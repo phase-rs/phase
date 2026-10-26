@@ -843,7 +843,7 @@ pub(super) fn handle_assign_blocker_damage(
     })
 }
 
-/// CR 508.8: If no creatures are declared as attackers, skip declare blockers and combat damage steps.
+/// CR 508.8: If no creatures are declared as attackers, skip declare blockers and combat damage steps; when the declaration triggered, the skip is decided as this step ends (CR 508.2).
 ///
 /// This helper is intentionally asymmetric with `handle_empty_blockers`:
 /// - CR 508.8 *explicitly* skips declare blockers and combat damage when there

@@ -1340,7 +1340,7 @@ mod tests {
     #[test]
     fn two_headed_giant_teammate_evasion_target_is_judged_by_the_attacking_teams_authority() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-        state.phase = Phase::DeclareAttackers;
+        state.phase = Phase::BeginCombat;
         state.active_player = PlayerId(1);
         let source = creature(&mut state, P0, "Source");
         let futile = creature(&mut state, P0, "Futile Teammate Target");
@@ -1374,7 +1374,7 @@ mod tests {
         assert!(matches!(
             effect_timing_verdict(&state, &target_candidate(ready), &AiConfig::default()),
             PolicyVerdict::Score { delta: 0.0, reason }
-                if reason.kind == "effect_timing_no_pair_blockable_evasion_target"
+                if reason.kind == "effect_timing_evasion_target_na"
         ));
     }
 

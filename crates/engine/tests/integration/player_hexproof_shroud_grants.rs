@@ -30,6 +30,8 @@ const EVERYBODY_LIVES: &str = "All creatures gain hexproof and indestructible un
 const EARTHSHAPE: &str = "Earthbend 3. Then each creature you control with power less than or equal to that land's power gains hexproof and indestructible until end of turn. You gain hexproof until end of turn.";
 const FLARE_OF_FORTITUDE: &str = "You may sacrifice a nontoken white creature rather than pay this spell's mana cost.\nUntil end of turn, your life total can't change, and permanents you control gain hexproof and indestructible.";
 const PERCH_PROTECTION: &str = "Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.";
+const SURGE_OF_SALVATION: &str = "You and permanents you control gain hexproof until end of turn. Prevent all damage that black and/or red sources would deal to creatures you control this turn.";
+const LAZOTEP_PLATING: &str = "Amass Zombies 1. (Put a +1/+1 counter on an Army you control. It's also a Zombie. If you don't control an Army, create a 0/0 black Zombie Army creature token first.)\nYou and permanents you control gain hexproof until end of turn. (You and they can't be the targets of spells or abilities your opponents control.)";
 const THOUGHT_SCOUR: &str = "Target player mills two cards.\nDraw a card.";
 
 fn add_free_spell(
@@ -229,6 +231,53 @@ fn flare_of_fortitude_locks_life_and_grants_permanents_not_player_hexproof() {
     assert!(player_has_cant_gain_life(state, P0));
     assert!(player_has_cant_lose_life(state, P0));
     assert!(!player_has_hexproof(state, P0));
+}
+
+#[test]
+fn surge_of_salvation_grants_caster_and_their_permanents_hexproof() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mine = scenario.add_vanilla(P0, 2, 2);
+    let theirs = scenario.add_vanilla(P1, 2, 2);
+    let spell = add_free_spell(
+        &mut scenario,
+        P0,
+        "Surge of Salvation",
+        true,
+        SURGE_OF_SALVATION,
+    );
+    let mut runner = scenario.build();
+
+    cast_and_resolve(&mut runner, spell);
+
+    assert!(object_has_keyword(&mut runner, mine, &Keyword::Hexproof));
+    assert!(!object_has_keyword(&mut runner, theirs, &Keyword::Hexproof));
+    assert!(player_has_hexproof(runner.state(), P0));
+    assert!(!player_has_hexproof(runner.state(), P1));
+}
+
+#[test]
+fn lazotep_plating_grants_caster_and_amassed_army_hexproof() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = add_free_spell(&mut scenario, P0, "Lazotep Plating", true, LAZOTEP_PLATING);
+    let mut runner = scenario.build();
+
+    cast_and_resolve(&mut runner, spell);
+
+    let army = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| {
+            let obj = &runner.state().objects[id];
+            obj.is_token && obj.controller == P0
+        })
+        .expect("Amass created the Army token");
+    assert!(object_has_keyword(&mut runner, army, &Keyword::Hexproof));
+    assert!(player_has_hexproof(runner.state(), P0));
+    assert!(!player_has_hexproof(runner.state(), P1));
 }
 
 #[test]

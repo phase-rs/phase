@@ -958,6 +958,65 @@ pub(crate) fn event_source_is_live_incarnation(
     }
 }
 
+/// CR 400.7 + CR 608.2h: the incarnation the CURRENT event proves for an
+/// event-context role. The event is the authority — an attack declaration stamps
+/// the attacker's incarnation, a zone change stamps the entrant's or the
+/// departing object's, a tap/damage stamps its subject. `None` when the event
+/// records nothing for this role: a legacy or synthetic event cannot
+/// discriminate, and the caller must fall back to live-by-id.
+///
+/// Deliberately NOT a scan of `zone_changes_this_turn`: a storage id can carry
+/// several exits in one turn (blink, die, re-enter), and only the firing event
+/// names the one this ability is about.
+pub(crate) fn event_context_incarnation(
+    filter: &TargetFilter,
+    event: &GameEvent,
+    id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    match filter {
+        TargetFilter::TriggeringSource | TargetFilter::AttachedTo => match event {
+            GameEvent::AttackersDeclared {
+                declaration_records,
+                ..
+            } => declaration_records
+                .iter()
+                .find(|record| record.object_id == id)
+                .and_then(|record| record.incarnation)
+                .map(|incarnation| ObjectIncarnationRef::of(id, incarnation)),
+            GameEvent::ZoneChanged {
+                to: Zone::Battlefield,
+                record,
+                ..
+            } => record
+                .entered_incarnation
+                .map(|incarnation| ObjectIncarnationRef::of(id, incarnation)),
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context
+                .as_ref()
+                .map(|context| context.identity.reference)
+                .filter(|pin| pin.object_id == id),
+            GameEvent::PermanentTapped {
+                incarnation: Some(incarnation),
+                ..
+            } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            GameEvent::DamageDealt {
+                source_incarnation: Some(incarnation),
+                ..
+            } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            _ => None,
+        },
+        TargetFilter::EventTarget => match event {
+            GameEvent::ZoneChanged { record, .. } => record
+                .trigger_source_context
+                .as_ref()
+                .map(|context| context.identity.reference)
+                .filter(|pin| pin.object_id == id),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// CR 400.7 + CR 120.1: whether the live permanent `obj` is the very object a
 /// damage event dealt damage to (the recipient role, `EventTarget`), as opposed
 /// to a later incarnation at the same `ObjectId`. The event itself stamps only
@@ -3148,7 +3207,14 @@ pub(crate) fn extract_player_from_event(
         // controller after the object has transferred or left play. Without
         // this arm, ETB and dies-trigger sub-effects with `target:
         // TriggeringPlayer` fell back to the ability controller, hitting the
-        // wrong player (Suture Priest #560, Bloodchief Ascension #546).
+        // wrong player (Suture Priest #560).
+        //
+        // An owner-keyed head ("put into an opponent's / a player's graveyard ...
+        // that player") names the graveyard's owner instead; the parser binds that
+        // anaphor to `ParentTargetOwner` (`relative_player_scope_for_condition`), so
+        // the subject ("that player loses ...") and "have that player ..." forms never
+        // reach this controller reading (CR 400.3 + CR 608.2c). The object-position
+        // "deals N damage to that player" form still does (known gap).
         GameEvent::ZoneChanged { record, .. } => Some(record.arrival.controller),
         // CR 122.1 + CR 603.7c: "that player" / `TriggeringPlayer` on a
         // counter-placement trigger is the player who put the counters.
@@ -6661,10 +6727,10 @@ mod tests {
     /// (ETB, dies, discard, return-to-hand), `TriggeringPlayer` must
     /// resolve to the moving object's controller as captured in the
     /// `ZoneChangeRecord` snapshot — NOT the ability controller and
-    /// NOT `None`. Regression discriminator for #546 (Bloodchief
-    /// Ascension) and #560 (Suture Priest), where the wildcard arm's
+    /// NOT `None`. Regression discriminator for #546 (the original
+    /// report) and #560 (Suture Priest), where the wildcard arm's
     /// `None` fallback caused `LoseLife { target: TriggeringPlayer }`
-    /// to revert to the Suture Priest / Bloodchief controller via
+    /// to revert to the ability controller (Suture Priest's controller) via
     /// `resolve_player_for_context_ref`'s ability-controller fallback,
     /// damaging the wrong player.
     ///
@@ -6687,12 +6753,12 @@ mod tests {
                 Zone::Battlefield,
             ),
             (
-                "Dies (Bloodchief Ascension #546 battlefield→graveyard)",
+                "Dies (Massacre Wurm class battlefield→graveyard)",
                 Some(Zone::Battlefield),
                 Zone::Graveyard,
             ),
             (
-                "Discard (Bloodchief Ascension #546 hand→graveyard)",
+                "Discard (hand→graveyard)",
                 Some(Zone::Hand),
                 Zone::Graveyard,
             ),

@@ -2118,7 +2118,10 @@ fn payment_outcome_condition(condition: &AbilityCondition) -> bool {
             EffectOutcomeSignal::OptionalEffectPerformed => true,
             EffectOutcomeSignal::CurrentScopeSucceeded
             | EffectOutcomeSignal::Guessed { .. }
-            | EffectOutcomeSignal::RevealUntilMatched => false,
+            | EffectOutcomeSignal::RevealUntilMatched
+            // CR 608.2c: the repeat directive reads this pass's repeat
+            // request, not whether a cost was paid.
+            | EffectOutcomeSignal::RepeatDirectiveReached => false,
         },
         AbilityCondition::Not { condition } => payment_outcome_condition(condition),
         AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {

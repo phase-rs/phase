@@ -29,6 +29,7 @@ use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, TokenSpec};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
+use super::stickers::StickerLocator;
 use super::zones::Zone;
 
 /// Globally ordered identity of a resolved command.
@@ -1066,12 +1067,20 @@ pub struct ResolvedLibraryShuffleCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// CR 613.7k: one retained sticker's renewal, in prior relative timestamp order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedStickerTimestamp {
+    pub locator: StickerLocator,
+    pub prior_timestamp: u64,
+    pub timestamp: u64,
+}
+
 /// One exact transition of an object occurrence between zone containers.
 ///
 /// CR 400.7: the command binds the source occurrence and its resulting
 /// incarnation, so replay neither selects a new object nor creates a new
-/// incarnation. CR 613.7d: battlefield-entry timestamps are captured by the
-/// ordinary path and installed exactly on replay.
+/// incarnation. CR 613.7d + CR 613.7k: object-entry and retained-sticker
+/// timestamps are captured by the ordinary path and installed exactly on replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedZoneChangeCommand {
     pub object: ObjectIncarnationRef,
@@ -1087,9 +1096,64 @@ pub struct ResolvedZoneChangeCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebound_from: Option<PlayerId>,
     pub entry_timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_sticker_timestamps: Option<Vec<RetainedStickerTimestamp>>,
     pub turn_zone_change_index: usize,
     pub zone_change_record: ZoneChangeRecord,
     pub cause: RulesExecutionNodeRef,
+}
+
+impl ResolvedZoneChangeCommand {
+    /// CR 613.7d + CR 613.7k: the structural authority for the timestamp
+    /// operands. A battlefield entry carries its entry timestamp; retained
+    /// sticker rows follow a recorded entry timestamp on a real move into a
+    /// zone that retains stickers, with unique locators, non-decreasing prior
+    /// stamps and strictly increasing installed stamps after the object's. A
+    /// real public nonbattlefield move with a scalar and no rows stays
+    /// loadable; the live prestate decides whether rows were required.
+    pub fn validate_timestamp_operands(
+        &self,
+    ) -> Result<(), ResolvedZoneChangeReplayInvariantError> {
+        if self.to == Zone::Battlefield && self.entry_timestamp.is_none() {
+            return Err(ResolvedZoneChangeReplayInvariantError::MissingBattlefieldEntryTimestamp);
+        }
+        let retains = crate::game::stickers::zone_retains_stickers(self.to);
+        match &self.retained_sticker_timestamps {
+            Some(rows) => {
+                let mismatch =
+                    || ResolvedZoneChangeReplayInvariantError::RetainedStickerMetadataMismatch {
+                        recorded: self.retained_sticker_timestamps.clone(),
+                    };
+                let Some(entry_timestamp) = self.entry_timestamp else {
+                    return Err(mismatch());
+                };
+                if rows.is_empty() || self.from == self.to || !retains {
+                    return Err(mismatch());
+                }
+                let mut locators = HashSet::new();
+                let mut prior_floor = 0;
+                let mut installed_floor = entry_timestamp;
+                for row in rows {
+                    if !locators.insert(&row.locator)
+                        || row.prior_timestamp < prior_floor
+                        || row.timestamp <= installed_floor
+                    {
+                        return Err(mismatch());
+                    }
+                    prior_floor = row.prior_timestamp;
+                    installed_floor = row.timestamp;
+                }
+                Ok(())
+            }
+            None if self.to != Zone::Battlefield
+                && self.entry_timestamp.is_some()
+                && (self.from == self.to || !retains) =>
+            {
+                Err(ResolvedZoneChangeReplayInvariantError::UnexpectedNonbattlefieldTimestamp)
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 /// Typed failure while applying one already-resolved zone transition.
@@ -1114,8 +1178,18 @@ pub enum ResolvedZoneChangeReplayInvariantError {
     RecordedTurnMismatch { expected: u32, found: u32 },
     #[error("zone-change battlefield entry is missing its timestamp")]
     MissingBattlefieldEntryTimestamp,
-    #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
+    /// CR 613.7d + CR 613.7k: a nonbattlefield move carries an entry timestamp
+    /// only when it renews retained stickers.
+    #[error(
+        "zone-change entry timestamp is unexpected for a hidden, same-zone or unstickered nonbattlefield move"
+    )]
     UnexpectedNonbattlefieldTimestamp,
+    /// CR 613.7k: recorded retained timestamps disagree with the operand or the
+    /// source's stickers.
+    #[error("zone-change retained sticker timestamp metadata mismatch: {recorded:?}")]
+    RetainedStickerMetadataMismatch {
+        recorded: Option<Vec<RetainedStickerTimestamp>>,
+    },
     #[error("zone-change installed incarnation mismatch: expected {expected}, found {found}")]
     ResultingIncarnationMismatch { expected: u64, found: u64 },
 }
@@ -3722,7 +3796,7 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
         || record.turn_zone_change_index != command.turn_zone_change_index
         || (changes_incarnation && command.resulting_incarnation <= command.object.incarnation)
         || (!changes_incarnation && command.resulting_incarnation != command.object.incarnation)
-        || (command.to == Zone::Battlefield) != command.entry_timestamp.is_some()
+        || command.validate_timestamp_operands().is_err()
         || (command.to == Zone::Battlefield
             && record.entered_incarnation != Some(command.resulting_incarnation))
         || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())

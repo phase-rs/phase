@@ -3110,6 +3110,8 @@ mod tests {
         let pool = vec![first_pull.clone(), second_pull.clone()];
         let pool_groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         let view = DraftPlayerView {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,
             source: DraftSourceView::Set {
@@ -3164,6 +3166,9 @@ mod tests {
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
@@ -3427,6 +3432,8 @@ mod tests {
         use draft_core::view::{DraftSourceView, SetLayoutView, SpectatorDraftView};
 
         let view = SpectatorDraftView {
+            flow: DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Drafting,
             kind: DraftKind::Premier,
             source: DraftSourceView::Set {
@@ -3462,6 +3469,9 @@ mod tests {
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftSpectatorView { view: v } => {

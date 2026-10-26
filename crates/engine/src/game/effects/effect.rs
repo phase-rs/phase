@@ -4,6 +4,7 @@ use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_
 use crate::types::ability::{
     ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, QuantityExpr,
     QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
@@ -305,7 +306,26 @@ fn register_transient_effect(
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
     let modifications = latch_chosen_text_words(state, modifications);
+    bind_transient_effect(
+        state,
+        ability,
+        static_def,
+        target_filter,
+        duration,
+        end_permission,
+        modifications,
+    );
+}
 
+fn bind_transient_effect(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    static_def: &StaticDefinition,
+    target_filter: Option<&TargetFilter>,
+    duration: &Duration,
+    end_permission: Option<&EndEffectPermission>,
+    modifications: Vec<ContinuousModification>,
+) {
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
     // permission, not an object grant. Unlike a pump or keyword grant, the set of
@@ -678,6 +698,37 @@ fn register_transient_effect(
         }
     };
 
+    // CR 109.5 + CR 702.11c: "You and permanents you control gain hexproof" — the
+    // object broadcast below cannot bind a player, so each player member of an
+    // `Or` binds through its player arm and the object members broadcast together.
+    if let Some(TargetFilter::Or { filters }) = application_filter {
+        let (players, mut objects): (Vec<_>, Vec<_>) =
+            filters.iter().cloned().partition(binds_as_player);
+        if !players.is_empty() {
+            let objects = match objects.len() {
+                0 => None,
+                1 => objects.pop(),
+                _ => Some(TargetFilter::Or { filters: objects }),
+            };
+            for member in players.into_iter().chain(objects) {
+                let split = StaticDefinition {
+                    affected: Some(member),
+                    ..static_def.clone()
+                };
+                bind_transient_effect(
+                    state,
+                    ability,
+                    &split,
+                    None,
+                    duration,
+                    end_permission,
+                    modifications.clone(),
+                );
+            }
+            return;
+        }
+    }
+
     // Non-targeted: resolve the affected filter (SelfRef handled above).
     match application_filter {
         // CR 113.10 + CR 702.16j: Player-scoped affected filter — register the
@@ -750,14 +801,7 @@ fn register_transient_effect(
         // keeps the arm scoped to `You`/`Opponent`/unscoped controllers; filters
         // carrying `properties` or a context-relative controller are genuine
         // object filters and stay on the broadcast path.
-        Some(player_filter @ TargetFilter::Typed(tf))
-            if tf.type_filters.is_empty()
-                && tf.properties.is_empty()
-                && matches!(
-                    tf.controller,
-                    None | Some(ControllerRef::You) | Some(ControllerRef::Opponent)
-                ) =>
-        {
+        Some(player_filter @ TargetFilter::Typed(tf)) if is_bare_player_typed(tf) => {
             // CR 104.2: eliminated players hold no game-state restrictions.
             let eliminated: std::collections::HashSet<PlayerId> = state
                 .players
@@ -907,6 +951,82 @@ fn register_transient_effect(
             }
         }
     }
+}
+
+/// An application filter that `bind_transient_effect`'s non-targeted match binds to players.
+fn binds_as_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Controller | TargetFilter::SpecificPlayer { .. } | TargetFilter::Player => {
+            true
+        }
+        TargetFilter::Typed(tf) => is_bare_player_typed(tf),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// A `Typed` filter with no types or properties and a `You`/`Opponent`/unscoped
+/// controller names players, not permanents.
+fn is_bare_player_typed(tf: &TypedFilter) -> bool {
+    tf.type_filters.is_empty()
+        && tf.properties.is_empty()
+        && matches!(
+            tf.controller,
+            None | Some(ControllerRef::You) | Some(ControllerRef::Opponent)
+        )
 }
 
 // CR 400.7 + CR 603.7c: a delayed `GenericEffect` whose pinned referent became a

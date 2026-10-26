@@ -1464,6 +1464,9 @@ fn draft_pod_size_is_allowed(
 fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction) -> Option<String> {
     use draft_core::types::DraftAction;
     match action {
+        DraftAction::AdvanceClock => {
+            Some("AdvanceClock is server-internal; not allowed from client".to_string())
+        }
         DraftAction::GeneratePairings => {
             Some("GeneratePairings is server-internal; not allowed from client".to_string())
         }
@@ -1476,7 +1479,9 @@ fn client_forbidden_draft_action_reason(action: &draft_core::types::DraftAction)
         // `guard_draft_action_payload`. Classifying it server-internal would
         // refuse EVERY shared-stack decision at the transport, before the
         // reducer ever saw one.
-        DraftAction::StartDraft
+        DraftAction::Select { .. }
+        | DraftAction::Control { .. }
+        | DraftAction::StartDraft
         | DraftAction::Pick { .. }
         | DraftAction::PickWithDraftEffect { .. }
         | DraftAction::SubmitDeck { .. }
@@ -4059,6 +4064,9 @@ mod restored_draft_startup_tests {
 
     fn uniform_lobby_snapshot() -> PersistedDraftSession {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -4111,6 +4119,65 @@ mod restored_draft_startup_tests {
         .expect("a valid Uniform snapshot restores under its own row key");
         assert!(lob.has_game(&snapshot.draft_code));
         assert!(restored.sessions.contains_key(&snapshot.draft_code));
+    }
+
+    #[test]
+    fn dormant_fifo_startup_restore_never_registers_or_replaces_legacy() {
+        use draft_core::types::{DraftAction, DraftFlow, DraftSessionId};
+        let legacy = uniform_lobby_snapshot();
+        let mut payload = legacy.clone();
+        payload.config.flow = DraftFlow::FifoAsync;
+        payload.config.cards_per_pack = 2;
+        payload.session = draft_core::types::DraftSession::new_fifo(
+            payload.config.clone(),
+            payload.session.seats.clone(),
+            payload.draft_code.clone(),
+            DraftSessionId("startup".into()),
+        )
+        .unwrap();
+        draft_core::session::apply_at(
+            &mut payload.session,
+            DraftAction::StartDraft,
+            Some(&draft_core::pack_source::FixturePackSource {
+                set_code: "TST".into(),
+                cards_per_pack: 2,
+            }),
+            1000,
+        )
+        .unwrap();
+        payload.session.validate_persisted_snapshot().unwrap();
+        let mut manager = DraftSessionManager::new();
+        let mut lob = LobbyManager::new();
+        restore_persisted_draft_session(&legacy.draft_code, legacy.clone(), &mut manager, &mut lob)
+            .unwrap();
+        assert!(lob.has_game(&legacy.draft_code));
+        let before =
+            serde_json::to_value(manager.sessions[&legacy.draft_code].to_persisted()).unwrap();
+        assert_eq!(
+            restore_persisted_draft_session(
+                &payload.draft_code,
+                payload.clone(),
+                &mut manager,
+                &mut lob,
+            )
+            .err()
+            .unwrap(),
+            "FIFO drafting is not supported by this runtime"
+        );
+        assert_eq!(
+            serde_json::to_value(manager.sessions[&legacy.draft_code].to_persisted()).unwrap(),
+            before
+        );
+        assert_eq!(manager.sessions.len(), 1);
+        let token = &legacy.player_tokens[0];
+        assert_eq!(
+            manager.draft_for_token(token),
+            Some(legacy.draft_code.as_str())
+        );
+        assert!(
+            restore_persisted_draft_session("WRONG1", payload, &mut manager, &mut lob).is_err()
+        );
+        assert_eq!(manager.sessions.len(), 1);
     }
 }
 
@@ -7195,8 +7262,8 @@ async fn broadcast_draft_timer_sync(
     }
 }
 
-/// The server-hosted draft's pick window.
-const DRAFT_PICK_TIMER_SECONDS: u32 = 75;
+/// The server-hosted draft's pick window (draft-core's native default).
+const DRAFT_PICK_TIMER_SECONDS: u32 = draft_core::types::NATIVE_DEFAULT_PICK_TIMER_SECONDS;
 
 /// Spawn a pick timer task. When the timer expires, auto-pick a random card
 /// for any seat that hasn't picked yet. Aborts the previous timer if one exists.
@@ -11935,6 +12002,9 @@ async fn handle_client_message(
             let set_label = source.set_code();
             let lobby_set_label = server_core::persist::draft_lobby_source_label(&source);
             let config = draft_core::types::DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 set_code: set_label.clone(),
                 source,
                 kind,
@@ -14057,6 +14127,9 @@ mod draft_socket_authority_tests {
 
     pub(super) fn test_draft_config() -> DraftConfig {
         DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -14129,6 +14202,9 @@ mod draft_socket_authority_tests {
     ) -> (String, String, server_core::FullSessionKey, ServerMessage) {
         let mut drafts = app_state.draft_sessions.lock().await;
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -14206,6 +14282,284 @@ mod draft_socket_authority_tests {
         )
         .expect("build initial draft match announcement");
         (draft_code, draft_token, key, initial_match_start)
+    }
+
+    #[tokio::test]
+    async fn dormant_native_prompt_actions_are_bounded_before_dispatch() {
+        use super::issue_4548_full_create_tests::{recv_server_message, spawn_full_mode_server};
+        use draft_core::types::{
+            DraftAction, DraftControl, DraftPromptId, DraftSessionId, MAX_DRAFT_JSON_INTEGER,
+        };
+        let (url, server, _temp, app) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let (fixture, _, code, token) = test_draft();
+            let persisted = {
+                let mut manager = fixture.lock().await;
+                for seat in 1..8 {
+                    manager.join_draft(&code, format!("Seat {seat}"), None).unwrap();
+                }
+                manager.apply_system_action(
+                    &code,
+                    DraftAction::StartDraft,
+                    Some(&draft_core::pack_source::FixturePackSource {
+                        set_code: "TST".into(),
+                        cards_per_pack: 14,
+                    }),
+                ).unwrap();
+                manager.sessions[&code].to_persisted()
+            };
+            app.draft_sessions.lock().await.restore_persisted_session(persisted).unwrap();
+            let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await, ServerMessage::ServerHello { .. }));
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").into(),
+                build_commit: build_commit().into(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
+            };
+            socket.send(WsMessage::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
+            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
+                draft_code: code.clone(),
+                player_token: "wrong-token".into(),
+            }).unwrap().into())).await.unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::DraftActionRejected { reason } if reason == "Invalid player token"));
+            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
+                draft_code: code.clone(),
+                player_token: token.clone(),
+            }).unwrap().into())).await.unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::DraftStateUpdate { view } if view.status == DraftStatus::Drafting));
+            let select = DraftAction::Select {
+                seat: 7,
+                prompt_id: DraftPromptId {
+                    session_id: DraftSessionId("future-session".into()),
+                    seat: 0,
+                    generation: 1,
+                },
+                picked_card_instance_ids: vec!["TST-0-0-0".into()],
+                burned_card_instance_ids: Vec::new(),
+                effect_card_instance_ids: Vec::new(),
+            };
+            let mut cases = vec![
+                (select.clone(), "FIFO drafting is not supported by this runtime"),
+                (DraftAction::Control { control: DraftControl::Resume },
+                    "FIFO drafting is not supported by this runtime"),
+                (DraftAction::AdvanceClock,
+                    "AdvanceClock is server-internal; not allowed from client"),
+            ];
+            for id in [String::new(), "x".repeat(129)] {
+                let mut bad = select.clone();
+                if let DraftAction::Select { picked_card_instance_ids, .. } = &mut bad {
+                    picked_card_instance_ids[0] = id;
+                }
+                cases.push((bad, "Select has invalid card ID"));
+            }
+            let mut bad = select.clone();
+            if let DraftAction::Select { burned_card_instance_ids, .. } = &mut bad {
+                *burned_card_instance_ids = (0..256).map(|n| format!("b{n}")).collect();
+            }
+            cases.push((bad, "Select has oversized burn list"));
+            let mut bad = select.clone();
+            if let DraftAction::Select { picked_card_instance_ids, .. } = &mut bad {
+                picked_card_instance_ids.push("TST-0-0-0".into());
+            }
+            cases.push((bad, "Select requires distinct disjoint IDs"));
+            let mut bad = select.clone();
+            if let DraftAction::Select { burned_card_instance_ids, .. } = &mut bad {
+                burned_card_instance_ids.push("TST-0-0-0".into());
+            }
+            cases.push((bad, "Select requires distinct disjoint IDs"));
+            let mut bad = select.clone();
+            if let DraftAction::Select { prompt_id, .. } = &mut bad {
+                prompt_id.generation = MAX_DRAFT_JSON_INTEGER + 1;
+            }
+            cases.push((bad, "Select has invalid prompt identity"));
+            let before = {
+                let manager = app.draft_sessions.lock().await;
+                serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap()
+            };
+            let disk = app.game_db.load_all_drafts().unwrap();
+            for (action, expected) in cases {
+                socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::DraftAction {
+                    draft_code: code.clone(), action,
+                }).unwrap().into())).await.unwrap();
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::Error { message, .. } if expected.starts_with("Select ") => {
+                        assert_eq!(message, expected);
+                    }
+                    ServerMessage::DraftActionRejected { reason } if !expected.starts_with("Select ") => {
+                        assert_eq!(reason, expected);
+                    }
+                    other => panic!("expected bounded/dormant refusal, got {other:?}"),
+                }
+                let manager = app.draft_sessions.lock().await;
+                assert_eq!(serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap(), before);
+                assert!(manager.sessions[&code].timer_task.is_none());
+                assert_eq!(app.game_db.load_all_drafts().unwrap(), disk);
+            }
+            let mut unknown = serde_json::to_value(ClientMessage::DraftAction {
+                draft_code: code.clone(), action: select.clone(),
+            }).unwrap();
+            unknown["data"]["action"]["type"] = "UnknownSelect".into();
+            socket.send(WsMessage::Text(unknown.to_string().into())).await.unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::Error { message, .. } if message.starts_with("Invalid message:")));
+            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::DraftAction {
+                draft_code: code.clone(),
+                action: DraftAction::Pick { seat: 7, card_instance_ids: vec!["TST-0-0-0".into()] },
+            }).unwrap().into())).await.unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::DraftStateUpdate { view } if view.pool.len() == 1
+                    && view.flow == draft_core::types::DraftFlow::LegacyBarrier && view.fifo.is_none()));
+            let (mut replacement, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            assert!(matches!(recv_server_message(&mut replacement).await, ServerMessage::ServerHello { .. }));
+            replacement.send(WsMessage::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
+            replacement.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
+                draft_code: code.clone(), player_token: token,
+            }).unwrap().into())).await.unwrap();
+            assert!(matches!(recv_server_message(&mut replacement).await, ServerMessage::DraftStateUpdate { .. }));
+            let before = {
+                let manager = app.draft_sessions.lock().await;
+                serde_json::to_value(manager.sessions[&code].to_persisted()).unwrap()
+            };
+            socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::DraftAction {
+                draft_code: code.clone(), action: select,
+            }).unwrap().into())).await.unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::DraftActionRejected { reason } if reason == DRAFT_SOCKET_AUTHORITY_REJECTION));
+            assert_eq!(serde_json::to_value(app.draft_sessions.lock().await.sessions[&code].to_persisted()).unwrap(), before);
+        }).await;
+        server.abort();
+        result.expect("dormant WebSocket fixture timed out");
+    }
+
+    #[tokio::test]
+    async fn dormant_native_legacy_start_and_pick_reach_ws_broadcast() {
+        use super::issue_4548_full_create_tests::{
+            recv_server_message, spawn_full_mode_server_with_draft_pools,
+        };
+        use draft_core::types::DraftAction;
+        let cards: Vec<_> = (0..3)
+            .map(|n| {
+                serde_json::json!({
+                    "name": format!("Fixture {n}"), "set_code": "TST",
+                    "collector_number": n.to_string(), "rarity": "common", "weight": 1,
+                })
+            })
+            .collect();
+        let json = serde_json::json!({"TST": {
+            "code": "TST", "name": "Test set", "release_date": null,
+            "pack_variants": [{"contents": [{"slot": "common", "count": 3,
+                "choices": [{"sheet": "common", "weight": 1}]}], "weight": 1}],
+            "pack_variants_total_weight": 1,
+            "sheets": {"common": {"cards": cards, "total_weight": 3,
+                "foil": false, "balance_colors": false}},
+            "prints": [], "basic_lands": [],
+        }});
+        let pool_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(pool_file.path(), serde_json::to_vec(&json).unwrap()).unwrap();
+        let pools = draft_pools::DraftPools::from_path(pool_file.path()).unwrap();
+        let (url, server, _temp, app) = spawn_full_mode_server_with_draft_pools(pools).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            let (fixture, _, code, token) = test_draft();
+            let persisted = {
+                let mut manager = fixture.lock().await;
+                for seat in 1..8 {
+                    manager
+                        .join_draft(&code, format!("Seat {seat}"), None)
+                        .unwrap();
+                }
+                let session = manager.sessions.get_mut(&code).unwrap();
+                session.config.cards_per_pack = 3;
+                session.session.config.cards_per_pack = 3;
+                session.to_persisted()
+            };
+            app.draft_sessions
+                .lock()
+                .await
+                .restore_persisted_session(persisted)
+                .unwrap();
+            let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            for message in [
+                ClientMessage::ClientHello {
+                    client_version: env!("CARGO_PKG_VERSION").into(),
+                    build_commit: build_commit().into(),
+                    protocol_version: PROTOCOL_VERSION,
+                    lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                    wire_formats: Vec::new(),
+                },
+                ClientMessage::ReconnectDraft {
+                    draft_code: code.clone(),
+                    player_token: token,
+                },
+            ] {
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::to_string(&message).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::DraftStateUpdate { view } if view.status == DraftStatus::Lobby));
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::DraftAction {
+                        draft_code: code.clone(),
+                        action: DraftAction::StartDraft,
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(recv_server_message(&mut socket).await,
+                ServerMessage::DraftStateUpdate { view } if view.status == DraftStatus::Drafting
+                    && view.current_pack.as_ref().unwrap().len() == 3 && view.fifo.is_none()));
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&ClientMessage::DraftAction {
+                        draft_code: code.clone(),
+                        action: DraftAction::Pick {
+                            seat: 7,
+                            card_instance_ids: vec!["TST-0-0-0".into()],
+                        },
+                    })
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            loop {
+                match recv_server_message(&mut socket).await {
+                    ServerMessage::DraftTimerSync { .. } => continue,
+                    ServerMessage::DraftStateUpdate { view } => {
+                        assert_eq!(view.pool[0].instance_id, "TST-0-0-0");
+                        assert_eq!(view.flow, draft_core::types::DraftFlow::LegacyBarrier);
+                        break;
+                    }
+                    other => panic!("legacy pick did not publish: {other:?}"),
+                }
+            }
+            let mut manager = app.draft_sessions.lock().await;
+            let timer = manager
+                .sessions
+                .get_mut(&code)
+                .unwrap()
+                .timer_task
+                .take()
+                .expect("legacy StartDraft armed its existing timer");
+            timer.abort();
+        })
+        .await;
+        server.abort();
+        result.expect("legacy wire positive timed out");
     }
 
     #[tokio::test]
@@ -15296,6 +15650,23 @@ mod issue_4548_full_create_tests {
         spawn_server(
             mode,
             draft_pools::DraftPools::default(),
+            Arc::new(CardDatabase::default()),
+            ServerContext::default(),
+        )
+        .await
+    }
+
+    pub(super) async fn spawn_full_mode_server_with_draft_pools(
+        pools: draft_pools::DraftPools,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+        AppState,
+    ) {
+        spawn_server(
+            ServerMode::Full,
+            pools,
             Arc::new(CardDatabase::default()),
             ServerContext::default(),
         )
@@ -22316,6 +22687,9 @@ mod issue_4548_deadlock_tests {
     /// A draft the two draft-tier edge tests below fan out over.
     async fn draft_fixture() -> (SharedDraftState, String) {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,

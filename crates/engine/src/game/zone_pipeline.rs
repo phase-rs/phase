@@ -4575,6 +4575,11 @@ fn execute_zone_move_with_applied_terminal(
     {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
+    // CR 400.7 + CR 701.24c: a library card put into its own library at no stated
+    // position does not change zones; a shuffle the instruction names is its own step.
+    if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
@@ -5597,6 +5602,47 @@ mod w3_library_placement_tests {
             )),
             "a placement must not emit a shuffle event (CR 701.24a: a placement is not a shuffle)"
         );
+    }
+
+    #[test]
+    fn library_card_into_its_own_library_moves_only_with_a_placement() {
+        let mut state = GameState::new_two_player(42);
+        let [a, b, c] = [1, 2, 3].map(|n| {
+            create_object(
+                &mut state,
+                CardId(n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            )
+        });
+        state.players[0].library = crate::im::vector![a, b, c];
+        let mover = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Mover".to_string(),
+            Zone::Battlefield,
+        );
+        let library =
+            |state: &GameState| state.players[0].library.iter().copied().collect::<Vec<_>>();
+
+        let mut events = Vec::new();
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(b, Zone::Library, mover),
+            &mut events,
+        );
+        assert_eq!(library(&state), vec![a, b, c]);
+        assert!(events.is_empty(), "{events:?}");
+
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(c, Zone::Library, mover)
+                .at_library_position(LibraryPosition::Top),
+            &mut events,
+        );
+        assert_eq!(library(&state), vec![c, a, b]);
     }
 
     /// F1 (CR 701.24a): a library placement whose replacement consult PARKS on a

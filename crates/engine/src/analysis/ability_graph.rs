@@ -1264,7 +1264,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         // CR 500.7: a turn-begin trigger fires once per turn.
         TriggerMode::TurnBegin => Some(AxisKey::ExtraTurn),
         // ----- remaining modes with no modeled producer ⇒ inert (None) -----
-        TriggerMode::ChangesController
+        TriggerMode::ChangesController { .. }
         | TriggerMode::DamageReceived
         | TriggerMode::DamagePreventedOnce
         | TriggerMode::ExcessDamage

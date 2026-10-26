@@ -395,6 +395,14 @@ pub struct CombatState {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub creature_blocked_attackers_this_combat: HashSet<BlockHistoryPair>,
+    /// CR 506.4 + CR 508.8: attackers removed from combat this combat, so a
+    /// combat whose attackers all left still had creatures attack or enter
+    /// attacking.
+    #[serde(
+        default,
+        serialize_with = "crate::types::deterministic_serde::hash_set"
+    )]
+    pub removed_attackers_this_combat: HashSet<ObjectId>,
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_map")]
     pub damage_assignments: HashMap<ObjectId, Vec<DamageAssignment>>,
     pub first_strike_done: bool,
@@ -429,6 +437,7 @@ impl PartialEq for CombatState {
             && self.attacking_incarnations_this_combat == other.attacking_incarnations_this_combat
             && self.creature_blocked_attackers_this_combat
                 == other.creature_blocked_attackers_this_combat
+            && self.removed_attackers_this_combat == other.removed_attackers_this_combat
             && self.first_strike_done == other.first_strike_done
             && self.first_strike_participants == other.first_strike_participants
     }
@@ -802,6 +811,9 @@ pub(crate) fn prune_object_from_combat(state: &mut GameState, oid: ObjectId) -> 
     let attackers_before = combat.attackers.len();
     combat.attackers.retain(|a| a.object_id != oid);
     let mut changed = combat.attackers.len() != attackers_before;
+    if changed {
+        combat.removed_attackers_this_combat.insert(oid);
+    }
     changed |= combat.attacked_permanents.remove(&oid).is_some();
     let edges_before = combat.attacked_permanents.len();
     combat
@@ -5550,7 +5562,7 @@ pub fn is_on_attacking_team(state: &GameState, player: PlayerId) -> bool {
 
 /// CR 500.1 + CR 506.1 + CR 508.1: whether the declare-attackers step of the
 /// combat phase this turn is IN — or has not yet reached — is still ahead with
-/// the attacking team yet to declare. Reads `state.phase` and `state.combat`
+/// the attacking team yet to declare. Reads `state.phase` and `state.waiting_for`
 /// only; a combat phase that is merely scheduled is the other arm of
 /// `attacker_declaration_pending_for`.
 ///
@@ -5565,15 +5577,16 @@ fn declaration_pending_at_current_phase(state: &GameState) -> bool {
         Phase::Untap | Phase::Upkeep | Phase::Draw | Phase::PreCombatMain | Phase::BeginCombat => {
             true
         }
-        // CR 508.1k: the chosen creatures become attacking creatures, so an
-        // attacking creature is the mark that the turn-based action has run.
-        // CR 508.8 keeps the empty declaration out of this arm: the engine
-        // leaves the step immediately when nothing is declared (pinned by
-        // `declaration_pending_at_current_phase_survives_an_empty_declaration`).
-        Phase::DeclareAttackers => state
-            .combat
-            .as_ref()
-            .is_none_or(|combat| combat.attackers.is_empty()),
+        // CR 508.1 + CR 508.2: the declaration is the step's first act and priority follows it, so the step is pending only while the engine waits for that declaration.
+        // CR 508.1h: an unpaid attack tax leaves the declaration in progress.
+        Phase::DeclareAttackers => matches!(
+            state.waiting_for,
+            crate::types::game_state::WaitingFor::DeclareAttackers { .. }
+                | crate::types::game_state::WaitingFor::CombatTaxPayment {
+                    context: crate::types::game_state::CombatTaxContext::Attacking,
+                    ..
+                }
+        ),
         Phase::DeclareBlockers
         | Phase::CombatDamage
         | Phase::EndCombat
@@ -16816,7 +16829,164 @@ mod tests {
 
         state.phase = Phase::DeclareAttackers;
         state.combat = Some(CombatState::default());
+        state.waiting_for = build_declare_attackers_waiting_for(&state);
         assert!(declaration_pending_at_current_phase(&state));
+    }
+
+    /// CR 508.2 + CR 508.8: after an empty declaration whose triggers keep the
+    /// step open, the declaration has happened even though no creature attacks.
+    #[test]
+    fn declaration_pending_at_current_phase_is_false_in_the_priority_window_after_an_empty_declaration(
+    ) {
+        let mut state = setup();
+        create_creature(&mut state, PlayerId(0), "Ready", 2, 2);
+        state.phase = Phase::DeclareAttackers;
+        state.combat = Some(CombatState::default());
+        state.waiting_for = build_declare_attackers_waiting_for(&state);
+        assert!(declaration_pending_at_current_phase(&state));
+        state.waiting_for = crate::types::game_state::WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(!declaration_pending_at_current_phase(&state));
+    }
+
+    /// P0 declares a 2/2 against P1, who controls Ghostly Prison; returns the
+    /// runner paused at the attack-tax prompt.
+    fn ghostly_prison_taxed_declaration() -> crate::game::scenario::GameRunner {
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{CombatTaxContext, WaitingFor};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let attacker = scenario.add_creature(PlayerId(0), "Taxed", 2, 2).id();
+        scenario.add_enchantment_from_oracle(
+            PlayerId(1),
+            "Ghostly Prison",
+            "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+        );
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::DeclareAttackers);
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(PlayerId(1)))])
+            .expect("declaring a taxed attacker is legal");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment {
+                context: CombatTaxContext::Attacking,
+                ..
+            }
+        ));
+        runner
+    }
+
+    /// CR 508.1h + CR 508.1j: the declaration is still pending while its attack
+    /// tax awaits payment, and complete once the tax is paid.
+    #[test]
+    fn declaration_pending_at_current_phase_holds_through_an_unpaid_attack_tax() {
+        use crate::types::mana::{ManaType, ManaUnit};
+
+        let mut runner = ghostly_prison_taxed_declaration();
+        assert!(declaration_pending_at_current_phase(runner.state()));
+
+        for _ in 0..2 {
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                Vec::new(),
+            ));
+        }
+        runner
+            .act(crate::types::actions::GameAction::PayCombatTax { accept: true })
+            .expect("paying the attack tax completes the declaration");
+        assert_eq!(runner.state().phase, Phase::DeclareAttackers);
+        assert!(runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|c| c.attackers.len() == 1));
+        assert!(!declaration_pending_at_current_phase(runner.state()));
+    }
+
+    /// CR 508.1d + CR 733.1: declining the attack tax reverses the declaration,
+    /// which stays pending until the player declares again.
+    #[test]
+    fn declaration_pending_at_current_phase_holds_through_a_declined_attack_tax() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut runner = ghostly_prison_taxed_declaration();
+        runner
+            .act(crate::types::actions::GameAction::PayCombatTax { accept: false })
+            .expect("declining the attack tax is legal");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ));
+        assert!(declaration_pending_at_current_phase(runner.state()));
+
+        runner
+            .declare_attackers(&[])
+            .expect("an empty declaration is legal");
+        assert!(runner
+            .state()
+            .combat
+            .as_ref()
+            .is_none_or(|c| c.attackers.is_empty()));
+        assert!(!declaration_pending_at_current_phase(runner.state()));
+    }
+
+    /// CR 509.1d: a block tax prompt is the blockers' declaration, not the
+    /// attackers'.
+    #[test]
+    fn declaration_pending_at_current_phase_ignores_a_block_tax() {
+        use crate::game::scenario::GameScenario;
+        use crate::types::game_state::{CombatTaxContext, WaitingFor};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let archangel = scenario
+            .add_creature(PlayerId(0), "Archangel of Tithes", 3, 5)
+            .from_oracle_text_with_keywords(
+                &["Flying"],
+                "Flying\nAs long as this creature is untapped, creatures can't attack you or planeswalkers you control unless their controller pays {1} for each of those creatures.\nAs long as this creature is attacking, creatures can't block unless their controller pays {1} for each of those creatures.",
+            )
+            .id();
+        let blocker = scenario
+            .add_creature(PlayerId(1), "Wind Drake", 2, 2)
+            .flying()
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::DeclareAttackers);
+        runner
+            .declare_attackers(&[(archangel, AttackTarget::Player(PlayerId(1)))])
+            .expect("Archangel of Tithes can attack");
+        while !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .expect("passing priority is legal");
+        }
+        float_mana(runner.state_mut(), PlayerId(1), 1);
+        runner
+            .declare_blockers(&[(blocker, archangel)])
+            .expect("declaring a taxed blocker is legal");
+        let waiting_for = runner.state().waiting_for.clone();
+        assert!(matches!(
+            waiting_for,
+            WaitingFor::CombatTaxPayment {
+                context: CombatTaxContext::Blocking,
+                ..
+            }
+        ));
+        assert!(!declaration_pending_at_current_phase(runner.state()));
+
+        let mut attack_step = runner.state().clone();
+        attack_step.phase = Phase::DeclareAttackers;
+        assert!(!declaration_pending_at_current_phase(&attack_step));
+        attack_step.waiting_for = build_declare_attackers_waiting_for(&attack_step);
+        assert!(declaration_pending_at_current_phase(&attack_step));
     }
 
     /// CR 508.1k: once attackers are declared, the whole `=> false` arm group

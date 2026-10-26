@@ -27,9 +27,10 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, Effect, EffectScope, FilterProp, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, ReturnResultId, SharedQuality, SharedQualityRelation,
-    SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
+    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
+    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -81,18 +82,19 @@ use super::{
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
-    inject_printed_color_choice_filter, intrinsic_continuation_effect, mark_uses_tracked_set,
-    nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
+    inject_printed_color_choice_filter, instead_override_body_mut, intrinsic_continuation_effect,
+    mark_uses_tracked_set, nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
-    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
-    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
-    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
+    rewrite_delayed_singular_recall_to_self, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_plural_library_recall_to_tracked_set,
+    rewrite_rounding_mode, rewrite_singular_battlefield_recall_to_self,
+    rewrite_that_type_mana_instead, singular_battlefield_recall, stamp_delayed_returns,
+    starts_with_plural_subject_anaphor, starts_with_singular_subject_anaphor,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback, PrintedColorCarrier,
+    PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -2611,8 +2613,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             // THAT damage instruction, not the chain's first one — the
                             // instructions before it (Goblin Charbelcher's reveal) are
                             // performed regardless and supply the quantity it reads.
-                            let base_index =
-                                instead_damage_antecedent_index(&env, &defs, instead_def);
+                            let mut instead = *instead_def.clone();
+                            let base_index = instead_damage_antecedent_index(
+                                &env,
+                                &defs,
+                                instead_override_body_mut(&mut instead),
+                            );
                             // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
                             // The TAIL defs (after the base) are nested into it below, so
@@ -2626,10 +2632,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             for next in chain_defs {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
-                            let mut instead = *instead_def.clone();
                             if base_index > 0 {
                                 rebind_damage_anaphor_to_antecedent(
-                                    &mut instead.effect,
+                                    &mut instead_override_body_mut(&mut instead).effect,
                                     intrinsic_continuation_effect(&root),
                                 );
                             }
@@ -2642,17 +2647,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                     .sub_ability
                                     .as_deref_mut()
                                     .expect("the optional-payment continuation was checked");
-                                rewrite_those_tokens_from_antecedent(
-                                    &mut instead.effect,
-                                    &continuation.effect,
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    continuation,
                                 );
-                                if rewrite_counter_instead_target_from_antecedent(
-                                    &mut instead.effect,
-                                    &continuation.effect,
-                                ) {
-                                    instead.target_choice_timing =
-                                        continuation.target_choice_timing;
-                                }
                                 if has_explicit_player_target(continuation.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2662,16 +2660,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 // CR 111.1 + CR 707.10: Resolve "create N of those
                                 // tokens" anaphor against the root (the antecedent
                                 // for a multi-clause base is the first printed clause).
-                                rewrite_those_tokens_from_antecedent(
-                                    &mut instead.effect,
-                                    &root.effect,
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    &root,
                                 );
-                                if rewrite_counter_instead_target_from_antecedent(
-                                    &mut instead.effect,
-                                    &root.effect,
-                                ) {
-                                    instead.target_choice_timing = root.target_choice_timing;
-                                }
                                 if has_explicit_player_target(root.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2969,10 +2961,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
+        def.sibling_condition = clause_ir.sibling_condition;
         // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
         def.unlowered_guard = clause_ir.parsed.unlowered_guard.clone();
+        // CR 611.2e: carry the onset the clause parser stamped from the verb form, so the
+        // resolution's entry-observation boundary knows whether this instruction applies
+        // with an entry of the same resolution.
+        def.entry_onset = clause_ir.parsed.entry_onset;
         // CR 608.2c: A mass zone move immediately followed by "deals that much
         // damage to each ..." reads ONE scalar result from the completed move,
         // not a different per-recipient event-context amount. Bind only this
@@ -3702,6 +3699,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // parent chain, so reset it to the default within-process step.
                 let lifted_sub_link = inner.sub_link;
                 inner.sub_link = SubAbilityLink::ContinuationStep;
+                // The clause's own guard scope belongs to the slot, like its link.
+                let lifted_sibling_condition = std::mem::take(&mut inner.sibling_condition);
                 let delayed_return_reader = inner.reads_return_result.take();
                 *current = AbilityDefinition::new(
                     kind,
@@ -3718,6 +3717,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 current.repeat_for = lifted_repeat_for;
                 current.player_scope = lifted_player_scope;
                 current.sub_link = lifted_sub_link;
+                current.sibling_condition = lifted_sibling_condition;
             }
         }
 
@@ -3791,14 +3791,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     // self-move antecedent binds to the source object; plural
                     // and mass-publisher recalls keep the chain tracked set.
                     let singular_self_recall = singular_battlefield_recall(&source_text_lower)
-                        && nearest_publisher_is_self_move(&defs);
+                        .then(|| nearest_self_move_destination(&defs))
+                        .flatten();
                     let plural_library_recall = plural_library_shuffle_recall(&source_text_lower);
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         // Per-def branch: only a battlefield-recall-shaped leg
                         // enters the carve-out; sibling defs of the same clause
                         // keep today's tracked-set rewrite.
-                        if singular_self_recall
+                        if singular_self_recall.is_some()
                             && matches!(
                                 &*current.effect,
                                 Effect::ChangeZone {
@@ -3809,6 +3810,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             )
                         {
                             rewrite_singular_battlefield_recall_to_self(&mut current.effect);
+                        } else if let (Some(origin), Effect::CreateDelayedTrigger { .. }) =
+                            (singular_self_recall, &*current.effect)
+                        {
+                            rewrite_delayed_singular_recall_to_self(&mut current.effect, origin);
                         } else {
                             if plural_library_recall {
                                 rewrite_plural_library_recall_to_tracked_set(&mut current.effect);
@@ -4535,6 +4540,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     if let Some(ref continuation) = ir.repeat_until {
         result.repeat_until = Some(continuation.clone());
     }
+    // CR 608.2c: "If C, do A and repeat this process" — loop the chain while
+    // the repeat directive (a tail child of A's gated clause) is reached.
+    if bind_repeat_directives(&mut result) && result.repeat_until.is_none() {
+        result.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::RepeatDirectiveReached,
+            }),
+            max_iterations: None,
+        });
+    }
 
     // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
     super::propagate_committed_choice_type_to_guesses(&mut result);
@@ -4555,6 +4570,48 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
     result
+}
+
+/// CR 608.2c: validate the structural "repeat this process" directives of an
+/// assembled chain and report whether one survives (the root then loops on
+/// `EffectOutcomeSignal::RepeatDirectiveReached`).
+///
+/// A directive is meaningful only as the TAIL child of a GATED clause: the gate
+/// is what decides whether the process repeats, and a gated sub is skipped
+/// together with its continuation children. An ungated parent or a directive
+/// with successors cannot express that, so the directive is replaced by an
+/// `Effect::unimplemented` gap (fail closed: no loop is stamped, and coverage
+/// stays honest) rather than left to loop until a zone runs dry. Validation lives
+/// at assembly because an outer "if" scope is applied after the nested body parse.
+pub(super) fn bind_repeat_directives(root: &mut AbilityDefinition) -> bool {
+    let mut survives = false;
+    let mut node = root;
+    loop {
+        let gated = node.condition.is_some();
+        let invalid = node.sub_ability.as_ref().is_some_and(|sub| {
+            sub.effect.is_repeat_directive() && (!gated || sub.sub_ability.is_some())
+        });
+        if invalid {
+            // Replace the invalid directive in place with an honest gap, keeping
+            // its position and successors linked: the clause must not read as a
+            // clean supported parse with its "repeat this process" dropped.
+            if let Some(sub) = node.sub_ability.as_deref_mut() {
+                *sub.effect = super::gap_diagnosis::clause_gap_unimplemented("repeat this process");
+            }
+            continue;
+        }
+        if node
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.effect.is_repeat_directive())
+        {
+            survives = true;
+        }
+        match node.sub_ability.as_deref_mut() {
+            Some(next) => node = next,
+            None => return survives,
+        }
+    }
 }
 
 // ===========================================================================
@@ -4792,6 +4849,15 @@ fn rebind_condition_instead_damage_anaphor(
     false
 }
 
+/// CR 111.1 + CR 608.2c: an override body's "those tokens" / counter-target
+/// anaphors name the instruction it replaces.
+fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &AbilityDefinition) {
+    rewrite_those_tokens_from_antecedent(&mut body.effect, &antecedent.effect);
+    if rewrite_counter_instead_target_from_antecedent(&mut body.effect, &antecedent.effect) {
+        body.target_choice_timing = antecedent.target_choice_timing;
+    }
+}
+
 /// CR 608.2c: identify the structural "you may pay ... If you do, X" form
 /// whose immediate paid continuation, rather than the payment itself, can be
 /// modified by a following "Y instead" clause.
@@ -4878,7 +4944,10 @@ mod arena_tests {
     use crate::parser::oracle_nom::context::ParseContext;
     #[cfg(feature = "cli")]
     use crate::types::ability::OpponentMayScope;
-    use crate::types::ability::{DelayedTriggerCondition, ReplacementDefinition};
+    use crate::types::ability::{
+        AttachmentReferent, DelayedTriggerCondition, FilterProp, ReplacementDefinition,
+        TargetFilter,
+    };
     use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::EtbTapState;
@@ -6162,11 +6231,12 @@ mod arena_tests {
 
     /// CR 608.2c + CR 301.5: "Destroy target creature with flying and all Equipment
     /// attached to that creature" must not lose the Equipment leg to the keyword
-    /// suffix, and the attachment relation has no filter form, so the leg fails
-    /// closed rather than destroying every Equipment. Paired positive: a
-    /// determiner-led second leg without the relation lowers to a second destroy.
+    /// suffix. The relation is the filter form `FilterProp::AttachedTo`, so the
+    /// leg lowers as an announced head plus one mass destroy whose population
+    /// unions the host and its attachments. Paired positive: a determiner-led
+    /// second leg without the relation lowers to a second destroy.
     #[test]
-    fn keyword_suffix_determiner_leg_is_kept_or_fails_closed() {
+    fn keyword_suffix_determiner_leg_keeps_the_attached_set() {
         let destroys = |text: &str| -> (usize, bool) {
             let parsed = crate::parser::parse_oracle_text(
                 text,
@@ -6195,9 +6265,62 @@ mod arena_tests {
             (2, false),
             "reach guard: the determiner-led leg survives the keyword suffix"
         );
-        let (_, has_gap) = destroys(
-            "Destroy target creature with flying and all Equipment attached to that creature.",
+        // CR 115.1 + CR 701.3a: the attached-set compound class parses as a
+        // head that announces the creature plus ONE mass destroy whose
+        // population unions the announced host with the Equipment attached to
+        // it — asserted structurally below, so a regression that dropped the
+        // announcing head (destroying every flyer) cannot pass.
+        let attached_set =
+            "Destroy target creature with flying and all Equipment attached to that creature.";
+        let parsed = crate::parser::parse_oracle_text(
+            attached_set,
+            "Leg Probe",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
         );
-        assert!(has_gap, "the attachment relation must fail closed");
+        let chain: Vec<&Effect> =
+            std::iter::successors(parsed.abilities.first(), |node| node.sub_ability.as_deref())
+                .map(|node| &*node.effect)
+                .collect();
+        assert!(
+            matches!(chain.first(), Some(Effect::TargetOnly { .. })),
+            "the announced head is a TargetOnly slot: {chain:?}"
+        );
+        let Some(Effect::DestroyAll { target, .. }) = chain.get(1) else {
+            panic!("one mass destroy follows the head: {chain:?}");
+        };
+        assert_eq!(
+            chain
+                .iter()
+                .filter(|effect| matches!(effect, Effect::DestroyAll { .. }))
+                .count(),
+            1,
+            "exactly one mass destroy in the chain: {chain:?}"
+        );
+        let TargetFilter::Or { filters } = target else {
+            panic!("the population unions host and attachments: {target:?}");
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|leg| matches!(leg, TargetFilter::ParentTarget)),
+            "the announced host is in the population: {target:?}"
+        );
+        assert!(
+            filters.iter().any(|leg| {
+                matches!(
+                    leg,
+                    TargetFilter::Typed(tf)
+                        if tf.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::AttachedTo {
+                                to: AttachmentReferent::Host { filter }
+                            } if matches!(**filter, TargetFilter::ParentTarget)
+                        ))
+                )
+            }),
+            "the attached set carries the Host relation: {target:?}"
+        );
     }
 }

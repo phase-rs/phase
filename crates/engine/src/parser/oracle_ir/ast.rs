@@ -1,17 +1,19 @@
 use serde::Serialize;
 
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
+use crate::parser::oracle_nom::target::PlayerAnaphor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
-    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousModification,
-    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
-    CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
-    FaceDownProfile, ForceBlockAttackerRef, GuardReading, LibraryInstructionActor, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
-    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetFilter, ThisWayCause, UnloweredGuard,
+    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousEffectOnset,
+    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission,
+    CounterAdjustment, CounterKindChooser, CounterKindDomain, CounterSourceRider, DigRestOrder,
+    DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile, ForceBlockAttackerRef,
+    GuardReading, LibraryInstructionActor, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue,
+    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter, ThisWayCause, UnloweredGuard,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -72,6 +74,13 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 611.2e + CR 608.2c: when this clause's continuous effect begins to apply to a
+    /// permanent an earlier instruction of the same resolution put onto the battlefield.
+    /// Stamped by the clause parser that recognized the verb form ("is/has" ⇒ `WithEntry`);
+    /// every other construction states `WhenFollowed`. Copied onto the assembled
+    /// `AbilityDefinition::entry_onset`.
+    #[serde(skip_serializing_if = "ContinuousEffectOnset::is_when_followed")]
+    pub(crate) entry_onset: ContinuousEffectOnset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,6 +94,11 @@ pub(crate) struct SubjectApplication {
     /// `AbilityDefinition.optional` so the resolver treats the sub-ability
     /// as a player choice.
     pub(crate) is_optional: bool,
+    /// CR 608.2c: the player anaphor the subject phrase printed, which names its
+    /// antecedent where `affected` alone cannot ("that player" and "its controller"
+    /// both lower to `ParentTargetController`).
+    #[serde(skip)]
+    pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -259,6 +273,9 @@ pub(crate) struct SubjectPhraseAst {
     pub(crate) inherits_parent: bool,
     /// CR 608.2c: Propagated from `SubjectApplication.is_optional`.
     pub(crate) is_optional: bool,
+    /// Propagated from `SubjectApplication.player_anaphor`.
+    #[serde(skip)]
+    pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -267,11 +284,19 @@ pub(crate) enum PredicateAst {
         effect: Effect,
         duration: Option<Duration>,
         sub_ability: Option<Box<AbilityDefinition>>,
+        /// CR 611.2e: the onset the predicate's verb form states (see
+        /// `ParsedEffectClause::entry_onset`).
+        onset: ContinuousEffectOnset,
     },
     Become {
         effect: Effect,
         duration: Option<Duration>,
         sub_ability: Option<Box<AbilityDefinition>>,
+        /// CR 611.2e: the onset the clause states. A "becomes" predicate is `WhenFollowed`;
+        /// the copula arms that lower through this variant ("it's a 3/3 …", "it's a Treasure
+        /// artifact …, and it loses all other card types", "is no longer <supertype>") state
+        /// `WithEntry`.
+        onset: ContinuousEffectOnset,
     },
     Restriction {
         effect: Effect,
@@ -813,12 +838,16 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 611.2e: because the definition uses the "is [characteristic]" form
     /// ("It's a Borg artifact creature"), the rule requires the type change to
     /// apply SIMULTANEOUSLY with the permanent entering the battlefield. The
-    /// engine installs it after entry via the shared `ChangeZone` +
-    /// `GenericEffect` continuation, so an ETB trigger keying on the new
-    /// characteristics does not see them. This is a PRE-EXISTING, CLASS-WIDE
-    /// deviation shared with Rise from the Grave and Grave Betrayal (both also
-    /// the "is" form); Puppeteer Clique's "It gains haste" is the "gains" form
-    /// and is correct. Not introduced here, and out of scope to fix.
+    /// engine still installs it after entry via the shared `ChangeZone` +
+    /// `GenericEffect` continuation, but that continuation is stamped
+    /// `ContinuousEffectOnset::WithEntry`, so the resolution defers its enter
+    /// observation until the continuation has applied and enter observers read
+    /// the entrant with the new characteristics (shared with Rise from the
+    /// Grave and Grave Betrayal, also the "is" form; Puppeteer Clique's "It
+    /// gains haste" is the "gains" form and is not deferred). Residual: the
+    /// deferral is one observation point at the end of the resolution, so
+    /// observers also see any later instruction's change (the same class as
+    /// Call a Surprise Witness's later flying counter).
     ///
     /// `assimilate` has NO CR 701.x keyword-action number: the set is
     /// unreleased and `docs/MagicCompRules.txt` has zero matches for it. Do not
@@ -2225,6 +2254,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
         unlowered_guard: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 

@@ -3265,6 +3265,18 @@ pub struct ResolutionCoinFlip {
     pub result: CoinFlipResult,
 }
 
+/// CR 608.2c: a pending "repeat this process" request, written when a looped
+/// chain's `RuntimeHandler::RepeatProcess` directive node resolves and read by
+/// the chain root's `EffectOutcomeSignal::RepeatDirectiveReached` loop
+/// predicate. Carries the `source_id` of the spell or ability whose
+/// instructions reached the directive, so the predicate honours only a request
+/// made by the process it is repeating (the controller follows that object's
+/// instructions, CR 608.2c), mirroring `ResolutionCoinFlip::flipper`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatProcessRequest {
+    pub source_id: ObjectId,
+}
+
 /// One battlefield member announced by a logical zone-change action.
 ///
 /// Membership is captured before the first delivery and is never inferred from
@@ -5199,26 +5211,45 @@ pub struct PendingPerPlayerZoneChoice {
     pub nominee: Option<PlayerId>,
 }
 
-/// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
-/// `ChangeZoneAll` instruction that places multiple owners' cards at the same
-/// library position with `random_order: false`. The first owner's batch is
-/// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
-/// batches drain after each batch completes.
+/// CR 401.4 + CR 101.4 + CR 608.2c: Per-owner library-order prompts for one
+/// instruction that places several owners' cards at one library position. The
+/// first owner's batch is surfaced as `WaitingFor::EffectZoneChoice`; each
+/// submitted order is collected, the next owner is prompted in APNAP order, and
+/// every owner's cards move together after the last owner chooses. Each prompt
+/// is answered by its batch's `chooser()` — the owner, unless the instruction
+/// names the arranger itself (CR 101.1).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MassLibraryOrderMember {
     /// The exact object incarnation that was selected for this ordered move.
     pub identity: ObjectIncarnationRef,
-    /// The zone this member occupied when the mass move created the prompt.
+    /// The zone this member occupied when the library-order prompt was created.
     pub origin: Zone,
 }
 
 /// One owner's exact members of a mass library-order instruction.
 /// The identity and origin are frozen at prompt creation so a later object with
-/// the same id cannot satisfy an in-flight ordering choice.
+/// the same id cannot satisfy an in-flight ordering choice. `owner` is whose
+/// cards and library these are; the player who arranges them is `chooser()`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MassLibraryOrderBatch {
     pub owner: PlayerId,
+    /// CR 101.1 + CR 608.2c: the player the instruction directs to arrange this
+    /// owner's cards; `None` = CR 401.4 owner. Snapshotted at resolution
+    /// (CR 608.2d); if that player leaves the game while this batch still has
+    /// cards to arrange, the controller of the object elects another player,
+    /// who is written here (CR 800.4g + CR 800.4h). Older saves decode as
+    /// `None`: every earlier prompt was owner-arranged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arranger: Option<PlayerId>,
     pub members: Vec<MassLibraryOrderMember>,
+}
+
+impl MassLibraryOrderBatch {
+    /// CR 401.4 + CR 101.1: the player who arranges this batch — the arranger
+    /// the instruction names, else the owner of the cards.
+    pub fn chooser(&self) -> PlayerId {
+        self.arranger.unwrap_or(self.owner)
+    }
 }
 
 /// Remaining batches of an in-flight mass library order.
@@ -5261,6 +5292,24 @@ pub struct PendingMassLibraryOrderChoice {
     /// Remaining owner batches in APNAP order after the current prompt.
     #[serde(default)]
     pub remaining_batches: PendingMassLibraryOrderBatches,
+    /// CR 101.4 + CR 401.4: owners who have already chosen, in APNAP order;
+    /// each batch lists that owner's cards in their submitted order with the
+    /// identity/origin frozen at submission. Nothing has moved yet: the whole
+    /// arrangement is delivered as one simultaneous action after the last owner
+    /// chooses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arranged_batches: Vec<MassLibraryOrderBatch>,
+    /// CR 608.2c: the stack entry whose resolution opened this arrangement. A
+    /// carrier is consumed only by a prompt of that same resolution; `None`
+    /// (older saves, or no resolving entry) binds on the instruction fields alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
+    /// CR 800.4g + CR 800.4h: the batch whose named arranger left the game with
+    /// cards still to arrange, held while the open prompt
+    /// (`ZoneOpponentChooserPurpose::SubstituteArranger`) elects the player who
+    /// arranges it. Taken when the election is answered; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arranger_election: Option<MassLibraryOrderBatch>,
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
@@ -6992,8 +7041,10 @@ pub enum BatchCompletion {
         player: PlayerId,
         /// Resolving effect source for the terminal `EffectResolved` event.
         source_id: ObjectId,
-        /// Full selected order. It determines the printed placement order and
-        /// remains the selected-object tracked set / effect count.
+        /// The complete arranged order: for an owner arrangement, every owner's
+        /// cards (APNAP owner segments, each in that owner's order). It
+        /// determines the printed placement order and remains the
+        /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
         /// Selection members that were already in a library at delivery time.
         /// They are repositions, not replaceable zone-change requests.
@@ -7625,6 +7676,30 @@ pub enum PendingCounterPostAction {
     /// parked record, and its characteristics are re-snapshotted from the live object at flush.
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
+    },
+    /// CR 614.12 + CR 616.1: finish an ordinary interactive enter-as-copy
+    /// entry after its merged counter placement settles. Never minted by Meld
+    /// or liminal entry. The incarnation pin prevents work on a later object.
+    ///
+    /// The fallible engine consumer pops this action before running the entry
+    /// tail; a nested pause parks only the remaining post-actions. It runs in
+    /// list order, before the completion's EffectResolved and player action.
+    ///
+    /// `add-engine-variant` gate:
+    /// * Stage 1 DOES_NOT_EXIST — no post-action finishes this ordinary entry.
+    /// * Stage 2 EXTEND_OK — FinishMeldEntry, EmitCommittedCopyTokenEntry,
+    ///   ContinueCopyTokenCreation, and FinalizeCommittedLiminalTokenEntry
+    ///   carry distinct suspended operations, not a shared parameter axis.
+    /// * Stage 3 WITHIN_SECTION — entry replacement resumption, CR 614.12
+    ///   + CR 616.1; this is not a leaf-reference layer.
+    ///
+    /// Serialized surface: PendingEffectResolved::post_actions on the existing
+    /// resolution-state frame wire, exactly like ContinueProliferateActions
+    /// and ContinuePlayerScopeSacrifice. Backward compatible, not forward
+    /// compatible: older builds cannot load a save containing this new tag.
+    /// Same one-way contract; no game protocol or resolution-state wire bump.
+    FinishCopyTargetChoiceEntry {
+        entrant: ObjectIncarnationRef,
     },
     /// CR 701.42 + CR 707.9: finish a meld instruction after a copy-as-enters
     /// choice whose entry counters paused on their own replacement choice.
@@ -10224,13 +10299,22 @@ pub struct PendingManaAbility {
     /// `chosen_counter_counts_missing_field_wire_shape_is_rejected` in this
     /// file's test module.
     pub chosen_counter_counts: Vec<u32>,
-    /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Two
-    /// writers, both binding the same CR 107.3a announcement:
+    /// CR 107.3a + CR 601.2b: Announced value of X for this mana ability. Four
+    /// writers, all binding the same CR 107.3a announcement:
     ///
     /// * CR 702.179e/f: a `Pay X speed` cost (Chicago Loop's `Pay X speed: Add
     ///   X mana in any combination of colors`), announced before cost payment
     ///   and bound to BOTH the speed cost and the produced-mana count via
     ///   `set_chosen_x_recursive`;
+    /// * an `{X}` mana cost leg (Wizard's Rockets' `{X}, {T}, Sacrifice this
+    ///   artifact: Add X mana in any combination of colors`), announced through
+    ///   `PayableResource::ManaGeneric` before cost payment; the activation pays
+    ///   the leg with X concretized and the produced-mana count reads the same
+    ///   value;
+    /// * a literal `Remove X counters` cost (Saltcrusted Steppe class), where
+    ///   the `SubmitPayAmount` handler binds X from the `PayableResource::Counters`
+    ///   answer for the leaf `next_chosen_counter_leaf_is_literal_x` identifies
+    ///   (CR 107.3i: every X on the object shares that value);
     /// * the X-sentinel `TapCreatures` form (Hazel of the Rootbloom's
     ///   `Tap X untapped tokens you control`), where
     ///   `handle_tap_creatures_for_mana_ability` binds X to the size of the
@@ -10239,7 +10323,7 @@ pub struct PendingManaAbility {
     ///   `advance_mana_ability_selection_cursor` read that single stored value
     ///   rather than re-deriving it from `requirement.fixed_count()`.
     ///
-    /// `None` until X is announced. Because this slot is shared by two costs, it
+    /// `None` until X is announced. Because this slot is shared by several costs, it
     /// is NOT a stage-completion marker — each selection stage owns its own
     /// typed presence field (see [`Self::chosen_tappers`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15618,6 +15702,12 @@ pub enum ZoneOpponentChooserPurpose {
     /// pick has left the game; the next player in turn order after the
     /// object's controller elects another player to make that one choice.
     SubstituteChooser,
+    /// CR 800.4g + CR 800.4h: the arranger an instruction named for an owner's
+    /// library-order batch (CR 101.1 + CR 401.4) has left the game while the
+    /// batch still has cards to arrange; the controller of the object, or the
+    /// next player in turn order after them, elects the player who arranges
+    /// that batch.
+    SubstituteArranger,
 }
 
 impl ZoneOpponentChooserPurpose {
@@ -16671,9 +16761,12 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
-        /// Exact origin/identity snapshot for a fresh
-        /// mass `ChangeZoneAll` library-order prompt. Generic zone choices leave
-        /// this absent and therefore retain their ordinary strict zone check.
+        /// Exact origin/identity snapshot for a fresh CR 401.4 owner
+        /// library-order prompt: a `ChangeZoneAll` mass placement or an
+        /// announced target set placed by `PutAtLibraryPosition`. The prompt's
+        /// `player` is the batch's `chooser()`: its owner, or the arranger the
+        /// instruction names (CR 101.1). Generic zone choices leave this absent
+        /// and therefore retain their ordinary strict zone check.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mass_library_order: Option<MassLibraryOrderBatch>,
         /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
@@ -17635,7 +17728,8 @@ pub enum WaitingFor {
     /// "target opponent chooses" pre-binds the chooser at announcement).
     /// `candidates` is the legal opponent set; `ability` is the resolving
     /// choose ability, carried so the zone choice can be presented to the
-    /// picked opponent.
+    /// picked opponent. `purpose` names the pending choice the picked player is
+    /// for, and so the authority that answers it.
     ChooseFromZoneOpponentChooser {
         player: PlayerId,
         candidates: Vec<PlayerId>,
@@ -18543,6 +18637,12 @@ pub enum PayableResource {
     /// silently resolve to `ManaCost::zero()`, which would concretize to a
     /// free payment (drops the fixed pips AND the X basis) instead of
     /// visibly rejecting the incompatible/corrupt save.
+    ///
+    /// CR 107.3a + CR 601.2b via CR 602.2b: with `pending_mana_ability: Some`,
+    /// the prompt is instead a mana ability's announcement of X for its `{X}`
+    /// cost leg (Wizard's Rockets). The submit only binds
+    /// `PendingManaAbility::chosen_x`; the activation then pays the
+    /// concretized leg through its own cost cursor.
     ManaGeneric { base_cost: ManaCost },
     /// CR 107.1c + CR 122.1: Choose how many counters to remove.
     Counters,
@@ -22040,6 +22140,82 @@ fn stack_bound_reveals_is_empty(
     reveals.is_empty()
 }
 
+/// CR 611.2e: whether every ability node of this state carries the parse-time entry onset
+/// (`AbilityDefinition::entry_onset` / `ResolvedAbility::entry_onset`). Engines that predate the
+/// onset never wrote this key, so its absence identifies the writer, not a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AbilityOnsetRecord {
+    /// Written by an engine that did not record onsets (the key is absent on the wire).
+    Unrecorded,
+    /// Every ability node's `entry_onset` was stamped by the current parser or copied from a
+    /// stamped node.
+    Recorded,
+}
+
+impl AbilityOnsetRecord {
+    /// Serde default for `GameState::ability_onset_record`: a payload without the key was
+    /// written by an engine that did not record onsets.
+    fn absent_on_wire() -> Self {
+        Self::Unrecorded
+    }
+}
+
+/// The serialized key of `GameState::ability_onset_record`, read by the persisted admission
+/// (`types::resolution::admit_entry_onset_record`) and by the test-support capture helper
+/// (`record_captured_onsets`).
+pub const ABILITY_ONSET_RECORD_FIELD: &str = "ability_onset_record";
+
+/// Test support: declares a committed game-state capture written before onsets were recorded
+/// (CR 611.2e) as onset-recorded, for a test whose subject does not depend on onsets. The capture
+/// then decodes exactly as it did before `admit_entry_onset_record` existed: every unrecorded node
+/// keeps the `WhenFollowed` default. Never call it on a payload whose onsets the test observes, and
+/// never outside tests; production admission refuses the same bytes
+/// (`a_frozen_v78_mode_choice_keeps_its_announcement_fold`).
+///
+/// Marks each game-state root of the document, by the committed capture shapes:
+/// - a debug export `{gameState, turnCheckpoints?, …}`: `gameState` and every `turnCheckpoints`
+///   element (each a bare state in every committed export);
+/// - a trusted envelope `{state, …}` (the dispatch `PersistedGameState::deserialize` makes):
+///   `state`;
+/// - a bare state (has `objects` and `turn_number`): the document itself.
+///
+/// Any other document (a card export, a CR 733 census map) is left unchanged.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_captured_onsets(document: &mut serde_json::Value) {
+    fn mark(root: &mut serde_json::Value) {
+        let recorded = serde_json::to_value(AbilityOnsetRecord::Recorded)
+            .expect("AbilityOnsetRecord serializes");
+        root.as_object_mut()
+            .expect("a committed capture's game-state root is a JSON object")
+            .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+    }
+    let Some(object) = document.as_object_mut() else {
+        return;
+    };
+    if let Some(game_state) = object.get_mut("gameState") {
+        mark(game_state);
+        if let Some(checkpoints) = object
+            .get_mut("turnCheckpoints")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            checkpoints.iter_mut().for_each(mark);
+        }
+    } else if let Some(state) = object.get_mut("state") {
+        mark(state);
+    } else if object.contains_key("objects") && object.contains_key("turn_number") {
+        mark(document);
+    }
+}
+
+/// `record_captured_onsets` over a JSON string, for loaders that hand a string onward.
+#[cfg(any(test, feature = "test-support"))]
+pub fn record_captured_onsets_json(json: &str) -> String {
+    let mut document: serde_json::Value =
+        serde_json::from_str(json).expect("a committed capture is JSON");
+    record_captured_onsets(&mut document);
+    serde_json::to_string(&document).expect("a committed capture re-serializes")
+}
+
 /// Declares the runtime state and its private serde-only raw mirror from one
 /// field list. Keeping the field declaration single-sourced makes persistence
 /// ingress exhaustive whenever `GameState` evolves.
@@ -22189,6 +22365,13 @@ declare_game_state! {
     /// by later retained-prefix replay.
     #[serde(default)]
     pub resolved_rules_journal: ResolvedRulesJournal,
+    /// CR 611.2e: which writer produced this state's ability onsets. Serialized unconditionally
+    /// (no `skip_serializing_if`) by every writer — the derived serializer, both persistence
+    /// writers and transport — so its absence on the wire is a fact about the writer: an engine
+    /// that did not record onsets. Persisted admission (`types::resolution::admit_entry_onset_record`)
+    /// reads it; `GameState::new` states `Recorded`.
+    #[serde(default = "AbilityOnsetRecord::absent_on_wire")]
+    pub ability_onset_record: AbilityOnsetRecord,
     /// CR 118.3a: transient carrier for the caster's pin hints during a single
     /// finalize spend. `finalize_mana_payment` takes `pending_cast` (removing the
     /// pins) BEFORE the spend runs, so the pins are moved here for the duration of
@@ -22643,11 +22826,12 @@ declare_game_state! {
     #[serde(serialize_with = "crate::types::deterministic_serde::im_hash_map")]
     pub attribution: im::HashMap<ObjectId, ObjectAttribution>,
 
-    /// CR 613.1d: Remote recipients whose live card types were derived by a
-    /// Layer-4 continuous effect during the preceding evaluation. The next
-    /// full pass restores only these objects' type baselines before applying
-    /// the new Layer-4 effect set, leaving independent spell/card state (such
-    /// as cast-time ability grants) untouched.
+    /// CR 613.1d + CR 613.1e + CR 613.4: Remote recipients whose live card
+    /// types, colours or power/toughness were derived by a continuous effect
+    /// during the preceding evaluation. The next full pass restores only
+    /// these objects' baselines before applying the new effect set, leaving
+    /// independent spell/card state (such as cast-time ability grants)
+    /// untouched. The name predates the widening past the type layer.
     ///
     /// This is an engine-only derived cache. It is reconstructed from the
     /// serialized attribution side-table on the first post-deserialization
@@ -23922,6 +24106,18 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolution_coin_flip: Option<ResolutionCoinFlip>,
 
+    /// CR 608.2c: the "repeat this process" directive
+    /// (`RuntimeHandler::RepeatProcess`) was reached in the current pass of a
+    /// looped chain, by the object named in the request. Set when the
+    /// directive node resolves and read by the root's
+    /// `EffectOutcomeSignal::RepeatDirectiveReached` loop predicate; cleared
+    /// at the head of every pass so a pass whose gate did not hold (or that
+    /// was declined) never reads a previous pass's request.
+    /// Resolution-scoped control flow, not game state proper: it is not part
+    /// of `PartialEq` and serializes only while set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeat_process_requested: Option<RepeatProcessRequest>,
+
     /// CR 101.4 + CR 608.2c: Per-player `ChooseFromZone { EachPlayer }`
     /// iteration paused by the current player's interactive choice. Drained
     /// alongside the vote-ballot frame, before the ability-continuation frame
@@ -23952,8 +24148,9 @@ declare_game_state! {
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
-    /// CR 401.4: Remaining per-owner library-order batches for a mass
-    /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
+    /// CR 401.4 + CR 101.4: the remaining per-owner prompts and the orders
+    /// already chosen for one owner library arrangement paused on
+    /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Boxed to keep `GameState` inside its stack budget
     /// (`types/game_state_size.rs`): it is populated only between the batches of
@@ -24465,6 +24662,21 @@ declare_game_state! {
     /// `resolving_stack_entry` like `resolving_trigger_firing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolving_spell_final_part: Option<OwedSpellFinalPart>,
+    /// CR 400.7 + CR 608.2h: the exact object — storage id and incarnation —
+    /// the resolution carrier (`resolving_stack_entry`) resolves, pinned by
+    /// `stack::begin_resolving_stack_entry` while it is still on the stack and
+    /// cleared with the carrier. A spell that leaves the stack once it starts to
+    /// resolve continues to resolve (CR 608.2m), and its last known information
+    /// is this incarnation's `lki_by_incarnation` snapshot. A later departure
+    /// recorded under the same storage id — e.g. the exile of everything a
+    /// departing owner owns (CR 800.4a), which moves the already-exiled card
+    /// again — overwrites `lki_cache` but never this snapshot. `None` for an
+    /// ability, which has no object row (its controller is fixed at activation or
+    /// trigger, CR 113.8). Read only by
+    /// `stack::resolving_object_controller`. Serialized because the carrier
+    /// survives a mid-resolution pause, like `resolving_spell_final_part`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolving_stack_object: Option<ObjectIncarnationRef>,
     /// CR 603.3b + CR 608.2g: a terminal resolution batch (currently Ripple)
     /// has settled, but its final spell is still completing announcement. Keep
     /// the provenance until the post-announcement priority pipeline can collect
@@ -31451,6 +31663,7 @@ impl GameState {
             next_pip_id: 1,
             next_spell_announcement: 0,
             resolved_rules_journal: ResolvedRulesJournal::default(),
+            ability_onset_record: AbilityOnsetRecord::Recorded,
             active_payment_pins: Vec::new(),
             active_rules_execution_node: None,
             active_casting_permission_index: None,
@@ -31657,6 +31870,7 @@ impl GameState {
             resolving_created_token_seats: None,
             merged_card_component_route: None,
             resolution_coin_flip: None,
+            repeat_process_requested: None,
             pending_player_scope_sacrifice_choice: None,
             pending_player_scope_unless_payment: None,
             pending_discard_batch: None,
@@ -31723,6 +31937,7 @@ impl GameState {
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
             resolving_spell_final_part: None,
+            resolving_stack_object: None,
             pending_resolution_completion: None,
             resolution_source_relatch: None,
             current_trigger_events: Vec::new(),
@@ -34483,6 +34698,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_pip_id: _,
         next_spell_announcement: _,
         resolved_rules_journal: _,
+        ability_onset_record: _,
         active_payment_pins: _,
         active_rules_execution_node: _,
         active_casting_permission_index: _,
@@ -34722,6 +34938,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_created_token_seats: _,
         merged_card_component_route: _,
         resolution_coin_flip: _,
+        repeat_process_requested: _,
         may_trigger_auto_choices: _,
         replacement_auto_choices: _,
         replacement_auto_choice_tail: _,
@@ -34781,6 +34998,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         resolving_spell_final_part: _,
+        // `resolving_stack_object` (CR 400.7 resolution-object pin): EXCLUDED, like the
+        // carrier `resolving_stack_entry` it is derived from — a pure function of that
+        // carrier and its object's incarnation at install, cleared with it. Comparing an
+        // incarnation identity would make a loop sampled mid-resolution compare unequal
+        // every iteration; excluding it cannot hide growth (`resolution_source_relatch`
+        // precedent).
+        resolving_stack_object: _,
         pending_resolution_completion: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
@@ -34908,6 +35132,7 @@ impl PartialEq for GameState {
             && self.next_pip_id == other.next_pip_id
             && self.next_spell_announcement == other.next_spell_announcement
             && self.resolved_rules_journal == other.resolved_rules_journal
+            && self.ability_onset_record == other.ability_onset_record
             && self.battlefield == other.battlefield
             && self.stack == other.stack
             && self.stack_paid_facts == other.stack_paid_facts
@@ -37925,7 +38150,9 @@ mod tests {
         flate2::read::GzDecoder::new(dump)
             .read_to_string(&mut json)
             .expect("the dump inflates");
-        let envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        record_captured_onsets(&mut envelope);
         assert!(
             json.contains("\"FlipCoin\""),
             "reach guard: the capture predates the merge and carries legacy FlipCoin nodes"
@@ -38197,7 +38424,10 @@ mod tests {
             flate2::read::GzDecoder::new(dump)
                 .read_to_string(&mut json)
                 .expect("the dump inflates");
-            let envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+            let mut envelope: serde_json::Value =
+                serde_json::from_str(&json).expect("the dump parses");
+            // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+            record_captured_onsets(&mut envelope);
             let board = envelope.get("gameState").unwrap_or(&envelope).clone();
             assert!(
                 board["waiting_for"]["data"].get("road").is_none(),
@@ -48617,6 +48847,7 @@ mod tests {
                 identity: ObjectIncarnationRef::of(ObjectId(1), 7),
                 origin: Zone::Battlefield,
             }],
+            arranger: None,
         };
         let wf = WaitingFor::EffectZoneChoice {
             player: PlayerId(0),
@@ -48674,6 +48905,9 @@ mod tests {
             track_exiled_by_source: false,
             duration: None,
             remaining_batches: PendingMassLibraryOrderBatches::Typed(Vec::new()),
+            arranged_batches: Vec::new(),
+            resolving_entry: None,
+            arranger_election: None,
         };
         let mut wire = serde_json::to_value(pending).unwrap();
         wire["remaining_batches"] = serde_json::json!([[1, [2, 3]]]);
@@ -48684,6 +48918,18 @@ mod tests {
             PendingMassLibraryOrderBatches::Legacy(ref batches)
                 if batches == &vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
         ));
+        assert!(
+            decoded.arranged_batches.is_empty(),
+            "an older save without collected orders decodes with none"
+        );
+        assert_eq!(
+            decoded.resolving_entry, None,
+            "an older save without entry provenance binds on the instruction fields alone"
+        );
+        assert!(
+            decoded.arranger_election.is_none(),
+            "an older save holds no election"
+        );
 
         let reserialized = serde_json::to_value(decoded).unwrap();
         assert_eq!(
@@ -48691,6 +48937,110 @@ mod tests {
             serde_json::json!([[1, [2, 3]]]),
             "a legacy mass-order queue must retain its migration authority across a save"
         );
+    }
+
+    /// CR 101.4 + CR 401.4 + CR 608.2c: the orders owners have already chosen
+    /// and the resolution that opened the arrangement survive a save, so a
+    /// reloaded arrangement still delivers every owner's cards together.
+    #[test]
+    fn pending_mass_library_order_choice_round_trips_arranged_batches_and_entry() {
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::NthFromTop { n: 3 },
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![MassLibraryOrderBatch {
+                owner: PlayerId(2),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::of(ObjectId(5), 1),
+                    origin: Zone::Battlefield,
+                }],
+                arranger: None,
+            }]),
+            arranged_batches: vec![MassLibraryOrderBatch {
+                owner: PlayerId(1),
+                members: vec![
+                    MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::of(ObjectId(3), 2),
+                        origin: Zone::Battlefield,
+                    },
+                    MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::of(ObjectId(4), 0),
+                        origin: Zone::Graveyard,
+                    },
+                ],
+                arranger: None,
+            }],
+            resolving_entry: Some(ObjectId(7)),
+            arranger_election: Some(MassLibraryOrderBatch {
+                owner: PlayerId(3),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::of(ObjectId(6), 0),
+                    origin: Zone::Graveyard,
+                }],
+                arranger: Some(PlayerId(0)),
+            }),
+        };
+        let wire = serde_json::to_value(&pending).unwrap();
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, pending);
+    }
+
+    /// CR 800.4g + CR 800.4h: the substitute-arranger election purpose has a
+    /// stable wire name, distinct from the per-player substitute election.
+    #[test]
+    fn substitute_arranger_purpose_round_trips_by_name() {
+        assert_eq!(
+            serde_json::to_value(ZoneOpponentChooserPurpose::SubstituteArranger).unwrap(),
+            serde_json::json!("SubstituteArranger")
+        );
+        assert_eq!(
+            serde_json::from_value::<ZoneOpponentChooserPurpose>(serde_json::json!(
+                "SubstituteArranger"
+            ))
+            .unwrap(),
+            ZoneOpponentChooserPurpose::SubstituteArranger
+        );
+    }
+
+    /// CR 101.1 + CR 401.4: an instruction-named arranger survives serde on both
+    /// the queued and the arranged batch, so a reload still prompts the arranger
+    /// rather than falling back to the owner; a wire without the key decodes as
+    /// the owner default.
+    #[test]
+    fn mass_library_order_batch_round_trips_an_explicit_arranger() {
+        let batch = |owner: u8, object: u64| MassLibraryOrderBatch {
+            owner: PlayerId(owner),
+            members: vec![MassLibraryOrderMember {
+                identity: ObjectIncarnationRef::of(ObjectId(object), 0),
+                origin: Zone::Graveyard,
+            }],
+            arranger: Some(PlayerId(0)),
+        };
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::Top,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![batch(2, 5)]),
+            arranged_batches: vec![batch(1, 3)],
+            resolving_entry: None,
+            arranger_election: None,
+        };
+        let wire = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            wire["arranged_batches"][0]["arranger"],
+            serde_json::json!(0)
+        );
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, pending);
+        assert_eq!(decoded.arranged_batches[0].chooser(), PlayerId(0));
+
+        let mut legacy = serde_json::to_value(batch(1, 3)).unwrap();
+        legacy.as_object_mut().unwrap().remove("arranger");
+        let legacy: MassLibraryOrderBatch = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.arranger, None);
+        assert_eq!(legacy.chooser(), PlayerId(1));
     }
 
     /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip
@@ -51584,6 +51934,67 @@ mod tests {
             deserialized.active_auto_tap_row_policy, None,
             "deserialized active_auto_tap_row_policy must be None"
         );
+    }
+
+    /// T1: `record_captured_onsets` marks exactly the game-state roots of each committed capture
+    /// shape and leaves every other document unchanged; the string form delegates.
+    #[test]
+    fn record_captured_onsets_marks_each_committed_shape_root() {
+        let recorded = serde_json::Value::from("Recorded");
+        let bare = || serde_json::json!({ "objects": {}, "turn_number": 1 });
+
+        // (a) debug export: `gameState` and every checkpoint.
+        let export = serde_json::json!({
+            "gameState": bare(),
+            "turnCheckpoints": [bare(), bare()],
+            "cardDatabase": { "objects": {}, "turn_number": 2 },
+        });
+        let mut marked = export.clone();
+        record_captured_onsets(&mut marked);
+        assert_eq!(marked["gameState"][ABILITY_ONSET_RECORD_FIELD], recorded);
+        for checkpoint in marked["turnCheckpoints"]
+            .as_array()
+            .expect("checkpoints stay an array")
+        {
+            assert_eq!(checkpoint[ABILITY_ONSET_RECORD_FIELD], recorded);
+        }
+        assert!(
+            marked.get(ABILITY_ONSET_RECORD_FIELD).is_none()
+                && marked["cardDatabase"]
+                    .get(ABILITY_ONSET_RECORD_FIELD)
+                    .is_none(),
+            "only the export's state roots are marked: {marked}"
+        );
+
+        // (b) trusted envelope: only `state`.
+        let mut envelope = serde_json::json!({
+            "state": bare(),
+            "precast_shortcut_runtime": { "objects": {}, "turn_number": 3 },
+        });
+        record_captured_onsets(&mut envelope);
+        assert_eq!(envelope["state"][ABILITY_ONSET_RECORD_FIELD], recorded);
+        assert!(envelope.get(ABILITY_ONSET_RECORD_FIELD).is_none());
+        assert!(envelope["precast_shortcut_runtime"]
+            .get(ABILITY_ONSET_RECORD_FIELD)
+            .is_none());
+
+        // (c) bare state: the root.
+        let mut state = bare();
+        record_captured_onsets(&mut state);
+        assert_eq!(state[ABILITY_ONSET_RECORD_FIELD], recorded);
+
+        // (d) a card export is left byte-identical.
+        let card_export = serde_json::json!({ "lightning bolt": { "name": "Lightning Bolt" } });
+        let mut untouched = card_export.clone();
+        record_captured_onsets(&mut untouched);
+        assert_eq!(untouched, card_export);
+
+        // (e) the string form is the value form, re-serialized.
+        let via_string: serde_json::Value = serde_json::from_str(&record_captured_onsets_json(
+            &serde_json::to_string(&export).expect("the export serializes"),
+        ))
+        .expect("the marked export parses");
+        assert_eq!(via_string, marked);
     }
 }
 
