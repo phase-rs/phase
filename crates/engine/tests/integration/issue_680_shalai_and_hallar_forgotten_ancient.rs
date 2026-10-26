@@ -47,7 +47,10 @@ fn issue_680_forgotten_ancient_counter_on_opponent_turn_triggers_shalai_damage()
 
     scenario.add_creature_from_oracle(P0, "Shalai and Hallar", 3, 3, SHALAI_AND_HALLAR);
     let ancient = scenario
-        .add_creature_from_oracle(P0, "Forgotten Ancient", 0, 0, FORGOTTEN_ANCIENT)
+        // Forgotten Ancient's printed 0/3: a 0/0 dies to CR 704.5f before its
+        // cast trigger resolves, and the trigger then has no creature to put
+        // the counter on (CR 400.7).
+        .add_creature_from_oracle(P0, "Forgotten Ancient", 0, 3, FORGOTTEN_ANCIENT)
         .id();
     let spell = zero_cost_spell(&mut scenario, P1);
 

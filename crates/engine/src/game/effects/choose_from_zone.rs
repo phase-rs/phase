@@ -1143,17 +1143,18 @@ fn advance_per_player_iteration(
         }
         None => {
             // CR 800.4g + CR 800.4h: the object requires this pick of a player
-            // who has left; the next player in turn order after the object's
-            // controller elects another player to make it. The pending pool
-            // (`current`) is carried through the election unchanged.
-            let elector = players::next_player_in_turn_order(state, ability.controller);
-            let candidates: Vec<PlayerId> = players::apnap_order(state)
-                .into_iter()
-                .filter(|&player| players::is_alive(state, player))
-                .collect();
+            // who has left; the controller of the object (live, or last-known
+            // once it has left the stack) — or, when that player has left, the
+            // next player in turn order after them — elects another player to
+            // make it. The pending pool (`current`) is carried through the
+            // election unchanged.
+            let object = state.resolving_stack_entry.as_ref().expect(
+                "admit_per_player_park admitted this iteration only with a resolution carrier installed (CR 608.2)",
+            );
+            let election = players::substitute_chooser_election(state, object);
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
-                player: elector,
-                candidates,
+                player: election.elector,
+                candidates: election.candidates,
                 ability: Box::new(ability.clone()),
                 purpose: ZoneOpponentChooserPurpose::SubstituteChooser,
             };
@@ -1219,7 +1220,8 @@ fn take_frame_for_prompt(
             frame.current.is_some() && frame.nominee.is_none()
         }
         ZoneOpponentChooserPurpose::Ordinary
-        | ZoneOpponentChooserPurpose::BindReciprocalConsume => false,
+        | ZoneOpponentChooserPurpose::BindReciprocalConsume
+        | ZoneOpponentChooserPurpose::SubstituteArranger => false,
     };
     if !frame_awaits_prompt || frame.ability.source_id != prompt_ability.source_id {
         return Err(EffectError::InvalidParam(
@@ -3466,6 +3468,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             source,

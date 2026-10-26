@@ -7275,7 +7275,13 @@ fn apply_state_level_gates(
         if let ProposedEvent::CreateToken { owner, .. } = event {
             let matches = match scope {
                 crate::types::ability::ControllerRef::You => *owner == source_controller,
-                crate::types::ability::ControllerRef::Opponent => *owner != source_controller,
+                // CR 102.1 + CR 616.1f: a player who has left the game is no
+                // longer a player, so no one's opponent — once an earlier
+                // replacement settles the event under a departed player, an
+                // opponent-scoped redirect is no longer applicable.
+                crate::types::ability::ControllerRef::Opponent => {
+                    *owner != source_controller && crate::game::players::is_alive(state, *owner)
+                }
                 crate::types::ability::ControllerRef::ScopedPlayer
                 | crate::types::ability::ControllerRef::TargetPlayer
                 | crate::types::ability::ControllerRef::TargetOpponent
@@ -7768,7 +7774,12 @@ fn object_replacement_candidate_applies(
         if let ProposedEvent::CreateToken { owner, .. } = event {
             let matches = match scope {
                 crate::types::ability::ControllerRef::You => *owner == replacement_player,
-                crate::types::ability::ControllerRef::Opponent => *owner != replacement_player,
+                // CR 102.1 + CR 616.1f: a departed player is no one's
+                // opponent, so this scope no longer applies to an event an
+                // earlier replacement settled under them.
+                crate::types::ability::ControllerRef::Opponent => {
+                    *owner != replacement_player && crate::game::players::is_alive(state, *owner)
+                }
                 crate::types::ability::ControllerRef::ScopedPlayer
                 | crate::types::ability::ControllerRef::TargetPlayer
                 // CR 109.4: TargetOpponent has no active-ability context at

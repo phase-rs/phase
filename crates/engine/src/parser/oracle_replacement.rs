@@ -1144,6 +1144,7 @@ fn parse_discard_to_library_top_replacement(
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
+            arranger: None,
         },
     );
     Some(

@@ -7864,6 +7864,7 @@ mod tests {
                     target: TargetFilter::SelfRef,
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Top,
+                    arranger: None,
                 }
             )),
             "positive control: the chain position the grant occupies IS walked"
