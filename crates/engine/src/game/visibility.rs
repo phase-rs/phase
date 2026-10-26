@@ -14332,11 +14332,19 @@ mod tests {
                 .with_mana_cost(ManaCost::zero())
                 .id();
             let mut runner = scenario.build();
-            let outcome = runner.cast(spell).commit().stop_at_optional().resolve();
+            let mut committed = runner.cast(spell).commit();
+            let mut events = Vec::new();
+            for _ in 0..4 {
+                if !matches!(committed.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+            }
             assert!(matches!(
-                outcome.final_waiting_for(),
+                committed.state().waiting_for,
                 WaitingFor::OptionalEffectChoice { player: P0, .. }
             ));
+            drop(committed);
             assert_eq!(runner.state().objects[&spell].zone, destination);
             let canonical = runner.state().clone();
             let frame = canonical.active_optional_effect_frame().unwrap();
@@ -14408,7 +14416,6 @@ mod tests {
             )
             .is_err());
             runner = GameRunner::from_state(restored);
-            let mut events = outcome.events().to_vec();
             events.extend(
                 runner
                     .act(GameAction::DecideOptionalEffect { accept: true })

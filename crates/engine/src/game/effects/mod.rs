@@ -22397,7 +22397,8 @@ mod tests {
                     }
                     let actor = InstructionActorRef::event(reference.clone()).unwrap();
                     def.instruction_actor = Some(actor);
-                    let mut runtime = super::ability_utils::build_resolved_from_def(&def, host, P0);
+                    let mut runtime =
+                        crate::game::ability_utils::build_resolved_from_def(&def, host, P0);
                     assert!(runtime.context.replacement_event.is_none());
                     if missing {
                         runtime.context.replacement_event =
