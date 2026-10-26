@@ -3,7 +3,7 @@
 //!
 //! Runtime coverage through the real `ActivateAbility` pipeline: the looting
 //! discard is interactive, and the creature-card rider must untap AND transform
-//! (CR 701.9a discard, CR 701.28a transform, CR 608.2c "this way" condition).
+//! (CR 701.9a discard, CR 701.27a transform, CR 608.2c "this way" condition).
 //! Every test sets a `back_face` so "did not transform" is never vacuous.
 
 use engine::game::casting::activated_ability_definitions;
@@ -71,7 +71,7 @@ fn setup() -> (GameRunner, ObjectId) {
 }
 
 /// Put a card of `core_type` on top of P0's library so the draw pulls it.
-fn seed_library_top(runner: &mut GameRunner, name: &str, core_type: CoreType) {
+fn seed_library_top(runner: &mut GameRunner, name: &str, core_type: CoreType) -> ObjectId {
     let state = runner.state_mut();
     let id = create_object(
         state,
@@ -90,10 +90,11 @@ fn seed_library_top(runner: &mut GameRunner, name: &str, core_type: CoreType) {
     let player = state.players.iter_mut().find(|p| p.id == P0).unwrap();
     player.library.retain(|&oid| oid != id);
     player.library.insert(0, id);
+    id
 }
 
 /// Activate the loot ability and discard the drawn card (the only card in hand).
-fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId) {
+fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId, drawn: ObjectId) {
     let idx = activated_ability_definitions(runner.state(), scholar)
         .into_iter()
         .find(|(_, ability)| matches!(ability.effect.as_ref(), Effect::Draw { .. }))
@@ -127,17 +128,17 @@ fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId) {
         }
     }
     assert!(
-        runner.state().players[0].hand.is_empty(),
-        "the drawn card must have been discarded"
+        runner.state().players[0].graveyard.contains(&drawn),
+        "the drawn card must have reached the graveyard"
     );
 }
 
 #[test]
 fn discarding_a_creature_card_untaps_and_transforms() {
     let (mut runner, scholar) = setup();
-    seed_library_top(&mut runner, "Grizzly Bears", CoreType::Creature);
+    let bears = seed_library_top(&mut runner, "Grizzly Bears", CoreType::Creature);
 
-    loot_discarding_drawn_card(&mut runner, scholar);
+    loot_discarding_drawn_card(&mut runner, scholar, bears);
 
     let obj = &runner.state().objects[&scholar];
     assert!(!obj.tapped, "creature discard untaps the Scholar");
@@ -148,9 +149,9 @@ fn discarding_a_creature_card_untaps_and_transforms() {
 #[test]
 fn discarding_a_noncreature_card_neither_untaps_nor_transforms() {
     let (mut runner, scholar) = setup();
-    seed_library_top(&mut runner, "Island", CoreType::Land);
+    let island = seed_library_top(&mut runner, "Island", CoreType::Land);
 
-    loot_discarding_drawn_card(&mut runner, scholar);
+    loot_discarding_drawn_card(&mut runner, scholar, island);
 
     let obj = &runner.state().objects[&scholar];
     assert!(obj.tapped, "noncreature discard leaves the Scholar tapped");
