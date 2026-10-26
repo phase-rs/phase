@@ -8582,10 +8582,12 @@ pub(crate) fn park_observer_triggers_if_paused(
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    let trigger_events: Vec<GameEvent> = filter_consumed_trigger_events_from(
+    // CR 603.2c: logical zone-change owners can queue observers without claiming
+    // the consumed ledger; honor their queued contexts as collection witnesses.
+    let trigger_events: Vec<GameEvent> = filter_already_collected_trigger_events_from(
+        state,
         &events[..owned.end],
         slice_start,
-        TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     )
     .into_iter()
@@ -12106,16 +12108,17 @@ pub(crate) fn filter_consumed_trigger_events(
 /// slice spans a whole continuation drain and can hold zone changes no owner
 /// allocated a group for, so it must consult this instead.
 ///
-/// Three further raw-slice collectors exist. [`park_observer_triggers_if_paused`]
-/// and [`collect_and_drain_observer_triggers_if_settled`] are not on any path that
-/// follows a logical zone-change owner today. The third — `engine_priority`'s
-/// exile-return pass — ALREADY follows one (`check_exile_returns` delivers through
+/// [`park_observer_triggers_if_paused`] also uses this filter: resumed coin-flip
+/// and scry continuations can pass a logical zone-change owner before pausing.
+/// [`collect_and_drain_observer_triggers_if_settled`]'s settled collector is not
+/// on a path that follows such an owner today. `engine_priority`'s exile-return
+/// pass ALREADY follows one (`check_exile_returns` delivers through
 /// `zone_pipeline::move_objects_simultaneously_then`, which completes and marks),
-/// and it applies the ledger half ONLY, not the queued-context witness. It is safe
+/// and applies the ledger half ONLY, not the queued-context witness. It is safe
 /// today solely because that owner marks; if `zone_pipeline` ever stops marking —
-/// which is the right call for four of the seven owners, per witness 2 above — that
-/// collector is exposed. A future caller that puts any of the three after a
-/// `complete_logical_zone_trigger_collection` must route it through here.
+/// which is the right call for four of the seven owners, per witness 2 above —
+/// that collector is exposed. Any remaining raw-slice collector newly placed
+/// after `complete_logical_zone_trigger_collection` must route through here.
 pub(crate) fn filter_already_collected_trigger_events_from(
     state: &GameState,
     events: &[GameEvent],
@@ -43349,6 +43352,97 @@ pub mod tests {
                 "settled={settled}: the helper borrows the journal, it never takes it"
             );
         }
+    }
+
+    /// CR 603.2c: a logical zone-change owner's queued context is a collection
+    /// witness even when that owner deliberately leaves the consumed ledger empty.
+    #[test]
+    fn park_observer_does_not_recollect_queued_zone_change() {
+        let (mut state, mut events) = paused_zone_observer_fixture();
+        collect_triggers_into_deferred(&mut state, &events);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "owner queued the observer"
+        );
+        assert_eq!(state.deferred_triggers[0].trigger_events, events);
+        assert!(state.consumed_before_priority_trigger_events.is_empty());
+
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "the parked slice must not duplicate the owner's queued observer"
+        );
+        assert!(state.stack.is_empty(), "the resolution is still paused");
+    }
+
+    /// CR 603.2c: a zone change without a collection witness still fires once.
+    #[test]
+    fn park_observer_collects_unwitnessed_zone_change() {
+        let (mut state, mut events) = paused_zone_observer_fixture();
+        assert!(state.deferred_triggers.is_empty());
+        assert!(state.consumed_before_priority_trigger_events.is_empty());
+
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+
+        assert_eq!(state.deferred_triggers.len(), 1);
+        assert_eq!(state.deferred_triggers[0].trigger_events, events);
+        assert!(state.stack.is_empty(), "the resolution is still paused");
+    }
+
+    #[test]
+    fn park_observer_excludes_copy_owned_spell_copied() {
+        let (mut state, _) = observer_helper_fixture(false);
+        let WaitingFor::OptionalEffectChoice { source_id, .. } = state.waiting_for else {
+            panic!("fixture must be paused");
+        };
+        let observer = state.objects.get_mut(&source_id).expect("observer exists");
+        let mut trigger = observer.trigger_definitions[0].definition.clone();
+        trigger.mode = TriggerMode::SpellCastOrCopy;
+        trigger.valid_card = None;
+        observer.base_trigger_definitions = std::sync::Arc::new(vec![trigger]);
+        observer.materialize_base_trigger_definitions();
+        let mut events = vec![GameEvent::SpellCopied {
+            card_id: observer.card_id,
+            controller: PlayerId(0),
+            object_id: source_id,
+            original_id: ObjectId(999_999),
+        }];
+        collect_triggers_into_deferred(&mut state, &events);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "reach guard: the copy event has a matching observer"
+        );
+        state.deferred_triggers.clear();
+
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+
+        assert!(
+            state.deferred_triggers.is_empty(),
+            "the copy owner, not the pause helper, collects SpellCopied"
+        );
+        assert!(state.stack.is_empty());
+    }
+
+    fn paused_zone_observer_fixture() -> (GameState, Vec<GameEvent>) {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        add_dies_observer(&mut state, PlayerId(0));
+        let subject = make_creature(&mut state, PlayerId(0), "Dying subject", 2, 2);
+        let mut events = Vec::new();
+        move_to_zone(&mut state, subject, Zone::Graveyard, &mut events);
+        assert!(matches!(events.as_slice(), [GameEvent::ZoneChanged { .. }]));
+        // The coin-keep prompt is the pause this helper's coin-flip caller leaves behind.
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: PlayerId(0),
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        (state, events)
     }
 
     /// One battlefield observer whose `Taps` trigger fires on the single event
