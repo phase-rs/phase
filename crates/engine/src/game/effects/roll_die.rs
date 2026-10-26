@@ -231,6 +231,10 @@ pub(crate) fn resolve_step(
         // CR 706.6: the roller is the player instructed to ignore, and so the
         // player who breaks a tie among equal lowest rolls.
         roller: ability.controller,
+        // CR 109.5 + CR 706.2: the printed controller the inline modifier
+        // reads — captured independently of the roller so a scoped seat
+        // keeps reading "you" as the printed player after a suspension.
+        quantity_controller: Some(ability.original_controller.unwrap_or(ability.controller)),
         targets: ability.targets.clone(),
         results_table: results.clone(),
         modifier: modifier.cloned(),
@@ -393,6 +397,7 @@ fn execute_roll(
         local_target_pins,
         keyed_target_incarnations,
         declared_player,
+        quantity_controller,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -422,6 +427,7 @@ fn execute_roll(
         local_target_pins,
         keyed_target_incarnations,
         declared_player,
+        quantity_controller,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -662,6 +668,7 @@ pub(crate) fn resume_after_ignore(
         local_target_pins,
         keyed_target_incarnations,
         declared_player,
+        quantity_controller,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -697,11 +704,14 @@ pub(crate) fn resume_after_ignore(
         }
 
         // CR 706.2: apply the modifier to produce this die's actual result.
+        // CR 109.5: a resumed modifier reads the printed controller captured
+        // at park — the same authority the inline path reads live — not the
+        // acting seat. Pre-field frames keep the legacy acting read.
         let actual = apply_modifier(
             state,
             natural,
             modifier.as_ref(),
-            controller,
+            quantity_controller.unwrap_or(controller),
             source_id,
             ability,
             crate::game::filter::ParkedTargets {
@@ -777,6 +787,7 @@ pub(crate) fn resume_after_ignore(
                     source_id,
                     controller,
                     roller,
+                    quantity_controller,
                     targets: targets.clone(),
                     sides,
                     results: results.clone(),
@@ -1683,6 +1694,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             roller: PlayerId(0),
+            quantity_controller: None,
             targets: vec![],
             sides: 20,
             results: vec![4, 17],

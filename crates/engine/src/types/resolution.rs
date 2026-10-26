@@ -281,6 +281,13 @@ pub struct PendingDieRoll {
     /// CR 706.6: the player who rolled, and therefore the player who chooses
     /// which of several tied-lowest rolls to ignore.
     pub roller: PlayerId,
+    /// CR 109.5 + CR 706.2: the printed controller the inline modifier read
+    /// (`original_controller.unwrap_or(controller)`), captured independently
+    /// of the roller so a scoped seat keeps reading "you" as the printed
+    /// player after a suspension. `None` on pre-field frames, which keep the
+    /// acting controller (the legacy read). Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_controller: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub sides: u8,
     /// CR 706.2 + CR 706.6: the NATURAL results — "the number indicated on the
@@ -441,6 +448,12 @@ pub struct PendingDieRollInstruction {
     /// CR 706.6: the player who rolls, and therefore the player who breaks an
     /// ignore tie once the dice exist.
     pub roller: PlayerId,
+    /// CR 109.5 + CR 706.2: the printed controller the inline modifier
+    /// reads, carried across the CR 616.1 choice so it survives into the
+    /// `PendingDieRoll` this instruction produces. `None` for frames built
+    /// without a capture. Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_controller: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub results_table: Vec<DieResultBranch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

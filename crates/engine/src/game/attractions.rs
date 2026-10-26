@@ -216,6 +216,7 @@ pub fn roll_to_visit_attractions(
         // No capture ran: the turn-based action has no resolution context,
         // so resume keeps the legacy path.
         declared_capture: None,
+        quantity_controller: None,
         local_target_pins: Vec::new(),
         keyed_target_incarnations: Vec::new(),
         declared_player: None,

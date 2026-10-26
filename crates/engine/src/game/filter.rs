@@ -9288,8 +9288,33 @@ fn zone_change_filter_inner(
                     // CR 109.4 + CR 115.1: "target player controls" — match the
                     // record's controller against the chosen player target.
                     // TargetOpponent reads identically (opponent constraint in slot).
+                    // Suspension-resume reads carry no ability, but the parked
+                    // frame kept the declared player targets plus the legality
+                    // stamp — judge the axis by those, exactly like the live
+                    // arm. Ability-blind entries with no parked frame keep the
+                    // event fallback below.
                     ControllerRef::TargetPlayer | ControllerRef::TargetOpponent => {
-                        let target_player = target_player_from_ability_or_root(state, ability);
+                        let declared = match (ability, ctx.ability_targets) {
+                            (Some(_), _) => declared_target_player(state, ability),
+                            (None, Some(parked)) => parked_declared_player_target(parked),
+                            (None, None) => DeclaredPlayerTarget::Undeclared,
+                        };
+                        let target_player = match declared {
+                            DeclaredPlayerTarget::Legal(player) => Some(player),
+                            // CR 608.2b: "Any part of the effect that requires
+                            // that information won't happen", so the filter
+                            // matches no object (never the event player's).
+                            DeclaredPlayerTarget::Illegal => None,
+                            // CR 603.2: When no player target was chosen, "that
+                            // player" is the triggering event's player. Non-Phase
+                            // triggers resolve their player anaphor from event
+                            // context, not a chosen/auto-bound target — Hellkite
+                            // Tyrant's "all artifacts that player controls" on a
+                            // combat-damage trigger. Inert outside a trigger.
+                            DeclaredPlayerTarget::Undeclared => {
+                                crate::game::quantity::triggering_event_player(state)
+                            }
+                        };
                         match target_player {
                             Some(pid) if pid == obj_ctrl => {}
                             _ => return false,

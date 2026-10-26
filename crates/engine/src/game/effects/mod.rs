@@ -61153,6 +61153,7 @@ mod entry_observation_settlement_tests {
                     source_id: ObjectId(100),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
+                    quantity_controller: None,
                     targets: Vec::new(),
                     sides: 6,
                     results: vec![3, 4],
