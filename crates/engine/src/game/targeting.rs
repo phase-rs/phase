@@ -7994,19 +7994,42 @@ mod tests {
         use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
 
         let (mut state, source, host) = setup_with_creatures();
-        state.current_trigger_event = Some(GameEvent::PermanentUntapped { object_id: host });
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(source, host)],
+        });
+        let mut untap_state = state.clone();
+        untap_state.current_trigger_event = Some(GameEvent::PermanentUntapped { object_id: host });
         let mut ability = make_resolved_with_targets(vec![], source);
-        let resolve = |ability: &crate::types::ability::ResolvedAbility, filter: &TargetFilter| {
+        let resolve = |state: &GameState,
+                       ability: &crate::types::ability::ResolvedAbility,
+                       filter: &TargetFilter| {
             (
-                resolve_effect_player_ref(&state, ability, filter),
-                crate::game::effects::resolve_player_for_context_ref(&state, ability, filter),
+                resolve_effect_player_ref(state, ability, filter),
+                crate::game::effects::resolve_player_for_context_ref(state, ability, filter),
             )
         };
         let host_controller = state.objects[&host].controller;
         assert_eq!(
-            resolve(&ability, &TargetFilter::ParentTarget),
+            resolve(&state, &ability, &TargetFilter::ParentTarget),
             (Some(host_controller), Some(host_controller))
         );
+        // The block event's controller/owner projections name its source (the blocker).
+        for (filter, player) in [
+            (
+                TargetFilter::ParentTargetController,
+                state.objects[&source].controller,
+            ),
+            (
+                TargetFilter::ParentTargetOwner,
+                state.objects[&source].owner,
+            ),
+        ] {
+            assert_eq!(
+                resolve(&state, &ability, &filter),
+                (Some(player), Some(player)),
+                "unguarded event fallback: {filter:?}"
+            );
+        }
         for origin in [
             TargetReadOrigin::OwnAnnouncement,
             TargetReadOrigin::ParentAnnouncement,
@@ -8019,7 +8042,7 @@ mod tests {
                 TargetFilter::ParentTargetOwner,
             ] {
                 assert_eq!(
-                    resolve(&ability, &filter),
+                    resolve(&state, &ability, &filter),
                     (None, None),
                     "unavailable player reference: {origin:?}, {filter:?}"
                 );
@@ -8029,12 +8052,16 @@ mod tests {
                 );
             }
             assert_eq!(
-                resolve(&ability, &TargetFilter::Controller),
+                resolve(&untap_state, &ability, &TargetFilter::Controller),
                 (Some(ability.controller), Some(ability.controller)),
                 "ordinary controller is independent of the missing announcement"
             );
             assert_eq!(
-                resolve(&ability, &TargetFilter::TriggeringSourceController),
+                resolve(
+                    &untap_state,
+                    &ability,
+                    &TargetFilter::TriggeringSourceController,
+                ),
                 (Some(host_controller), Some(host_controller)),
                 "a genuine event reference retains its own authority"
             );
