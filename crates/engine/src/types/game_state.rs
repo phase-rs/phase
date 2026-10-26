@@ -12720,6 +12720,9 @@ fn visit_persisted_live_zone_changed_records(
         "stack",
         "waiting_for",
         "resolution_stack",
+        // The pre-roll instruction owns trigger events before dice or a
+        // resolution frame exist; their occurrence keys also rebind on load.
+        "pending_die_roll_instruction",
         "current_trigger_event",
         "resolving_stack_entry",
         "current_trigger_events",
@@ -24180,8 +24183,8 @@ declare_game_state! {
     /// Two applicable die-roll replacements (Barbarian Class + Pixie Guide) make
     /// the affected player order them, which suspends `roll_die::resolve` on a
     /// `ReplacementChoice`. The resolving ability is gone by the time the choice
-    /// is submitted, so the results table, modifier, and targets are parked here
-    /// and consumed by `roll_die::resume_roll_dice_after_replacement`. This is
+    /// is submitted, so the results table, modifier, targets, and owning trigger
+    /// scope are parked here and consumed by `roll_die::resume_roll_dice_after_replacement`. This is
     /// deliberately NOT a `ResolutionStack` frame: the stack top during the
     /// ordering choice belongs to the ability continuation, and a `DieRoll`
     /// frame pushed over it would break the top-of-stack ownership checks that
@@ -33786,9 +33789,9 @@ impl GameState {
 
     /// Every trigger-event carrier that can still resume or resolve: the stack,
     /// pending/deferred/ordering triggers, current and batched trigger events,
-    /// every parked resolution frame, and a paused triggered mana ability. The
-    /// one traversal `normalize_for_loop` uses for both LKI retention and
-    /// identity canonicalization.
+    /// every parked resolution frame, the pre-roll die instruction, and a paused
+    /// triggered mana ability. The one traversal `normalize_for_loop` uses for
+    /// both LKI retention and identity canonicalization.
     fn for_each_trigger_event_carrier_mut(&mut self, f: &mut impl FnMut(&mut GameEvent)) {
         for entry in self
             .stack
@@ -33847,6 +33850,16 @@ impl GameState {
         // Every parked frame, not only the active one: an optional frame's
         // singular and plural events, a continuation's trigger contexts.
         self.resolution_stack.for_each_retained_trigger_event_mut(f);
+        if let Some(context) = self
+            .pending_die_roll_instruction
+            .as_mut()
+            .and_then(|instruction| instruction.trigger_context.as_mut())
+        {
+            if let Some(event) = context.event.as_mut() {
+                f(event);
+            }
+            context.events.iter_mut().for_each(&mut *f);
+        }
         // CR 605.4a: a triggered mana ability paused mid-occurrence retains its
         // current work item, its accepted tail and its collected batches.
         if let Some(resume) = self.pending_triggered_mana_resume.as_deref_mut() {
@@ -39716,6 +39729,69 @@ mod tests {
         })
     }
 
+    #[test]
+    fn preroll_instruction_reconciles_singular_and_plural_occurrences() {
+        for trusted in [false, true] {
+            for plural in [false, true] {
+                let mut state = GameState::new_two_player(42);
+                state.turn_number = 19;
+                state
+                    .zone_changes_this_turn
+                    .push_back(persisted_zone_change_record(ObjectId(9_800), 18, 0));
+                let record = persisted_zone_change_record(ObjectId(9_801), 19, 1);
+                state.zone_changes_this_turn.push_back(record.clone());
+                let event = persisted_zone_change_event(record);
+                state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+                    source_id: ObjectId(9_801),
+                    controller: PlayerId(0),
+                    roller: PlayerId(0),
+                    targets: vec![],
+                    results_table: vec![],
+                    modifier: None,
+                    die_result: None,
+                    trigger_context: Some(ResolvingTriggerContext {
+                        event: (!plural).then(|| event.clone()),
+                        events: if plural { vec![event] } else { vec![] },
+                        match_count: None,
+                        die_result: None,
+                    }),
+                    continuation: crate::types::resolution::DieRollContinuation::Resolution,
+                    chain_root_targets: vec![],
+                }));
+                let wire = serde_json::to_value(if trusted {
+                    PersistedGameState::capture(state)
+                } else {
+                    PersistedGameState::Raw(Box::new(state))
+                })
+                .unwrap();
+                let restored = serde_json::from_value::<PersistedGameState>(wire)
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap();
+                assert_eq!(restored.zone_changes_this_turn.len(), 1);
+                let context = restored
+                    .pending_die_roll_instruction
+                    .as_ref()
+                    .unwrap()
+                    .trigger_context
+                    .as_ref()
+                    .unwrap();
+                let event = if plural {
+                    &context.events[0]
+                } else {
+                    context.event.as_ref().unwrap()
+                };
+                let GameEvent::ZoneChanged { record, .. } = event else {
+                    panic!("retained ZoneChanged");
+                };
+                assert_eq!(
+                    (record.recorded_turn_number, record.turn_zone_change_index),
+                    (19, 0)
+                );
+            }
+        }
+    }
+
     /// Registration surfaces 4 and 5 for `pending_discard_batch`: the
     /// hand-written `PartialEq` conjunct, and membership in
     /// `LIVE_EVENT_CARRIER_FIELDS`.
@@ -44801,41 +44877,56 @@ mod tests {
                 match_count: None,
                 die_result: None,
             };
-            state.resolution_stack.push_inner(match kind {
-                0 => optional_frame(vec![tapped]),
-                1 => copy_chosen_frame(tapped),
-                2 | 3 => ResolutionFrame::CoinFlip(PendingCoinFlip {
-                    source_id: ObjectId(5),
-                    controller: PlayerId(0),
-                    flipper: PlayerId(0),
-                    targets: vec![],
-                    win_effect: None,
-                    lose_effect: None,
-                    kind: PendingCoinFlipKind::Exactly { remaining: 0 },
-                    chain_root_targets: vec![],
-                    branch_context: FlipBranchContext::default(),
-                    trigger_context: Some(context),
-                }),
-                4 | 5 => ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+            if kind >= 6 {
+                state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
                     source_id: ObjectId(5),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
                     targets: vec![],
-                    sides: 6,
-                    results: vec![1, 2],
-                    ignore_rules: vec![],
                     results_table: vec![],
                     modifier: None,
                     die_result: None,
-                    next_index: 1,
-                    running_total: 1,
-                    rolled_any: true,
-                    forced_ignored: vec![],
-                    chain_root_targets: vec![],
                     trigger_context: Some(context),
-                })),
-                _ => unreachable!(),
-            });
+                    continuation: crate::types::resolution::DieRollContinuation::Resolution,
+                    chain_root_targets: vec![],
+                }));
+            } else {
+                state.resolution_stack.push_inner(match kind {
+                    0 => optional_frame(vec![tapped]),
+                    1 => copy_chosen_frame(tapped),
+                    2 | 3 => ResolutionFrame::CoinFlip(PendingCoinFlip {
+                        source_id: ObjectId(5),
+                        controller: PlayerId(0),
+                        flipper: PlayerId(0),
+                        targets: vec![],
+                        win_effect: None,
+                        lose_effect: None,
+                        kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+                        chain_root_targets: vec![],
+                        branch_context: FlipBranchContext::default(),
+                        trigger_context: Some(context),
+                    }),
+                    4 | 5 => ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+                        source_id: ObjectId(5),
+                        controller: PlayerId(0),
+                        roller: PlayerId(0),
+                        targets: vec![],
+                        sides: 6,
+                        results: vec![1, 2],
+                        ignore_rules: vec![],
+                        results_table: vec![],
+                        modifier: None,
+                        die_result: None,
+                        next_index: 1,
+                        running_total: 1,
+                        rolled_any: true,
+                        forced_ignored: vec![],
+                        chain_root_targets: vec![],
+                        trigger_context: Some(context),
+                    })),
+                    _ => unreachable!(),
+                });
+            }
             // Buried coin fixtures exercise traversal only; they are not
             // resumable/persisted stacks with two direct-choice owners.
             if buried {
@@ -44854,7 +44945,7 @@ mod tests {
         // Singular/plural coin and die authority, active and buried, joins the
         // existing optional/copy carrier normalization family.
         for (kind, buried) in
-            (0..6).flat_map(|kind| [false, true].map(move |buried| (kind, buried)))
+            (0..8).flat_map(|kind| [false, true].map(move |buried| (kind, buried)))
         {
             let copy_chosen = format!("kind={kind}, buried={buried}");
             let position =
@@ -44886,6 +44977,26 @@ mod tests {
                 ),
                 "[copy_chosen={copy_chosen}] a different referent controller is a different position"
             );
+        }
+        for context in [
+            None,
+            Some(ResolvingTriggerContext {
+                event: None,
+                events: vec![],
+                match_count: None,
+                die_result: None,
+            }),
+        ] {
+            let mut state = position_in(6, false, 91, PlayerId(1));
+            state
+                .pending_die_roll_instruction
+                .as_mut()
+                .unwrap()
+                .trigger_context = context;
+            assert!(!state
+                .normalize_for_loop()
+                .lki_by_incarnation
+                .contains_key(&pyromancer));
         }
     }
 

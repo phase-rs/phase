@@ -125,7 +125,11 @@ pub fn build_resolved_from_def_with_targets_and_chain_root(
 /// suspension's owning trigger scope. `Some(empty)` clears foreign channels;
 /// legacy `None` does not push a scope or reconstruct missing authority.
 ///
-/// This captures coin keep and post-roll die suspensions entered with an owning live scope. Pre-roll PendingDieRollInstruction replacement-ordering pauses remain outside this change. A die roll started by a coin's continuation drain still loses its published per-survivor result at the drain's whole-snapshot restore (pre-existing, unchanged).
+/// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
+/// retain their owning scope, including explicit emptiness; legacy missing scope
+/// is not reconstructed. A die roll started by a coin's continuation drain still
+/// loses its published per-survivor result at the drain's whole-snapshot restore
+/// (pre-existing, unchanged).
 ///
 /// This policy is dice/coin-only. Sibling branch builders in `vote.rs`,
 /// `reveal_from_hand.rs`, and `exile_top_card_contest.rs` are untouched.

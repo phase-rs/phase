@@ -347,10 +347,9 @@ pub struct PendingDieRoll {
 /// Class + Pixie Guide), CR 616.1 makes the affected player order them, which
 /// suspends the resolver on `WaitingFor::ReplacementChoice` — and unlike the
 /// CR 706.6 ignore choice, the dice do NOT exist yet, so `PendingDieRoll`
-/// cannot carry it. This frame carries the instruction's non-event context
-/// (results table, modifier, targets, source) so the resume path can finish the
-/// roll with the fully-modified `ProposedEvent::RollDice` the pipeline hands
-/// back.
+/// cannot carry it. This carrier retains the instruction's results table,
+/// modifier, targets, source, and owning trigger scope so the resume path can
+/// finish the roll with the fully-modified `ProposedEvent::RollDice`.
 ///
 /// The `sides` and the die count both ride the proposed event, not this frame:
 /// a replacement may change how many dice are rolled (CR 706.1), so re-reading
@@ -380,6 +379,11 @@ pub struct PendingDieRollInstruction {
     /// boundary, and the CR 616.1 ordering choice is such a boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_result: Option<i32>,
+    /// CR 608.2c + CR 400.7e + CR 616.1: the rolling resolution's scope,
+    /// captured before replacement ordering. Some(empty) clears foreign input;
+    /// None preserves legacy no-push behavior and the non-resolution visit path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
     /// Which caller owns the completion of this roll (see the type docs).
     #[serde(default)]
     pub continuation: DieRollContinuation,

@@ -227,7 +227,11 @@ impl FlipRun<'_> {
     /// choice. `kind` is the position after the paused flip. The branches are cloned only here,
     /// on suspension.
     ///
-    /// This captures coin keep and post-roll die suspensions entered with an owning live scope. Pre-roll PendingDieRollInstruction replacement-ordering pauses remain outside this change. A die roll started by a coin's continuation drain still loses its published per-survivor result at the drain's whole-snapshot restore (pre-existing, unchanged).
+    /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
+    /// retain their owning scope, including explicit emptiness; legacy missing scope
+    /// is not reconstructed. A die roll started by a coin's continuation drain still
+    /// loses its published per-survivor result at the drain's whole-snapshot restore
+    /// (pre-existing, unchanged).
     fn park(
         &self,
         state: &GameState,

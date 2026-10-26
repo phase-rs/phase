@@ -218,6 +218,16 @@ pub(crate) fn resolve_step(
         // CR 706.4 + CR 608.2: carry the pre-existing die context across the
         // action boundary a replacement-ordering or keep choice would introduce.
         die_result: state.die_result_this_resolution,
+        // CR 608.2c + CR 400.7e + CR 616.1: bind the rolling resolution before
+        // replacement ordering can suspend it, including an explicitly empty scope.
+        trigger_context: Some(ResolvingTriggerContext::capture(state).unwrap_or_else(|| {
+            ResolvingTriggerContext {
+                event: None,
+                events: Vec::new(),
+                match_count: None,
+                die_result: None,
+            }
+        })),
         // CR 706.3a: an `Effect::RollDie` resolution finishes here, in
         // `execute_roll`.
         continuation: DieRollContinuation::Resolution,
@@ -236,14 +246,15 @@ pub(crate) fn resolve_step(
     // on a `ReplacementChoice`, at which point `ability` is gone — the parked
     // frame is the only thing that carries the results table, the modifier, and
     // the targets to the resume path.
-    state.pending_die_roll_instruction = Some(Box::new(instruction.clone()));
+    state.pending_die_roll_instruction = Some(Box::new(instruction));
     let proposal = propose_roll(state, ability.controller, count, sides, events);
-    if !matches!(proposal, RollProposal::Suspended) {
-        // Only a suspension needs the parked frame; every other outcome finishes
-        // inline and must not leave a stale instruction behind for an unrelated
-        // later roll to pick up.
-        state.pending_die_roll_instruction = None;
+    if matches!(proposal, RollProposal::Suspended) {
+        return Ok(ResolutionProgress::Waiting);
     }
+    let instruction = *state
+        .pending_die_roll_instruction
+        .take()
+        .expect("the just-proposed die instruction remains parked until execution");
 
     execute_roll(state, instruction, sides, proposal, events)
 }
@@ -324,6 +335,7 @@ fn execute_roll(
         results_table,
         modifier,
         die_result,
+        trigger_context,
         // CR 706.3a: `execute_roll` is the RESOLUTION continuation. The
         // roll-to-visit tag is dispatched on before this point
         // (`resume_roll_dice_after_replacement`), so anything arriving here owns
@@ -332,20 +344,6 @@ fn execute_roll(
         chain_root_targets,
     } = instruction;
 
-    // CR 608.2c + CR 400.7e: capture before a table child can change the live
-    // channels. Explicit emptiness excludes foreign input after a pause.
-    let trigger_context = if outcome.needs_choice() || !results_table.is_empty() {
-        Some(
-            ResolvingTriggerContext::capture(state).unwrap_or_else(|| ResolvingTriggerContext {
-                event: None,
-                events: Vec::new(),
-                match_count: None,
-                die_result: None,
-            }),
-        )
-    } else {
-        None
-    };
     let pending = PendingDieRoll {
         source_id,
         controller,
@@ -450,12 +448,25 @@ pub(crate) fn resume_roll_dice_after_replacement(
         return Ok(ResolutionProgress::Complete);
     }
 
-    // CR 706.4 + CR 608.2: the CR 616.1 ordering choice was an action boundary,
-    // which cleared `die_result_this_resolution`. Restore the instruction's
-    // context before rolling, exactly as the `DieKeepChoice` resume does.
+    // CR 608.2c + CR 400.7e + CR 616.1: replay only the instruction's owned
+    // resolution scope. Legacy absence must not acquire ambient authority.
+    let entry_die = state.die_result_this_resolution;
+    let trigger_snapshot = instruction
+        .trigger_context
+        .as_ref()
+        .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = instruction.die_result;
-
-    execute_roll(state, *instruction, sides, proposal, events)
+    let result = execute_roll(state, *instruction, sides, proposal, events);
+    let exit_die = if result.is_ok() {
+        state.die_result_this_resolution
+    } else {
+        entry_die
+    };
+    if let Some(snapshot) = trigger_snapshot {
+        crate::game::triggers::restore_trigger_event_context(state, snapshot);
+    }
+    state.die_result_this_resolution = exit_die;
+    result
 }
 
 /// CR 706.4 + CR 608.2c: the immediate parent resumes with the completed
@@ -485,7 +496,11 @@ pub(crate) fn publish_completed_result_to_parent(state: &mut GameState) {
 /// roll than the one already committed to. The re-parked frame carries the
 /// resolved set verbatim in `forced_ignored`, and this reuses it.
 ///
-/// This captures coin keep and post-roll die suspensions entered with an owning live scope. Pre-roll PendingDieRollInstruction replacement-ordering pauses remain outside this change. A die roll started by a coin's continuation drain still loses its published per-survivor result at the drain's whole-snapshot restore (pre-existing, unchanged).
+/// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
+/// retain their owning scope, including explicit emptiness; legacy missing scope
+/// is not reconstructed. A die roll started by a coin's continuation drain still
+/// loses its published per-survivor result at the drain's whole-snapshot restore
+/// (pre-existing, unchanged).
 pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // Only a mid-loop re-park drains here; a pending CR 706.6 keep prompt must
     // stay parked for its own action handler, which is the only thing that knows
@@ -1802,5 +1817,596 @@ mod tests {
             Zone::Hand,
             "paired control: a carrier stamped with the current incarnation returns the card"
         );
+    }
+}
+
+#[cfg(test)]
+mod preroll_tests {
+    use super::*;
+    use crate::game::{
+        scenario::{GameScenario, P0},
+        zones,
+    };
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, DieResultBranch, QuantityExpr, QuantityRef, TargetFilter,
+    };
+    use crate::types::game_state::{GameRng, PersistedGameState, StackEntry, StackEntryKind};
+    use crate::types::zones::{EtbTapState, Zone};
+
+    fn empty() -> ResolvingTriggerContext {
+        ResolvingTriggerContext {
+            event: None,
+            events: vec![],
+            match_count: None,
+            die_result: None,
+        }
+    }
+
+    fn install(state: &mut GameState, context: &ResolvingTriggerContext) {
+        state.current_trigger_event = context.event.clone();
+        state.current_trigger_events = context.events.clone();
+        state.current_trigger_match_count = context.match_count;
+        state.die_result_this_resolution = context.die_result;
+    }
+
+    fn assert_scope(state: &GameState, context: &ResolvingTriggerContext) {
+        assert_eq!(state.current_trigger_event, context.event);
+        assert_eq!(state.current_trigger_events, context.events);
+        assert_eq!(state.current_trigger_match_count, context.match_count);
+    }
+
+    fn gain(value: i32) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    fn move_between(origin: Zone, destination: Zone) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(origin),
+                destination,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )
+    }
+
+    fn successor() -> AbilityDefinition {
+        let mut branch = move_between(Zone::Graveyard, Zone::Battlefield);
+        branch.sub_ability = Some(Box::new(move_between(Zone::Battlefield, Zone::Hand)));
+        branch
+    }
+
+    // Typed ownership fixtures supplement the public Murder producer regressions.
+    // Both actual replacement clauses run through resolve_step and continue_replacement.
+    fn fixture(
+        branch: AbilityDefinition,
+        sides: u8,
+    ) -> (
+        GameState,
+        ObjectId,
+        ResolvingTriggerContext,
+        ResolvingTriggerContext,
+    ) {
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Scope owner", 2, 2).id();
+        scenario.with_cards_in_hand(P0, &["Discard", "Spare"]);
+        scenario.add_enchantment_from_oracle(P0, "Barbarian Class", "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.");
+        scenario.add_creature_from_oracle(P0, "Pixie Guide", 1, 3, "Flying\nGrant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.");
+        let mut state = scenario.build().state().clone();
+        let mut events = vec![];
+        zones::move_to_zone(&mut state, source, Zone::Exile, &mut events);
+        let foreign = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == source))
+            .unwrap()
+            .clone();
+        zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
+        let provenance = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        events.clear();
+        zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        let departure = events
+            .iter()
+            .find(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == source))
+            .unwrap()
+            .clone();
+        let owned = ResolvingTriggerContext {
+            event: Some(departure.clone()),
+            events: vec![departure],
+            match_count: Some(3),
+            die_result: None,
+        };
+        let ambient = ResolvingTriggerContext {
+            event: Some(foreign.clone()),
+            events: vec![foreign],
+            match_count: Some(41),
+            die_result: Some(79),
+        };
+        let mut carrier = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
+        carrier.set_trigger_source_recursive(provenance);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(carrier),
+                condition: None,
+                trigger_event: owned.event.clone(),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.resolving_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
+        install(&mut state, &owned);
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides,
+                modifier: None,
+                results: vec![DieResultBranch {
+                    min: 1,
+                    max: sides,
+                    effect: Box::new(branch),
+                }],
+            },
+            vec![],
+            source,
+            P0,
+        );
+        assert_eq!(
+            resolve_step(&mut state, &ability, &mut vec![]).unwrap(),
+            ResolutionProgress::Waiting
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                candidate_count: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            state
+                .pending_die_roll_instruction
+                .as_ref()
+                .unwrap()
+                .trigger_context,
+            Some(owned.clone())
+        );
+        let seed = (0..100_000)
+            .find(|&seed| {
+                let mut rng = GameRng::seed_from_u64(seed);
+                [1, 2, 3]
+                    .into_iter()
+                    .all(|n| rng.draw(RandomDraw::Outcome).random_range(1..=sides) == n.min(sides))
+            })
+            .unwrap();
+        state.rng_seed = seed;
+        state.rng_word_pos = 0;
+        state.rng = GameRng::seed_from_u64(seed);
+        (state, source, owned, ambient)
+    }
+
+    fn modified(state: &mut GameState) -> ProposedEvent {
+        let ReplacementResult::Execute(event @ ProposedEvent::RollDice { .. }) =
+            replacement::continue_replacement(state, 1, &mut vec![])
+        else {
+            panic!("both real replacements must finish as RollDice");
+        };
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        event
+    }
+
+    fn consume_caller_count(state: &mut GameState, source: ObjectId) {
+        state.die_result_this_resolution = None;
+        let before = state.players[0].life;
+        let consumer = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        super::super::resolve_ability_chain(state, &consumer, &mut vec![], 0).unwrap();
+        assert_eq!(state.players[0].life, before + 41);
+    }
+
+    #[test]
+    fn preroll_owned_empty_nonempty_and_legacy_scopes() {
+        for mode in ["own", "empty", "foreign", "legacy"] {
+            for restore in 0..4 {
+                let (mut state, source, owned, foreign) = fixture(successor(), 3);
+                let context = match mode {
+                    "own" => Some(owned.clone()),
+                    "empty" => Some(empty()),
+                    "foreign" => Some(foreign.clone()),
+                    "legacy" => None,
+                    _ => unreachable!(),
+                };
+                state
+                    .pending_die_roll_instruction
+                    .as_mut()
+                    .unwrap()
+                    .trigger_context = context.clone();
+                state.capture_rng_word_pos();
+                state = match restore {
+                    0 => state,
+                    1 => serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap(),
+                    2 => serde_json::from_value::<PersistedGameState>(
+                        serde_json::to_value(PersistedGameState::capture(state)).unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap(),
+                    3 => serde_json::from_value::<PersistedGameState>(
+                        serde_json::to_value(state).unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap(),
+                    _ => unreachable!(),
+                };
+                state.rehydrate_rng();
+                assert_eq!(
+                    state
+                        .pending_die_roll_instruction
+                        .as_ref()
+                        .unwrap()
+                        .trigger_context,
+                    context
+                );
+                let mut caller = if mode == "own" { foreign } else { owned };
+                caller.match_count = Some(41);
+                caller.die_result = Some(79);
+                let event = modified(&mut state);
+                install(&mut state, &caller);
+                assert!(state.current_trigger_event.is_some());
+                assert!(!state.current_trigger_events.is_empty());
+                let mut events = vec![];
+                assert_eq!(
+                    resume_roll_dice_after_replacement(&mut state, event, &mut events).unwrap(),
+                    ResolutionProgress::Complete
+                );
+                assert_scope(&state, &caller);
+                assert_eq!(state.die_result_this_resolution, Some(3));
+                // CR 400.7e + CR 400.7j: only the owned departure (or legacy
+                // no-push ambient departure) authorizes the effect's second move.
+                let destinations: Vec<_> = events
+                    .iter()
+                    .filter_map(|e| match e {
+                        GameEvent::ZoneChanged { object_id, to, .. } if *object_id == source => {
+                            Some(*to)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    destinations,
+                    if matches!(mode, "own" | "legacy") {
+                        vec![Zone::Battlefield, Zone::Hand]
+                    } else {
+                        vec![Zone::Battlefield]
+                    },
+                    "{mode}, restore={restore}"
+                );
+                consume_caller_count(&mut state, source);
+            }
+        }
+    }
+
+    #[test]
+    fn preroll_legacy_missing_scope_is_not_recaptured() {
+        let (mut state, source, owned, foreign) = fixture(successor(), 1);
+        state
+            .pending_die_roll_instruction
+            .as_mut()
+            .unwrap()
+            .trigger_context = None;
+        let event = modified(&mut state);
+        install(&mut state, &owned);
+        assert_eq!(
+            resume_roll_dice_after_replacement(&mut state, event, &mut vec![]).unwrap(),
+            ResolutionProgress::Waiting
+        );
+        let pending = state.take_active_die_roll_frame().unwrap().unwrap();
+        assert!(pending.trigger_context.is_none());
+        install(&mut state, &foreign);
+        let mut events = vec![];
+        assert_eq!(
+            resume_after_ignore(&mut state, pending, vec![0, 1], &mut events).unwrap(),
+            ResolutionProgress::Complete
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert!(events.iter().any(|e| matches!(e, GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if *object_id == source)));
+    }
+
+    #[test]
+    fn preroll_errors_restore_all_caller_channels() {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(|| {
+                for mode in ["own", "empty", "legacy"] {
+                    for links in [2, 22] {
+                        let mut branch = gain(1);
+                        for _ in 0..links {
+                            let mut parent = gain(1);
+                            parent.sub_ability = Some(Box::new(branch));
+                            branch = parent;
+                        }
+                        let (mut state, source, owned, caller) = fixture(branch, 3);
+                        state
+                            .pending_die_roll_instruction
+                            .as_mut()
+                            .unwrap()
+                            .trigger_context = match mode {
+                            "own" => Some(owned),
+                            "empty" => Some(empty()),
+                            "legacy" => None,
+                            _ => unreachable!(),
+                        };
+                        let event = modified(&mut state);
+                        install(&mut state, &caller);
+                        let before = state.players[0].life;
+                        let mut events = vec![];
+                        let result =
+                            resume_roll_dice_after_replacement(&mut state, event, &mut events);
+                        if links == 22 {
+                            assert_eq!(result, Err(EffectError::ChainTooDeep));
+                            assert!(state.players[0].life > before);
+                            assert_eq!(state.die_result_this_resolution, Some(79));
+                            assert!(!events.iter().any(|e| matches!(
+                                e,
+                                GameEvent::EffectResolved {
+                                    kind: EffectKind::RollDie,
+                                    ..
+                                }
+                            )));
+                        } else {
+                            assert_eq!(result.unwrap(), ResolutionProgress::Complete);
+                            assert_eq!(state.players[0].life, before + 3);
+                            assert_eq!(state.die_result_this_resolution, Some(3));
+                        }
+                        assert_scope(&state, &caller);
+                        consume_caller_count(&mut state, source);
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
+    fn preroll_fresh_empty_capture_excludes_later_departure() {
+        let (mut state, source, owned, _) = fixture(successor(), 3);
+        let instruction = state.pending_die_roll_instruction.take().unwrap();
+        state.pending_replacement = None;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        install(&mut state, &empty());
+        let ability = ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 3,
+                modifier: None,
+                results: instruction.results_table,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        assert_eq!(
+            resolve_step(&mut state, &ability, &mut vec![]).unwrap(),
+            ResolutionProgress::Waiting
+        );
+        assert_eq!(
+            state
+                .pending_die_roll_instruction
+                .as_ref()
+                .unwrap()
+                .trigger_context,
+            Some(empty())
+        );
+        let event = modified(&mut state);
+        install(&mut state, &owned);
+        let mut events = vec![];
+        resume_roll_dice_after_replacement(&mut state, event, &mut events).unwrap();
+        assert_eq!(state.objects[&source].zone, Zone::Battlefield);
+        assert!(events.iter().any(|e| matches!(e, GameEvent::ZoneChanged { object_id, to: Zone::Battlefield, .. } if *object_id == source)));
+        assert_scope(&state, &owned);
+    }
+
+    #[test]
+    fn preroll_success_publishes_waiting_complete_and_empty_outputs() {
+        for mode in ["complete", "waiting", "prevented", "zero-sided"] {
+            let branch = if mode == "waiting" {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DiscardCard {
+                        count: 1,
+                        target: TargetFilter::Controller,
+                    },
+                )
+            } else {
+                gain(1)
+            };
+            let (mut state, _, _, caller) = fixture(branch, 3);
+            let mut event = modified(&mut state);
+            if let ProposedEvent::RollDice { count, sides, .. } = &mut event {
+                if mode == "prevented" {
+                    *count = 0;
+                }
+                if mode == "zero-sided" {
+                    *sides = 0;
+                }
+            }
+            install(&mut state, &caller);
+            let result =
+                resume_roll_dice_after_replacement(&mut state, event, &mut vec![]).unwrap();
+            assert_scope(&state, &caller);
+            assert_eq!(
+                result,
+                if mode == "waiting" {
+                    ResolutionProgress::Waiting
+                } else {
+                    ResolutionProgress::Complete
+                }
+            );
+            assert_eq!(
+                state.die_result_this_resolution,
+                if matches!(mode, "complete" | "waiting") {
+                    Some(3)
+                } else {
+                    None
+                }
+            );
+            if mode == "waiting" {
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::DiscardChoice { .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn preroll_visit_does_not_replay_resolution_scope() {
+        use crate::game::scenario::GameRunner;
+        use crate::types::actions::GameAction;
+        for restore in 0..4 {
+            for hostile in [false, true] {
+                let (fixture_state, _, owned, caller) = fixture(gain(1000), 3);
+                let mut state = fixture_state;
+                state.pending_die_roll_instruction = None;
+                state.pending_replacement = None;
+                state.resolving_stack_entry = None;
+                state.resolving_trigger_firing = None;
+                state.waiting_for = WaitingFor::Priority { player: P0 };
+                install(&mut state, &empty());
+                let id = zones::create_object(
+                    &mut state,
+                    crate::types::identifiers::CardId(901),
+                    P0,
+                    "All lights".to_string(),
+                    Zone::Battlefield,
+                );
+                {
+                    let object = state.objects.get_mut(&id).unwrap();
+                    object
+                        .card_types
+                        .core_types
+                        .push(crate::types::card_type::CoreType::Artifact);
+                    object.card_types.subtypes.push("Attraction".to_string());
+                    object.attraction_lights = vec![1, 2, 3, 4, 5, 6];
+                    for trigger in crate::parser::oracle::parse_oracle_text(
+                        "Visit — Draw a card.",
+                        "All lights",
+                        &[],
+                        &[],
+                        &["Attraction".to_string()],
+                    )
+                    .triggers
+                    {
+                        object.push_printed_trigger(trigger);
+                    }
+                }
+                crate::game::trigger_index::reindex_object_triggers(&mut state, id);
+                let mut events = vec![];
+                crate::game::attractions::roll_to_visit_attractions(&mut state, P0, &mut events);
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice {
+                        candidate_count: 2,
+                        ..
+                    }
+                ));
+                assert!(state
+                    .pending_die_roll_instruction
+                    .as_ref()
+                    .unwrap()
+                    .trigger_context
+                    .is_none());
+                assert!(!events
+                    .iter()
+                    .any(|e| matches!(e, GameEvent::DieRolled { .. })));
+                state.capture_rng_word_pos();
+                state = match restore {
+                    0 => state,
+                    1 => serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap(),
+                    2 => serde_json::from_value::<PersistedGameState>(
+                        serde_json::to_value(PersistedGameState::capture(state)).unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap(),
+                    3 => serde_json::from_value::<PersistedGameState>(
+                        serde_json::to_value(state).unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap(),
+                    _ => unreachable!(),
+                };
+                state.rehydrate_rng();
+                let before = state.players[0].life;
+                if hostile {
+                    let instruction = state.pending_die_roll_instruction.as_mut().unwrap();
+                    instruction.trigger_context = Some(owned);
+                    instruction.die_result = Some(123);
+                    instruction.results_table = vec![DieResultBranch {
+                        min: 1,
+                        max: 6,
+                        effect: Box::new(gain(1000)),
+                    }];
+                    let event = modified(&mut state);
+                    install(&mut state, &caller);
+                    let die = state.die_result_this_resolution;
+                    resume_roll_dice_after_replacement(&mut state, event, &mut events).unwrap();
+                    assert_scope(&state, &caller);
+                    assert_eq!(state.die_result_this_resolution, die);
+                } else {
+                    let mut runner = GameRunner::from_state(state);
+                    events.extend(
+                        runner
+                            .act(GameAction::ChooseReplacement { index: 1 })
+                            .unwrap()
+                            .events,
+                    );
+                    state = runner.state().clone();
+                    assert_eq!(state.die_result_this_resolution, None);
+                    assert!(
+                        !state.stack.is_empty(),
+                        "the actual visit trigger is queued"
+                    );
+                }
+                assert!(events.iter().any(|e| matches!(e, GameEvent::AttractionVisited { attraction_id, .. } if *attraction_id == id)));
+                assert!(state.pending_die_roll_instruction.is_none());
+                assert_eq!(state.players[0].life, before);
+            }
+        }
     }
 }

@@ -1977,7 +1977,7 @@ fn restore_random_pause(run: &mut Run, ingress: RandomRestore) {
 fn departure_random_run(
     body: AbilityDefinition,
     thumb: bool,
-    extra_die: bool,
+    extra_dice: u8,
 ) -> (Run, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -2000,11 +2000,23 @@ fn departure_random_run(
             .as_legendary()
             .id()
     });
-    if extra_die {
+    assert!(extra_dice <= 2);
+    if extra_dice > 0 {
         scenario.add_enchantment_from_oracle(
             P0,
             "Barbarian Class",
-            "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
+            "",
+        ).with_subtypes(vec!["Class"]).from_oracle_text(
+            "(Gain the next level as a sorcery to add its ability.)\nIf you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.\n{1}{R}: Level 2\nWhenever you roll one or more dice, target creature you control gets +2/+0 and gains menace until end of turn.\n{2}{R}: Level 3\nCreatures you control have haste.",
+        );
+    }
+    if extra_dice == 2 {
+        scenario.add_creature_from_oracle(
+            P0,
+            "Pixie Guide",
+            1,
+            3,
+            "Flying\nGrant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.",
         );
     }
     let kill = murder(&mut scenario);
@@ -2065,7 +2077,7 @@ fn thumb_departure(ingress: RandomRestore, won: bool) {
     let (mut run, source, other) = departure_random_run(
         AbilityDefinition::new(AbilityKind::Spell, flip_to(successor_body())),
         true,
-        false,
+        0,
     );
     pin(&mut run.runner, coin_seed(&[true, false]));
     run.until(|state| matches!(state.waiting_for, WaitingFor::CoinFlipKeepChoice { .. }));
@@ -2117,7 +2129,7 @@ fn synthetic_thumb_legacy_v9_does_not_invent_departure_authority() {
         let (mut run, source, _) = departure_random_run(
             AbilityDefinition::new(AbilityKind::Spell, flip_to(successor_body())),
             true,
-            false,
+            0,
         );
         pin(&mut run.runner, coin_seed(&[true, false]));
         run.until(|state| matches!(state.waiting_for, WaitingFor::CoinFlipKeepChoice { .. }));
@@ -2191,7 +2203,7 @@ fn synthetic_departure_die_keep_finds_successor_after_restore() {
         for ingress in RANDOM_RESTORES {
             let mut body = d1_body(1, successor_body());
             body.sub_ability = Some(result_life_tail());
-            let (mut run, source, other) = departure_random_run(body, false, extra_die);
+            let (mut run, source, other) = departure_random_run(body, false, u8::from(extra_die));
             if extra_die {
                 run.until(|state| matches!(state.waiting_for, WaitingFor::DieKeepChoice { .. }));
                 restore_random_pause(&mut run, ingress);
@@ -2271,7 +2283,7 @@ fn synthetic_departure_die_midloop_replays_its_scope_after_restore() {
                 },
             );
             body.sub_ability = Some(result_life_tail());
-            let (mut run, source, other) = departure_random_run(body, false, extra_die);
+            let (mut run, source, other) = departure_random_run(body, false, u8::from(extra_die));
             let naturals = if extra_die {
                 vec![1_u8, 1, 2]
             } else {
@@ -2373,7 +2385,7 @@ fn synthetic_thumb_selected_dice_publish_survivors_and_aggregate() {
                 } else {
                     dice
                 };
-                let (mut run, source, other) = departure_random_run(body, coin, false);
+                let (mut run, source, other) = departure_random_run(body, coin, 0);
                 let hand = run.runner.state().players[0].hand.len();
                 if coin {
                     pin(&mut run.runner, coin_seed(&[true, false]));
@@ -2594,4 +2606,341 @@ fn synthetic_exact_live_result_branch_reads_changed_source_power() {
 #[test]
 fn synthetic_departed_result_branch_reads_captured_source_power() {
     characteristic_branch(true);
+}
+
+fn preroll_departure(sides: u8, count: i32, aggregate: bool) -> (Run, ObjectId, ObjectId) {
+    let mut body = d1_body(count, successor_body());
+    let Effect::RollDie {
+        sides: kind,
+        results,
+        ..
+    } = body.effect.as_mut()
+    else {
+        unreachable!()
+    };
+    *kind = sides;
+    results[0].max = sides;
+    if aggregate {
+        results[0].min = 4;
+        results.insert(
+            0,
+            DieResultBranch {
+                min: 3,
+                max: 3,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::DiscardCard {
+                        count: 1,
+                        target: TargetFilter::Controller,
+                    },
+                )),
+            },
+        );
+    }
+    body.sub_ability = Some(result_life_tail());
+    let (mut run, source, other) = departure_random_run(body, false, 2);
+    let naturals: Vec<u8> = (1..=(count as u8 + 2)).map(|n| n.min(sides)).collect();
+    let seed = (0..100_000)
+        .find(|&seed| {
+            let mut rng = GameRng::seed_from_u64(seed);
+            naturals
+                .iter()
+                .all(|&n| rng.draw(RandomDraw::Outcome).random_range(1..=sides) == n)
+        })
+        .unwrap();
+    pin(&mut run.runner, seed);
+    run.until(|state| matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }));
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidate_count,
+        candidates,
+        ..
+    } = &run.runner.state().waiting_for
+    else {
+        unreachable!()
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(candidates.len(), 2);
+    assert_ne!(candidates[0], candidates[1]);
+    assert_eq!(run.runner.state().objects[&source].zone, Zone::Graveyard);
+    assert!(run.runner.state().pending_die_roll_instruction.is_some());
+    assert!(run.runner.state().current_trigger_event.is_none());
+    assert!(run.runner.state().current_trigger_events.is_empty());
+    assert!(!run.events.iter().any(|e| matches!(
+        e,
+        GameEvent::DieRolled { .. } | GameEvent::DieRollIgnored { .. }
+    )));
+    (run, source, other)
+}
+
+fn assert_preroll_success(run: &mut Run, source: ObjectId, other: ObjectId, rolls: &[u8]) {
+    run.finish();
+    // CR 400.7e + CR 400.7j: the own-departure successor and the object
+    // moved by this effect remain findable across replacement ordering.
+    assert_eq!(
+        moves(&run.events, source),
+        vec![
+            (Some(Zone::Graveyard), Zone::Battlefield),
+            (Some(Zone::Battlefield), Zone::Hand),
+        ]
+    );
+    assert_eq!(run.runner.state().objects[&source].zone, Zone::Hand);
+    assert_eq!(run.runner.state().objects[&other].zone, Zone::Battlefield);
+    assert_eq!(
+        run.runner.state().players[0].life,
+        40 + rolls.iter().map(|&n| i32::from(n)).sum::<i32>()
+    );
+    let observed: Vec<_> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::DieRolled {
+                result: Some(n), ..
+            } => Some(*n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(observed, rolls);
+    let ignored: Vec<_> = run
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DieRollIgnored { result, .. } => Some(*result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ignored, if rolls == [1] { vec![1, 1] } else { vec![1, 2] });
+    assert!(run.runner.state().pending_die_roll_instruction.is_none());
+    assert!(run.runner.state().pending_replacement.is_none());
+}
+
+#[test]
+fn synthetic_departure_die_ordering_finds_successor_after_restore() {
+    for ingress in RANDOM_RESTORES {
+        for index in [0, 1] {
+            let (mut run, source, other) = preroll_departure(3, 1, false);
+            restore_random_pause(&mut run, ingress);
+            assert!(matches!(
+                run.runner.state().waiting_for,
+                WaitingFor::ReplacementChoice {
+                    candidate_count: 2,
+                    ..
+                }
+            ));
+            run.act(GameAction::ChooseReplacement { index });
+            assert_preroll_success(&mut run, source, other, &[3]);
+        }
+    }
+}
+
+#[test]
+fn synthetic_departure_die_ordering_then_keep_retains_scope() {
+    for ingress in RANDOM_RESTORES {
+        for restore_keep in [false, true] {
+            let (mut run, source, other) = preroll_departure(1, 1, false);
+            restore_random_pause(&mut run, ingress);
+            run.act(GameAction::ChooseReplacement { index: 1 });
+            let WaitingFor::DieKeepChoice {
+                player,
+                results,
+                ignore_count,
+                ignorable_indices,
+            } = &run.runner.state().waiting_for
+            else {
+                panic!("ordering must lead to a tied keep choice");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(results, &[1, 1, 1]);
+            assert_eq!(*ignore_count, 2);
+            assert_eq!(ignorable_indices, &[0, 1, 2]);
+            if restore_keep {
+                restore_random_pause(&mut run, ingress);
+            }
+            run.act(GameAction::SelectDieRolls {
+                ignore_indices: vec![0, 1],
+            });
+            assert_preroll_success(&mut run, source, other, &[1]);
+        }
+    }
+}
+
+#[test]
+fn synthetic_departure_die_ordering_publishes_child_and_aggregate() {
+    for ingress in RANDOM_RESTORES {
+        let (mut run, source, other) = preroll_departure(4, 2, true);
+        let hand = run.runner.state().players[0].hand.len();
+        restore_random_pause(&mut run, ingress);
+        run.act(GameAction::ChooseReplacement { index: 1 });
+        assert!(matches!(
+            run.runner.state().waiting_for,
+            WaitingFor::DiscardChoice { player: P0, .. }
+        ));
+        assert_eq!(run.runner.state().die_result_this_resolution, Some(3));
+        let card = run.runner.state().players[0].hand[0];
+        run.act(GameAction::SelectCards { cards: vec![card] });
+        assert_eq!(run.runner.state().die_result_this_resolution, Some(7));
+        assert_eq!(run.runner.state().players[0].hand.len(), hand);
+        assert_preroll_success(&mut run, source, other, &[3, 4]);
+    }
+}
+
+#[test]
+fn synthetic_departure_die_preroll_compaction_rebinds_owned_occurrence() {
+    for ingress in [RandomRestore::Trusted, RandomRestore::Raw] {
+        let (mut run, source, other) = preroll_departure(3, 1, false);
+        let state = run.runner.state_mut();
+        assert!(state.turn_number > 0);
+        let mut stale = state.zone_changes_this_turn[0].clone();
+        stale.recorded_turn_number = state.turn_number - 1;
+        state.zone_changes_this_turn.push_front(stale);
+        // Make every current live occurrence agree with its shifted ledger row.
+        // The JSON injection also runs on the pre-field production baseline.
+        let mut value = serde_json::to_value(&*state).unwrap();
+        fn shift(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(n) = map.get_mut("turn_zone_change_index") {
+                        *n = serde_json::json!(n.as_u64().unwrap() + 1);
+                    }
+                    for v in map.values_mut() {
+                        shift(v);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for v in values {
+                        shift(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        shift(&mut value);
+        *state = serde_json::from_value(value).unwrap();
+        restore_random_pause(&mut run, ingress);
+        let state = run.runner.state();
+        let context = state
+            .pending_die_roll_instruction
+            .as_ref()
+            .unwrap()
+            .trigger_context
+            .as_ref()
+            .unwrap();
+        assert!(context.event.is_some());
+        assert!(!context.events.is_empty());
+        for event in context.event.iter().chain(context.events.iter()) {
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                assert_eq!(
+                    state.zone_changes_this_turn[record.turn_zone_change_index],
+                    **record
+                );
+            }
+        }
+        run.act(GameAction::ChooseReplacement { index: 1 });
+        assert_preroll_success(&mut run, source, other, &[3]);
+    }
+}
+
+#[test]
+fn synthetic_departure_die_preroll_rejects_invalid_owned_occurrence() {
+    for trusted in [false, true] {
+        for future in [false, true] {
+            for plural in [false, true] {
+                let (run, source, _) = preroll_departure(3, 1, false);
+                let mut record = run
+                    .runner
+                    .state()
+                    .zone_changes_this_turn
+                    .iter()
+                    .find(|r| r.object_id == source && r.to_zone == Zone::Graveyard)
+                    .unwrap()
+                    .clone();
+                if future {
+                    record.recorded_turn_number = run.runner.state().turn_number + 1;
+                } else {
+                    record.object_id = ObjectId(999_999);
+                }
+                let event = GameEvent::ZoneChanged {
+                    object_id: record.object_id,
+                    from: record.from_zone,
+                    to: record.to_zone,
+                    record: Box::new(record),
+                };
+                let mut value = serde_json::to_value(if trusted {
+                    PersistedGameState::capture(run.runner.state().clone())
+                } else {
+                    PersistedGameState::Raw(Box::new(run.runner.state().clone()))
+                })
+                .unwrap();
+                let payload = if trusted {
+                    &mut value["state"]
+                } else {
+                    &mut value
+                };
+                payload["pending_die_roll_instruction"]["trigger_context"] = serde_json::json!({
+                    "event": if plural { None } else { Some(event.clone()) },
+                    "events": if plural { vec![event] } else { vec![] },
+                    "match_count": null, "die_result": null,
+                });
+                let restored = serde_json::from_value::<PersistedGameState>(value)
+                    .and_then(|s| s.into_game_state().map_err(serde::de::Error::custom));
+                assert!(restored.is_err(), "invalid instruction-only occurrence must be rejected: trusted={trusted}, future={future}, plural={plural}");
+            }
+        }
+    }
+}
+
+#[test]
+fn preroll_legacy_missing_scope_survives_all_ingresses_without_inventing_authority() {
+    for ingress in [
+        RandomRestore::GameState,
+        RandomRestore::Trusted,
+        RandomRestore::Raw,
+    ] {
+        let (mut run, source, _) = preroll_departure(1, 1, false);
+        let saved = match ingress {
+            RandomRestore::Trusted => PersistedGameState::capture(run.runner.state().clone()),
+            _ => PersistedGameState::Raw(Box::new(run.runner.state().clone())),
+        };
+        let mut value = serde_json::to_value(saved).unwrap();
+        let payload = if matches!(ingress, RandomRestore::Trusted) {
+            &mut value["state"]
+        } else {
+            &mut value
+        };
+        assert!(payload["pending_die_roll_instruction"]
+            .as_object_mut()
+            .unwrap()
+            .remove("trigger_context")
+            .is_some());
+        let mut state = match ingress {
+            RandomRestore::GameState => serde_json::from_value::<GameState>(value).unwrap(),
+            _ => serde_json::from_value::<PersistedGameState>(value)
+                .unwrap()
+                .into_game_state()
+                .unwrap(),
+        };
+        state.rehydrate_rng();
+        assert!(state
+            .pending_die_roll_instruction
+            .as_ref()
+            .unwrap()
+            .trigger_context
+            .is_none());
+        run.runner = GameRunner::from_state(state);
+        run.act(GameAction::ChooseReplacement { index: 1 });
+        assert!(matches!(
+            run.runner.state().waiting_for,
+            WaitingFor::DieKeepChoice { .. }
+        ));
+        run.act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0, 1],
+        });
+        run.finish();
+        assert_eq!(
+            moves(&run.events, source),
+            vec![(Some(Zone::Graveyard), Zone::Battlefield)]
+        );
+        assert_eq!(run.runner.state().objects[&source].zone, Zone::Battlefield);
+    }
 }
