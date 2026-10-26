@@ -678,6 +678,10 @@ impl EventObjectSnapshot {
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
             | TargetFilter::EventTarget
+            // CR 506.3: needs live combat state (the attacker's current attack target)
+            // and may be a planeswalker permanent; unlike `DefendingPlayer` it is not
+            // a player-axis selector the snapshot can answer `false` for.
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::ParentTargetSlot { .. }
             | TargetFilter::DeclaredPlayer { .. }
             | TargetFilter::OriginalSource
@@ -885,6 +889,12 @@ impl EventObjectSnapshot {
             | FilterProp::AttachedTo { to: AttachmentReferent::Recipient }
             | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
             | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+            // CR 701.3a: event snapshots carry no host relation, exactly as they
+            // carry none for the other four referents, so a `Host` filter must
+            // fail the reach gate LOUDLY rather than read an unhosted snapshot.
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { .. },
+            }
             | FilterProp::Unpaired
             | FilterProp::OtherThanTriggerObject
             | FilterProp::MostPrevalentCreatureTypeIn { .. }
@@ -2684,5 +2694,24 @@ mod tests {
             ],
         };
         assert_eq!(classify(&nested), Unsupported);
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_snapshot_tests {
+    use super::*;
+
+    /// CR 506.3: needs live combat state and may be a planeswalker permanent, so the
+    /// Connive snapshot gate refuses it rather than answering false.
+    #[test]
+    fn attacked_referent_is_unsupported_for_a_snapshot_subject() {
+        assert!(matches!(
+            EventObjectSnapshot::classify_filter_shape(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            EventObjectFilterSupport::Unsupported
+        ));
+        assert!(matches!(
+            EventObjectSnapshot::classify_filter_shape(&TargetFilter::DefendingPlayer),
+            EventObjectFilterSupport::PermanentDomainFalse
+        ));
     }
 }

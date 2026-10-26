@@ -1967,8 +1967,14 @@ def artifact_profile(
     policy: Policy,
     files: list[str] | None = None,
     classification: dict[str, Any] | None = None,
+    *,
+    author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate immutable, current-head contributor artifacts separately from proof."""
+    """Evaluate immutable, current-head contributor artifacts separately from proof.
+
+    The artifact contract binds contributors, not repository writers: a writer's
+    failures stay visible but never hold or decline.
+    """
     timing = admission_time_profile(pr, policy)
     body = str(pr.get("body") or "")
     head = str(pr.get("headRefOid") or "").lower()
@@ -2069,9 +2075,11 @@ def artifact_profile(
         "mode": policy.admission_mode,
         "enforcement_cutoff": policy.admission_enforced_after,
         **timing,
+        "hold": timing["hold"] and not author_is_repository_writer,
+        "repository_writer_exempt": author_is_repository_writer,
         "passes": not failures,
-        "would_decline": bool(failures),
-        "decline": timing["enforced"] and bool(failures),
+        "would_decline": bool(failures) and not author_is_repository_writer,
+        "decline": timing["enforced"] and bool(failures) and not author_is_repository_writer,
         "failures": failures,
         "gate_a_head": gate_matches[0][0] if len(gate_matches) == 1 else None,
         "final_review_head": review_matches[0] if len(review_matches) == 1 else None,
@@ -2112,7 +2120,12 @@ def has_accepted_pr_label(pr: dict[str, Any], accepted_label: str | None) -> boo
 
 
 def architecture_scope_profile(
-    pr: dict[str, Any], files: list[str], policy: Policy, private_overrides: dict[str, Any]
+    pr: dict[str, Any],
+    files: list[str],
+    policy: Policy,
+    private_overrides: dict[str, Any],
+    *,
+    author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
     matched_paths = sorted(
         path for path in files if matches_any(path, policy.architecture_scope_patterns)
@@ -2139,7 +2152,8 @@ def architecture_scope_profile(
         fold_login(str(login))
         for login in private_overrides.get("architecture_scope_authors", [])
     }
-    author_authorized = bool(author) and fold_login(str(author)) in private_authors
+    private_override = bool(author) and fold_login(str(author)) in private_authors
+    author_authorized = author_is_repository_writer or private_override
     issue_evidence_complete = bool(pr.get("closingIssuesReferencesComplete"))
     issues = (
         accepted_closing_issues(pr, policy.architecture_accepted_issue_label)
@@ -2166,7 +2180,8 @@ def architecture_scope_profile(
         "accepted_closing_issues": issues,
         "closing_issue_records": pr.get("closingIssuesReferences", []),
         "closing_issue_count": pr.get("closingIssuesReferencesCount"),
-        "author_private_override": author_authorized,
+        "author_private_override": private_override,
+        "author_repository_writer": author_is_repository_writer,
         "accepted_pr_label": pr_label_authorized,
         "closing_issue_evidence_complete": issue_evidence_complete,
         "files_complete": bool(pr.get("filesComplete")),
@@ -2809,7 +2824,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         # architecture scope is a data/authorization blocker no label can waive.
         action = "review"
         reason = "approved_for_review_label"
-    elif classification.get("hard_stop_paths"):
+    elif classification.get("hard_stop_paths") and not author_policy.get("repository_writer"):
+        # Hard-stop paths guard against contributor tampering; a repository
+        # writer changing CI, skills, or build config falls through to review.
         action = "request_changes"
         reason = "hard_stop"
     elif (packet.get("contributor") or {}).get("standing") == "skip":
@@ -3118,6 +3135,7 @@ def make_packet(
     gittensor: dict[str, Any] | None = None,
     first_block_event: dict[str, Any] | None = None,
     required_check_names: set[str] | None = None,
+    author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
     files = pr_files_from_view(pr)
     classification = classify_files(files, policy)
@@ -3134,15 +3152,25 @@ def make_packet(
     parse_diff = parse_diff_comment_state(
         pr.get("comments", []), {"github-actions", acting_login}
     )
-    artifacts = artifact_profile(pr, policy, files, classification)
+    artifacts = artifact_profile(
+        pr,
+        policy,
+        files,
+        classification,
+        author_is_repository_writer=author_is_repository_writer,
+    )
     architecture_scope = architecture_scope_profile(
-        pr, files, policy, private_overrides
+        pr,
+        files,
+        policy,
+        private_overrides,
+        author_is_repository_writer=author_is_repository_writer,
     )
     compact_pr = compact_pr_view(pr, acting_login)
     author_policy = {
-        "frontend_review_allowed": frontend_review_allowed(
-            compact_pr.get("author_login"), private_overrides
-        )
+        "repository_writer": author_is_repository_writer,
+        "frontend_review_allowed": author_is_repository_writer
+        or frontend_review_allowed(compact_pr.get("author_login"), private_overrides),
     }
     proof = proof_profile(pr, contributor_summary, gittensor)
     if (
@@ -3748,6 +3776,42 @@ def required_checks_by_base(
     }
 
 
+def repository_writer_logins(repo: str) -> frozenset[str]:
+    """Folded logins holding write, maintain, or admin access to ``repo``.
+
+    Repository write access is the policy's maintainer boundary: a PR authored by
+    a writer is exempt from the contributor-only gates (hard-stop paths,
+    architecture scope, frontend policy, artifact admission). ``authorAssociation``
+    cannot answer this — a triage-only collaborator still reports ``COLLABORATOR``.
+    The ``permission=push`` filter includes maintain and admin. A failed lookup
+    returns an empty set, so unknown data never exempts an author.
+    """
+    try:
+        pages = run_json(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/collaborators",
+                "--method",
+                "GET",
+                "-f",
+                "permission=push",
+                "-F",
+                "per_page=100",
+                "--paginate",
+                "--slurp",
+            ]
+        )
+    except subprocess.CalledProcessError:
+        print(
+            f"could not list repository writers for {repo}; "
+            "applying contributor gates to every author",
+            file=sys.stderr,
+        )
+        return frozenset()
+    return frozenset(fold_login(str(user["login"])) for page in pages for user in page)
+
+
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 
@@ -3763,6 +3827,7 @@ class ReviewContext:
     policy: Policy
     private_overrides: dict[str, Any]
     acting_login: str
+    repository_writers: frozenset[str]
     local_events: dict[tuple[int, str], dict[str, Any]]
     local_latest_events: dict[int, dict[str, Any]]
     local_latest_observations: dict[int, dict[str, Any]]
@@ -3784,6 +3849,7 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
         policy=load_policy(args.config),
         private_overrides=load_private_overrides(args.state_dir),
         acting_login=args.acting_login or gh_user(),
+        repository_writers=repository_writer_logins(args.repo),
         local_events=latest_events_by_pr_head(events),
         local_latest_events=latest_events_by_pr(events),
         local_latest_observations=latest_observations_by_pr(events),
@@ -3818,15 +3884,16 @@ def packet_for_pr(
     local_latest_look = context.local_latest_looks.get(pr_number)
     local_latest_action = context.local_latest_actions.get(pr_number)
     first_block_event = context.first_block_events.get(head_key)
+    author_login = (pr.get("author") or {}).get("login")
     contributor_summary = build_contributor_summary(
-        (pr.get("author") or {}).get("login"),
+        author_login,
         pr_number,
         context.analytics_model,
         context.signal_occurrences,
         context.private_overrides,
     )
     gittensor = gittensor_summary(
-        (pr.get("author") or {}).get("login"),
+        author_login,
         context.gittensor_index,
         context.gittensor_warning,
     )
@@ -3841,6 +3908,8 @@ def packet_for_pr(
         gittensor,
         first_block_event,
         required_check_names,
+        author_is_repository_writer=bool(author_login)
+        and fold_login(author_login) in context.repository_writers,
     )
     packet["local_latest_event"] = local_latest_event
     packet["local_latest_observation"] = local_latest_observation

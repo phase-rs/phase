@@ -9424,6 +9424,7 @@ fn resume_pending_continuation_pass(
         if deferred_life_boundary.is_none_or(|boundary| state.resolution_stack.len() > boundary) {
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
+            effects::counters::resume_copy_target_entry_completions(state, events)?;
         }
         resume_due_counter_cost_root(state, events)?;
         if matches!(state.waiting_for, WaitingFor::Priority { .. })
@@ -9431,6 +9432,7 @@ fn resume_pending_continuation_pass(
         {
             super::life_safety::observe_boundary_carrier(state);
             effects::resume_resolution_frames(state, events);
+            effects::counters::resume_copy_target_entry_completions(state, events)?;
         }
         resume_due_counter_cost_root(state, events)?;
         let mut drained_deferred_life = false;
@@ -9453,9 +9455,11 @@ fn resume_pending_continuation_pass(
         {
             super::life_safety::observe_boundary_carrier(state);
             effects::drain_pending_continuation(state, events);
+            effects::counters::resume_copy_target_entry_completions(state, events)?;
             if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                 super::life_safety::observe_boundary_carrier(state);
                 effects::resume_resolution_frames(state, events);
+                effects::counters::resume_copy_target_entry_completions(state, events)?;
             }
         }
         // CR 614.12a + CR 111.1: An entry replacement's required choices are made
@@ -13596,6 +13600,22 @@ fn apply_non_priority_pass_action(
                         &mut events,
                     )?;
                     state.last_effect_count = Some(chosen.len() as i32);
+                    // CR 107.3f + CR 107.3i + CR 118.12: "tap X untapped ..." as an effect
+                    // resolves with X chosen by the player, so the count tapped defines X for the
+                    // riders. The selection mode is the signal, as in casting_costs.rs and
+                    // mana_abilities.rs; min_count == 0 is not (Aggregate also has floor 0).
+                    // Only the rider this payment parked receives it: a payment with no rider
+                    // leaves any enclosing continuation's X untouched.
+                    if matches!(
+                        *mode,
+                        crate::types::ability::TapCreaturesSelectionMode::VariableX
+                    ) {
+                        engine_resolution_choices::stamp_paused_payment_rider_x(
+                            state,
+                            crate::types::game_state::ContinuationXAnnouncement::TappedCount,
+                            u32::try_from(chosen.len()).unwrap_or(u32::MAX),
+                        );
+                    }
                     if matches!(state.waiting_for, WaitingFor::PayCost { .. }) {
                         state.waiting_for = WaitingFor::Priority { player: *player };
                     }
@@ -23165,7 +23185,9 @@ mod stage2_injector_tests {
         flate2::read::GzDecoder::new(gz)
             .read_to_string(&mut json)
             .expect("fixture inflates");
-        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         // Cross the dump through the PRODUCTION decoder rather than a bare `GameState`
         // decode wrapped in `Raw`: `PersistedGameState`'s own `Deserialize` runs
         // `reject_legacy_raw_prompt_authority` and `decode_persisted_resolution_state`
@@ -23987,7 +24009,7 @@ mod stage2_injector_tests {
 
         assert_eq!(
             producers.len() + readers.len() + in_test,
-            54,
+            57,
             "CR 603.5 prompt census drifted. A new PRODUCER must have its recipient bound \
              somewhere — the mint's conjunct (a) covers exactly ONE of them. A new READER is \
              the benign case (U4's own consumption arm was one).\n\
@@ -23995,10 +24017,11 @@ mod stage2_injector_tests {
         );
         assert_eq!(
             (producers.len(), readers.len(), in_test),
-            (4, 11, 39),
+            (4, 11, 42),
             "the partition, not just the total: four PRODUCTION producers, eleven PRODUCTION \
-             readers (including the two new optional-subject projection reads), and 39 \
-             `#[cfg(test)]` lines.\nproducers={producers:#?}\n\
+             readers (including the two new optional-subject projection reads), and 42 \
+             `#[cfg(test)]` lines, including the ChooseOneOf, retained optional/outer, \
+             and retained repeat/choice restore fixtures.\nproducers={producers:#?}\n\
              readers={readers:#?}"
         );
         assert_eq!(
@@ -24943,7 +24966,9 @@ mod kilo_interruptibility_tests {
         flate2::read::GzDecoder::new(gz)
             .read_to_string(&mut json)
             .expect("fixture inflates");
-        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         // Route through the REAL production restore chokepoint, exactly as the integration helper
         // does. Decoding AS `PersistedGameState` (rather than decoding a bare `GameState` and
         // wrapping it) routes the dump through

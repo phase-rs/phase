@@ -1789,6 +1789,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -5490,6 +5491,7 @@ mod tests {
                     target: TargetFilter::ParentTarget,
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Bottom,
+                    arranger: None,
                 },
                 SpellStackToGraveyardReplacement::Library {
                     position: LibraryPosition::Bottom,

@@ -28,20 +28,25 @@
 
 use engine::game::combat::{
     apply_resolved_combat_membership, AttackTarget, BlockHistoryPair, CombatParticipation,
+    DamageAssignment, DamageTarget,
 };
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{ChosenAttribute, TargetRef};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
-use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::game_state::{LayersDirty, WaitingFor};
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::resolved_commands::{
     ResolvedCombatMembershipCommand, ResolvedCombatMembershipEdit,
-    ResolvedCombatMembershipReplayInvariantError, ResolvedRulesCommand,
+    ResolvedCombatMembershipReplayInvariantError, ResolvedRulesCommand, ResolvedRulesJournal,
 };
+use engine::types::zones::Zone;
 
 /// Verbatim Oracle text (Scryfall, 2026-07). A paraphrase risks taking a
 /// different parser branch than the real card.
@@ -218,6 +223,7 @@ fn enters_attacking_journals_and_replays_its_recorded_defender() {
         ResolvedCombatMembershipEdit::Attack {
             resulting_defending_player: P1,
             resulting_attack_target: AttackTarget::Player(P1),
+            resulting_attack_target_identity: None,
         },
         "the recorded pair is the CR 508.4 choice the authority settled"
     );
@@ -252,6 +258,444 @@ fn enters_attacking_journals_and_replays_its_recorded_defender() {
     assert!(
         !replay_blocked,
         "CR 509.1h: a creature entering attacking is not blocked"
+    );
+}
+
+/// Verbatim pinned MTGJSON Oracle text. The destination siblings below are
+/// typed combat fixtures; neither adds a new Oracle clause to this card.
+const NINJA_ORACLE: &str = "Ninjutsu {1}{U} ({1}{U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\nWhenever this creature deals combat damage to a player, you may draw a card.";
+
+/// Produce the permanent Attack command through the real activation action,
+/// sharing `place_attacking_alongside` / `push_attacker_and_journal` with entry.
+fn permanent_ninjutsu_attack(battle: bool) -> (GameRunner, ObjectId, ObjectId, usize) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let returned = scenario.add_vanilla(P0, 2, 2);
+    let other = scenario.add_vanilla(P0, 2, 2);
+    let blocker = scenario.add_vanilla(P1, 1, 4);
+    let ninja = scenario
+        .add_creature_to_hand_from_oracle(P0, "Ninja of the Deep Hours", 2, 2, NINJA_ORACLE)
+        .with_subtypes(vec!["Human", "Ninja"])
+        .id();
+    let recipient = if battle {
+        scenario.add_vanilla(P0, 0, 1)
+    } else {
+        scenario
+            .add_planeswalker_from_oracle(P1, "Combat recipient", "Test", 8, "")
+            .id()
+    };
+    let mut runner = scenario.build();
+    if battle {
+        let object = runner.state_mut().objects.get_mut(&recipient).unwrap();
+        object.card_types.core_types = vec![CoreType::Battle];
+        object.card_types.subtypes = vec!["Siege".to_string()];
+        object.base_card_types = object.card_types.clone();
+        object.power = None;
+        object.toughness = None;
+        object.base_power = None;
+        object.base_toughness = None;
+        object.defense = Some(8);
+        object.base_defense = Some(8);
+        object.counters.insert(CounterType::Defense, 8);
+        object.chosen_attributes.push(ChosenAttribute::Player(P1));
+    }
+    let target = if battle {
+        AttackTarget::Battle(recipient)
+    } else {
+        AttackTarget::Planeswalker(recipient)
+    };
+    advance_to_declare_attackers(&mut runner, P0);
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![(returned, target), (other, AttackTarget::Player(P1))],
+            bands: vec![],
+        })
+        .expect("declare the permanent attack and unrelated player attack");
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        runner.pass_both_players();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareBlockers { .. }
+    ));
+    runner
+        .act(GameAction::DeclareBlockers {
+            assignments: vec![],
+        })
+        .expect("the returned attacker is genuinely unblocked");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        attacker_entry(runner.state(), returned),
+        Some((P1, target, false))
+    );
+    let pin = ObjectIncarnationRef::from_object(&runner.state().objects[&recipient]);
+    assert_eq!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .get(&returned),
+        Some(&pin)
+    );
+    for mana in [ManaType::Blue, ManaType::Colorless] {
+        let _ = runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(mana, ninja, false, vec![]));
+    }
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    runner
+        .act(GameAction::ActivateNinjutsu {
+            ninjutsu_object_id: ninja,
+            creature_to_return: returned,
+        })
+        .expect("activate the printed Ninjutsu ability through apply");
+    assert_eq!(runner.state().objects[&returned].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&ninja].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&ninja].tapped);
+    assert_eq!(
+        attacker_entry(runner.state(), ninja),
+        Some((P1, target, false))
+    );
+
+    // Nonempty unrelated bookkeeping makes partial mutation on rejection visible.
+    // This is a typed replay fixture, after the production command was captured.
+    let combat = runner.state_mut().combat.as_mut().unwrap();
+    combat
+        .attackers
+        .iter_mut()
+        .find(|info| info.object_id == other)
+        .unwrap()
+        .blocked = true;
+    combat.blocker_assignments.insert(other, vec![blocker]);
+    combat.blocker_to_attacker.insert(blocker, vec![other]);
+    combat.damage_assignments.insert(
+        other,
+        vec![DamageAssignment {
+            target: DamageTarget::Object(blocker),
+            amount: 2,
+        }],
+    );
+    combat.pending_damage.push((
+        other,
+        DamageAssignment {
+            target: DamageTarget::Player(P1),
+            amount: 1,
+        },
+    ));
+    combat.damage_step_index = Some(1);
+    combat.first_strike_done = true;
+    combat.first_strike_participants = Some([other].into_iter().collect());
+    combat.regular_damage_done = true;
+    runner.state_mut().layers_dirty = LayersDirty::Clean;
+    (runner, ninja, recipient, journal_start)
+}
+
+fn assert_atomic_attack_rejection(
+    state: &mut GameState,
+    command: &ResolvedCombatMembershipCommand,
+    expected: ResolvedCombatMembershipReplayInvariantError,
+) {
+    // Serialize the ENTIRE state, including all CombatState fields omitted by
+    // PartialEq, block histories, journal, waiting state and event carriers.
+    let before = serde_json::to_value(&*state).unwrap();
+    let dirty = state.layers_dirty.clone();
+    assert_eq!(
+        apply_resolved_combat_membership(state, command),
+        Err(expected)
+    );
+    assert_eq!(serde_json::to_value(&*state).unwrap(), before);
+    assert_eq!(state.layers_dirty, dirty);
+}
+
+/// CR 702.49c: Ninjutsu preserves the returned creature's exact destination,
+/// including both permanent kinds. Replay must install the recorded active pin.
+#[test]
+fn permanent_attack_producer_journal_roundtrip_and_replay_keep_exact_recipient() {
+    for battle in [false, true] {
+        let (runner, ninja, recipient, journal_start) = permanent_ninjutsu_attack(battle);
+        let state = runner.state();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&recipient]);
+        let target = if battle {
+            AttackTarget::Battle(recipient)
+        } else {
+            AttackTarget::Planeswalker(recipient)
+        };
+        let commands: Vec<_> = membership_commands(state, journal_start)
+            .into_iter()
+            .filter(|command| command.object.object_id == ninja)
+            .collect();
+        assert_eq!(
+            commands.len(),
+            1,
+            "the production activation records one Attack"
+        );
+        let command = &commands[0];
+        assert_eq!(
+            command.object,
+            ObjectIncarnationRef::from_object(&state.objects[&ninja])
+        );
+        assert_eq!(
+            command.edit,
+            ResolvedCombatMembershipEdit::Attack {
+                resulting_defending_player: P1,
+                resulting_attack_target: target,
+                resulting_attack_target_identity: Some(pin),
+            },
+            "the producer must thread the exact permanent pin, kind, ID and original defender"
+        );
+        assert_eq!(
+            state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanents
+                .get(&ninja),
+            Some(&pin)
+        );
+
+        let json = serde_json::to_string(&state.resolved_rules_journal).unwrap();
+        let roundtrip: ResolvedRulesJournal = serde_json::from_str(&json)
+            .expect("the real journal decoder validates the populated Attack authority");
+        assert_eq!(
+            serde_json::to_value(&roundtrip).unwrap(),
+            serde_json::to_value(&state.resolved_rules_journal).unwrap()
+        );
+        let mut replay = state.clone();
+        replay.resolved_rules_journal = roundtrip;
+        let decoded = membership_commands(&replay, journal_start)
+            .into_iter()
+            .find(|record| record.object.object_id == ninja)
+            .unwrap();
+        assert_eq!(&decoded, command);
+        let combat = replay.combat.as_mut().unwrap();
+        combat.attackers.retain(|info| info.object_id != ninja);
+        combat.attacked_permanents.remove(&ninja);
+        assert!(attacker_entry(&replay, ninja).is_none());
+        assert!(!replay
+            .combat
+            .as_ref()
+            .unwrap()
+            .attacked_permanents
+            .contains_key(&ninja));
+        apply_resolved_combat_membership(&mut replay, &decoded)
+            .expect("replay against the post-entry predecessor installs membership and pin");
+        assert_eq!(attacker_entry(&replay, ninja), Some((P1, target, false)));
+        let combat = replay.combat.as_ref().unwrap();
+        assert_eq!(
+            combat.attacked_permanents.get(&ninja),
+            Some(&pin),
+            "replay must install the absent outgoing edge"
+        );
+        let member = combat
+            .attackers
+            .iter()
+            .find(|info| info.object_id == ninja)
+            .unwrap();
+        assert_eq!(
+            member.resolve_damage_target(&replay, false),
+            Some(DamageTarget::Object(recipient)),
+            "the shared current-recipient reader must consume the installed pin"
+        );
+        assert_eq!(
+            serde_json::to_value(&replay.combat).unwrap(),
+            serde_json::to_value(&state.combat).unwrap(),
+            "replay preserves the complete graph and damage bookkeeping"
+        );
+        assert_eq!(replay.layers_dirty, LayersDirty::Full);
+        assert_atomic_attack_rejection(
+            &mut replay,
+            &decoded,
+            ResolvedCombatMembershipReplayInvariantError::AlreadyAttacking(ninja),
+        );
+    }
+}
+
+/// CR 400.7: a new recipient incarnation cannot satisfy recorded authority.
+#[test]
+fn permanent_attack_stale_and_missing_legacy_authority_reject_atomically() {
+    for battle in [false, true] {
+        let (runner, ninja, recipient, journal_start) = permanent_ninjutsu_attack(battle);
+        let state = runner.state();
+        let command = membership_commands(state, journal_start)
+            .into_iter()
+            .find(|record| record.object.object_id == ninja)
+            .unwrap();
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&recipient]);
+        let mut predecessor = state.clone();
+        let combat = predecessor.combat.as_mut().unwrap();
+        combat.attackers.retain(|info| info.object_id != ninja);
+        combat.attacked_permanents.remove(&ninja);
+        let mut stale = predecessor.clone();
+        stale.objects.get_mut(&recipient).unwrap().incarnation += 1;
+        let found = ObjectIncarnationRef::from_object(&stale.objects[&recipient]);
+        assert_ne!(pin, found);
+        assert_atomic_attack_rejection(
+            &mut stale,
+            &command,
+            ResolvedCombatMembershipReplayInvariantError::StaleObject {
+                expected: pin,
+                found,
+            },
+        );
+
+        let mut legacy_json = serde_json::to_value(&state.resolved_rules_journal).unwrap();
+        let mut removed = 0;
+        for entry in legacy_json["entries"].as_array_mut().unwrap() {
+            let Some(record) = entry
+                .get_mut("command")
+                .and_then(|command| command.get_mut("CombatMembership"))
+            else {
+                continue;
+            };
+            if record["object"] == serde_json::to_value(command.object).unwrap() {
+                let attack = record["edit"]["Attack"]
+                    .as_object_mut()
+                    .expect("the captured command is Attack");
+                assert!(attack.remove("resulting_attack_target_identity").is_some());
+                removed += 1;
+            }
+        }
+        assert_eq!(
+            removed, 1,
+            "remove the field from the actual permanent Attack wire record"
+        );
+        let legacy: ResolvedRulesJournal = serde_json::from_value(legacy_json)
+            .expect("unused legacy permanent Attack history remains decodable");
+        let mut history = state.clone();
+        history.resolved_rules_journal = legacy;
+        let unknown = membership_commands(&history, journal_start)
+            .into_iter()
+            .find(|record| record.object.object_id == ninja)
+            .unwrap();
+        let ResolvedCombatMembershipEdit::Attack {
+            resulting_attack_target_identity,
+            ..
+        } = &unknown.edit
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            *resulting_attack_target_identity, None,
+            "historical decoding must not invent a pin"
+        );
+        let redecoded: ResolvedRulesJournal =
+            serde_json::from_str(&serde_json::to_string(&history.resolved_rules_journal).unwrap())
+                .unwrap();
+        history.resolved_rules_journal = redecoded;
+        assert_eq!(
+            membership_commands(&history, journal_start)
+                .into_iter()
+                .find(|record| record.object.object_id == ninja),
+            Some(unknown.clone())
+        );
+        assert_atomic_attack_rejection(
+            &mut predecessor,
+            &unknown,
+            ResolvedCombatMembershipReplayInvariantError::StaleObject {
+                expected: ObjectIncarnationRef::of(recipient, LEGACY_INCARNATION),
+                found: pin,
+            },
+        );
+    }
+}
+
+#[test]
+fn permanent_attack_serialized_guard_refuses_incoherent_populated_authority() {
+    for battle in [false, true] {
+        let (runner, ninja, recipient, journal_start) = permanent_ninjutsu_attack(battle);
+        let state = runner.state();
+        let command = membership_commands(state, journal_start)
+            .into_iter()
+            .find(|record| record.object.object_id == ninja)
+            .unwrap();
+        let mut wrong_id = command.clone();
+        let mut legacy_pin = command.clone();
+        let mut player_pin = command.clone();
+        if let ResolvedCombatMembershipEdit::Attack {
+            resulting_attack_target_identity,
+            ..
+        } = &mut wrong_id.edit
+        {
+            *resulting_attack_target_identity =
+                Some(ObjectIncarnationRef::from_object(&state.objects[&ninja]));
+        }
+        if let ResolvedCombatMembershipEdit::Attack {
+            resulting_attack_target_identity,
+            ..
+        } = &mut legacy_pin.edit
+        {
+            *resulting_attack_target_identity =
+                Some(ObjectIncarnationRef::of(recipient, LEGACY_INCARNATION));
+        }
+        if let ResolvedCombatMembershipEdit::Attack {
+            resulting_attack_target,
+            ..
+        } = &mut player_pin.edit
+        {
+            *resulting_attack_target = AttackTarget::Player(P1);
+        }
+        for bad in [wrong_id, legacy_pin, player_pin] {
+            let mut journal = state.resolved_rules_journal.clone();
+            journal.record_combat_membership(bad).unwrap();
+            let error = serde_json::from_value::<ResolvedRulesJournal>(
+                serde_json::to_value(journal).unwrap(),
+            )
+            .expect_err("the Attack serialized-authority guard must reject populated incoherence");
+            assert!(
+                error
+                    .to_string()
+                    .contains("combat-membership attack has incoherent permanent identity"),
+                "wrong validator branch: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn field_missing_legacy_player_attack_replays_without_a_permanent_pin() {
+    let attack = kaalia_attack();
+    let command = membership_commands(attack.runner.state(), attack.journal_start)
+        .into_iter()
+        .find(|record| record.object.object_id == attack.angel)
+        .unwrap();
+    let mut wire = serde_json::to_value(&command).unwrap();
+    assert!(wire["edit"]["Attack"]
+        .as_object_mut()
+        .unwrap()
+        .remove("resulting_attack_target_identity")
+        .is_some());
+    let legacy: ResolvedCombatMembershipCommand = serde_json::from_value(wire).unwrap();
+    assert_eq!(
+        legacy, command,
+        "Player/None retains its safe legacy meaning"
+    );
+    let mut replay = attack.runner.state().clone();
+    let combat = replay.combat.as_mut().unwrap();
+    combat
+        .attackers
+        .retain(|info| info.object_id != attack.angel);
+    assert!(!combat.attacked_permanents.contains_key(&attack.angel));
+    apply_resolved_combat_membership(&mut replay, &legacy)
+        .expect("legacy Player Attack remains replayable");
+    assert_eq!(
+        attacker_entry(&replay, attack.angel),
+        Some((P1, AttackTarget::Player(P1), false))
+    );
+    let combat = replay.combat.as_ref().unwrap();
+    assert!(!combat.attacked_permanents.contains_key(&attack.angel));
+    assert_eq!(
+        combat
+            .attackers
+            .iter()
+            .find(|info| info.object_id == attack.angel)
+            .unwrap()
+            .resolve_damage_target(&replay, false),
+        Some(DamageTarget::Player(P1))
     );
 }
 

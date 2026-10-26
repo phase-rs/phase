@@ -951,6 +951,20 @@ impl PendingActivationTriggerCollection {
         self.pending_contexts.extend(contexts);
     }
 
+    /// The triggers collected during the announcement, each with its own trigger
+    /// event, that `commit_into` hands to ordinary placement once the activation
+    /// completes. Read-only, for the restore validator.
+    pub(crate) fn pending_contexts(&self) -> &[PendingTriggerContext] {
+        &self.pending_contexts
+    }
+
+    /// Test fixture: a collection already holding `context`.
+    #[cfg(test)]
+    pub(crate) fn with_pending_context_for_test(mut self, context: PendingTriggerContext) -> Self {
+        self.pending_contexts.push(context);
+        self
+    }
+
     /// Commit collector consequences exactly once and append the retained
     /// contexts to the caller's deferred delivery list.
     ///
@@ -3221,15 +3235,20 @@ fn collect_matching_triggers_inner(
             if !admitted {
                 continue;
             }
-            // CR 603.10d + CR 603.3a: "when you lose control of ~" is
-            // controlled by the PRE-change controller — the player who just
-            // lost control — not by whoever controls the object now.
-            // `source_context.lki.controller` (captured into `controller`
-            // above) already reflects the POST-change live controller for a
-            // self-ref source: `collect_pending_triggers` flushes layers
-            // before this scan runs, so the changing object's own controller
-            // has already moved to `new_controller` by the time trigger
-            // sources are gathered. Mirror
+            // CR 603.3a + CR 109.5: a self-ref `ChangesController` trigger is
+            // controlled by the player its `side` names — CR 603.10d "when you
+            // lose control of ~" is the PRE-change controller (the player who
+            // just lost control), CR 603.10 "when you gain control of ~" is the
+            // POST-change controller (the gainer) — not by whoever controls the
+            // object when the scan runs. `source_context.lki.controller`
+            // (captured into `controller` above) reflects the POST-change live
+            // controller for a self-ref source: `collect_pending_triggers`
+            // flushes layers before this scan runs, so the changing object's own
+            // controller has already moved to `new_controller` by the time
+            // trigger sources are gathered. That is wrong for `Loses`, and for
+            // `Gains` it is right only by coincidence (a second flush could move
+            // it again), so both sides read the event's own endpoints through
+            // `ControlChangeSide::participant`. Mirror
             // `trigger_matchers::match_changes_controller`'s own directional
             // discriminant (`source_id == *object_id`) here rather than
             // re-deriving it, since `admitted` above already confirms this
@@ -3237,14 +3256,16 @@ fn collect_matching_triggers_inner(
             // `SpecificObject` shape (Stolen Uniform, `source_id !=
             // object_id`) is left UNCHANGED: its source is a different object
             // whose own controller is already the right answer (CR 113.8).
-            let controller = match event {
-                GameEvent::ControllerChanged {
-                    object_id,
-                    old_controller,
-                    ..
-                } if trig_def.mode == TriggerMode::ChangesController && *object_id == obj_id => {
-                    *old_controller
-                }
+            let controller = match (&trig_def.mode, event) {
+                (
+                    TriggerMode::ChangesController { side },
+                    GameEvent::ControllerChanged {
+                        object_id,
+                        old_controller,
+                        new_controller,
+                        ..
+                    },
+                ) if *object_id == obj_id => side.participant(*old_controller, *new_controller),
                 _ => controller,
             };
             if !check_trigger_constraint_with_ref(
@@ -3266,12 +3287,13 @@ fn collect_matching_triggers_inner(
             // CR 603.3a + CR 113.8: `build_triggered_ability_from_context` has
             // no `event` parameter and so re-derives its own controller from
             // `source_context.lki.controller` — the same value `controller`
-            // held before the CR 603.10d override above. Rebind the ability
-            // (and every sub/else branch, via the existing `player_scope`
-            // rebinding authority) to the possibly-overridden `controller` so
-            // the ability's controller and its `PendingTrigger.controller`
-            // agree by construction. A no-op for every trigger mode other
-            // than the self-ref `ChangesController` case above.
+            // held before the `ChangesController` side override above. Rebind
+            // the ability (and every sub/else branch, via the existing
+            // `player_scope` rebinding authority) to the possibly-overridden
+            // `controller` so the ability's controller and its
+            // `PendingTrigger.controller` agree by construction. A no-op for
+            // every trigger mode other than the self-ref `ChangesController`
+            // case above.
             ability.set_controller_recursive(controller);
             // CR 603.4: Stamp the printed-trigger index so per-turn resolution
             // tracking (`AbilityCondition::AbilityUseCountThisTurn`) can identify
@@ -6871,16 +6893,9 @@ fn pending_trigger_has_no_legal_resolution_targets(
     );
     let empty = match super::ability_utils::build_target_slots(state, &pending.ability) {
         Ok(slots) => {
-            // CR 115.1: only effects that DECLARE a target surface a chooseable
-            // slot. `extract_target_filter_from_effect` is the single authority
-            // the slot builder itself uses — it returns `None` not only for
-            // context-refs ("you may draw a card") but for every resolution-time
-            // selection (Sacrifice, at-resolution Bounce, put-from-hand
-            // ChangeZone/CastFromZone, etc.), all of which are ALWAYS resolvable.
-            // Testing raw `target_filter()` here would fork from that authority
-            // and silently drop an auto-accepted "you may put a creature from
-            // your hand …" trigger (Kaalia et al.).
-            (extract_target_filter_from_effect(&pending.ability.effect).is_some()
+            // CR 115.10a + CR 603.3d: only an announcement declaration
+            // requires a legal stack-time choice, not an untargeted recipient.
+            (super::ability_utils::node_has_stack_target_declaration(&pending.ability)
                 && slots.is_empty())
                 || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
         }
@@ -12863,6 +12878,12 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringPlayer
         | TargetFilter::EventTarget
         | TargetFilter::DefendingPlayer => false,
+        // CR 506.4c + CR 603.4: unlike `DefendingPlayer`, whose answer rests on the
+        // event binding alone, this referent also reads live combat and battlefield
+        // state (the attacker's current attack target, whether the planeswalker is
+        // still there), which can differ between fire time and resolution. When in
+        // doubt the answer is `true`.
+        TargetFilter::AttackedPlayerOrPlaneswalker => true,
     }
 }
 
@@ -12964,6 +12985,13 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         FilterProp::DifferentNameFrom { filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => filter_binding_diverges(filter),
+        // CR 701.3a: the filter-matched host axis resolves its host set from the
+        // RESOLVING ability (the parent target) or from the trigger event
+        // (`TriggeringSource`), so it diverges exactly when the nested filter
+        // does — recurse into the same authority.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_binding_diverges(filter),
         // CR 608.2c: the Radiance-class reference. `DistinctFrom` takes its ids
         // from `ability.targets` for the `ParentTarget` shape, so the nested
         // filter is the whole question.
@@ -16368,6 +16396,8 @@ fn evaluate_trigger_condition_with_source(
         }),
         // CR 207.2c + CR 601.2: cast during the configured phase set.
         TriggerCondition::CastDuringPhase { phases } => phases.contains(&state.phase),
+        // CR 500.1 + CR 506.1: the game is currently in one of `phases`.
+        TriggerCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3b + CR 702.8a: source permanent came from a spell cast using
         // the specified timing permission this turn.
         TriggerCondition::CastTimingPermission { permission } => {
@@ -52709,6 +52739,24 @@ mod pending_trigger_pin_reassignment_tests {
             assigned_pin,
             Some(expected),
             "assigning an unpinned ability must rebind the pin from the entry's own trigger event"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_binding_tests {
+    use super::*;
+
+    /// CR 506.4c + CR 603.4: the bound referent also reads live combat and battlefield state,
+    /// which can differ between fire time and resolution; "when in doubt, true".
+    #[test]
+    fn attacked_referent_filter_binding_diverges() {
+        assert!(filter_binding_diverges(
+            &TargetFilter::AttackedPlayerOrPlaneswalker
+        ));
+        assert!(
+            !filter_binding_diverges(&TargetFilter::DefendingPlayer),
+            "contrast: the event binding alone is non-divergent"
         );
     }
 }

@@ -1455,9 +1455,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
-    // identities and origins for later private choices. The public current
-    // `EffectZoneChoice` is projected below; its execution-only successor
-    // carrier must never be shipped to any viewer, including a future owner.
+    // identities and origins for later private choices, and the orders owners
+    // have already chosen (CR 401.4: the order isn't revealed). The public
+    // current `EffectZoneChoice` is projected below; its execution-only
+    // successor carrier must never be shipped to any viewer, including a
+    // future owner.
     filtered.pending_mass_library_order_choice = None;
     // CR 400.2 + CR 616.1: the replacement-suspended exile iterator retains
     // the exact remaining library order and current-resolution incarnation
@@ -11525,10 +11527,10 @@ mod tests {
             source: crate::types::game_state::OpponentGuessSource {
                 prompt: expected_prompt.clone(),
             },
-            owner: Some(crate::types::game_state::OpponentGuessOwner {
+            owner: Some(Box::new(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
                 committed_choice: None,
-            }),
+            })),
             proposition_truth: Some(true),
         };
 
@@ -11713,10 +11715,10 @@ mod tests {
                     &source_context,
                 ),
             },
-            owner: Some(crate::types::game_state::OpponentGuessOwner {
+            owner: Some(Box::new(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
                 committed_choice: Some(ChosenAttribute::Number(5)),
-            }),
+            })),
             proposition_truth: None,
         };
 
@@ -14602,8 +14604,10 @@ mod tests {
         flate2::read::GzDecoder::new(&gz[..])
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )

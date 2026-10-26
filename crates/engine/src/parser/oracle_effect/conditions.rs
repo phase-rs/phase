@@ -995,6 +995,16 @@ pub(super) fn strip_if_you_do_conditional_with_head(
 ) {
     let lower = text.to_lowercase();
 
+    // CR 701.17c + CR 608.2c: "If two cards that share a card type were milled
+    // this way, <effect>" (The Tale of Tamiyo) gates on the cards the preceding
+    // mill moved. Delegates to the existing nom stripper so the gate is
+    // recognized in the general clause cascade, not only in the repeat
+    // directive's own chunk.
+    let (milled, milled_rest) = strip_milled_shared_quality_conditional(text);
+    if milled.is_some() {
+        return (milled, None, milled_rest);
+    }
+
     // CR 603.12 + CR 608.2c: strip a leading reflexive-conditional connector
     // ("if you do, ", "when you do, ", "if that player doesn't, ", ...) and
     // return the corresponding AbilityCondition. Delegates to the shared
@@ -5665,10 +5675,12 @@ fn build_instead_def(
 
     let instead_def =
         super::parse_child_ability_with_parent_target(&effect_text, kind, parent_target_available);
-    let mut result = instead_def;
-    result.condition = Some(AbilityCondition::ConditionInstead {
-        inner: Box::new(condition),
-    });
+    let mut result = super::instead_override_definition(
+        instead_def,
+        AbilityCondition::ConditionInstead {
+            inner: Box::new(condition),
+        },
+    );
     if result
         .condition
         .as_ref()

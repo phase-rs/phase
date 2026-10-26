@@ -504,10 +504,22 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         life(&runner, P1) > 0,
         "ON: the shortcut fired early (P1 positive)"
     );
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_none_or(|combat| combat.attacked_permanents.is_empty()),
+        "the golden fixture has no active permanent attack relation"
+    );
     let mut event_stream = format!("{all:?}")
         .replace(", cast_mana_value: None", "")
         .replace(", new_total: LifeTotalReading(None)", "")
-        .replace(", was_prepared: false", "");
+        .replace(", was_prepared: false", "")
+        // `attack_target` was added to the combat status after the golden was cut;
+        // no combat is live in this fixture, so its derived value is None (CR 506.3).
+        .replace(", attack_target: None", "")
+        .replace(", attack_target_identity: None", "");
     for owner in 0..2 {
         for controller in 0..2 {
             event_stream = event_stream.replace(
@@ -5941,7 +5953,8 @@ pub(crate) fn gunzip_dump(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 pub(crate) fn restore_dump(json: &str) -> GameState {

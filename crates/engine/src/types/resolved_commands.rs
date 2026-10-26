@@ -29,6 +29,7 @@ use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, TokenSpec};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
+use super::stickers::StickerLocator;
 use super::zones::Zone;
 
 /// Globally ordered identity of a resolved command.
@@ -528,6 +529,8 @@ pub enum ResolvedCombatMembershipEdit {
     Attack {
         resulting_defending_player: PlayerId,
         resulting_attack_target: AttackTarget,
+        #[serde(default)]
+        resulting_attack_target_identity: Option<ObjectIncarnationRef>,
     },
     /// CR 509.1g + CR 506.3e: the object became a blocking creature for the
     /// recorded attacker, which becomes blocked per CR 509.1h.
@@ -550,6 +553,13 @@ pub enum ResolvedCombatMembershipEdit {
     Remove {
         expected_participation: CombatParticipation,
     },
+    /// CR 506.4 + CR 506.4c + CR 506.4d + CR 506.4e: the object, a planeswalker or
+    /// battle whose characteristics changed, stopped being attacked. Only its
+    /// incoming attacked relations end: the listed attackers (in declaration
+    /// order) stay attacking creatures, attacking nothing, and the object keeps
+    /// any role of its own. The applier requires the same attackers still attack
+    /// this exact object before retiring their edges.
+    RetireAttacked { expected_attacked_by: Vec<ObjectId> },
 }
 
 /// Typed failure while applying one already-resolved combat-membership edit.
@@ -588,6 +598,14 @@ pub enum ResolvedCombatMembershipReplayInvariantError {
         object: ObjectId,
         expected: Box<CombatParticipation>,
         found: Box<CombatParticipation>,
+    },
+    #[error(
+        "combat-membership attacked-relation retirement mismatch for {object:?}: expected attackers {expected:?}, found {found:?}"
+    )]
+    RetiredAttackMismatch {
+        object: ObjectId,
+        expected: Vec<ObjectId>,
+        found: Vec<ObjectId>,
     },
 }
 
@@ -1049,12 +1067,20 @@ pub struct ResolvedLibraryShuffleCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// CR 613.7k: one retained sticker's renewal, in prior relative timestamp order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedStickerTimestamp {
+    pub locator: StickerLocator,
+    pub prior_timestamp: u64,
+    pub timestamp: u64,
+}
+
 /// One exact transition of an object occurrence between zone containers.
 ///
 /// CR 400.7: the command binds the source occurrence and its resulting
 /// incarnation, so replay neither selects a new object nor creates a new
-/// incarnation. CR 613.7d: battlefield-entry timestamps are captured by the
-/// ordinary path and installed exactly on replay.
+/// incarnation. CR 613.7d + CR 613.7k: object-entry and retained-sticker
+/// timestamps are captured by the ordinary path and installed exactly on replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedZoneChangeCommand {
     pub object: ObjectIncarnationRef,
@@ -1070,9 +1096,64 @@ pub struct ResolvedZoneChangeCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebound_from: Option<PlayerId>,
     pub entry_timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_sticker_timestamps: Option<Vec<RetainedStickerTimestamp>>,
     pub turn_zone_change_index: usize,
     pub zone_change_record: ZoneChangeRecord,
     pub cause: RulesExecutionNodeRef,
+}
+
+impl ResolvedZoneChangeCommand {
+    /// CR 613.7d + CR 613.7k: the structural authority for the timestamp
+    /// operands. A battlefield entry carries its entry timestamp; retained
+    /// sticker rows follow a recorded entry timestamp on a real move into a
+    /// zone that retains stickers, with unique locators, non-decreasing prior
+    /// stamps and strictly increasing installed stamps after the object's. A
+    /// real public nonbattlefield move with a scalar and no rows stays
+    /// loadable; the live prestate decides whether rows were required.
+    pub fn validate_timestamp_operands(
+        &self,
+    ) -> Result<(), ResolvedZoneChangeReplayInvariantError> {
+        if self.to == Zone::Battlefield && self.entry_timestamp.is_none() {
+            return Err(ResolvedZoneChangeReplayInvariantError::MissingBattlefieldEntryTimestamp);
+        }
+        let retains = crate::game::stickers::zone_retains_stickers(self.to);
+        match &self.retained_sticker_timestamps {
+            Some(rows) => {
+                let mismatch =
+                    || ResolvedZoneChangeReplayInvariantError::RetainedStickerMetadataMismatch {
+                        recorded: self.retained_sticker_timestamps.clone(),
+                    };
+                let Some(entry_timestamp) = self.entry_timestamp else {
+                    return Err(mismatch());
+                };
+                if rows.is_empty() || self.from == self.to || !retains {
+                    return Err(mismatch());
+                }
+                let mut locators = HashSet::new();
+                let mut prior_floor = 0;
+                let mut installed_floor = entry_timestamp;
+                for row in rows {
+                    if !locators.insert(&row.locator)
+                        || row.prior_timestamp < prior_floor
+                        || row.timestamp <= installed_floor
+                    {
+                        return Err(mismatch());
+                    }
+                    prior_floor = row.prior_timestamp;
+                    installed_floor = row.timestamp;
+                }
+                Ok(())
+            }
+            None if self.to != Zone::Battlefield
+                && self.entry_timestamp.is_some()
+                && (self.from == self.to || !retains) =>
+            {
+                Err(ResolvedZoneChangeReplayInvariantError::UnexpectedNonbattlefieldTimestamp)
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 /// Typed failure while applying one already-resolved zone transition.
@@ -1097,8 +1178,18 @@ pub enum ResolvedZoneChangeReplayInvariantError {
     RecordedTurnMismatch { expected: u32, found: u32 },
     #[error("zone-change battlefield entry is missing its timestamp")]
     MissingBattlefieldEntryTimestamp,
-    #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
+    /// CR 613.7d + CR 613.7k: a nonbattlefield move carries an entry timestamp
+    /// only when it renews retained stickers.
+    #[error(
+        "zone-change entry timestamp is unexpected for a hidden, same-zone or unstickered nonbattlefield move"
+    )]
     UnexpectedNonbattlefieldTimestamp,
+    /// CR 613.7k: recorded retained timestamps disagree with the operand or the
+    /// source's stickers.
+    #[error("zone-change retained sticker timestamp metadata mismatch: {recorded:?}")]
+    RetainedStickerMetadataMismatch {
+        recorded: Option<Vec<RetainedStickerTimestamp>>,
+    },
     #[error("zone-change installed incarnation mismatch: expected {expected}, found {found}")]
     ResultingIncarnationMismatch { expected: u64, found: u64 },
 }
@@ -3389,6 +3480,30 @@ impl ResolvedRulesJournal {
                     ));
                 }
                 match &command.edit {
+                    ResolvedCombatMembershipEdit::Attack {
+                        resulting_attack_target,
+                        resulting_attack_target_identity: Some(pin),
+                        ..
+                    } if pin.incarnation == LEGACY_INCARNATION
+                        || match resulting_attack_target {
+                            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+                                *id != pin.object_id
+                            }
+                            AttackTarget::Player(_) => true,
+                        } =>
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership attack has incoherent permanent identity"
+                                .to_string(),
+                        ));
+                    }
+                    ResolvedCombatMembershipEdit::Remove {
+                        expected_participation,
+                    } if !expected_participation.is_coherent(command.object.object_id) => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership removal has incoherent attack authority".to_string(),
+                        ));
+                    }
                     // CR 509.1a: a creature is chosen to block an attacking
                     // creature, which is never itself.
                     ResolvedCombatMembershipEdit::Block {
@@ -3407,10 +3522,19 @@ impl ResolvedRulesJournal {
                             "combat-membership removal prunes no combat role".to_string(),
                         ));
                     }
+                    // CR 506.4: a retirement that ends no relation never happened.
+                    ResolvedCombatMembershipEdit::RetireAttacked {
+                        expected_attacked_by,
+                    } if expected_attacked_by.is_empty() => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership retirement ends no attacked relation".to_string(),
+                        ));
+                    }
                     ResolvedCombatMembershipEdit::Attack { .. }
                     | ResolvedCombatMembershipEdit::Block { .. }
                     | ResolvedCombatMembershipEdit::MarkBlocked
-                    | ResolvedCombatMembershipEdit::Remove { .. } => {}
+                    | ResolvedCombatMembershipEdit::Remove { .. }
+                    | ResolvedCombatMembershipEdit::RetireAttacked { .. } => {}
                 }
             }
             ResolvedRulesCommand::ControllerOverride(command) => {
@@ -3672,7 +3796,7 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
         || record.turn_zone_change_index != command.turn_zone_change_index
         || (changes_incarnation && command.resulting_incarnation <= command.object.incarnation)
         || (!changes_incarnation && command.resulting_incarnation != command.object.incarnation)
-        || (command.to == Zone::Battlefield) != command.entry_timestamp.is_some()
+        || command.validate_timestamp_operands().is_err()
         || (command.to == Zone::Battlefield
             && record.entered_incarnation != Some(command.resulting_incarnation))
         || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())

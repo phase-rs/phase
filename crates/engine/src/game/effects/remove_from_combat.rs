@@ -116,7 +116,9 @@ pub fn remove_object_from_combat(
     oid: crate::types::identifiers::ObjectId,
 ) -> bool {
     // CR 733: read the exact roles being pruned BEFORE the prune, so the journal
-    // records what this removal actually did. An object holding no combat role
+    // records what this removal actually did, including exact outgoing and
+    // incoming attacked-permanent edges. Capture once, before structural prune.
+    // An object holding no combat role
     // prunes nothing and is not recorded. A blocking creature none of whose
     // attackers remain still holds a role (CR 509.1g), so it is recorded too.
     let participation = CombatParticipation::capture(state, oid);
@@ -238,6 +240,150 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// CR 506.4c: a recipient's phase-out retires edges, not its attackers.
+    #[test]
+    fn recipient_phase_out_and_return_do_not_revive_incoming_edges() {
+        use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+        use crate::types::card_type::CoreType;
+        use crate::types::resolved_commands::{ResolvedCombatMembershipEdit, ResolvedRulesCommand};
+        for battle in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let attacker = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Attacker".to_string(),
+                Zone::Battlefield,
+            );
+            let recipient = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Recipient".to_string(),
+                Zone::Battlefield,
+            );
+            let bystander = create_object(
+                &mut state,
+                CardId(3),
+                PlayerId(1),
+                "Bystander".to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&attacker)
+                .unwrap()
+                .card_types
+                .core_types = vec![CoreType::Creature];
+            state
+                .objects
+                .get_mut(&recipient)
+                .unwrap()
+                .card_types
+                .core_types = vec![if battle {
+                CoreType::Battle
+            } else {
+                CoreType::Planeswalker
+            }];
+            let selected = if battle {
+                AttackTarget::Battle(recipient)
+            } else {
+                AttackTarget::Planeswalker(recipient)
+            };
+            let pin = crate::game::combat::bind_attack_target(&state, selected).unwrap();
+            let mut info = AttackerInfo::new(attacker, selected, PlayerId(1));
+            info.blocked = true;
+            state.combat = Some(CombatState {
+                attackers: vec![info.clone()],
+                attacked_permanents: std::iter::once((attacker, pin)).collect(),
+                blocker_assignments: std::iter::once((attacker, vec![bystander])).collect(),
+                blocker_to_attacker: std::iter::once((bystander, vec![attacker])).collect(),
+                ..Default::default()
+            });
+            assert_eq!(
+                info.resolve_damage_target(&state, false),
+                Some(crate::game::combat::DamageTarget::Object(recipient))
+            );
+            assert_eq!(
+                CombatParticipation::capture(&state, recipient).attacked_by,
+                vec![attacker]
+            );
+            let before = state.clone();
+            assert_eq!(
+                crate::game::phasing::phase_out_object(
+                    &mut state,
+                    recipient,
+                    PhaseOutCause::Directly,
+                    &mut Vec::new()
+                ),
+                vec![recipient]
+            );
+            assert!(state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanents
+                .is_empty());
+            assert_eq!(state.combat.as_ref().unwrap().attackers, vec![info.clone()]);
+            assert_eq!(
+                state.combat.as_ref().unwrap().blocker_assignments,
+                before.combat.as_ref().unwrap().blocker_assignments
+            );
+            assert_eq!(
+                state.combat.as_ref().unwrap().blocker_to_attacker,
+                before.combat.as_ref().unwrap().blocker_to_attacker
+            );
+            let command = state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry.command.as_ref() {
+                    Some(ResolvedRulesCommand::CombatMembership(command))
+                        if command.object.object_id == recipient
+                            && matches!(
+                                &command.edit,
+                                ResolvedCombatMembershipEdit::Remove { .. }
+                            ) =>
+                    {
+                        Some(command.clone())
+                    }
+                    _ => None,
+                })
+                .expect("phase-out journals the incoming-edge removal");
+            // Phasing sets its phase flag before calling the shared removal
+            // authority, so replay compares the exact pre-prune graph there.
+            let mut replay = before;
+            replay.objects.get_mut(&recipient).unwrap().phase_status = PhaseStatus::PhasedOut {
+                cause: PhaseOutCause::Directly,
+            };
+            crate::game::combat::apply_resolved_combat_membership(&mut replay, &command).unwrap();
+            assert_eq!(replay.combat, state.combat);
+            assert_eq!(info.resolve_damage_target(&state, false), None);
+            crate::game::phasing::phase_in_object(&mut state, recipient, &mut Vec::new());
+            assert!(pin.is_current(&state));
+            assert!(state
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanents
+                .is_empty());
+            assert_eq!(info.resolve_damage_target(&state, false), None);
+            assert_eq!(
+                info.resolve_damage_target(&state, true),
+                if battle {
+                    None
+                } else {
+                    Some(crate::game::combat::DamageTarget::Player(PlayerId(1)))
+                }
+            );
+            assert!(
+                !remove_object_from_combat(&mut state, recipient),
+                "repeated recipient removal is a no-op"
+            );
+        }
     }
 
     #[test]

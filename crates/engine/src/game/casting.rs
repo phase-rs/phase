@@ -3283,6 +3283,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -24704,7 +24705,9 @@ fn find_eligible_hand_cost_targets(
 ) -> Vec<ObjectId> {
     let effective_filter = super::cost_payability::cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .players
@@ -24800,7 +24803,9 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
             find_eligible_hand_cost_targets(state, player, source, granting_object, filter_ref)
         }
         ExileCostSourceZone::Graveyard => {
-            let ctx = super::filter::FilterContext::from_source(state, source)
+            // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+            // activated ability).
+            let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
                 .with_granting_object(granting_object);
             state
                 .players
@@ -24838,7 +24843,9 @@ pub(crate) fn find_eligible_unattach_for_cost_targets(
     filter: &TargetFilter,
     n: u32,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .battlefield
@@ -25135,7 +25142,9 @@ pub(crate) fn find_eligible_return_to_hand_targets(
     granting_object: Option<ObjectIncarnationRef>,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .battlefield
@@ -25193,7 +25202,9 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
     counter_type: &crate::types::counter::CounterMatch,
     count: u32,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .battlefield
@@ -25220,7 +25231,9 @@ pub(super) fn find_eligible_tap_creatures_for_cost(
     cost: &AbilityCost,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     let exclude_source = requires_untapped(cost);
     state
@@ -28736,6 +28749,14 @@ fn activate_with_cost_carrier(
         Err(error) => return Err(error),
     };
 
+    // CR 601.2c + CR 602.2b: the ability's cross-target constraints ("from a
+    // single graveyard") bind the whole target set it declares, whether its
+    // targets are chosen now, before any cost, or after an X announcement that
+    // sets how many it has (`deferred_target_selection`). Stated once and
+    // carried onto every target-bearing pending activation built below, as the
+    // modal sibling (`engine_modes::route_activated_modes`) carries its modes'.
+    let target_constraints = ability_def.target_constraints.clone();
+
     // CR 602.2b + CR 601.2b-i: announcement-only choices are resolved before
     // entering the shared target-before-cost boundary below.
     if let Some(ref cost) = activation_cost {
@@ -28773,6 +28794,7 @@ fn activate_with_cost_carrier(
             );
             pending_x.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_x.activation_cost = remaining;
+            pending_x.target_constraints = target_constraints;
             pending_x.deferred_target_selection = has_effect_targets;
             // CR 601.2g + CR 601.2h: if a non-self battlefield-removal sub-cost
             // (Sacrifice / battlefield Exile / ReturnToHand) is still
@@ -28817,6 +28839,7 @@ fn activate_with_cost_carrier(
             );
             pending_x.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_x.activation_cost = remaining;
+            pending_x.target_constraints = target_constraints;
             pending_x.deferred_target_selection = has_effect_targets;
             // CR 601.2f + CR 601.2h: POSITIVE signal — the residual non-mana tail
             // in `activation_cost` is still OUTSTANDING after mana payment, so
@@ -29410,7 +29433,6 @@ fn activate_with_cost_carrier(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        let target_constraints = ability_def.target_constraints.clone();
         if let Some(targets) =
             auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
@@ -31014,6 +31036,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -31063,6 +31086,11 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::DistinctFrom { reference: filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // whether it reads a chosen target is exactly whether that filter does.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => target_filter_reads_chosen_target(filter, read),
         FilterProp::SharesQuality { reference, .. } => reference
             .as_deref()
             .is_some_and(|x| target_filter_reads_chosen_target(x, read)),

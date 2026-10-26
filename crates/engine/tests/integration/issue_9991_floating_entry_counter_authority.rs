@@ -5,8 +5,8 @@
 //! CR 608.2h: source information must come from the specified object.
 //! CR 614.12: replacements modify how a permanent enters the battlefield.
 //! CR 616.1: the affected object's controller chooses among replacements.
-//! These fixtures keep source information unchanged between trigger and entry;
-//! resolution-time X snapshots and last-known information are separate work.
+//! Floating quantities are fixed when the installing trigger resolves; entering
+//! object quantities retain their entry-time context.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
@@ -73,7 +73,7 @@ fn make_p1_active(runner: &mut GameRunner) {
     state.waiting_for = WaitingFor::Priority { player: P1 };
 }
 
-fn assert_resolved(state: &GameState, expected: u32, sources: &[ObjectId]) {
+fn assert_entry_complete(state: &GameState, expected: u32) {
     let entrant = state
         .objects
         .values()
@@ -88,6 +88,16 @@ fn assert_resolved(state: &GameState, expected: u32, sources: &[ObjectId]) {
             .unwrap_or(0),
         expected
     );
+    assert_eq!(state.stack.len(), 0, "the entire stack must resolve");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "resolution must finish at Priority, got {:?}",
+        state.waiting_for
+    );
+}
+
+fn assert_resolved(state: &GameState, expected: u32, sources: &[ObjectId]) {
+    assert_entry_complete(state, expected);
     assert_eq!(state.pending_damage_replacements.len(), sources.len());
     for rider in &state.pending_damage_replacements {
         assert!(rider.is_consumed, "every installed rider must have applied");
@@ -105,12 +115,6 @@ fn assert_resolved(state: &GameState, expected: u32, sources: &[ObjectId]) {
     actual.sort();
     expected_sources.sort();
     assert_eq!(actual, expected_sources);
-    assert_eq!(state.stack.len(), 0, "the entire stack must resolve");
-    assert!(
-        matches!(state.waiting_for, WaitingFor::Priority { .. }),
-        "resolution must finish at Priority, got {:?}",
-        state.waiting_for
-    );
 }
 
 #[test]
@@ -216,6 +220,7 @@ fn r4_preservation_p1_runadi_uses_the_entrants_mana_value() {
     scenario.at_phase(Phase::PreCombatMain);
     let runadi = scenario
         .add_creature_from_oracle(P1, "Runadi, Behemoth Caller", 1, 3, RUNADI)
+        .with_mana_cost(ManaCost::generic(3))
         .id();
     let spell = add_spell(&mut scenario, P1, 6);
     let mut runner = scenario.build();
@@ -243,6 +248,13 @@ fn r5_preservation_archaic_uses_colors_spent_on_the_entrant() {
     let spell = add_spell(&mut scenario, P0, 0);
     let mut runner = scenario.build();
     assert_cast_trigger(&runner, archaic);
+    assert_eq!(
+        runner.state().objects[&archaic]
+            .colors_spent_to_cast
+            .distinct_colors(),
+        0,
+        "the pre-existing source's payment facts differ from the entrant's"
+    );
 
     let commit = runner.cast(spell).commit();
     let cast = commit
@@ -261,3 +273,136 @@ fn r5_preservation_archaic_uses_colors_spent_on_the_entrant() {
     ));
     assert_resolved(outcome.state(), 2, &[archaic]);
 }
+
+// Synthetic response spell: change counters through a production cast, without
+// changing the parsed Communal Brewing trigger under test.
+fn ingredient_response(scenario: &mut GameScenario, brewing: ObjectId) -> ObjectId {
+    use engine::types::ability::{Effect, QuantityExpr, TargetFilter};
+    scenario
+        .add_spell_to_hand(P0, "Ingredient response", true)
+        .with_mana_cost(ManaCost::zero())
+        .with_ability(Effect::PutCounter {
+            counter_type: CounterType::Generic("ingredient".to_string()),
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SpecificObject { id: brewing },
+        })
+        .id()
+}
+
+fn departure_response(scenario: &mut GameScenario) -> ObjectId {
+    // Naturalize, verbatim Oracle. Cost is waived only by the fixture.
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Naturalize",
+            true,
+            "Destroy target artifact or enchantment.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id()
+}
+
+fn commit_brewing_creature(runner: &mut GameRunner, brewing: ObjectId, spell: ObjectId) {
+    assert_cast_trigger(runner, brewing);
+    runner.cast(spell).commit();
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().stack.len(), 2, "creature and cast trigger");
+}
+
+fn resolve_brewing_trigger(runner: &mut GameRunner) {
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1, "creature still waiting");
+    assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    assert!(runner.state().current_trigger_event.is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn brewing_ingredient_growth_before_trigger_resolution_is_counted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brewing = add_brewing(&mut scenario, P0, 3);
+    let spell = add_spell(&mut scenario, P0, 0);
+    let response = ingredient_response(&mut scenario, brewing);
+    let mut runner = scenario.build();
+    commit_brewing_creature(&mut runner, brewing, spell);
+    runner.cast(response).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 2);
+    assert_eq!(
+        runner.state().objects[&brewing].counters[&CounterType::Generic("ingredient".into())],
+        4
+    );
+    // CR 611.2d + CR 608.2h: X uses information at trigger resolution.
+    runner.advance_until_stack_empty();
+    assert_resolved(runner.state(), 4, &[brewing]);
+}
+
+#[test]
+fn brewing_ingredient_growth_after_trigger_resolution_is_not_counted() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brewing = add_brewing(&mut scenario, P0, 3);
+    let spell = add_spell(&mut scenario, P0, 0);
+    let response = ingredient_response(&mut scenario, brewing);
+    let mut runner = scenario.build();
+    commit_brewing_creature(&mut runner, brewing, spell);
+    resolve_brewing_trigger(&mut runner);
+    runner.cast(response).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(
+        runner.state().objects[&brewing].counters[&CounterType::Generic("ingredient".into())],
+        4
+    );
+    // CR 611.2d: the installed effect retains the already determined X.
+    runner.advance_until_stack_empty();
+    assert_resolved(runner.state(), 3, &[brewing]);
+}
+
+#[test]
+fn brewing_departure_after_trigger_resolution_preserves_three() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brewing = add_brewing(&mut scenario, P0, 3);
+    let spell = add_spell(&mut scenario, P0, 0);
+    let naturalize = departure_response(&mut scenario);
+    let mut runner = scenario.build();
+    commit_brewing_creature(&mut runner, brewing, spell);
+    resolve_brewing_trigger(&mut runner);
+    runner.cast(naturalize).target_object(brewing).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&brewing].zone, Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 1);
+    // CR 113.7a + CR 611.2d: source departure cannot change the installed X.
+    runner.advance_until_stack_empty();
+    assert_resolved(runner.state(), 3, &[brewing]);
+}
+
+#[test]
+fn brewing_departure_before_trigger_resolution_preserves_unchanged_three() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let brewing = add_brewing(&mut scenario, P0, 3);
+    let spell = add_spell(&mut scenario, P0, 0);
+    let naturalize = departure_response(&mut scenario);
+    let mut runner = scenario.build();
+    commit_brewing_creature(&mut runner, brewing, spell);
+    runner.cast(naturalize).target_object(brewing).commit();
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&brewing].zone, Zone::Graveyard);
+    assert_eq!(runner.state().stack.len(), 2);
+    // CR 113.7a + CR 608.2h: the independent trigger uses source information.
+    runner.advance_until_stack_empty();
+    assert_entry_complete(runner.state(), 3);
+    assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    assert!(runner.state().pending_damage_replacements[0].is_consumed);
+}
+
+// Known source-quantity limitation (probed through production casts): if the
+// ingredient count changes from 3 to 4 after triggering and Brewing then leaves
+// before resolution, the trigger's source snapshot still supplies 3 rather than
+// departure-time 4. Fixing that source/LKI authority is outside this install seam.

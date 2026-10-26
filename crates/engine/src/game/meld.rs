@@ -509,6 +509,10 @@ fn commit_final_attack_status(
     attack_target: Option<AttackTarget>,
 ) {
     if let Some(combat_state) = state.combat.as_mut() {
+        combat_state.attacked_permanents.remove(&context.source_id);
+        combat_state
+            .attacked_permanent_kinds
+            .remove(&context.source_id);
         combat_state
             .attackers
             .retain(|attacker| attacker.object_id != context.source_id);
@@ -521,7 +525,13 @@ fn commit_final_attack_status(
     else {
         return;
     };
+    let pin = combat::bind_attack_target(state, target);
     if let Some(combat_state) = state.combat.as_mut() {
+        if let Some(pin) = pin {
+            combat_state
+                .attacked_permanents
+                .insert(context.source_id, pin);
+        }
         combat_state.attackers.push(AttackerInfo::new(
             context.source_id,
             target,
@@ -529,6 +539,8 @@ fn commit_final_attack_status(
         ));
         state.layers_dirty.mark_full();
     }
+    // CR 506.4: the new pin's kinds are the baseline for later type changes.
+    combat::record_attacked_kinds(state, context.source_id);
 }
 
 fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mut Vec<GameEvent>) {
@@ -553,16 +565,8 @@ fn finalize_meld_entry_snapshot(
     events: &mut Vec<GameEvent>,
 ) {
     let source_id = context.source_id;
-    let defending_player = attack_target.and_then(|target| {
-        state.objects.get(&source_id).and_then(|object| {
-            combat::entry_attack_target_defender(state, object.controller, target)
-        })
-    });
-    let combat_status = crate::types::game_state::ZoneChangeCombatStatus {
-        attacking: defending_player.is_some(),
-        defending_player,
-        ..Default::default()
-    };
+    let _ = attack_target;
+    let combat_status = crate::game::zones::capture_combat_status(state, source_id);
     refresh_meld_entry_records(state, source_id, combat_status, events);
 
     let replay_deferred_entry = !state.deferred_entry_events.is_empty();
