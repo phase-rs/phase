@@ -6,7 +6,6 @@
 //! fired. If this probe ever reads the correct total instead, plan G.2's
 //! rejection is falsified — PR C re-plans and PR B stands unchanged.
 
-use engine::game::effects::roll_die::resume_after_ignore;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::parse_oracle_text;
@@ -731,19 +730,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         keyed_target_incarnations: vec![],
         declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![15],
@@ -806,19 +793,7 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         keyed_target_incarnations: vec![],
         declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![10],
@@ -909,19 +884,7 @@ fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
         keyed_target_incarnations: vec![],
         declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![12],
@@ -1007,19 +970,7 @@ fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
         keyed_target_incarnations: vec![],
         declared_player: None,
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![12],
@@ -1077,19 +1028,7 @@ fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
         keyed_target_incarnations: vec![],
         declared_player: None,
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![10],
@@ -1156,19 +1095,7 @@ fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
         keyed_target_incarnations: vec![],
         declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![15],
@@ -1260,19 +1187,7 @@ fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
         keyed_target_incarnations: vec![],
         declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Undeclared),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![12],
@@ -1369,19 +1284,7 @@ fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
         keyed_target_incarnations: vec![],
         declared_player: None,
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![15],
@@ -1450,19 +1353,7 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
             engine::game::scenario::P1,
         )),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![12],
@@ -1544,19 +1435,7 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
         keyed_target_incarnations: vec![],
         declared_player: Some(engine::game::filter::DeclaredPlayerTarget::Legal(P1)),
     };
-    let mut events = Vec::new();
-    resume_after_ignore(&mut state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    let rolls: Vec<u8> = events
-        .iter()
-        .filter_map(|event| match event {
-            GameEvent::DieRolled {
-                result: Some(total),
-                ..
-            } => Some(*total),
-            _ => None,
-        })
-        .collect();
+    let rolls = resumed_die_totals(&mut state, pending);
     assert_eq!(
         rolls,
         vec![6],
@@ -2259,10 +2138,29 @@ fn opponent_power_sum_modifier() -> DieRollModifier {
 
 /// Drive `pending` through the real resume entry and collect emitted totals.
 fn resumed_die_totals(state: &mut GameState, pending: PendingDieRoll) -> Vec<u8> {
-    let mut events = Vec::new();
-    resume_after_ignore(state, pending, Vec::new(), &mut events, None)
-        .expect("resuming the parked roll must not error");
-    events
+    // Production resume: park the crafted frame on the resolution stack and
+    // answer the keep prompt through the public action path, ignoring nothing.
+    // Every fixture stages an empty forced set, so the production
+    // forced-union is a no-op and this reads exactly the direct-resume path.
+    let roller = pending.roller;
+    let results = pending.results.clone();
+    state.push_die_roll_frame(pending);
+    state.waiting_for = WaitingFor::DieKeepChoice {
+        player: roller,
+        results,
+        ignorable_indices: Vec::new(),
+        ignore_count: 0,
+    };
+    let outcome = engine::game::engine::apply(
+        state,
+        roller,
+        GameAction::SelectDieRolls {
+            ignore_indices: Vec::new(),
+        },
+    )
+    .expect("resuming the parked roll must not error");
+    outcome
+        .events
         .iter()
         .filter_map(|event| match event {
             GameEvent::DieRolled {
