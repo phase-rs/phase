@@ -2,10 +2,13 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{GameRestriction, PreventionAmount, ShieldKind, TargetRef};
+use engine::types::ability::{
+    AbilityCondition, AbilityCost, Effect, GameRestriction, PreventionAmount, ShieldKind,
+    TapCreaturesRequirement, TapCreaturesSelectionMode, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, CostResume, PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -632,14 +635,14 @@ fn still_resolving_trigger_runtime_population() {
     upkeep_population(" This ability still resolves if its target becomes illegal.");
 }
 
-fn split_reflexive_population(change_controller: bool) {
+fn in_chain_reflexive_clause_population(change_controller: bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::Untap);
     let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
     let source = scenario
         .add_creature_from_oracle(
             P0,
-            "Split Reflexive Population Probe",
+            "In-chain Reflexive Population Probe",
             0,
             9,
             &format!(
@@ -715,6 +718,156 @@ fn split_reflexive_population(change_controller: bool) {
     }
     runner.advance_until_stack_empty();
     // CR 608.2h: determine the population using current information on resolution.
+    let (hit, spared) = if change_controller {
+        (own_peer, opposing_peer)
+    } else {
+        (opposing_peer, own_peer)
+    };
+    assert_ability_population(&runner, target, hit, spared);
+    assert_eq!(
+        runner.state().objects[&source].damage_marked,
+        u32::from(change_controller)
+    );
+}
+
+#[test]
+fn in_chain_reflexive_clause_runtime_population() {
+    // oracle_trigger.rs:2054: mana payment stays in the plain effect-chain body;
+    // split_reflexive_optional_payment rejects a standalone mana cost.
+    in_chain_reflexive_clause_population(false);
+}
+
+#[test]
+fn in_chain_reflexive_clause_reads_current_controller_on_resolution() {
+    in_chain_reflexive_clause_population(true);
+}
+
+fn split_reflexive_population(change_controller: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    let [target, own_peer, opposing_peer] = ability_population(&mut scenario);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Split Reflexive Population Probe",
+            0,
+            9,
+            &format!(
+                "At the beginning of your upkeep, you may tap two untapped creatures you control. When you do, {ABILITY_DAMAGE}"
+            ),
+        )
+        .id();
+    let ray = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ray of Command", true, RAY)
+        .with_mana_cost(cost(vec![ManaCostShard::Blue], 3))
+        .id();
+    let mut runner = scenario.build();
+
+    // SHAPE reach guard: this is the split PayCost parent and reflexive child,
+    // not an optional clause lowered through the plain effect-chain branch.
+    let triggers = &runner.state().objects[&source].trigger_definitions;
+    assert_eq!(triggers.len(), 1);
+    let parent = triggers[0]
+        .definition
+        .execute
+        .as_deref()
+        .expect("upkeep payment parent");
+    assert!(matches!(
+        parent.effect.as_ref(),
+        Effect::PayCost {
+            cost: AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::Count { count: 2 },
+                ..
+            },
+            ..
+        }
+    ));
+    assert!(matches!(
+        parent
+            .sub_ability
+            .as_deref()
+            .expect("split reflexive child")
+            .condition,
+        Some(AbilityCondition::WhenYouDo)
+    ));
+
+    runner.advance_to_upkeep();
+    assert_eq!(runner.state().phase, Phase::Upkeep);
+    assert_eq!(runner.state().stack.len(), 1, "only the parent is stacked");
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source
+        ),
+        "the parent offers its optional cost before announcing any target: {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept the parent's tap payment");
+    let WaitingFor::PayCost {
+        player,
+        kind,
+        choices,
+        count,
+        min_count,
+        resume,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected resolution tap payment, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        *kind,
+        PayCostKind::TapCreatures {
+            mode: TapCreaturesSelectionMode::Fixed
+        }
+    );
+    assert!(matches!(resume, CostResume::Resolution));
+    assert_eq!((*count, *min_count), (2, 2));
+    assert!(choices.contains(&source) && choices.contains(&own_peer));
+    assert!(!runner.state().objects[&source].tapped);
+    assert!(!runner.state().objects[&own_peer].tapped);
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![source, own_peer],
+        })
+        .expect("pay by tapping the two selected creatures");
+    assert!(runner.state().objects[&source].tapped);
+    assert!(runner.state().objects[&own_peer].tapped);
+    assert_eq!(
+        runner.state().objects[&target].damage_marked,
+        0,
+        "payment does not resolve the reflexive damage"
+    );
+    // CR 603.12 + CR 603.3d: only after the parent resolves does its separate
+    // reflexive trigger go on the stack and announce its creature target.
+    choose_trigger_population_target(&mut runner, source, target);
+    if change_controller {
+        add_mana(&mut runner, P0, ManaType::Blue, 4);
+        priority(&mut runner, P0);
+        let _ = runner.cast(ray).target_object(target).commit();
+        runner.resolve_top();
+        assert_eq!(runner.state().objects[&ray].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&target].controller, P0);
+        assert_eq!(runner.state().objects[&target].owner, P1);
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the reflexive trigger waits below Ray"
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+    runner.advance_until_stack_empty();
+    // CR 608.2h: read the target's current controller when applying the damage.
     let (hit, spared) = if change_controller {
         (own_peer, opposing_peer)
     } else {
