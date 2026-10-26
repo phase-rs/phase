@@ -2292,6 +2292,13 @@ fn synthetic_departure_die_midloop_replays_its_scope_after_restore() {
                 run.act(GameAction::SelectDieRolls {
                     ignore_indices: vec![0],
                 });
+                // CR 608.2c: the keep handler hands the re-parked frame's live
+                // survivor value back instead of the entry value it replayed over.
+                assert_eq!(
+                    run.runner.state().die_result_this_resolution,
+                    Some(1),
+                    "{ingress:?}"
+                );
             } else {
                 run.until(|state| matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }));
             }
@@ -2306,6 +2313,13 @@ fn synthetic_departure_die_midloop_replays_its_scope_after_restore() {
             assert_eq!(player, P0);
             let card = run.runner.state().players[0].hand[0];
             run.act(GameAction::SelectCards { cards: vec![card] });
+            // CR 608.2c: the mid-loop drain leaves the completed aggregate live for
+            // the parent's later instructions, not the pre-drain scalar.
+            assert_eq!(
+                run.runner.state().die_result_this_resolution,
+                Some(3),
+                "{ingress:?}, keep={extra_die}"
+            );
             run.finish();
             assert_eq!(run.runner.state().players[0].life, 43);
             assert_eq!(
