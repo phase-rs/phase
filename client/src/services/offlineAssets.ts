@@ -1,4 +1,4 @@
-import { EngineModuleReloadRequiredError } from "../adapter/main-thread-engine.ts";
+import { EngineModuleReloadRequiredError } from "../adapter/types.ts";
 import { getSharedAdapter } from "../adapter/wasm-adapter.ts";
 import { loadScryfallData } from "./scryfall.ts";
 import { loadPreconDeckMap } from "../hooks/useDecks.ts";

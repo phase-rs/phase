@@ -244,7 +244,7 @@ describe("prepareOfflineAssets", () => {
   });
 
   it("reports reload-required alongside independent failures", async () => {
-    const { EngineModuleReloadRequiredError } = await import("../../adapter/main-thread-engine.ts");
+    const { EngineModuleReloadRequiredError } = await import("../../adapter/types.ts");
     dependencies.warmCardDatabase.mockRejectedValue(new EngineModuleReloadRequiredError(new Error("import failed")));
     dependencies.loadScryfallData.mockResolvedValue(null);
     const { prepareOfflineAssets } = await loadOfflineAssets();

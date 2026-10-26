@@ -8,25 +8,11 @@
  * worker are the only runtime importers.
  */
 import type { EngineModule } from "./engine-queries";
+import { EngineModuleReloadRequiredError } from "./types";
 
 let engineModulePromise: Promise<EngineModule> | null = null;
 let wasmInitPromise: Promise<void> | null = null;
 let cardDbPromise: Promise<number> | null = null;
-
-/**
- * A browser's module map retains failed dynamic imports for the document
- * lifetime. Retrying this requires a page reload, unlike WASM initialization
- * and card-data loading failures.
- */
-export class EngineModuleReloadRequiredError extends Error {
-  readonly cause: unknown;
-
-  constructor(cause: unknown) {
-    super("The engine module failed to load; reload the page to retry.");
-    this.name = "EngineModuleReloadRequiredError";
-    this.cause = cause;
-  }
-}
 
 export async function loadEngineModule(): Promise<EngineModule> {
   if (!engineModulePromise) {

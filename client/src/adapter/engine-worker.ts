@@ -265,6 +265,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
         const text = await resp.text();
         const count = load_card_database(text);
+        if (count <= 0) throw new Error("Failed to load card-data.json (no cards loaded)");
         cardDbLoaded = true;
         result(msg.id, count);
         break;

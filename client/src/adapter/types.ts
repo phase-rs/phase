@@ -4839,6 +4839,21 @@ export class AdapterError extends Error {
   }
 }
 
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
+  }
+}
+
 /** Error codes for AdapterError */
 export const AdapterErrorCode = {
   NOT_INITIALIZED: "NOT_INITIALIZED",

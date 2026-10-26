@@ -61,11 +61,13 @@ describe("main-thread fallback engine initialization", () => {
       throw importFailure;
     });
     const runtime = await loadRuntime(engineFactory, { rejectImport: true });
+    // Same module graph as `runtime`, which `loadRuntime` just reset.
+    const { EngineModuleReloadRequiredError } = await import("../types");
 
     const firstError = await runtime.ensureWasmInit().catch((error: unknown) => error);
     const secondError = await runtime.ensureWasmInit().catch((error: unknown) => error);
 
-    expect(firstError).toBeInstanceOf(runtime.EngineModuleReloadRequiredError);
+    expect(firstError).toBeInstanceOf(EngineModuleReloadRequiredError);
     expect(secondError).toBe(firstError);
     expect(engineFactory).toHaveBeenCalledOnce();
   });
