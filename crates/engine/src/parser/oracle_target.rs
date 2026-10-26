@@ -11,10 +11,11 @@ use nom::Parser;
 use crate::types::ability::{
     AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
     CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ControllerRef,
-    CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet, ObjectProperty,
-    ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate, PtStat,
-    PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality, SharedQualityRelation,
-    TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
+    CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet,
+    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -7834,19 +7835,22 @@ pub(crate) fn parse_cost_paid_object_noun(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// CR 608.2k + CR 701.9a: "the discarded <noun>" / "the sacrificed <noun>" —
-/// an untargeted reference to the object discarded or sacrificed to pay this
-/// ability's cost. Both participles are always cost participles here.
-pub(crate) fn parse_cost_paid_participle_object(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        (
-            opt(tag("the ")),
-            alt((tag("discarded "), tag("sacrificed "))),
-            parse_cost_paid_object_noun,
-        ),
-    )
-    .parse(input)
+/// CR 608.2k + CR 701.9a + CR 701.21a: "the discarded <noun>" / "the
+/// sacrificed <noun>", returning the `CostCategory` of the cost that would
+/// have paid for the object (`Discards` / `SacrificesPermanent`). The phrase
+/// alone does not prove a cost: the same participles describe an effect's
+/// discard or sacrifice. A reader that binds the phrase to the cost-paid
+/// object verifies the returned category against the enclosing ability's
+/// cost (`ParseContext::current_ability_cost_categories`).
+pub(crate) fn parse_cost_paid_participle_object(input: &str) -> OracleResult<'_, CostCategory> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, category) = alt((
+        value(CostCategory::Discards, tag("discarded ")),
+        value(CostCategory::SacrificesPermanent, tag("sacrificed ")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_object_noun(rest)?;
+    Ok((rest, category))
 }
 
 fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
@@ -8838,19 +8842,39 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
 /// table, which keeps "the exiled card" → `TrackedSet` for the common
 /// effect-exile case.
-pub(crate) fn parse_cost_paid_object_reference<'a>(
+fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
-    let (rest, _) = opt(tag("the ")).parse(input)?;
+    value(
+        TargetFilter::CostPaidObject,
+        alt((
+            value(
+                (),
+                (
+                    opt(tag("the ")),
+                    tag::<_, _, OracleError<'_>>("sacrificed "),
+                    parse_cost_paid_object_noun,
+                ),
+            ),
+            |i| parse_exile_cost_paid_object(i, ctx),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 608.2k: "the exiled <noun>" as a cost participle — accepted ONLY when
+/// the enclosing ability carries a non-self exile cost
+/// (`ctx.current_ability_exile_cost_zone`); otherwise `nom::Err::Error`, since
+/// "exiled" then describes an effect's exile.
+pub(crate) fn parse_exile_cost_paid_object<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, ()> {
     let exile_is_cost = ctx.current_ability_exile_cost_zone.is_some();
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("sacrificed "),
-        nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost),
-    ))
-    .parse(rest)?;
-    let (rest, _) = parse_cost_paid_object_noun(rest)?;
-    Ok((rest, TargetFilter::CostPaidObject))
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost).parse(rest)?;
+    parse_cost_paid_object_noun(rest)
 }
 
 /// CR 400.7: The origin zone named by a "put there from <zone>" provenance

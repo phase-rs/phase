@@ -79,6 +79,32 @@ fn chain_has_unimplemented(def: &AbilityDefinition) -> bool {
             .is_some_and(chain_has_unimplemented)
 }
 
+fn condition_has_share_quality(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::ObjectsShareQuality { .. } => true,
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_has_share_quality)
+        }
+        AbilityCondition::Not { condition } => condition_has_share_quality(condition),
+        _ => false,
+    }
+}
+
+/// Whether any node of the chain is gated by an `ObjectsShareQuality`.
+fn chain_has_share_quality(def: &AbilityDefinition) -> bool {
+    def.condition
+        .as_ref()
+        .is_some_and(condition_has_share_quality)
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_has_share_quality)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(chain_has_share_quality)
+}
+
 // ---------------------------------------------------------------------------
 // Counterbalance
 // ---------------------------------------------------------------------------
@@ -278,6 +304,81 @@ fn counterbalance_lowers_to_a_reflexive_and_same_quality_gate() {
             ],
         })
     );
+}
+
+/// The Counterbalance trigger's lowered reveal and counter nodes for `text`.
+fn counterbalance_shaped_trigger_nodes(text: &str) -> (AbilityDefinition, AbilityDefinition) {
+    let parsed = parse_oracle_text(
+        text,
+        "Counterbalance",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::SpellCast)
+        .expect("spell-cast trigger");
+    let execute = trigger.execute.as_deref().expect("trigger execute").clone();
+    assert!(
+        matches!(*execute.effect, Effect::RevealTop { .. }) && execute.optional,
+        "reach guard: the trigger reveals optionally first, got {execute:#?}"
+    );
+    let counter = execute
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: a counter sub-ability follows the reveal")
+        .clone();
+    assert!(
+        matches!(*counter.effect, Effect::Counter { .. }),
+        "reach guard: the sub-ability counters, got {counter:#?}"
+    );
+    (execute, counter)
+}
+
+/// CR 118.12 + CR 603.12 + CR 608.2c: the rider is claimed under a reflexive
+/// connector only when the final condition can keep both. "If you do" composes
+/// (`And`, CB-AST). A negated reflexive ("If they don't") or a zone-change "if
+/// … this way" head does not compose, so the rider is left to the base
+/// lowering instead of displacing the connector, which still gates the
+/// counter. The sentences differ from the verbatim text only in the connector.
+#[test]
+fn same_quality_rider_is_claimed_only_under_a_composing_reflexive() {
+    let (_, composing) = counterbalance_shaped_trigger_nodes(COUNTERBALANCE);
+    assert!(
+        chain_has_share_quality(&composing),
+        "paired positive: \"If you do\" claims the rider, got {composing:#?}"
+    );
+
+    for connector in ["If they don't,", "If a card is exiled this way,"] {
+        let text = COUNTERBALANCE.replace("If you do,", connector);
+        assert_ne!(text, COUNTERBALANCE, "fixture: connector replaced");
+        let (reveal, counter) = counterbalance_shaped_trigger_nodes(&text);
+        assert!(
+            !chain_has_share_quality(&reveal),
+            "{connector} cannot compose with the rider, so it is not claimed: {reveal:#?}"
+        );
+        let kept = match connector {
+            "If they don't," => {
+                counter.condition
+                    == Some(AbilityCondition::Not {
+                        condition: Box::new(AbilityCondition::EffectOutcome {
+                            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                        }),
+                    })
+            }
+            _ => matches!(
+                counter.condition,
+                Some(AbilityCondition::ZoneChangedThisWay { .. })
+            ),
+        };
+        assert!(
+            kept,
+            "{connector} still gates the counter, got {:?}",
+            counter.condition
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,4 +642,52 @@ fn hisoka_lowers_to_a_cost_paid_same_quality_gate() {
     assert!(costs
         .iter()
         .any(|c| matches!(c, AbilityCost::Discard { .. })));
+}
+
+/// CR 608.2k: "the discarded card" names a cost-paid object only when the
+/// ability's cost discards. Here the discard is the effect's own first
+/// instruction and the cost is mana only, so the rider is not claimed as a
+/// `CostPaidObject` comparison (which would read no cost-paid object at
+/// resolution). Paired positive: Hisoka's verbatim text, whose cost discards,
+/// claims it (H-AST). The declined text keeps its base lowering; this row
+/// asserts only the non-claim.
+#[test]
+fn discarded_card_rider_without_a_discard_cost_is_not_a_cost_paid_reference() {
+    let types = ["Legendary".to_string(), "Creature".to_string()];
+    let subtypes = ["Human".to_string(), "Wizard".to_string()];
+    let hisoka = parse_oracle_text(HISOKA, "Hisoka, Minamo Sensei", &[], &types, &subtypes);
+    let hisoka_ability = hisoka
+        .abilities
+        .first()
+        .expect("Hisoka's activated ability");
+    assert!(
+        chain_has_share_quality(hisoka_ability),
+        "paired positive: a discard cost binds the rider, got {hisoka_ability:#?}"
+    );
+
+    let effect_discard = "{2}{U}: Discard a card, then counter target spell if it has the same mana value as the discarded card.";
+    let parsed = parse_oracle_text(
+        effect_discard,
+        "Hisoka, Minamo Sensei",
+        &[],
+        &types,
+        &subtypes,
+    );
+    let ability = parsed.abilities.first().expect("the activated ability");
+    assert!(
+        matches!(ability.cost, Some(AbilityCost::Mana { .. })),
+        "reach guard: the cost is mana only, got {:?}",
+        ability.cost
+    );
+    assert!(
+        ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|counter| matches!(*counter.effect, Effect::Counter { .. })),
+        "reach guard: the rider's counter clause was parsed, got {ability:#?}"
+    );
+    assert!(
+        !chain_has_share_quality(ability),
+        "an effect discard does not make \"the discarded card\" a cost-paid object: {ability:#?}"
+    );
 }

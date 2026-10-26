@@ -20,7 +20,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{
-    parse_cost_paid_object_reference, parse_cost_paid_participle_object, parse_shared_quality,
+    parse_cost_paid_participle_object, parse_exile_cost_paid_object, parse_shared_quality,
     parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
     parse_word_bounded, parse_zone_word, peek_zone_boundary, slot_matches_anaphor, slot_zone_class,
     AnaphorNoun, AnaphorZoneClass,
@@ -4138,11 +4138,15 @@ fn quality_reads_as_the_same(quality: &SharedQuality) -> bool {
 
 /// CR 701.20a + CR 608.2k: the closed set of single-object references a
 /// same-quality rider compares against. "the revealed card" is the card the
-/// ability revealed earlier (`LastRevealed`). A cost participle ("the
-/// discarded card", "the sacrificed creature", and "the exiled card" only when
-/// the ability has an exile cost) is the object paid for this ability's cost
-/// (`CostPaidObject`); a triggered ability has no cost, so cost participles are
-/// declined there. Any other phrase ("that card", "a permanent") is not owned.
+/// ability revealed earlier (`LastRevealed`). A cost participle is the object
+/// paid for this ability's cost (`CostPaidObject`) only when the ability's
+/// cost has that participle's action: "the discarded card" / "the sacrificed
+/// creature" need a discard / sacrifice cost
+/// (`ParseContext::current_ability_cost_categories`), "the exiled card" a
+/// non-self exile cost. Without such a cost the participle names an effect's
+/// action and is declined; a triggered ability has no cost, so cost
+/// participles are declined there too. Any other phrase ("that card", "a
+/// permanent") is not owned.
 fn parse_same_quality_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -4151,13 +4155,19 @@ fn parse_same_quality_reference<'a>(
         if ctx.in_trigger {
             return Err(oracle_err(i));
         }
-        alt((
-            value(
-                TargetFilter::CostPaidObject,
-                parse_cost_paid_participle_object,
-            ),
-            |i| parse_cost_paid_object_reference(i, ctx),
-        ))
+        value(
+            TargetFilter::CostPaidObject,
+            alt((
+                value(
+                    (),
+                    verify(parse_cost_paid_participle_object, |category| {
+                        // Typed `CostCategory` membership, not text dispatch.
+                        ctx.current_ability_cost_categories.contains(category)
+                    }),
+                ),
+                |i| parse_exile_cost_paid_object(i, ctx),
+            )),
+        )
         .parse(i)
     };
     alt((
@@ -9414,8 +9424,8 @@ mod tests {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CommanderOwnership, PlayerFilter, SharedQuality,
-        SharedQualityRelation,
+        AggregateFunction, CardTypeSetSource, CommanderOwnership, CostCategory, PlayerFilter,
+        SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
 
@@ -11617,7 +11627,16 @@ mod tests {
     /// instruction's declared target (`ParentTarget`).
     #[test]
     fn strip_same_quality_as_conditional_covers_quality_and_reference_axes() {
-        let ctx = ParseContext::default();
+        // An activated ability whose cost both discards and sacrifices, so
+        // every cost participle on the reference axis names a cost.
+        let ctx = ParseContext {
+            current_ability_cost_categories: vec![
+                CostCategory::ManaOnly,
+                CostCategory::Discards,
+                CostCategory::SacrificesPermanent,
+            ],
+            ..Default::default()
+        };
         for (quality_text, quality) in [
             ("name", SharedQuality::Name),
             ("mana value", SharedQuality::ManaValue),
@@ -11670,14 +11689,77 @@ mod tests {
         );
     }
 
+    /// CR 608.2k + CR 701.9a + CR 701.21a: "the discarded card" / "the
+    /// sacrificed creature" name the cost-paid object only when the enclosing
+    /// ability's cost discards / sacrifices. With a mana-only cost ("{2}{U}:
+    /// Discard a card, then counter target spell if …") the participle is an
+    /// effect's action and the rider is declined, text unchanged; a cost with
+    /// the other participle's category does not bind it either. The claimed
+    /// rows (the participle's own category in scope) are the reach guards for
+    /// the declines: the sentence and every other context field are identical.
+    #[test]
+    fn strip_same_quality_as_conditional_cost_participles_need_their_cost() {
+        for (reference_text, category, other_category) in [
+            (
+                "the discarded card",
+                CostCategory::Discards,
+                CostCategory::SacrificesPermanent,
+            ),
+            (
+                "the sacrificed creature",
+                CostCategory::SacrificesPermanent,
+                CostCategory::Discards,
+            ),
+        ] {
+            let text =
+                format!("Counter target spell if it has the same mana value as {reference_text}.");
+            let cost_ctx = |categories: Vec<CostCategory>| ParseContext {
+                current_ability_cost_categories: categories,
+                ..Default::default()
+            };
+
+            let (condition, body) = strip_same_quality_as_conditional(
+                &text,
+                &cost_ctx(vec![CostCategory::ManaOnly, category]),
+            );
+            assert_eq!(body, "Counter target spell", "{text}");
+            assert_eq!(
+                condition,
+                Some(AbilityCondition::ObjectsShareQuality {
+                    subject: TargetFilter::ParentTarget,
+                    reference: TargetFilter::CostPaidObject,
+                    quality: SharedQuality::ManaValue,
+                }),
+                "{text}"
+            );
+
+            for declining_ctx in [
+                ParseContext::default(),
+                cost_ctx(vec![CostCategory::ManaOnly]),
+                cost_ctx(vec![CostCategory::ManaOnly, other_category]),
+            ] {
+                let (condition, body) = strip_same_quality_as_conditional(&text, &declining_ctx);
+                assert_eq!(
+                    condition, None,
+                    "{text} under {:?}",
+                    declining_ctx.current_ability_cost_categories
+                );
+                assert_eq!(body, text);
+            }
+        }
+    }
+
     /// The stripper declines every shape outside the single-object class and
     /// returns the text unchanged. Each decline is paired with a positive
     /// sibling that differs only in the declined axis.
     #[test]
     fn strip_same_quality_as_conditional_declines_outside_the_class() {
         let default_ctx = ParseContext::default();
+        // In a trigger even a discard category in scope does not make "the
+        // discarded card" a cost participle: `in_trigger` alone declines it.
         let trigger_ctx = ParseContext {
             in_trigger: true,
+            current_ability_cost_categories: vec![CostCategory::Discards],
             ..Default::default()
         };
         let declined: [(&str, &ParseContext); 6] = [

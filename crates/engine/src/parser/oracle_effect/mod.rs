@@ -44706,10 +44706,17 @@ fn parse_effect_chain_ir_body(
         let (superlative_target_cond, text) = strip_superlative_target_conditional(&text);
         let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
         // CR 608.2c + CR 202.3: "<instruction> if it has the same <quality> as
-        // <object>" (Counterbalance, Hisoka). Only claimed when no leading general
-        // conditional was stripped: `guard_condition` keeps `condition` first, so a
-        // rider stripped beside one would be discarded.
-        let (same_quality_cond, text) = if condition.is_none() {
+        // <object>" (Counterbalance, Hisoka). Only claimed when the final
+        // condition match below keeps it: never beside a leading general
+        // conditional (`guard_condition` keeps `condition` first), and under a
+        // reflexive connector only when that connector composes with a guard
+        // ("If you do" → `And`, a `When you do` marker → its guard). Any other
+        // reflexive ("If you don't", "if … this way") would be displaced by the
+        // rider, so the text keeps its base lowering instead.
+        let (same_quality_cond, text) = if condition.is_none()
+            && if_you_do.as_ref().is_none_or(|reflexive| {
+                reflexive.is_optional_effect_performed() || reflexive.has_when_you_do_marker()
+            }) {
             strip_same_quality_as_conditional(&text, ctx)
         } else {
             (None, text)
@@ -45833,6 +45840,10 @@ fn parse_effect_chain_ir_body(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            // CR 608.2k: likewise the enclosing ability's cost categories, so
+            // "the discarded card" in any effect chunk names the card discarded
+            // for the cost (Hisoka, Minamo Sensei).
+            current_ability_cost_categories: ctx.current_ability_cost_categories.clone(),
             parent_target_available,
             // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
             // chain already produces an exile, so a later singular "the
