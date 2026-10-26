@@ -94975,6 +94975,7 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         );
         assert!(unimplemented, "{text}: {def:?}");
     }
+}
 
 /// Stitcher Geralf's exile sentence names a participle the target-position
 /// grammar cannot bind ("put into graveyards this way"), so the exile

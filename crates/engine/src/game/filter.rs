@@ -1582,6 +1582,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: source.triggering_object,
             declared_slot_view: source.declared_slot_view,
             granting_object: source.granting_object,
+            ability_targets: None,
         }
     }
 
@@ -6263,6 +6264,7 @@ pub(crate) fn matches_target_filter_on_departure(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::Departed(from),
+        ctx.ability_targets,
         HeldObject::Live,
     )
 }
@@ -6332,6 +6334,7 @@ pub(crate) fn matches_target_filter_on_entry_observation(
         ctx.declared_slot_view,
         ctx.granting_object,
         ControllerLookup::LiveOrLki,
+        ctx.ability_targets,
         HeldObject::Detached,
     )
 }

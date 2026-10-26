@@ -5995,7 +5995,8 @@ fn declined_search_scalar_quantity_dependency(
                 source,
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    caused_by: None
+                    caused_by: None,
+                    ..
                 }
             )
         },
@@ -6032,7 +6033,8 @@ fn declined_search_scalar_filter_inputs(
                 source,
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    caused_by: None
+                    caused_by: None,
+                    ..
                 }
             )
         },
@@ -6064,7 +6066,8 @@ fn declined_search_player_dependency(state: &GameState, player: &PlayerFilter) -
                 source,
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
-                    caused_by: None
+                    caused_by: None,
+                    ..
                 }
             )
         },
@@ -6147,6 +6150,7 @@ fn declined_search_population_dependency(
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    ..
                 } => true,
                 CardTypeSetSource::Objects { filter } => {
                     declined_search_filter_dependency(state, filter, information, context)
@@ -31341,10 +31345,12 @@ mod tests {
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: Some(ThisWayCause::Destroyed),
+                filter: None,
             },
             CardTypeSetSource::TrackedSet {
                 set: TrackedAnaphorSource::ChainSet,
                 caused_by: None,
+                filter: None,
             },
             CardTypeSetSource::Objects {
                 filter: TargetFilter::ParentTarget,

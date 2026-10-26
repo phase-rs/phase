@@ -9581,6 +9581,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -9633,6 +9634,9 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
             AttachmentReferent::DeclaredTarget { .. } => true,
             AttachmentReferent::Player { player } => {
                 controller_ref_is_selected_dependent(player, false)
+            }
+            AttachmentReferent::Host { filter } => {
+                target_filter_has_unsupported_selected_ref(filter, true)
             }
             AttachmentReferent::Source | AttachmentReferent::Recipient => false,
         },
@@ -9836,7 +9840,7 @@ fn player_scope_is_selected_dependent(scope: &PlayerScope) -> bool {
     match scope {
         PlayerScope::Target
         | PlayerScope::RecipientController
-        | PlayerScope::ParentObjectTargetController => true,
+        | PlayerScope::ParentObjectTarget { .. } => true,
         PlayerScope::Controller
         | PlayerScope::ScopedPlayer
         | PlayerScope::Opponent { .. }
@@ -24143,6 +24147,7 @@ impl TargetFilter {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
