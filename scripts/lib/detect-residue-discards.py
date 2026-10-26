@@ -309,6 +309,54 @@ class Expressions:
             else:
                 arm = self.end(body, {","}, end)
 
+    def postfix_receiver(self, start, end):
+        """Accept one receiver chain, not a larger operator expression."""
+        v = self.values
+        if start < end and v[start] == "::":
+            start += 1
+        if start >= end:
+            return False
+        if re.fullmatch(r"\w+", v[start]):
+            start += 1
+        elif v[start] in ("(", "[") and self.pairs[start] < end:
+            start = self.pairs[start] + 1
+        else:
+            return False
+        while start < end:
+            token = v[start]
+            if token in ("(", "[") and self.pairs[start] < end:
+                start = self.pairs[start] + 1
+            elif token == "?":
+                start += 1
+            elif (token in ("::", ".") and start + 1 < end
+                  and re.fullmatch(r"\w+", v[start + 1])):
+                start += 2
+            else:
+                return False
+        return True
+
+    def wrapper_origin(self, name, opened, end):
+        """Follow the registered wrapper's final closure result."""
+        v = self.values
+        args = self.split(opened + 1, end - 1)
+        wrapper_args = RESULT_WRAPPERS[name]
+        if len(args) >= wrapper_args:
+            # Return-type commas can split the last closure into several ranges.
+            a, b = args[wrapper_args - 1][0], args[-1][1]
+            closure = a + (a < b and v[a] == "move")
+            if closure < b and v[closure] == "|":
+                close = self.end(closure + 1, {"|"}, b)
+                if close < b:
+                    body = close + 1
+                    if v[body:body + 2] == ["-", ">"]:
+                        # Stop at the balanced body, not at generic/function arrows.
+                        body = self.end(body + 2, {"{"}, b)
+                        if body < b and self.pairs[body] == b - 1:
+                            return self.origin(body, b)
+                    elif len(args) == wrapper_args:
+                        return self.origin(body, b)
+        return None
+
     def origin(self, start, end):
         """Return (helper token index, symbol) only for a helper RESULT.
 
@@ -331,6 +379,10 @@ class Expressions:
         if opened <= start:
             return None
         name = v[opened - 1]
+        if (name in RESULT_WRAPPERS and opened - 2 > start
+                and v[opened - 2] == "."
+                and self.postfix_receiver(start, opened - 2)):
+            return self.wrapper_origin(name, opened, end)
         path = v[start:opened]
         if path and path[0] == "::":
             path = path[1:]
@@ -346,22 +398,6 @@ class Expressions:
             a, b = args[0]
             if a < b and v[a] not in ("|", "move"):
                 return self.origin(a, b)
-        wrapper_args = RESULT_WRAPPERS.get(name)
-        if "." in path and wrapper_args is not None and len(args) >= wrapper_args:
-            # Return-type commas can split the last closure into several ranges.
-            a, b = args[wrapper_args - 1][0], args[-1][1]
-            closure = a + (a < b and v[a] == "move")
-            if closure < b and v[closure] == "|":
-                close = self.end(closure + 1, {"|"}, b)
-                if close < b:
-                    body = close + 1
-                    if v[body:body + 2] == ["-", ">"]:
-                        # Stop at the balanced body, not at generic/function arrows.
-                        body = self.end(body + 2, {"{"}, b)
-                        if body < b and self.pairs[body] == b - 1:
-                            return self.origin(body, b)
-                    elif len(args) == wrapper_args:
-                        return self.origin(body, b)
         return None
 
     def ignored_binding(self, start, end):

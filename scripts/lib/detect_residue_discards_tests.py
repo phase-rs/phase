@@ -758,6 +758,38 @@ class DiscardTests(unittest.TestCase):
             with self.subTest(wrapper=wrapper, result="not a helper"):
                 self.assertEqual(hits(f"let (filter, _) = {expr};"), [])
 
+    def test_scope_wrapper_compound_receivers(self):
+        for wrapper, prefix in (("with_player_antecedents", ""),
+                                ("with_player_scope", "scope, ")):
+            for receiver in ("contexts[0]", "get_context()", "self.ctx().inner[0]",
+                             "get_context()?"):
+                for closure in ("|s| parse_target_with_ctx(input, s)",
+                                "move |s| -> Result<(TargetFilter, &'a str), E> "
+                                "{ parse_target_with_ctx(input, s) },"):
+                    expr = f"{receiver}.{wrapper}({prefix}{closure})"
+                    with self.subTest(wrapper=wrapper, receiver=receiver, closure=closure,
+                                      result="discarded remainder"):
+                        self.assertEqual(
+                            [(h.family, h.symbol) for h in hits(f"let (filter, _) = {expr};")],
+                            [("binding", "parse_target_with_ctx")])
+                    with self.subTest(wrapper=wrapper, receiver=receiver, closure=closure,
+                                      result="consumed remainder"):
+                        self.assertEqual(
+                            hits(f"let (filter, rest) = {expr}; consume(rest);"), [])
+
+    def test_scope_wrapper_compound_receiver_guards(self):
+        for wrapper, prefix in (("with_player_antecedents", ""),
+                                ("with_player_scope", "scope, ")):
+            for receiver in ("a + ctx", "x == ctx"):
+                expr = f"{receiver}.{wrapper}({prefix}|s| parse_target_with_ctx(input, s))"
+                with self.subTest(wrapper=wrapper, receiver=receiver):
+                    self.assertEqual(hits(f"let (filter, _) = {expr};"), [])
+            for receiver in ("contexts[0]", "get_context()", "self.ctx().inner[0]",
+                             "get_context()?"):
+                expr = f"{receiver}.{wrapper}({prefix}|s| -> u8 {{ 0 }})"
+                with self.subTest(wrapper=wrapper, receiver=receiver, result="not a helper"):
+                    self.assertEqual(hits(f"let (filter, _) = {expr};"), [])
+
     def test_typed_binding_discards_residue(self):
         found = hits("let (filter, _): (TargetFilter, &str) = parse_target(input);")
         self.assertEqual([(h.family, h.symbol) for h in found], [("binding", "parse_target")])
