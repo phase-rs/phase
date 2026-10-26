@@ -104,6 +104,7 @@ fn loot_discarding_drawn_card(runner: &mut GameRunner, scholar: ObjectId, drawn:
         .act(GameAction::ActivateAbility {
             source_id: scholar,
             ability_index: idx,
+            payment_mode: Default::default(),
         })
         .expect("Civilized Scholar's {T} ability must be activatable");
 
