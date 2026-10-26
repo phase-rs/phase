@@ -30552,7 +30552,7 @@ pub enum AbilityCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype_filter: Option<Box<TargetFilter>>,
     },
-    /// CR 608.2c + CR 201.2: Compare whether two anaphoric object references
+    /// CR 608.2c + CR 608.2h: Compare whether two anaphoric object references
     /// share at least one value of the named quality at resolution time.
     /// Covers "if it shares a card type with that permanent" (Amareth), the
     /// trailing "<instruction> if it has the same <quality> as <object>" rider

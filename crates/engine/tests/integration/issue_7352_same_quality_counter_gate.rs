@@ -691,3 +691,70 @@ fn discarded_card_rider_without_a_discard_cost_is_not_a_cost_paid_reference() {
         "an effect discard does not make \"the discarded card\" a cost-paid object: {ability:#?}"
     );
 }
+
+/// CR 608.2k: a cost-paid participle is claimed only when its kind is the only
+/// slot-binding cost kind of the ability's cost. A cost that discards and also
+/// sacrifices or reveals has two payments that can write the one cost-paid
+/// slot, so the participle is ambiguous and the rider is not claimed as a
+/// `CostPaidObject` comparison. Paired positive: Hisoka's verbatim text, whose
+/// only slot-binding cost is the discard (beside mana), claims it. The
+/// declined text keeps its base lowering; this row asserts only the non-claim.
+#[test]
+fn cost_participle_rider_under_an_ambiguous_slot_binding_cost_is_not_claimed() {
+    let types = ["Legendary".to_string(), "Creature".to_string()];
+    let subtypes = ["Human".to_string(), "Wizard".to_string()];
+    let hisoka = parse_oracle_text(HISOKA, "Hisoka, Minamo Sensei", &[], &types, &subtypes);
+    let hisoka_ability = hisoka
+        .abilities
+        .first()
+        .expect("Hisoka's activated ability");
+    assert!(
+        chain_has_share_quality(hisoka_ability),
+        "paired positive: a discard-only cost binds the rider, got {hisoka_ability:#?}"
+    );
+
+    type CostMatcher = fn(&AbilityCost) -> bool;
+    let is_sacrifice: CostMatcher = |c| matches!(c, AbilityCost::Sacrifice(_));
+    let is_reveal: CostMatcher = |c| matches!(c, AbilityCost::Reveal { .. });
+    let rows = [
+        ("Sacrifice a creature", "the discarded card", is_sacrifice),
+        (
+            "Sacrifice a creature",
+            "the sacrificed creature",
+            is_sacrifice,
+        ),
+        (
+            "Reveal a Dragon card from your hand",
+            "the discarded card",
+            is_reveal,
+        ),
+    ];
+    for (second_cost, reference_text, is_second_cost) in rows {
+        let text = format!(
+            "{{2}}{{U}}, Discard a card, {second_cost}: Counter target spell if it has the same mana value as {reference_text}."
+        );
+        let parsed = parse_oracle_text(&text, "Hisoka, Minamo Sensei", &[], &types, &subtypes);
+        let ability = parsed.abilities.first().expect("the activated ability");
+        let Some(AbilityCost::Composite { costs }) = &ability.cost else {
+            panic!(
+                "reach guard: the cost is a composite, got {:?}",
+                ability.cost
+            );
+        };
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Discard { .. }))
+                && costs.iter().any(is_second_cost),
+            "reach guard: the cost discards and pays `{second_cost}`, got {costs:?}"
+        );
+        assert!(
+            matches!(*ability.effect, Effect::Counter { .. }),
+            "reach guard: the counter instruction was parsed, got {ability:#?}"
+        );
+        assert!(
+            !chain_has_share_quality(ability),
+            "an ambiguous cost-paid participle is not claimed ({text}): {ability:#?}"
+        );
+    }
+}
