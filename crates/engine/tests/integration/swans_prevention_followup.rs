@@ -584,14 +584,17 @@ fn actual_forwarded_zone_move_rebinds_only_the_immediate_saved_damage_source() {
             .id();
         let mut runner = scenario.build();
         let old = ObjectIncarnationRef::from_object(&runner.state().objects[&returned]);
-        let mut events = runner
-            .cast(spell)
-            .target_object(swans)
-            .commit()
-            .stop_at_optional()
-            .resolve()
-            .events()
-            .to_vec();
+        let mut committed = runner.cast(spell).target_object(swans).commit();
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            if committed.state().stack.is_empty()
+                || !matches!(committed.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+        }
+        drop(committed);
         if parked_move {
             assert!(matches!(
                 runner.state().waiting_for,
@@ -827,14 +830,17 @@ fn actual_selected_instead_keeps_its_own_event_with_an_independent_actor_after_s
                 .base_replacement_definitions,
         )
         .push(shield);
-        let mut events = runner
-            .cast(spell)
-            .target_player(P1)
-            .commit()
-            .stop_at_optional()
-            .resolve()
-            .events()
-            .to_vec();
+        let mut committed = runner.cast(spell).target_player(P1).commit();
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            if committed.state().stack.is_empty()
+                || !matches!(committed.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            events.extend(committed.act(GameAction::PassPriority).unwrap().events);
+        }
+        drop(committed);
         if !missing {
             assert!(
                 matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == p3)
