@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::types::ability::{
     AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
-    Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectKind, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -4039,6 +4039,13 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
             event,
             GameEvent::LandPlayed { object_id, .. }
                 if *object_id == source_id
+        ) || matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id: attach_source_id,
+                ..
+            } if *attach_source_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
@@ -4113,16 +4120,34 @@ pub(crate) fn apply_pending_spell_resolution(
         .unwrap_or(false);
     if is_aura {
         if let Some(target) = ctx.spell_targets.first() {
-            match target {
+            // CR 608.3c / CR 603.2e: an Aura spell becoming attached on this
+            // resume path is an effect resolution, so emit `EffectResolved
+            // { Attach }` (Bramble Elemental) -- but only when the attachment
+            // actually moved: a same-host re-attach is a CR 701.3b no-op and
+            // must not re-trigger "becomes attached".
+            let attached = match target {
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to(state, ctx.object_id, *target_id);
+                    effects::attach::attach_to_reporting_change(state, ctx.object_id, *target_id)
                 }
-                crate::types::ability::TargetRef::Object(_) => {}
+                crate::types::ability::TargetRef::Object(_) => false,
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player(state, ctx.object_id, *player_id);
+                    effects::attach::attach_to_player_reporting_change(
+                        state,
+                        ctx.object_id,
+                        *player_id,
+                    )
                 }
+            };
+            if attached {
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::Attach,
+                    source_id: ctx.object_id,
+                    subject: state
+                        .capture_event_object_snapshot(ctx.object_id)
+                        .map(Box::new),
+                });
             }
         }
     }

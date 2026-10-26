@@ -5258,6 +5258,7 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
         state.resolving_stack_entry = None;
         state.resolving_trigger_firing = None;
         state.resolving_spell_final_part = None;
+        state.resolving_stack_object = None;
         state.resolution_source_relatch = None;
     }
 }
