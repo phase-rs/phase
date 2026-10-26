@@ -4120,16 +4120,19 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // own board read when present: an OMITTED read is FAIL-OPEN for the
         // CR 603.3b gate, so a filter that names controller-scoped members
         // must merge its profile rather than ride on the zone default.
+        //
+        // CR 603.3b + CR 603.10a: EVERY tracked-set read is member-bound,
+        // filtered or not — the storage is per-source (member A reads A's
+        // set, member B reads B's), so the identical-function proof behind
+        // the `profiles_conflict` fast path breaks either way and the group
+        // must prompt. The filter only narrows WHICH members; it is not
+        // what binds the read to the source.
         CardTypeSetSource::TrackedSet { filter, .. } => {
             let mut profile = reads_zone_membership();
             if let Some(filter) = filter {
                 profile.merge(board_membership_read(filter));
-                // CR 603.3b: a member filter narrows the read to the members
-                // each source exposes, so the read is member-bound — the
-                // same event can feed two different member populations and
-                // must not take the `profiles_conflict` fast path.
-                profile.reads_member_bound = true;
             }
+            profile.reads_member_bound = true;
             profile
         }
         // CR 608.2i: the cast journal is read by looking BACK at actions already
@@ -7962,14 +7965,16 @@ mod tests {
             caused_by: None,
             filter: None,
         };
+        let mut expected_unfiltered = reads_zone_membership();
+        expected_unfiltered.reads_member_bound = true;
         assert_eq!(
             characteristic_source_read(&unfiltered_chain),
-            reads_zone_membership(),
-            "an unfiltered chain set keeps the zone-membership profile"
+            expected_unfiltered,
+            "an unfiltered chain set keeps the zone-membership profile plus member-boundness"
         );
         assert!(
-            !characteristic_source_read(&unfiltered_chain).reads_member_bound(),
-            "an unfiltered chain set read is not member-bound"
+            characteristic_source_read(&unfiltered_chain).reads_member_bound(),
+            "an unfiltered chain set read is member-bound — each source reads its own set (CR 603.10a)"
         );
 
         // Idempotence: a union of two identical members equals that member.
