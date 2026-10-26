@@ -1336,7 +1336,7 @@ export function GameProvider({
           if (reconnectSession.terminalOnly && !terminalDelivery) {
             onWsEventRef.current?.({
               type: "terminalUnavailable",
-              message: "Retained terminal delivery could not be read",
+              message: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
             });
             return;
           }

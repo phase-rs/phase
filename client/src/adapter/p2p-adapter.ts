@@ -5129,7 +5129,7 @@ export class P2PHostAdapter implements EngineAdapter {
         } catch {
           this.emit({
             type: "terminalUnavailable",
-            message: "Concede reached a Full terminal state, but the native final views could not be published.",
+            message: i18n.t("multiplayer:terminalRecovery.finalViewsUnpublished"),
           });
         }
       }
@@ -5156,7 +5156,7 @@ export class P2PHostAdapter implements EngineAdapter {
           suspendIfStillAway();
           this.emit({
             type: "error",
-            message: "Could not reconcile the Concede outcome; the seat remains fenced.",
+            message: i18n.t("multiplayer:terminalRecovery.concedeUnreconciled"),
           });
           return "unknown";
         }
@@ -5220,7 +5220,7 @@ export class P2PHostAdapter implements EngineAdapter {
           suspendIfStillAway();
           this.emit({
             type: "error",
-            message: "Could not reconcile the Concede outcome; the seat remains fenced.",
+            message: i18n.t("multiplayer:terminalRecovery.concedeUnreconciled"),
           });
           return "unknown";
         }
@@ -5731,7 +5731,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     }
     if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;
     if (!(await this.send({ type: "terminal_result_receipt", result }))) {
-      this.emit({ type: "terminalUnavailable", message: "The durable terminal receipt could not be sent; waiting for redelivery" });
+      this.emit({ type: "terminalUnavailable", message: i18n.t("multiplayer:terminalRecovery.receiptUnsent") });
       return;
     }
     if (session !== this.session || this.authenticatedSession !== session || this.terminated) return;

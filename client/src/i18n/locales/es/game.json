@@ -1329,7 +1329,8 @@
     "passwordPrompt": "Esta sala requiere una contraseña:",
     "toasts": {
       "connectionFailed": "La conexión falló. Reintenta o cambia el servidor en Ajustes.",
-      "eliminatedSpectating": "Has sido eliminado. Ahora eres espectador."
+      "eliminatedSpectating": "Has sido eliminado. Ahora eres espectador.",
+      "retainedTerminalUnreadable": "No se pudo leer la entrega guardada del resultado final"
     },
     "resumeReset": {
       "appUpdated": "La aplicación se actualizó y tu partida guardada es incompatible con la nueva versión.",
