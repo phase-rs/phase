@@ -777,6 +777,52 @@ class DiscardTests(unittest.TestCase):
                         self.assertEqual(
                             hits(f"let (filter, rest) = {expr}; consume(rest);"), [])
 
+    def test_scope_wrapper_compound_receiver_projections(self):
+        for wrapper, prefix in (("with_player_antecedents", ""),
+                                ("with_player_scope", "scope, ")):
+            for receiver in ("contexts[0]", "get_context()", "get_context()?",
+                             "self.ctx().inner[0]"):
+                for helper in ("parse_target_with_ctx", "parse_target_with_syntax"):
+                    wrapped = f"{receiver}.{wrapper}({prefix}|s| {helper}(input, s))"
+                    for expr in (wrapped, f"({wrapped})"):
+                        for projection in (("0", "2") if helper == "parse_target_with_syntax"
+                                           else ("0",)):
+                            with self.subTest(wrapper=wrapper, receiver=receiver,
+                                              helper=helper, expr=expr, projection=projection):
+                                self.assertEqual(
+                                    [(h.family, h.symbol) for h in hits(
+                                        f"let f = {expr}.{projection};")],
+                                    [("projection", helper)])
+                        with self.subTest(wrapper=wrapper, receiver=receiver,
+                                          helper=helper, expr=expr, projection="1"):
+                            self.assertEqual(hits(f"let rest = {expr}.1; consume(rest);"), [])
+                expr = f"{receiver}.with_other(|s| parse_target_with_ctx(input, s)).0"
+                with self.subTest(control=expr):
+                    self.assertEqual(hits(f"let f = {expr};"), [])
+                # Tuple projection is postfix: it binds before the binary operator.
+                for operator in ("+", "-", "*", "/", "%", "&", "|", "^",
+                                 "<", ">", "==", "!=", "&&", "||"):
+                    expr = (f"a {operator} {receiver}.{wrapper}({prefix}|s| "
+                            "parse_target_with_ctx(input, s)).0")
+                    with self.subTest(operator=operator, expr=expr):
+                        self.assertEqual(
+                            [(h.family, h.symbol) for h in hits(f"let f = {expr};")],
+                            [("projection", "parse_target_with_ctx")])
+
+    def test_scope_wrapper_projection_keyword_boundaries(self):
+        for wrapper, prefix in (("with_player_antecedents", ""),
+                                ("with_player_scope", "scope, ")):
+            for receiver in ("contexts[0]", "get_context()", "get_context()?",
+                             "self.ctx().inner[0]", "(ctx)"):
+                expr = (f"{receiver}.{wrapper}({prefix}|s| "
+                        "parse_target_with_ctx(input, s)).0")
+                for template in ("if EXPR {}", "match EXPR { _ => () }",
+                                 "return EXPR;", "for f in EXPR {}"):
+                    with self.subTest(wrapper=wrapper, receiver=receiver, template=template):
+                        self.assertEqual(
+                            [(h.family, h.symbol) for h in hits(template.replace("EXPR", expr))],
+                            [("projection", "parse_target_with_ctx")])
+
     def test_scope_wrapper_compound_receiver_guards(self):
         for wrapper, prefix in (("with_player_antecedents", ""),
                                 ("with_player_scope", "scope, ")):
@@ -789,6 +835,31 @@ class DiscardTests(unittest.TestCase):
                 expr = f"{receiver}.{wrapper}({prefix}|s| -> u8 {{ 0 }})"
                 with self.subTest(wrapper=wrapper, receiver=receiver, result="not a helper"):
                     self.assertEqual(hits(f"let (filter, _) = {expr};"), [])
+
+    def test_scope_wrapper_turbofish_results(self):
+        for wrapper, prefix in (("with_player_antecedents", ""),
+                                ("with_player_scope", "scope, ")):
+            for receiver in ("ctx", "contexts[0]", "get_context::<T>()",
+                             "Self::get_context::<Vec<(A, B)>>()",
+                             "get_context::<fn() -> T>()"):
+                for generic in ("", "::<_>", "::<Vec<(A, B)>>", "::<fn() -> T>"):
+                    expr = (f"{receiver}.{wrapper}{generic}({prefix}|s| "
+                            "parse_target_with_ctx(input, s))")
+                    for template, expected in (
+                        ("let (f, _) = EXPR;", [("binding", "parse_target_with_ctx")]),
+                        ("let (f, rest) = EXPR; consume(rest);", []),
+                        ("let f = EXPR.0;", [("projection", "parse_target_with_ctx")]),
+                        ("let rest = EXPR.1; consume(rest);", []),
+                    ):
+                        with self.subTest(wrapper=wrapper, receiver=receiver,
+                                          generic=generic, template=template):
+                            self.assertEqual(
+                                [(h.family, h.symbol) for h in hits(
+                                    template.replace("EXPR", expr))], expected)
+                    unregistered = expr.replace(wrapper, "with_other")
+                    for template in ("let (f, _) = EXPR;", "let f = EXPR.0;"):
+                        with self.subTest(unregistered=unregistered, template=template):
+                            self.assertEqual(hits(template.replace("EXPR", unregistered)), [])
 
     def test_typed_binding_discards_residue(self):
         found = hits("let (filter, _): (TargetFilter, &str) = parse_target(input);")

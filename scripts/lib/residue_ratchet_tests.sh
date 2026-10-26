@@ -130,6 +130,34 @@ expect_rc 'removing indexed receiver discard passes' 0
 expect_out 'indexed receiver removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
 printf 'SMOKE removed indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
 
+# Compound receiver projections discard the helper's remainder too.
+new_fixture
+printf 'fn added() { let f = contexts[0].with_player_antecedents(|s| parse_target_with_ctx(input, s)).0; }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'indexed receiver projection fails' 1
+expect_out 'indexed receiver projection names file and line' 'crates/engine/src/parser/probe.rs:2: projection parse_target_with_ctx'
+expect_out 'indexed receiver projection exceeds ceiling' 'actual 2, ceiling 1'
+printf 'SMOKE indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'removing indexed receiver projection passes' 0
+expect_out 'indexed receiver projection removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+printf 'SMOKE removed indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
+
+# Generic wrapper and receiver calls must retain helper-result discard origins.
+new_fixture
+printf 'fn added() { let (f, _) = Self::get_context::<Vec<(A, B)>>().with_player_scope::<fn() -> T>(scope, |s| parse_target_with_ctx(input, s)); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'turbofish wrapper discard fails' 1
+expect_out 'turbofish wrapper growth names file and line' 'crates/engine/src/parser/probe.rs:2: binding parse_target_with_ctx'
+expect_out 'turbofish wrapper growth exceeds ceiling' 'actual 2, ceiling 1'
+printf 'SMOKE turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+run_gate
+expect_rc 'removing turbofish wrapper discard passes' 0
+expect_out 'turbofish wrapper removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
+printf 'SMOKE removed turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
+
 # Per-file ceilings and strict ledger parsing, including disappeared files.
 ledger <<'EOF'
 crates/engine/src/parser/probe.rs 3

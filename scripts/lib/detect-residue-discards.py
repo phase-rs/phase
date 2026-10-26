@@ -28,6 +28,8 @@ Mixed alternatives count only the discarding alternatives, not the whole arm.
 Argument and wrapper-pattern splitting accepts an optional trailing comma.
 Range-endpoint projections count; free `drop` calls accept explicit generic
 arguments; single-dot `.drop` methods never classify their helper arguments.
+Registered result wrappers and their receiver segments accept turbofish arguments,
+including nested types and function arrows; free-helper generic calls are unchanged.
 Semicolon-terminated bare statement blocks discard helper tails, not header
 blocks or let initializers (which retain their binding classification).
 Discovery excludes exactly tests.rs and *_tests.rs, snapshots, and modules
@@ -184,6 +186,28 @@ class Expressions:
             j += 1
         return None
 
+    def turbofish_start(self, end):
+        """Find `::` for a balanced turbofish ending at end, else None."""
+        v = self.values
+        if end == 0 or v[end - 1] != ">":
+            return None
+        depth = 0
+        i = end - 1
+        while i >= 0:
+            if v[i] in (")", "]", "}"):
+                i = self.pairs[i] - 1
+                continue
+            if v[i] == ">" and (i == 0 or v[i - 1] != "-"):
+                depth += 1
+            elif v[i] == "<":
+                depth -= 1
+                if depth == 0:
+                    start = i - 1
+                    return (start if start >= 0 and self.turbofish_end(start) == end
+                            else None)
+            i -= 1
+        return None
+
     def split(self, start, end, separator=","):
         out = []
         part = start
@@ -309,6 +333,40 @@ class Expressions:
             else:
                 arm = self.end(body, {","}, end)
 
+    def receiver_start(self, dot):
+        """Walk one postfix receiver backward without absorbing header keywords."""
+        v = self.values
+        start = dot
+        while start > 0:
+            token = v[start - 1]
+            if token == "?":
+                start -= 1
+            elif token == ">":
+                generic = self.turbofish_start(start)
+                if generic is None:
+                    break
+                start = generic
+            elif token in (")", "]"):
+                start = self.pairs[start - 1]
+                if (start == 0 or follows_expression_prefix(v, start)
+                        or v[start - 1] in ("if", "while", "match", "for", "in")):
+                    break
+                if not (re.fullmatch(r"\w+", v[start - 1])
+                        or v[start - 1] in (")", "]", "?")
+                        or self.turbofish_start(start) is not None):
+                    break
+            elif re.fullmatch(r"\w+", token):
+                start -= 1
+                if (start > 0 and v[start - 1] in ("::", ".")
+                        and not (v[start - 1] == "." and start > 1
+                                 and v[start - 2] == ".")):
+                    start -= 1
+                else:
+                    break
+            else:
+                break
+        return start
+
     def postfix_receiver(self, start, end):
         """Accept one receiver chain, not a larger operator expression."""
         v = self.values
@@ -328,6 +386,10 @@ class Expressions:
                 start = self.pairs[start] + 1
             elif token == "?":
                 start += 1
+            elif (token == "::" and re.fullmatch(r"\w+", v[start - 1])
+                  and (after := self.turbofish_end(start)) is not None
+                  and after <= end):
+                start = after
             elif (token in ("::", ".") and start + 1 < end
                   and re.fullmatch(r"\w+", v[start + 1])):
                 start += 2
@@ -378,10 +440,12 @@ class Expressions:
         opened = self.pairs[end - 1]
         if opened <= start:
             return None
-        name = v[opened - 1]
-        if (name in RESULT_WRAPPERS and opened - 2 > start
-                and v[opened - 2] == "."
-                and self.postfix_receiver(start, opened - 2)):
+        generic = self.turbofish_start(opened)
+        callee = opened - 1 if generic is None else generic - 1
+        name = v[callee]
+        if (name in RESULT_WRAPPERS and callee - 1 > start
+                and v[callee - 1] == "."
+                and self.postfix_receiver(start, callee - 1)):
             return self.wrapper_origin(name, opened, end)
         path = v[start:opened]
         if path and path[0] == "::":
@@ -516,11 +580,17 @@ def find_discards(relpath, lines):
                     continue
             elif v[start] == ")":
                 start = ex.pairs[start]
-                if (start > 0 and re.fullmatch(r"\w+", v[start - 1])
-                        and not follows_expression_prefix(v, start)):
-                    start -= 1
+                generic = ex.turbofish_start(start)
+                callee = start - 1 if generic is None else generic - 1
+                if (callee >= 0 and re.fullmatch(r"\w+", v[callee])
+                        and not follows_expression_prefix(v, start)
+                        and (generic is None or v[callee] in RESULT_WRAPPERS)):
+                    start = callee
                     while start >= 2 and v[start - 1] in ("::", ".") and re.fullmatch(r"\w+", v[start - 2]):
                         start -= 2
+                    if (v[callee] in RESULT_WRAPPERS and callee >= 2
+                            and v[callee - 1] == "." and v[callee - 2] != "."):
+                        start = min(start, ex.receiver_start(callee - 1))
             else:
                 continue
             # A single dot leaves a method receiver; doubled dots are a range.
