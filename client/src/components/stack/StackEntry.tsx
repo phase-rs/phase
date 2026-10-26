@@ -119,6 +119,7 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
   const sourceIsToken = sourceObj?.display_source === "Token" || Boolean(details?.token_image_ref);
   const sourceTokenImageRef =
     sourceObj?.display_source === "Token" ? sourceObj.token_image_ref : details?.token_image_ref;
+  const rowOwnerRef = details?.printed_ref ?? undefined;
 
   const { src, isLoading, rungs, advanceFailedSource } = useCardImage(
     imageProps?.cardName ?? sourceName,
@@ -130,6 +131,9 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
     tokenImageRef: sourceTokenImageRef,
     oracleId: imageProps?.oracleId,
     faceName: imageProps?.faceName,
+    // A present row owns both printing and identity; never borrow a stale live identity.
+    ownerPrinting: details ? (rowOwnerRef ? details.printing : undefined) : imageProps?.ownerPrinting,
+    ownerPrintedRef: rowOwnerRef,
     },
   );
 

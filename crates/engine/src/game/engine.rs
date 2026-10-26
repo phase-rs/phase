@@ -1525,10 +1525,10 @@ fn apply_action_boundary_core(
     // same snapshot, and removing an impossible state is not part of the action
     // and must not be rolled back with it. CONSEQUENCE, stated so it is not
     // later read as a bug: an action this boundary REJECTS still leaves
-    // `resolution_stack` repaired, with no `bump_state_revision` and no events,
-    // because the error paths return before `finish_action_boundary` runs. That
-    // is intended — a client that submitted one bad action before its pass must
-    // not stay wedged because of it.
+    // `resolution_stack` repaired, with no events. The repair advances the revision
+    // itself because error paths return before `finish_action_boundary` runs.
+    // This is intended — a client that submitted one bad action before its pass
+    // must not stay wedged because of it.
     //
     // Re-entrancy is handled by the same live-dispatch guard the priority-
     // boundary sweep uses: `SimulationFilter`'s clone-and-apply probe re-enters
@@ -1540,7 +1540,14 @@ fn apply_action_boundary_core(
     let pre_recovery_pass_was_authorized = !authorize_actor
         || (matches!(&action, GameAction::PassPriority)
             && check_actor_authorization(state, authenticated_actor, &action).is_ok());
+    let resolution_stack_before = state.resolution_stack.clone();
     let recovered_terminal_rest_boundary = sweep_and_recover_priority_boundary_rest(state);
+    // The entry sweep runs before `boundary_snapshot`, so its repair survives a rejected
+    // action. A repair changes the delivered state, and the revision is the clients'
+    // staleness key, so the repair advances it itself.
+    if recovered_terminal_rest_boundary || state.resolution_stack != resolution_stack_before {
+        bump_state_revision(state);
+    }
     let recovered_stale_priority_pass =
         recovered_terminal_rest_boundary && matches!(&action, GameAction::PassPriority);
     // A completed hidden-search audience is an event-filtering sidecar for the

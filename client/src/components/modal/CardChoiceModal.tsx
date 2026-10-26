@@ -175,6 +175,7 @@ export function CardChoiceModal() {
     selectionInteractionId(s.viewerInteraction),
   );
   const scryPromptId = useGameStore((s) => s.gameState?.derived?.scry_prompt_id);
+  const promptIdentity = useGameStore((s) => s.gameState?.derived?.waiting_for_identity);
 
   if (!waitingFor) return null;
 
@@ -332,10 +333,12 @@ export function CardChoiceModal() {
       return <DiscardModal key={waitingFor.data.cards.join(",")} data={waitingFor.data} />;
     case "ChooseUntapSubset":
       return null;
-    case "PayCost":
+    case "PayCost": {
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
-      return <PayCostDispatch key={payCostPromptKey(waitingFor.data)} data={waitingFor.data} />;
+      const promptKey = promptIdentity ?? payCostPromptKey(waitingFor.data);
+      return <PayCostDispatch key={promptKey} promptKey={promptKey} data={waitingFor.data} />;
+    }
     case "MultiTargetSelection":
       if (!canActForWaitingState) return null;
       return <MultiTargetSelectionModal data={waitingFor.data} />;
@@ -2463,10 +2466,9 @@ function RevealForCostModal({ data }: { data: PayCost["data"] }) {
 // CR 118.3 + CR 601.2b + CR 605.3b: single dispatch for the unified `PayCost`
 // state — branch on `kind.type` to the matching cost-selection modal. The
 // `key` forces a fresh selection set when the prompt identity or cost step changes.
-function PayCostDispatch({ data }: { data: PayCost["data"] }) {
+function PayCostDispatch({ data, promptKey }: { data: PayCost["data"]; promptKey: string }) {
   const { t } = useTranslation("game");
   const isManaAbility = data.resume.type === "ManaAbility";
-  const promptKey = payCostPromptKey(data);
   switch (data.kind.type) {
     case "Discard":
       return (
@@ -2952,6 +2954,8 @@ function CommanderZoneChoiceModal({
           >
             <CardImage
               cardName={obj?.name ?? "Unknown"}
+              ownerPrinting={obj?.printing}
+              ownerPrintedRef={obj?.printed_ref}
               size="normal"
               className={CHOICE_CARD_IMAGE_CLASS}
             />
@@ -3028,6 +3032,8 @@ function RevealUntilKeptChoiceModal({
         >
           <CardImage
             cardName={obj?.name ?? "Unknown"}
+            ownerPrinting={obj?.printing}
+            ownerPrintedRef={obj?.printed_ref}
             size="normal"
             className={CHOICE_CARD_IMAGE_CLASS}
           />

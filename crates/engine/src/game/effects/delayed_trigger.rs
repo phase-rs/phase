@@ -5483,6 +5483,7 @@ mod tests {
             source_id,
             LKISnapshot {
                 name: "Nine-Lives Familiar".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(3),
                 toughness: Some(3),

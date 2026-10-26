@@ -14,13 +14,14 @@ type SeparatePilesPartition = Extract<WaitingFor, { type: "SeparatePilesPartitio
 type SeparatePilesChoice = Extract<WaitingFor, { type: "SeparatePilesChoice" }>;
 
 function objectImageProps(obj: GameObject) {
-  const { name, faceIndex, oracleId, faceName } = cardImageLookup(obj);
+  const { name, faceIndex, oracleId, faceName, ownerPrinting } = cardImageLookup(obj);
   const isToken = obj.display_source === "Token";
   return {
     cardName: name,
     faceIndex,
     oracleId,
     faceName,
+    ownerPrinting,
     isToken,
     tokenFilters: isToken ? tokenFiltersForObject(obj) : undefined,
     tokenImageRef: isToken ? obj.token_image_ref : undefined,

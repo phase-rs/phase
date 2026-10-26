@@ -39,7 +39,8 @@ import { DEFAULT_PILE_SOURCE, pileSeatDeck, pileSourceParam } from "../services/
 import { withSavedDeckLibraryOrSkip } from "../services/savedDeckTransaction";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
-import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
+import type { ParsedDeck } from "../services/deckParser";
+import { submitParsedDeck } from "../services/deckSubmission";
 import { bracketToEngineTier } from "../types/bracketEstimate";
 import type { ActionableBotLink, BotLink, HostSeed, LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import {
@@ -182,6 +183,9 @@ function MultiplayerPageContent({
   setView: Dispatch<SetStateAction<MultiplayerView>>;
   pendingLobbyJoins: MutableRefObject<Set<AbortController>>;
 }) {
+  // Only the current page attempt may hand prepared decks to a transport.
+  const preparationAttempt = useRef(0);
+  useEffect(() => () => { preparationAttempt.current += 1; }, []);
   const { t } = useTranslation("multiplayer");
   useAudioContext("lobby");
   const navigate = useNavigate();
@@ -393,6 +397,7 @@ function MultiplayerPageContent({
   // the choice, then either execute the pending host/join action or return
   // to wherever the user triggered the "Change" affordance from.
   const handleSelectDeck = (name: string) => {
+    preparationAttempt.current += 1;
     setActiveDeckName(name);
     localStorage.setItem(ACTIVE_DECK_KEY, name);
 
@@ -403,8 +408,10 @@ function MultiplayerPageContent({
 
     if (pendingAction) {
       const action = pendingAction;
-      void executeAction(action).then((ok) => {
-        if (ok) setPendingAction(null);
+      const pending = executeAction(action);
+      const attempt = preparationAttempt.current;
+      void pending.then((ok) => {
+        if (ok && attempt === preparationAttempt.current) setPendingAction(null);
       });
       return;
     }
@@ -412,6 +419,8 @@ function MultiplayerPageContent({
   };
 
   const handleEditDeck = useCallback((name: string) => {
+    preparationAttempt.current += 1;
+    setBrokerOfflinePrompt(null);
     // A Discord host flow must come back through the bot-link arrival: `view`
     // and `hostSeed` are component state, and the deck-builder route unmounts
     // this page.
@@ -454,22 +463,17 @@ function MultiplayerPageContent({
     view,
   ]);
 
-  const expandDeck = useCallback(() => {
+  // Supplied formats never read the active deck; ordinary hosts bind art here.
+  const hostDeck = useCallback(async (settings: HostSettings) => {
+    const format = settings.formatConfig.format;
+    if (formatSuppliesDeck(format)) {
+      return pileSeatDeck(format, settings.pile ?? DEFAULT_PILE_SOURCE);
+    }
     const deck = loadActiveDeck();
     if (!deck) return null;
-    return { ...expandParsedDeck(deck), bracket_tier: bracketToEngineTier(loadActiveDeckBracket()) };
+    const bracket = bracketToEngineTier(loadActiveDeckBracket());
+    return { ...await submitParsedDeck(deck), bracket_tier: bracket };
   }, []);
-
-  // A supplied-deck format never reads the active deck: the host submits the pile seat's deck.
-  const hostDeck = useCallback(
-    (settings: HostSettings) => {
-      const format = settings.formatConfig.format;
-      return formatSuppliesDeck(format)
-        ? pileSeatDeck(format, settings.pile ?? DEFAULT_PILE_SOURCE)
-        : Promise.resolve(expandDeck());
-    },
-    [expandDeck],
-  );
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
   const lookupJoinTargetFromStore = useMultiplayerStore((s) => s.lookupJoinTarget);
@@ -591,6 +595,8 @@ function MultiplayerPageContent({
   // side after the room is already open.
   const executeAction = useCallback(
     async (action: PendingAction): Promise<boolean> => {
+      const attempt = ++preparationAttempt.current;
+      const current = () => attempt === preparationAttempt.current;
       const validationFormat: GameFormat | undefined =
         action.type === "host"
           ? action.settings.formatConfig.format
@@ -606,6 +612,7 @@ function MultiplayerPageContent({
             ? (compat.selected_format_reasons[0] ?? t("page.deckNotLegal", { format }))
             : null;
         } catch (err) {
+          if (!current()) return false;
           showToast(
             err instanceof Error
               ? t("page.deckCheckFailed", { error: err.message })
@@ -630,6 +637,7 @@ function MultiplayerPageContent({
 
         if (validationFormat) {
           const refusal = await checkDeck(parsedDeck, validationFormat);
+          if (!current()) return false;
           if (refusal === false) return false;
           if (refusal !== null) {
             showToast(refusal);
@@ -645,6 +653,7 @@ function MultiplayerPageContent({
         const pile = loadSavedDeck(action.settings.pile.name);
         if (pile) {
           const refusal = await checkDeck(pile, action.settings.formatConfig.format);
+          if (!current()) return false;
           if (refusal === false) return false;
           if (refusal !== null) {
             showToast(refusal);
@@ -654,12 +663,6 @@ function MultiplayerPageContent({
       }
 
       if (action.type === "host") {
-        const deck = await hostDeck(action.settings);
-        if (!deck) {
-          showToast(t("page.couldNotLoadDeck"));
-          return false;
-        }
-
         const opponentCount = Math.max(0, action.settings.formatConfig.max_players - 1);
         const aiSeatIndexes = new Set(action.settings.aiSeats.map((seat) => seat.seatIndex));
         const allOpponentsAreAi =
@@ -697,6 +700,12 @@ function MultiplayerPageContent({
           );
           return true;
         }
+        const deck = await hostDeck(action.settings);
+        if (!current()) return false;
+        if (!deck) {
+          showToast(t("page.couldNotLoadDeck"));
+          return false;
+        }
 
         const store = useMultiplayerStore.getState();
         // A dedicated game server and the lobby broker can both be connected.
@@ -713,6 +722,7 @@ function MultiplayerPageContent({
               url: action.serverUrl,
               socket: action.serverUrl === null ? null : await store.ensureSubscriptionSocket(action.serverUrl),
             };
+        if (!current()) return false;
         const target = resolved.url;
         const socket = resolved.socket;
 
@@ -731,7 +741,7 @@ function MultiplayerPageContent({
             brokerUrl: target,
             roomName: action.settings.roomName,
           });
-          if (!ok) {
+          if (!current() || !ok) {
             return false;
           }
           navigate("/");
@@ -793,6 +803,7 @@ function MultiplayerPageContent({
   // Host setup complete → execute immediately if a deck exists or the format supplies it, otherwise prompt
   const handleHostSetupComplete = useCallback(
     async (settings: HostSettings, serverUrl: string | null): Promise<boolean> => {
+      preparationAttempt.current += 1;
       const action: PendingAction = {
         type: "host", settings, serverUrl,
         connectionMode: serverUrl === null ? "p2p" : "server",
@@ -885,6 +896,7 @@ function MultiplayerPageContent({
 
   const handleSpectate = useCallback(
     async (code: string, origin: LobbySource | null, context?: LobbyGame) => {
+      preparationAttempt.current += 1;
       // Boundary guard: spectating needs an authority to watch through, so a
       // null origin here is nothing this page can open a socket on.
       if (origin === null) {
@@ -945,6 +957,7 @@ function MultiplayerPageContent({
       context?: LobbyGame,
       onNotFound?: () => void,
     ) => {
+      preparationAttempt.current += 1;
       const trimmedCode = code.trim();
 
       // Draft entries bypass the normal join-with-deck flow entirely — draft
@@ -1102,6 +1115,7 @@ function MultiplayerPageContent({
   // Same-version gate: players on different builds cannot share a game, so a
   // stale tab first tries to reload onto the deployed build.
   const gateBotLink = async (link: ActionableBotLink) => {
+    preparationAttempt.current += 1;
     const arrival = ++latestArrival.current;
     const superseded = () => arrival !== latestArrival.current;
     const build = await checkDeployedBuild();
@@ -1147,6 +1161,7 @@ function MultiplayerPageContent({
     const stashed = readStashedBotLinkOnce();
     const fromUrl = parseBotLink(location.search);
     if (fromUrl !== null) {
+      preparationAttempt.current += 1;
       // Stash before strip: an autoUpdate reload after the strip must still
       // find the link.
       if (fromUrl.kind !== "invalid") stashBotLink(location.search);
@@ -1166,6 +1181,8 @@ function MultiplayerPageContent({
   }, [location.key]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleBack = () => {
+    preparationAttempt.current += 1;
+    setBrokerOfflinePrompt(null);
     if (view === "deck-select") {
       // With a pending action the user clearly came from a host/join
       // attempt; without one they came from the "Change Deck" affordance,
@@ -1268,6 +1285,8 @@ function MultiplayerPageContent({
               </button>
               <button
                 onClick={() => {
+                  preparationAttempt.current += 1;
+                  setBrokerOfflinePrompt(null);
                   setDeckSelectReturn(view as MultiplayerView);
                   setPendingAction(null);
                   setView("deck-select");
@@ -1292,6 +1311,9 @@ function MultiplayerPageContent({
             </span>
             <button
               onClick={() => {
+                preparationAttempt.current += 1;
+                setBrokerOfflinePrompt(null);
+                setPendingAction(null);
                 setDeckSelectReturn(view as MultiplayerView);
                 setView("deck-select");
               }}
@@ -1314,6 +1336,7 @@ function MultiplayerPageContent({
             // Host Game itself, so arriving there keeps whatever the player
             // last chose rather than silently overriding it.
             onHostGame={() => {
+              preparationAttempt.current += 1;
               // The lobby's own Host Game never inherits a Discord seed.
               setHostSeed(null);
               setView("host-setup");
@@ -1331,10 +1354,22 @@ function MultiplayerPageContent({
             // mounted, so the seed is applied once, at mount.
             key={hostSeed?.code ?? "manual"}
             seed={hostSeed ?? undefined}
+            preparationEpoch={{
+              get current() { return preparationAttempt.current; },
+              invalidate: () => {
+                preparationAttempt.current += 1;
+                setPendingAction(null);
+                setBrokerOfflinePrompt(null);
+              },
+            }}
             onHost={handleHostSetupComplete}
-            onBack={() => setView("lobby")}
+            onBack={handleBack}
             connectionMode={connectionMode}
-            onConnectionModeChange={setConnectionMode}
+            onConnectionModeChange={(mode) => {
+              // HostSetup may already have delegated its human-deck preparation.
+              preparationAttempt.current += 1;
+              setConnectionMode(mode);
+            }}
             hostDisabled={liveCheck.status === "illegal" || liveCheck.status === "checking"}
             hostDisabledReason={
               liveCheck.status === "illegal"
@@ -1407,13 +1442,18 @@ function MultiplayerPageContent({
       {brokerOfflinePrompt && (
         <BrokerOfflinePrompt
           serverAddress={brokerOfflinePrompt.serverAddress ?? undefined}
-          onCancel={() => setBrokerOfflinePrompt(null)}
+          onCancel={() => {
+            preparationAttempt.current += 1;
+            setBrokerOfflinePrompt(null);
+          }}
           onContinueWithoutLobby={() => {
+            const attempt = ++preparationAttempt.current;
             const { action } = brokerOfflinePrompt;
             setBrokerOfflinePrompt(null);
             if (action.type === "host") {
               void (async () => {
                 const deck = await hostDeck(action.settings);
+                if (attempt !== preparationAttempt.current) return;
                 if (!deck) {
                   showToast(t("page.couldNotLoadDeck"));
                   return;
@@ -1421,7 +1461,7 @@ function MultiplayerPageContent({
                 if (await startP2PHostingSession(action.settings, deck, {
                   brokerUrl: null,
                   roomName: action.settings.roomName,
-                })) navigate("/");
+                }) && attempt === preparationAttempt.current) navigate("/");
               })();
             }
           }}

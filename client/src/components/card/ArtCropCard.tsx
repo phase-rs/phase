@@ -69,6 +69,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
         : undefined,
     oracleId: renderCardBack ? undefined : imageLookup.oracleId,
     faceName: renderCardBack ? undefined : imageLookup.faceName,
+    ownerPrinting: renderCardBack ? undefined : imageLookup.ownerPrinting,
   });
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {

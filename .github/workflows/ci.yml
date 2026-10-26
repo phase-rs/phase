@@ -1162,5 +1162,5 @@ jobs:
           test -s client/src/wasm/engine_wasm_bg.wasm
 
       - name: Run isolated draft match proofs
-        run: pnpm exec vitest run --config vitest.integration.config.ts --pool=forks --isolate --coverage.enabled=false --reporter=verbose src/adapter/__tests__/setDraftMatchProof.integration.test.ts src/adapter/__tests__/cubeDraftMatchProof.integration.test.ts
+        run: pnpm exec vitest run --config vitest.integration.config.ts --pool=forks --isolate --coverage.enabled=false --reporter=verbose src/adapter/__tests__/setDraftMatchProof.integration.test.ts src/adapter/__tests__/cubeDraftMatchProof.integration.test.ts src/game/__tests__/waitingForIdentity.integration.test.ts
         working-directory: client

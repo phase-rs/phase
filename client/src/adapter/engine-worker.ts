@@ -35,6 +35,7 @@ import init, {
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   evaluateDeckFormatGate,
+  checkDeckPrintingsBounds,
   customFormatFromLobbyConfig,
   formatConfigForCustomRules,
   apply_seat_mutation,
@@ -150,6 +151,7 @@ type EngineRequest =
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "evaluateDeckFormatGate"; id: number; request: unknown }
+  | { type: "checkDeckPrintingsBounds"; id: number; printings: unknown }
   | { type: "customFormatFromLobbyConfig"; id: number; name: string; formatConfig: unknown }
   | { type: "formatConfigForCustomRules"; id: number; customRules: unknown }
   | { type: "getCardFaceData"; id: number; cardName: string }
@@ -302,6 +304,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, evaluateDeckFormatGate(msg.request));
+        break;
+      }
+
+      // Resource bounds on one guest deck's printings sidecar, for the P2P host's
+      // admission. The engine throws its reason on abuse; the outer try/catch
+      // returns that throw as an `error` response. Reads no card database, so it
+      // does not gate on one.
+      case "checkDeckPrintingsBounds": {
+        checkDeckPrintingsBounds(msg.printings);
+        result(msg.id, null);
         break;
       }
 

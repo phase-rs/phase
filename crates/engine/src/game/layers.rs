@@ -29105,6 +29105,7 @@ mod tests {
             dead_source,
             LKISnapshot {
                 name: "Mortician Beetle".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),

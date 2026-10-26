@@ -2983,6 +2983,7 @@ mod tests {
             ObjectId(42),
             crate::types::game_state::LKISnapshot {
                 name: "Grizzly Bears".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(2),
                 toughness: Some(2),

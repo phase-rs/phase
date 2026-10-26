@@ -245,6 +245,8 @@ export function PreferencesModal({
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
   const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
   const setShowCardPreviewFooter = usePreferencesStore((s) => s.setShowCardPreviewFooter);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
+  const setShowOwnerPrintings = usePreferencesStore((s) => s.setShowOwnerPrintings);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -704,6 +706,23 @@ export function PreferencesModal({
                     </label>
                     <p className="mt-1.5 text-xs text-slate-400">
                       {t("visual.cardPreviewFooterHint")}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.ownerCardArt")}>
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={showOwnerPrintings}
+                        onChange={(e) => setShowOwnerPrintings(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("visual.showOwnerPrintings")}
+                      </span>
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.ownerPrintingsHint")}
                     </p>
                   </SettingGroup>
 

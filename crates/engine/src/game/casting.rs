@@ -18919,14 +18919,11 @@ fn announce_spell_on_stack(
             super::engine_casting::remember_cast_start(state, prepared.object_id)?;
         }
         state.spell_cast_reversal = Some(std::sync::Arc::new(
-            crate::types::game_state::SpellCastReversal {
-                object_id: prepared.object_id,
+            crate::types::game_state::SpellCastReversal::announced(
+                prepared.object_id,
                 player,
-                journal_start: state.resolved_rules_journal.entries().len(),
-                undo: Vec::new(),
-                cost_mutations: false,
-                library_undo_forbidden: false,
-            },
+                state.resolved_rules_journal.entries().len(),
+            ),
         ));
     }
     // CR 400.7: A new cast announcement is a new casting event — discard any

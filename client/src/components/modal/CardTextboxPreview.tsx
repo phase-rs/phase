@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { CardType } from "../../adapter/types.ts";
+import type { CardPrinting, CardType, PrintedRef } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { getCardImageSrcSetProps } from "../card/cardImageSrcSet.ts";
 
@@ -43,15 +43,21 @@ function bandFor(cardTypes: CardType | undefined): Band {
  * The band is chosen from `cardTypes` so frames that don't follow the standard
  * creature/spell layout (sagas, planeswalkers, battles, classes, cases) crop
  * to their actual rules-text region.
+ * Owner printing is supplied only by an object-backed caller; the facade owns
+ * viewer preference selection. Name-only callers remain ownerless.
  */
 export function CardTextboxPreview({
   cardName,
   cardTypes,
+  ownerPrinting,
+  ownerPrintedRef,
 }: {
   cardName: string;
   cardTypes?: CardType;
+  ownerPrinting?: CardPrinting | null;
+  ownerPrintedRef?: PrintedRef | null;
 }) {
-  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal" });
+  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal", ownerPrinting, ownerPrintedRef });
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
 
   // Still resolving — stay absent rather than flash a band into the modal.

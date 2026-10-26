@@ -22,7 +22,119 @@ use casting_costs::{CostSelection, SpellCostPayment};
 pub(super) struct CastStartBoundary {
     pub(super) object_id: ObjectId,
     journal_start: usize,
-    from_action_boundary: Vec<crate::types::game_state::SpellCastUndo>,
+    from_action_boundary: CastUndoLists,
+}
+
+/// Which serialization a cast-undo capture produces.
+#[derive(Clone, Copy)]
+enum CastUndoForm {
+    /// CR 733.1: the exact serialization, display-only data included, so a
+    /// cancelled cast restores every value.
+    Exact,
+    /// CR 104.4b + CR 203.1 + CR 206.1: the rules projection of the typed value,
+    /// which omits display-only data such as a printing.
+    Rules,
+}
+
+impl CastUndoForm {
+    fn to_value<T: serde::Serialize + ?Sized>(
+        self,
+        value: &T,
+    ) -> serde_json::Result<serde_json::Value> {
+        match self {
+            Self::Exact => serde_json::to_value(value),
+            Self::Rules => crate::types::display_only::rules_projection(value),
+        }
+    }
+}
+
+/// Whether the descriptor being written keeps a comparison list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ComparisonIdentity {
+    Projected,
+    /// A descriptor saved before the comparison list existed; it keeps none
+    /// until its reversal ends.
+    Legacy,
+}
+
+impl ComparisonIdentity {
+    fn of(reversal: &crate::types::game_state::SpellCastReversal) -> Self {
+        match reversal.comparison_undo {
+            Some(_) => Self::Projected,
+            None => Self::Legacy,
+        }
+    }
+}
+
+/// One typed state's captures, taken from the same value. The rules capture is
+/// absent for a legacy descriptor.
+struct CastUndoValues {
+    exact: serde_json::Value,
+    rules: Option<serde_json::Value>,
+}
+
+impl CastUndoValues {
+    fn capture(state: &GameState, identity: ComparisonIdentity) -> Result<Self, EngineError> {
+        Ok(Self {
+            exact: cast_undo_value(state, CastUndoForm::Exact)?,
+            rules: match identity {
+                ComparisonIdentity::Projected => Some(cast_undo_value(state, CastUndoForm::Rules)?),
+                ComparisonIdentity::Legacy => None,
+            },
+        })
+    }
+
+    /// Apply an earlier inverse to both captures in lockstep. A step without a
+    /// comparison list drops the rules capture: a legacy inverse never yields one.
+    fn undo(
+        &mut self,
+        restoration: &[crate::types::game_state::SpellCastUndo],
+        comparison: Option<&[crate::types::game_state::SpellCastUndo]>,
+    ) -> Result<(), EngineError> {
+        for edit in restoration.iter().rev() {
+            apply_cast_undo(&mut self.exact, edit)?;
+        }
+        match (&mut self.rules, comparison) {
+            (Some(rules), Some(edits)) => {
+                for edit in edits.iter().rev() {
+                    apply_cast_undo(rules, edit)?;
+                }
+            }
+            (Some(_), None) => self.rules = None,
+            (None, _) => {}
+        }
+        Ok(())
+    }
+}
+
+/// The inverse edits from one capture back to an earlier one, in both forms.
+struct CastUndoLists {
+    restoration: Vec<crate::types::game_state::SpellCastUndo>,
+    comparison: Option<Vec<crate::types::game_state::SpellCastUndo>>,
+}
+
+impl CastUndoLists {
+    /// The edits that turn `after` back into `before`; the comparison list
+    /// exists only when both captures have a rules form.
+    fn between(before: &CastUndoValues, after: &CastUndoValues) -> Self {
+        let diff = |before: &serde_json::Value, after: &serde_json::Value| {
+            let mut edits = Vec::new();
+            collect_cast_undo(Some(before), Some(after), &mut Vec::new(), &mut edits);
+            edits
+        };
+        Self {
+            restoration: diff(&before.exact, &after.exact),
+            comparison: match (&before.rules, &after.rules) {
+                (Some(before), Some(after)) => Some(diff(before, after)),
+                (Some(_), None) | (None, Some(_)) | (None, None) => None,
+            },
+        }
+    }
+
+    fn install(self, root: &mut crate::types::game_state::SpellCastReversal) {
+        root.undo = self.restoration;
+        root.comparison_undo = self.comparison;
+    }
 }
 
 struct CastUndoFrame {
@@ -79,20 +191,16 @@ pub(super) fn remember_cast_start(
 ) -> Result<(), EngineError> {
     CAST_START_BOUNDARIES.with(|boundaries| {
         if let Some(frame) = boundaries.borrow_mut().last_mut() {
-            let cast_start = cast_undo_value(state)?;
-            let action_boundary = cast_undo_value(&frame.action_boundary)?;
-            let mut from_action_boundary = Vec::new();
-            collect_cast_undo(
-                Some(&cast_start),
-                Some(&action_boundary),
-                &mut Vec::new(),
-                &mut from_action_boundary,
-            );
+            // A fresh descriptor follows this call, and it always carries a
+            // comparison list.
+            let identity = ComparisonIdentity::Projected;
+            let cast_start = CastUndoValues::capture(state, identity)?;
+            let action_boundary = CastUndoValues::capture(&frame.action_boundary, identity)?;
             // Synchronous completed casts no longer need their checkpoints.
             frame.cast_start = Some(CastStartBoundary {
                 object_id,
                 journal_start: state.resolved_rules_journal.entries().len(),
-                from_action_boundary,
+                from_action_boundary: CastUndoLists::between(&cast_start, &action_boundary),
             });
         }
         Ok(())
@@ -145,7 +253,8 @@ fn restore_sparse_cast_fields(
     state: &mut GameState,
     reversal: &crate::types::game_state::SpellCastReversal,
 ) -> Result<(), EngineError> {
-    let mut value = cast_undo_value(state)?;
+    // CR 733.1: cancellation applies the restoration list only.
+    let mut value = cast_undo_value(state, CastUndoForm::Exact)?;
     let mut changed = std::collections::BTreeSet::new();
     for edit in reversal.undo.iter().rev() {
         let path = match edit {
@@ -267,34 +376,31 @@ pub(super) fn record_spell_cast_undo(
             .library_undo_forbidden = true;
         return Ok(());
     }
-    let mut before_value = cast_undo_value(before)?;
+    // Both lists are captured from the same typed states and composed in
+    // lockstep; the descriptor being written decides whether a comparison list
+    // is kept.
+    let identity = ComparisonIdentity::of(root);
+    let mut before_values = CastUndoValues::capture(before, identity)?;
     if let Some(boundary) = cast_start {
-        for edit in boundary.from_action_boundary.iter().rev() {
-            apply_cast_undo(&mut before_value, edit)?;
-        }
+        before_values.undo(
+            &boundary.from_action_boundary.restoration,
+            boundary.from_action_boundary.comparison.as_deref(),
+        )?;
     }
     // Fold the prior inverse into this action's existing boundary. The stored
     // result describes changed state, rather than accumulating a per-click log.
     if cast_start.is_none() {
-        if let Some(root) = before.spell_cast_reversal.as_ref() {
-            for edit in root.undo.iter().rev() {
-                apply_cast_undo(&mut before_value, edit)?;
-            }
+        if let Some(prior) = before.spell_cast_reversal.as_ref() {
+            before_values.undo(&prior.undo, prior.comparison_undo.as_deref())?;
         }
     }
-    let after_value = cast_undo_value(state)?;
-    let mut edits = Vec::new();
-    collect_cast_undo(
-        Some(&before_value),
-        Some(&after_value),
-        &mut Vec::new(),
-        &mut edits,
-    );
-    let root = std::sync::Arc::make_mut(state.spell_cast_reversal.as_mut().unwrap());
-    if root.undo.is_empty() {
-        root.journal_start = action_start;
+    let after_values = CastUndoValues::capture(state, identity)?;
+    let lists = CastUndoLists::between(&before_values, &after_values);
+    let current = std::sync::Arc::make_mut(state.spell_cast_reversal.as_mut().unwrap());
+    if current.undo.is_empty() {
+        current.journal_start = action_start;
     }
-    root.undo = edits;
+    lists.install(current);
     Ok(())
 }
 
@@ -315,6 +421,7 @@ pub(super) fn preserve_independent_cast_action(
     if state.spell_cast_reversal.is_none() || !root.cost_mutations || root.library_undo_forbidden {
         return Ok(());
     }
+    let identity = ComparisonIdentity::of(root);
     let mut retained = before.clone();
     retained.spell_cast_reversal = None;
     restore_sparse_cast_fields(&mut retained, root)?;
@@ -324,27 +431,28 @@ pub(super) fn preserve_independent_cast_action(
         semantic_owner,
         action,
     )?;
-    let retained_value = cast_undo_value(&retained)?;
-    let current_value = cast_undo_value(state)?;
-    let mut undo = Vec::new();
-    collect_cast_undo(
-        Some(&retained_value),
-        Some(&current_value),
-        &mut Vec::new(),
-        &mut undo,
-    );
-    let root = std::sync::Arc::make_mut(state.spell_cast_reversal.as_mut().unwrap());
-    root.journal_start = retained.resolved_rules_journal.entries().len();
-    root.undo = undo;
+    // The rebased descriptor keeps the form of the descriptor being rebased.
+    let retained_values = CastUndoValues::capture(&retained, identity)?;
+    let current_values = CastUndoValues::capture(state, identity)?;
+    let lists = CastUndoLists::between(&retained_values, &current_values);
+    let current = std::sync::Arc::make_mut(state.spell_cast_reversal.as_mut().unwrap());
+    current.journal_start = retained.resolved_rules_journal.entries().len();
+    lists.install(current);
     Ok(())
 }
 
-fn cast_undo_value(state: &GameState) -> Result<serde_json::Value, EngineError> {
-    let mut value = serde_json::to_value(state)
+fn cast_undo_value(
+    state: &GameState,
+    form: CastUndoForm,
+) -> Result<serde_json::Value, EngineError> {
+    let mut value = form
+        .to_value(state)
         .map_err(|error| EngineError::InvalidAction(format!("Cannot record cast undo: {error}")))?;
     // The descriptor is not part of the compared state. In particular, prior
-    // inverse edits must never become input to another inverse. No extra
-    // GameState clone is needed for this serialization boundary.
+    // inverse edits must never become input to another inverse, and its
+    // fragments are already-erased JSON that a rules projection cannot see a
+    // printing inside. No extra GameState clone is needed for this
+    // serialization boundary.
     value
         .as_object_mut()
         .expect("GameState serializes as an object")
@@ -365,7 +473,7 @@ fn cast_undo_value(state: &GameState) -> Result<serde_json::Value, EngineError> 
             .ok_or_else(|| EngineError::InvalidAction("Invalid cast undo object".into()))?
             .insert(
                 CAST_UNDO_OBJECT_RULES.into(),
-                serde_json::to_value(rules).map_err(invalid_cast_undo_rules)?,
+                form.to_value(&rules).map_err(invalid_cast_undo_rules)?,
             );
     }
     Ok(value)
@@ -1165,4 +1273,352 @@ pub(super) fn handle_harmonize_tap_choice(
         lock,
         events,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::card_printing::CardPrinting;
+    use crate::types::display_only::DisplayOnly;
+    use crate::types::game_state::{SpellCastReversal, SpellCastUndo, ZoneChangeRecord};
+    use crate::types::identifiers::CardId;
+
+    fn printing(tag: &str) -> CardPrinting {
+        CardPrinting {
+            set_code: tag.into(),
+            collector_number: "1".into(),
+        }
+    }
+
+    fn stamp(state: &mut GameState, id: ObjectId, tag: &str) {
+        let object = state.objects.get_mut(&id).expect("object exists");
+        object.printing = DisplayOnly::new(Some(printing(tag)));
+        object.base_printing = DisplayOnly::new(Some(printing(tag)));
+    }
+
+    fn conceal(state: &mut GameState, id: ObjectId) {
+        state
+            .objects
+            .get_mut(&id)
+            .expect("object exists")
+            .conceal_printing();
+    }
+
+    /// Two battlefield objects: X carries `x_tag`, Y carries a fixed printing.
+    fn board(x_tag: &str) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let x = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Object X".into(),
+            Zone::Battlefield,
+        );
+        let y = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Object Y".into(),
+            Zone::Battlefield,
+        );
+        stamp(&mut state, x, x_tag);
+        stamp(&mut state, y, "SYYY");
+        (state, x, y)
+    }
+
+    fn with_descriptor(
+        state: &mut GameState,
+        object_id: ObjectId,
+        comparison_undo: Option<Vec<SpellCastUndo>>,
+    ) {
+        let mut reversal = SpellCastReversal::announced(object_id, PlayerId(0), 0);
+        reversal.comparison_undo = comparison_undo;
+        reversal.cost_mutations = true;
+        state.spell_cast_reversal = Some(Arc::new(reversal));
+    }
+
+    fn edit_path(edit: &SpellCastUndo) -> &[String] {
+        match edit {
+            SpellCastUndo::Value { path, .. }
+            | SpellCastUndo::Splice { path, .. }
+            | SpellCastUndo::Hand { path, .. } => path,
+        }
+    }
+
+    fn object_field(id: ObjectId, field: &str) -> Vec<String> {
+        vec!["objects".into(), id.0.to_string(), field.into()]
+    }
+
+    fn holds_edit(list: &[SpellCastUndo], path: &[String]) -> bool {
+        list.iter().any(|edit| edit_path(edit) == path)
+    }
+
+    fn holds_printing_of(list: &[SpellCastUndo], id: ObjectId) -> bool {
+        holds_edit(list, &object_field(id, "printing"))
+            || holds_edit(list, &object_field(id, "base_printing"))
+    }
+
+    fn holds_any_printing(list: &[SpellCastUndo]) -> bool {
+        list.iter().any(|edit| {
+            edit_path(edit)
+                .iter()
+                .any(|part| part == "printing" || part == "base_printing")
+        })
+    }
+
+    fn without_printing_of(list: &[SpellCastUndo], id: ObjectId) -> Vec<SpellCastUndo> {
+        list.iter()
+            .filter(|edit| {
+                edit_path(edit) != object_field(id, "printing")
+                    && edit_path(edit) != object_field(id, "base_printing")
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn captures(state: &GameState) -> CastUndoValues {
+        CastUndoValues::capture(state, ComparisonIdentity::Projected).expect("capture")
+    }
+
+    fn direct(before: &GameState, after: &GameState) -> CastUndoLists {
+        CastUndoLists::between(&captures(before), &captures(after))
+    }
+
+    fn spliced_at(list: &[SpellCastUndo]) -> usize {
+        match list {
+            [SpellCastUndo::Splice { index, .. }] => *index,
+            other => panic!("expected exactly one splice, got {other:?}"),
+        }
+    }
+
+    /// Cast-start flow over `board(x_tag)`: a parent choice changes life and
+    /// conceals Y before the cast start; the cost then changes life and conceals X.
+    struct CastStartFlow {
+        boundary_lists: CastUndoLists,
+        reversal: Arc<SpellCastReversal>,
+        expected: CastUndoLists,
+        x: ObjectId,
+        y: ObjectId,
+    }
+
+    fn cast_start_flow(x_tag: &str) -> CastStartFlow {
+        let (action_boundary, x, y) = board(x_tag);
+        let mut cast_start = action_boundary.clone();
+        cast_start.players[0].life -= 1;
+        conceal(&mut cast_start, y);
+
+        let guard = CastUndoBoundaryGuard::enter(Arc::new(action_boundary.clone()));
+        remember_cast_start(&cast_start, x).expect("cast start recorded");
+        let boundary = guard.take().expect("the cast start is retained");
+
+        let mut now = cast_start.clone();
+        now.players[0].life -= 3;
+        conceal(&mut now, x);
+        with_descriptor(&mut now, x, Some(Vec::new()));
+        record_spell_cast_undo(&mut now, &action_boundary, 0, Some(&boundary)).expect("recorded");
+
+        CastStartFlow {
+            boundary_lists: boundary.from_action_boundary,
+            reversal: now.spell_cast_reversal.clone().expect("descriptor kept"),
+            expected: direct(&cast_start, &now),
+            x,
+            y,
+        }
+    }
+
+    // CR 733.1 + CR 104.4b: the cast-start boundary keeps both inverses, so a
+    // printing concealed before the cast start folds out of both lists and the
+    // comparison list never holds a printing.
+    #[test]
+    fn cast_start_boundary_records_both_lists_in_lockstep() {
+        let a = cast_start_flow("SAAA");
+        let b = cast_start_flow("SBBB");
+
+        // Reach: the boundary holds Y's concealment in the restoration list only.
+        assert!(holds_printing_of(&a.boundary_lists.restoration, a.y));
+        let boundary_comparison = a
+            .boundary_lists
+            .comparison
+            .as_deref()
+            .expect("a fresh boundary keeps a comparison list");
+        assert!(!boundary_comparison.is_empty(), "the life edit is retained");
+        assert!(!holds_any_printing(boundary_comparison));
+
+        // Both final lists are the direct diffs of the cast start against now.
+        assert_eq!(a.reversal.undo, a.expected.restoration);
+        assert_eq!(a.reversal.comparison_undo, a.expected.comparison);
+        let comparison = a.reversal.comparison_undo.as_deref().expect("comparison");
+        assert!(holds_edit(
+            comparison,
+            &["players".into(), "0".into(), "life".into()]
+        ));
+        assert!(!holds_any_printing(comparison));
+
+        // The concealment before the cast start is folded away; the cost's own is kept.
+        assert!(!holds_printing_of(&a.reversal.undo, a.y));
+        assert!(holds_edit(&a.reversal.undo, &object_field(a.x, "printing")));
+        assert!(holds_edit(
+            &a.reversal.undo,
+            &object_field(a.x, "base_printing")
+        ));
+
+        // The printing-only twin has an equal comparison list and a restoration
+        // list that differs by exactly X's two printing edits.
+        assert_eq!(a.reversal.comparison_undo, b.reversal.comparison_undo);
+        assert_ne!(a.reversal.undo, b.reversal.undo);
+        assert_eq!(
+            without_printing_of(&a.reversal.undo, a.x),
+            without_printing_of(&b.reversal.undo, b.x)
+        );
+        assert_eq!(a.reversal.undo.len() - 2, {
+            without_printing_of(&a.reversal.undo, a.x).len()
+        });
+    }
+
+    // CR 733.1 + CR 104.4b: composing the prior inverse into the next action's
+    // boundary gives the same lists, in both forms, as one direct diff.
+    #[test]
+    fn folded_inverse_equals_the_direct_inverse_in_both_forms() {
+        let (pre, x, _y) = board("SAAA");
+        let mut s1 = pre.clone();
+        s1.players[0].life -= 2;
+        conceal(&mut s1, x);
+        with_descriptor(&mut s1, x, Some(Vec::new()));
+        record_spell_cast_undo(&mut s1, &pre, 0, None).expect("first action recorded");
+        let first = s1.spell_cast_reversal.clone().expect("descriptor");
+        assert!(holds_printing_of(&first.undo, x), "reach: s1 concealed X");
+
+        let mut s2 = s1.clone();
+        s2.players[1].life -= 2;
+        record_spell_cast_undo(&mut s2, &s1, 0, None).expect("second action recorded");
+        let folded = s2.spell_cast_reversal.clone().expect("descriptor");
+
+        let expected = direct(&pre, &s2);
+        assert_eq!(folded.undo, expected.restoration);
+        assert_eq!(folded.comparison_undo, expected.comparison);
+        assert_ne!(folded.undo, first.undo, "reach: the fold rewrote the list");
+        assert!(holds_printing_of(&folded.undo, x));
+        let comparison = folded.comparison_undo.as_deref().expect("comparison");
+        assert!(!holds_any_printing(comparison));
+    }
+
+    // CR 733.1: a descriptor saved before the comparison list existed gains none
+    // through any composition step.
+    #[test]
+    fn a_legacy_descriptor_gains_no_comparison_list() {
+        let (before, x, _y) = board("SAAA");
+        let mut state = before.clone();
+        state.players[0].life -= 2;
+        with_descriptor(&mut state, x, None);
+        record_spell_cast_undo(&mut state, &before, 0, None).expect("recorded");
+        let reversal = state.spell_cast_reversal.clone().expect("descriptor");
+        assert!(
+            !reversal.undo.is_empty(),
+            "reach: the restoration list was rewritten"
+        );
+        assert_eq!(reversal.comparison_undo, None);
+
+        let mut values = captures(&state);
+        assert!(
+            values.rules.is_some(),
+            "reach: a projected capture has a rules form"
+        );
+        values.undo(&[], None).expect("applies");
+        assert!(values.rules.is_none());
+
+        let full = captures(&state);
+        let legacy = CastUndoValues::capture(&state, ComparisonIdentity::Legacy).expect("capture");
+        assert!(legacy.rules.is_none());
+        assert_eq!(CastUndoLists::between(&full, &legacy).comparison, None);
+        assert_eq!(CastUndoLists::between(&legacy, &full).comparison, None);
+        assert_eq!(CastUndoLists::between(&legacy, &legacy).comparison, None);
+        assert_eq!(
+            CastUndoLists::between(&full, &full).comparison,
+            Some(Vec::new())
+        );
+    }
+
+    fn zone_change_record(state: &GameState, id: ObjectId, tag: &str) -> ZoneChangeRecord {
+        let mut object = state.objects.get(&id).expect("object exists").clone();
+        object.printing = DisplayOnly::new(Some(printing(tag)));
+        object.snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard)
+    }
+
+    fn with_records(base: &GameState, records: &[&ZoneChangeRecord]) -> GameState {
+        let mut state = base.clone();
+        state.zone_changes_this_turn = records.iter().map(|record| (*record).clone()).collect();
+        state
+    }
+
+    /// Both lists, applied to their own after-capture, reproduce their before-capture.
+    fn assert_each_list_is_exact(before: &GameState, after: &GameState) -> CastUndoLists {
+        let lists = direct(before, after);
+        let mut restored = captures(after);
+        restored
+            .undo(&lists.restoration, lists.comparison.as_deref())
+            .expect("applies");
+        let expected = captures(before);
+        assert_eq!(restored.exact, expected.exact);
+        assert_eq!(restored.rules, expected.rules);
+        lists
+    }
+
+    // CR 733.1 + CR 104.4b: two records that are equal as rules data but differ in
+    // a display-only printing give each form its own splice position, and each list
+    // is exact in its own representation.
+    #[test]
+    fn projected_equal_array_elements_keep_each_list_exact() {
+        let (base, x, _y) = board("SAAA");
+        let r1 = zone_change_record(&base, x, "S1");
+        let r2 = zone_change_record(&base, x, "S2");
+        assert!(r1 == r2, "reach: the records are equality-transparent");
+        assert_ne!(
+            serde_json::to_value(&r1).expect("record serializes"),
+            serde_json::to_value(&r2).expect("record serializes"),
+            "reach: their exact JSON differs"
+        );
+
+        // Removal: [R1, R2] -> [R2].
+        let removal = assert_each_list_is_exact(
+            &with_records(&base, &[&r1, &r2]),
+            &with_records(&base, &[&r2]),
+        );
+        assert_eq!(spliced_at(&removal.restoration), 0);
+        assert_eq!(
+            spliced_at(removal.comparison.as_deref().expect("comparison")),
+            1
+        );
+
+        // Insertion: [R2] -> [R1, R2].
+        let insertion = assert_each_list_is_exact(
+            &with_records(&base, &[&r2]),
+            &with_records(&base, &[&r1, &r2]),
+        );
+        assert_eq!(spliced_at(&insertion.restoration), 0);
+        assert_eq!(
+            spliced_at(insertion.comparison.as_deref().expect("comparison")),
+            1
+        );
+
+        // The removal twin: same splice index, other payload; equal comparison list.
+        let twin = assert_each_list_is_exact(
+            &with_records(&base, &[&r2, &r1]),
+            &with_records(&base, &[&r1]),
+        );
+        assert_eq!(spliced_at(&twin.restoration), 0);
+        assert_ne!(twin.restoration, removal.restoration);
+        assert_eq!(twin.comparison, removal.comparison);
+
+        // A rules difference (the record's name) separates the comparison list.
+        let mut renamed = r1.clone();
+        renamed.name = "Another name".into();
+        let rules_twin = assert_each_list_is_exact(
+            &with_records(&base, &[&renamed, &r2]),
+            &with_records(&base, &[&r2]),
+        );
+        assert_ne!(rules_twin.comparison, removal.comparison);
+    }
 }

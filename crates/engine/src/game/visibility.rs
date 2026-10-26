@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::types::action_rejection::ActionRejection;
+use crate::types::display_only::DisplayOnly;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
     CastOfferKind, GameState, LibraryKnowledgeStamp, PayCostKind, StackEntryKind, WaitingFor,
@@ -378,6 +379,7 @@ pub(crate) fn capture_library_search_card_view(
         zone: object.zone,
         identity: ObjectIncarnationRef::from_object(object),
         card_id: object.card_id,
+        printing: object.printing.clone(),
         current_face,
         front_face,
         back_face,
@@ -3794,6 +3796,10 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     Arc::make_mut(&mut obj.base_static_definitions).clear();
     obj.base_color.clear();
     obj.base_printed_ref = None;
+    // CR 400.2 + CR 708.5: the printing identifies the physical card exactly as its name does,
+    // so it leaves with the name, live and base value alike.
+    obj.printing = DisplayOnly::default();
+    obj.base_printing = DisplayOnly::default();
 }
 
 /// The retained event shapes that carry a `ZoneChangeRecord` or a `TriggerSourceContext`:
@@ -3910,6 +3916,7 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `effect_context_object`/`amassed_army_object`), a different payload
 /// (`CostPaidObjectSnapshot`) and writer set; event carriers outside the loops above;
 /// raw-event transport; stable-id tracking and `proposer_hidden_view` (#9377 section 1).
+/// Its printing stays beside its name (the exposure rule follows the name).
 ///
 /// The payment wire census covers only the `mana_spent_source_snapshots` key;
 /// `assert_linked_exile_census` in the 9377 integration file covers `linked_exile_snapshot`.
@@ -4563,6 +4570,7 @@ fn redact_damage_record_source(record: &mut crate::types::game_state::DamageReco
 fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
     let crate::types::game_state::LKISnapshot {
         name,
+        printing,
         token_image_ref,
         power,
         toughness,
@@ -4584,6 +4592,8 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         attachments,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
+    // CR 400.2: the printing leaves with the name it was captured beside.
+    *printing = DisplayOnly::default();
     *token_image_ref = None;
     *power = None;
     *toughness = None;

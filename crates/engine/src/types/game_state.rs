@@ -33,8 +33,12 @@ use super::ability::{
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
+use super::card_printing::CardPrinting;
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
+use super::display_only::{
+    reported_rules_projection, DisplayOnly, OmittedDisplayData, ReportedRulesProjection,
+};
 use super::events::{
     EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
     EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind, Targeter,
@@ -451,9 +455,14 @@ pub struct CombatPhaseSkipState {
 
 /// CR 400.7: Snapshot of an object's characteristics at the time it left a public zone.
 /// Used for event-context resolution when the object is no longer in its original zone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LKISnapshot {
     pub name: String,
+    /// The printing captured beside `name` as the object last existed in the public zone.
+    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
+    /// AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<CardPrinting>>,
     /// Display-only token catalog ref as it last existed in the public zone.
     /// Preserved so stack entries from dead token sources can render the exact
     /// token image without falling back to name-based lookup.
@@ -545,6 +554,60 @@ pub struct LKISnapshot {
     /// which is exactly the pre-change fail-closed behavior.
     #[serde(default)]
     pub attachments: Vec<AttachmentSnapshot>,
+}
+
+/// `printing` is omitted unconditionally (CR 203.1 + CR 206.1: display-only), so the text is
+/// the same with or without a printing and every Debug-keyed reading of a value that embeds a
+/// snapshot (`TriggerSourceContext`, `ZoneChangeRecord`, `GameEvent`) is unchanged. The
+/// exhaustive destructure makes a new field a compile error here until it is added to the text.
+impl std::fmt::Debug for LKISnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            printing: _,
+            token_image_ref,
+            power,
+            toughness,
+            base_power,
+            base_toughness,
+            mana_value,
+            controller,
+            owner,
+            card_types,
+            subtypes,
+            supertypes,
+            keywords,
+            colors,
+            chosen_attributes,
+            counters,
+            tapped,
+            is_suspected,
+            was_prepared,
+            attachments,
+        } = self;
+        f.debug_struct("LKISnapshot")
+            .field("name", name)
+            .field("token_image_ref", token_image_ref)
+            .field("power", power)
+            .field("toughness", toughness)
+            .field("base_power", base_power)
+            .field("base_toughness", base_toughness)
+            .field("mana_value", mana_value)
+            .field("controller", controller)
+            .field("owner", owner)
+            .field("card_types", card_types)
+            .field("subtypes", subtypes)
+            .field("supertypes", supertypes)
+            .field("keywords", keywords)
+            .field("colors", colors)
+            .field("chosen_attributes", chosen_attributes)
+            .field("counters", counters)
+            .field("tapped", tapped)
+            .field("is_suspected", is_suspected)
+            .field("was_prepared", was_prepared)
+            .field("attachments", attachments)
+            .finish()
+    }
 }
 
 /// Complete event-time authority for a triggered ability's source.
@@ -8120,7 +8183,19 @@ impl ActivationPhyrexianIntent {
 }
 
 /// CR 601.2 + CR 733.1: an incomplete spell's durable reversal boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Two inverse-edit lists are recorded at the same capture points from the same typed
+/// states. `undo` (the restoration list) inverts the exact serialization, display-only
+/// data included; it is the only list cancellation applies, so a cancelled cast returns
+/// every value, printing included. `comparison_undo` inverts the rules projection
+/// (`display_only::rules_projection`) of the same states and is the descriptor's identity:
+/// CR 104.4b: loop detection compares whole game states, and CR 203.1 + CR 206.1 give a
+/// printing no effect on game play, so two reversals that differ only in display-only data
+/// are equal.
+/// The fragments are already-serialized JSON: a rules projection of a state that still
+/// holds this descriptor cannot see a printing inside them, so every whole-state capture
+/// removes the descriptor first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SpellCastReversal {
     pub object_id: ObjectId,
     pub player: PlayerId,
@@ -8130,11 +8205,62 @@ pub(crate) struct SpellCastReversal {
     /// the descriptor stores inverse edits for changed members.
     #[serde(default)]
     pub undo: Vec<SpellCastUndo>,
+    /// The comparison list. `None` only for a descriptor saved before the list
+    /// existed; such a descriptor keeps none until its reversal ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_undo: Option<Vec<SpellCastUndo>>,
     #[serde(default)]
     pub cost_mutations: bool,
     #[serde(default)]
     pub library_undo_forbidden: bool,
 }
+
+impl SpellCastReversal {
+    /// CR 601.2a + CR 733.1: the descriptor of a newly announced spell, with no
+    /// edits yet and a comparison list from the start.
+    pub(crate) fn announced(object_id: ObjectId, player: PlayerId, journal_start: usize) -> Self {
+        Self {
+            object_id,
+            player,
+            journal_start,
+            undo: Vec::new(),
+            comparison_undo: Some(Vec::new()),
+            cost_mutations: false,
+            library_undo_forbidden: false,
+        }
+    }
+}
+
+/// CR 104.4b + CR 203.1 + CR 206.1: every field but the two lists, then the comparison
+/// lists when both descriptors have one and the restoration lists when neither has one.
+/// A descriptor with a comparison list never equals one without, so the relation is an
+/// equivalence: no pair crosses the two classes, and inside each class it is equality of
+/// a tuple of `Eq` values.
+impl PartialEq for SpellCastReversal {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            object_id,
+            player,
+            journal_start,
+            undo,
+            comparison_undo,
+            cost_mutations,
+            library_undo_forbidden,
+        } = self;
+        *object_id == other.object_id
+            && *player == other.player
+            && *journal_start == other.journal_start
+            && *cost_mutations == other.cost_mutations
+            && *library_undo_forbidden == other.library_undo_forbidden
+            && match (comparison_undo, &other.comparison_undo) {
+                (Some(mine), Some(theirs)) => mine == theirs,
+                (None, None) => *undo == other.undo,
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    }
+}
+
+impl Eq for SpellCastReversal {}
 
 /// CR 733.1: inverse edits captured at the existing action boundary. Paths
 /// address serialized state fields; applying them restores values, never
@@ -12413,6 +12539,18 @@ fn visit_persisted_journal_zone_change_trigger_records(
 /// current turn and the ledger position together, but historical payloads may
 /// omit either field and deserialize them as zero.
 ///
+/// Records and ledger rows are compared by [`PersistedZoneChangeFingerprint`]:
+/// the rules projection of the typed `ZoneChangeRecord` (decoded through its own
+/// compatibility decoding, without its two occurrence stamps). CR 203.1 +
+/// CR 206.1: a printing has no effect on game play, so a display-only
+/// difference neither splits one occurrence into two nor selects between two
+/// rules-identical occurrences, while the loaded state keeps every original
+/// value because reconciliation only inserts the two stamps. Display-free
+/// records keep today's raw-JSON comparison at the fast paths and among two or
+/// more rules-identical candidates, so every binding that is unique today stays
+/// unique; a display-free record whose only rules-identical row differs from it
+/// in raw form now binds to that row.
+///
 /// This runs against serialized `ResolutionStateWire` input before either v1
 /// legacy fields or v2/v3 typed frames materialize into runtime state. The
 /// caller passes any v1-only live roots; typed frames are part of the canonical
@@ -12487,7 +12625,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
 
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
 
-    let mut seen = HashMap::<(u32, usize), serde_json::Value>::new();
+    let mut seen = HashMap::<(u32, usize), OccurrenceClaim>::new();
     visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
         reconcile_persisted_zone_changed_record(record, turn_number, &occurrences, &mut seen)
     })?;
@@ -12532,10 +12670,110 @@ fn reindex_persisted_batched_zone_change_trigger_keys(
     Ok(())
 }
 
+/// Load errors of the persisted zone-change reconciliation; the texts are matched by tests.
+const ZONE_CHANGE_NO_OCCURRENCE: &str = "current-turn ZoneChanged record has no ledger occurrence";
+const ZONE_CHANGE_AMBIGUOUS_OCCURRENCE: &str =
+    "ZoneChanged record ambiguously matches multiple ledger occurrences";
+const ZONE_CHANGE_CONFLICTING_CLAIMS: &str =
+    "ZoneChanged occurrence key is shared by conflicting records";
+
 #[derive(Debug)]
 struct PersistedZoneChangeOccurrence {
     index: usize,
-    fingerprint: serde_json::Value,
+    fingerprint: PersistedZoneChangeFingerprint,
+}
+
+/// CR 400.7 + CR 603.2c: the identity that binds a persisted `ZoneChanged`
+/// record to its ledger occurrence. CR 203.1 + CR 206.1: display-only data
+/// takes no part in it.
+#[derive(Debug)]
+struct PersistedZoneChangeFingerprint {
+    /// The rules projection of the typed record decoded without the two
+    /// occurrence stamps. The projection holds both stamp keys at the constant
+    /// serde defaults on every side, so it needs no further stripping.
+    rules: serde_json::Value,
+    raw: RawZoneChangeFingerprint,
+}
+
+/// The raw half of the two-source rule.
+#[derive(Debug)]
+enum RawZoneChangeFingerprint {
+    /// The typed record carries no display data: today's raw comparison (the raw
+    /// map without the two stamps) still decides between display-free records.
+    DisplayFree(serde_json::Value),
+    /// The typed record carries display data: raw comparison is disabled for it.
+    DisplayBearing,
+}
+
+impl PersistedZoneChangeFingerprint {
+    /// Whether two fingerprints name one occurrence. Two display-free records
+    /// compare in raw form (today's relation); any pair with display data
+    /// compares the rules projection. Raw equality implies rules equality (the
+    /// typed fingerprint is a function of the raw one), so this is finer than
+    /// the rules relation only between two display-free records.
+    fn same_occurrence(&self, other: &Self) -> bool {
+        match (&self.raw, &other.raw) {
+            (
+                RawZoneChangeFingerprint::DisplayFree(a),
+                RawZoneChangeFingerprint::DisplayFree(b),
+            ) => a == b,
+            (
+                RawZoneChangeFingerprint::DisplayFree(_),
+                RawZoneChangeFingerprint::DisplayBearing,
+            )
+            | (
+                RawZoneChangeFingerprint::DisplayBearing,
+                RawZoneChangeFingerprint::DisplayFree(_),
+            )
+            | (
+                RawZoneChangeFingerprint::DisplayBearing,
+                RawZoneChangeFingerprint::DisplayBearing,
+            ) => self.rules == other.rules,
+        }
+    }
+}
+
+/// CR 603.2c: every live record that names one occurrence key must be that
+/// occurrence: all of them agree in the rules projection, and the display-free
+/// ones also agree in raw form (today's comparison among display-free records).
+/// This is the pairwise relation of [`PersistedZoneChangeFingerprint::same_occurrence`]
+/// applied to the whole group, so the verdict does not depend on visiting order.
+struct OccurrenceClaim {
+    rules: serde_json::Value,
+    /// The raw form of the first display-free record of this key, if any.
+    display_free_raw: Option<serde_json::Value>,
+}
+
+impl OccurrenceClaim {
+    fn of(fingerprint: PersistedZoneChangeFingerprint) -> Self {
+        let display_free_raw = match fingerprint.raw {
+            RawZoneChangeFingerprint::DisplayFree(raw) => Some(raw),
+            RawZoneChangeFingerprint::DisplayBearing => None,
+        };
+        Self {
+            rules: fingerprint.rules,
+            display_free_raw,
+        }
+    }
+
+    fn admit(&mut self, fingerprint: PersistedZoneChangeFingerprint) -> Result<(), String> {
+        if self.rules != fingerprint.rules {
+            return Err(ZONE_CHANGE_CONFLICTING_CLAIMS.to_string());
+        }
+        match (fingerprint.raw, &self.display_free_raw) {
+            (RawZoneChangeFingerprint::DisplayBearing, _) => Ok(()),
+            (RawZoneChangeFingerprint::DisplayFree(raw), None) => {
+                self.display_free_raw = Some(raw);
+                Ok(())
+            }
+            (RawZoneChangeFingerprint::DisplayFree(raw), Some(claimed)) if raw == *claimed => {
+                Ok(())
+            }
+            (RawZoneChangeFingerprint::DisplayFree(_), Some(_)) => {
+                Err(ZONE_CHANGE_CONFLICTING_CLAIMS.to_string())
+            }
+        }
+    }
 }
 
 fn persisted_turn_number(
@@ -12555,26 +12793,57 @@ fn json_usize(value: &serde_json::Value) -> Option<usize> {
     value.as_u64().and_then(|value| usize::try_from(value).ok())
 }
 
+/// The persisted record without its two occurrence stamps: the raw half of the
+/// fingerprint, and the typed decode's input.
+fn without_occurrence_stamps(
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut stamp_free = record.clone();
+    stamp_free.remove("turn_zone_change_index");
+    stamp_free.remove("recorded_turn_number");
+    stamp_free
+}
+
+/// CR 400.7 + CR 603.2c + CR 203.1 + CR 206.1: decodes the persisted record
+/// through `ZoneChangeRecord`'s own compatibility decoding and fingerprints its
+/// rules projection. The decode input omits the two occurrence stamps, which
+/// reconciliation itself rewrites and which today's loader reads as absent when
+/// invalid, so they take their serde defaults on every side.
 fn zone_change_fingerprint(
     record: &serde_json::Map<String, serde_json::Value>,
-) -> Result<serde_json::Value, String> {
+) -> Result<PersistedZoneChangeFingerprint, String> {
     if !record.contains_key("object_id")
         || !record.contains_key("from_zone")
         || !record.contains_key("to_zone")
     {
         return Err("ZoneChanged record is missing its zone-change shape".to_string());
     }
-    let mut fingerprint = record.clone();
-    fingerprint.remove("turn_zone_change_index");
-    fingerprint.remove("recorded_turn_number");
-    Ok(serde_json::Value::Object(fingerprint))
+    let stamp_free = without_occurrence_stamps(record);
+    let typed = ZoneChangeRecord::deserialize(&stamp_free).map_err(|error| {
+        format!("ZoneChanged record does not decode as a zone-change record: {error}")
+    })?;
+    let ReportedRulesProjection {
+        value: rules,
+        omitted,
+    } = reported_rules_projection(&typed)
+        .map_err(|error| format!("ZoneChanged record has no rules projection: {error}"))?;
+    if !rules.is_object() {
+        return Err("ZoneChanged record's rules projection is not an object".to_string());
+    }
+    let raw = match omitted {
+        OmittedDisplayData::Nothing => {
+            RawZoneChangeFingerprint::DisplayFree(serde_json::Value::Object(stamp_free))
+        }
+        OmittedDisplayData::NonEmpty => RawZoneChangeFingerprint::DisplayBearing,
+    };
+    Ok(PersistedZoneChangeFingerprint { rules, raw })
 }
 
 fn reconcile_persisted_zone_changed_record(
     record: &mut serde_json::Value,
     current_turn: u32,
     occurrences: &[PersistedZoneChangeOccurrence],
-    seen: &mut HashMap<(u32, usize), serde_json::Value>,
+    seen: &mut HashMap<(u32, usize), OccurrenceClaim>,
 ) -> Result<(), String> {
     let record = record
         .as_object_mut()
@@ -12603,7 +12872,7 @@ fn reconcile_persisted_zone_changed_record(
             if let Some(index) = index {
                 if occurrences
                     .get(index)
-                    .is_some_and(|occurrence| occurrence.fingerprint == fingerprint)
+                    .is_some_and(|occurrence| occurrence.fingerprint.same_occurrence(&fingerprint))
                 {
                     (turn, index)
                 } else {
@@ -12630,7 +12899,7 @@ fn reconcile_persisted_zone_changed_record(
         // zero/current stamps remain strict below.
         None if !occurrences
             .iter()
-            .any(|occurrence| occurrence.fingerprint == fingerprint) =>
+            .any(|occurrence| occurrence.fingerprint.same_occurrence(&fingerprint)) =>
         {
             return Ok(())
         }
@@ -12645,11 +12914,10 @@ fn reconcile_persisted_zone_changed_record(
 
     match seen.entry((recorded_turn, index)) {
         std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(fingerprint);
+            entry.insert(OccurrenceClaim::of(fingerprint));
         }
-        std::collections::hash_map::Entry::Occupied(entry) if *entry.get() == fingerprint => {}
-        std::collections::hash_map::Entry::Occupied(_) => {
-            return Err("ZoneChanged occurrence key is shared by conflicting records".to_string());
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.get_mut().admit(fingerprint)?;
         }
     }
     Ok(())
@@ -12658,22 +12926,33 @@ fn reconcile_persisted_zone_changed_record(
 /// A coherent pair can remain as-is even when two historical ledger rows are
 /// byte-identical: persistence cannot distinguish copied carriers of one
 /// occurrence from a lost second occurrence. Only a record that needs a new
-/// binding must identify exactly one ledger row.
+/// binding must identify exactly one ledger row, by the two-source rule:
+///
+/// - (a) the candidates are the ledger occurrences whose rules projection equals
+///   the record's (CR 203.1 + CR 206.1: display data never discriminates);
+/// - (b) exactly one candidate binds (CR 400.7 + CR 603.2c: one occurrence per
+///   record);
+/// - (c) two or more candidates fall back to today's raw comparison, only when
+///   the record and every candidate are display-free (a display-bearing member
+///   disables the fallback, so a printing never chooses);
+/// - (d) no candidate is an error. Raw equality implies rules equality (the typed
+///   fingerprint is a function of the raw one), so the raw fallback the rule
+///   would permit for an all-display-free set cannot find a row either, and both
+///   branches give this error; it is returned directly.
 fn reconcile_current_turn_zone_changed_record(
     record: &mut serde_json::Map<String, serde_json::Value>,
     current_turn: u32,
-    fingerprint: &serde_json::Value,
+    fingerprint: &PersistedZoneChangeFingerprint,
     occurrences: &[PersistedZoneChangeOccurrence],
 ) -> Result<(u32, usize), String> {
     let candidates = occurrences
         .iter()
-        .filter(|occurrence| occurrence.fingerprint == *fingerprint)
+        .filter(|occurrence| occurrence.fingerprint.rules == fingerprint.rules)
         .collect::<Vec<_>>();
-    let [occurrence] = candidates.as_slice() else {
-        return Err(match candidates.len() {
-            0 => "current-turn ZoneChanged record has no ledger occurrence".to_string(),
-            _ => "ZoneChanged record ambiguously matches multiple ledger occurrences".to_string(),
-        });
+    let occurrence = match candidates.as_slice() {
+        [] => return Err(ZONE_CHANGE_NO_OCCURRENCE.to_string()),
+        [one] => *one,
+        several => legacy_raw_occurrence(fingerprint, several)?,
     };
     record.insert(
         "recorded_turn_number".to_string(),
@@ -12684,6 +12963,37 @@ fn reconcile_current_turn_zone_changed_record(
         serde_json::Value::from(occurrence.index),
     );
     Ok((current_turn, occurrence.index))
+}
+
+/// Rule (c) of the two-source rule: among two or more rules-identical candidates,
+/// today's raw comparison decides, but only when the record and every candidate
+/// are display-free. A display-bearing record or member disables the fallback
+/// (it is not merely excluded), so a printing never selects between rules-identical
+/// occurrences (CR 203.1 + CR 206.1).
+fn legacy_raw_occurrence<'a>(
+    fingerprint: &PersistedZoneChangeFingerprint,
+    candidates: &[&'a PersistedZoneChangeOccurrence],
+) -> Result<&'a PersistedZoneChangeOccurrence, String> {
+    let RawZoneChangeFingerprint::DisplayFree(record_raw) = &fingerprint.raw else {
+        return Err(ZONE_CHANGE_AMBIGUOUS_OCCURRENCE.to_string());
+    };
+    let mut raw_matches = Vec::new();
+    for candidate in candidates {
+        match &candidate.fingerprint.raw {
+            RawZoneChangeFingerprint::DisplayBearing => {
+                return Err(ZONE_CHANGE_AMBIGUOUS_OCCURRENCE.to_string());
+            }
+            RawZoneChangeFingerprint::DisplayFree(raw) if raw == record_raw => {
+                raw_matches.push(*candidate);
+            }
+            RawZoneChangeFingerprint::DisplayFree(_) => {}
+        }
+    }
+    match raw_matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(ZONE_CHANGE_NO_OCCURRENCE.to_string()),
+        _ => Err(ZONE_CHANGE_AMBIGUOUS_OCCURRENCE.to_string()),
+    }
 }
 
 /// Visits `ZoneChanged` records in live event carriers only. The occurrence
@@ -39697,6 +40007,365 @@ mod tests {
         }
     }
 
+    type PersistedRecord = serde_json::Map<String, serde_json::Value>;
+
+    /// The serialized zone-change record of a battlefield-to-graveyard object, optionally
+    /// carrying a printing in its look-back snapshot. Every call builds the same object, so
+    /// two records differ only in what the caller edits.
+    fn printed_zone_change_record(printing: Option<&str>) -> PersistedRecord {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(9_401),
+            PlayerId(0),
+            "Doomed Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .expect("fixture object exists")
+            .printing = DisplayOnly::new(printing.map(|tag| CardPrinting {
+            set_code: tag.to_string(),
+            collector_number: "7".to_string(),
+        }));
+        let record = state.objects[&id].snapshot_for_zone_change(
+            id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        match serde_json::to_value(&record).expect("record serializes") {
+            serde_json::Value::Object(map) => map,
+            other => panic!("a zone-change record serializes as an object, got {other}"),
+        }
+    }
+
+    fn fingerprint_of(record: &PersistedRecord) -> PersistedZoneChangeFingerprint {
+        zone_change_fingerprint(record).expect("fixture record fingerprints")
+    }
+
+    /// The raw half, present only for a display-free fingerprint.
+    fn raw_of(fingerprint: &PersistedZoneChangeFingerprint) -> Option<&serde_json::Value> {
+        match &fingerprint.raw {
+            RawZoneChangeFingerprint::DisplayFree(raw) => Some(raw),
+            RawZoneChangeFingerprint::DisplayBearing => None,
+        }
+    }
+
+    fn edited(
+        mut record: PersistedRecord,
+        edit: impl FnOnce(&mut PersistedRecord),
+    ) -> PersistedRecord {
+        edit(&mut record);
+        record
+    }
+
+    #[test]
+    fn zone_change_fingerprint_is_the_typed_rules_projection() {
+        let spaa = printed_zone_change_record(Some("SPAA"));
+        // Reach: the serialized record holds the printing exactly once.
+        assert_eq!(
+            serde_json::to_string(&spaa)
+                .expect("record text")
+                .matches("SPAA")
+                .count(),
+            1
+        );
+        let bearing = fingerprint_of(&spaa);
+        assert!(!bearing.rules.to_string().contains("SPAA"));
+        assert!(raw_of(&bearing).is_none());
+
+        // A printing neither splits nor decides: any printing, or none, is the same rules value.
+        let other_printing = fingerprint_of(&printed_zone_change_record(Some("SQQQ")));
+        let free = fingerprint_of(&printed_zone_change_record(None));
+        assert_eq!(bearing.rules, other_printing.rules);
+        assert_eq!(bearing.rules, free.rules);
+        assert!(raw_of(&other_printing).is_none());
+        assert!(raw_of(&free).is_some());
+
+        // Legacy aliases collapse in the rules projection and stay apart in raw form.
+        let plain = printed_zone_change_record(None);
+        let aliases = [
+            (
+                "base_power null vs omitted",
+                edited(plain.clone(), |m| {
+                    m.insert("base_power".to_string(), serde_json::Value::Null);
+                }),
+                edited(plain.clone(), |m| {
+                    m.remove("base_power");
+                }),
+            ),
+            (
+                "ignored unknown key",
+                plain.clone(),
+                edited(plain.clone(), |m| {
+                    m.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+                }),
+            ),
+            (
+                "arrival omitted",
+                plain.clone(),
+                edited(plain.clone(), |m| {
+                    m.remove("arrival");
+                }),
+            ),
+        ];
+        for (label, a, b) in &aliases {
+            let (a, b) = (fingerprint_of(a), fingerprint_of(b));
+            assert_eq!(
+                a.rules, b.rules,
+                "{label}: typed decoding collapses the pair"
+            );
+            assert!(
+                raw_of(&a).is_some() && raw_of(&b).is_some(),
+                "{label}: display-free"
+            );
+            assert_ne!(raw_of(&a), raw_of(&b), "{label}: raw JSON still differs");
+        }
+
+        // A rules difference still separates.
+        let stronger = fingerprint_of(&edited(plain.clone(), |m| {
+            m.insert("power".to_string(), serde_json::json!(9));
+        }));
+        assert_ne!(stronger.rules, free.rules);
+
+        // The occurrence stamps take no part, valid or not: an invalid stamp reads as absent.
+        let stamp_free = edited(plain.clone(), |m| {
+            m.remove("recorded_turn_number");
+            m.remove("turn_zone_change_index");
+        });
+        let reference = fingerprint_of(&stamp_free);
+        let stamp_edits: [(&str, Vec<(&str, serde_json::Value)>); 5] = [
+            (
+                "valid stamps",
+                vec![
+                    ("recorded_turn_number", serde_json::json!(19)),
+                    ("turn_zone_change_index", serde_json::json!(4)),
+                ],
+            ),
+            (
+                "null index",
+                vec![("turn_zone_change_index", serde_json::Value::Null)],
+            ),
+            (
+                "string turn and negative index",
+                vec![
+                    ("recorded_turn_number", serde_json::json!("x")),
+                    ("turn_zone_change_index", serde_json::json!(-1)),
+                ],
+            ),
+            (
+                "null turn",
+                vec![("recorded_turn_number", serde_json::Value::Null)],
+            ),
+            (
+                "negative turn",
+                vec![("recorded_turn_number", serde_json::json!(-5))],
+            ),
+        ];
+        for (label, entries) in stamp_edits {
+            let record = edited(plain.clone(), |m| {
+                for (key, value) in entries {
+                    m.insert(key.to_string(), value);
+                }
+            });
+            let fingerprint = fingerprint_of(&record);
+            assert_eq!(fingerprint.rules, reference.rules, "{label}");
+            assert_eq!(raw_of(&fingerprint), raw_of(&reference), "{label}");
+        }
+
+        // An undecodable record is a load error naming the record; the shape guard is unchanged.
+        let undecodable = edited(plain.clone(), |m| {
+            m.insert("mana_value".to_string(), serde_json::json!("x"));
+        });
+        let error = zone_change_fingerprint(&undecodable).expect_err("undecodable record");
+        assert!(
+            error.contains("does not decode as a zone-change record"),
+            "{error}"
+        );
+        let shapeless = edited(plain, |m| {
+            m.remove("to_zone");
+        });
+        let error = zone_change_fingerprint(&shapeless).expect_err("shapeless record");
+        assert!(error.contains("missing its zone-change shape"), "{error}");
+    }
+
+    #[test]
+    fn occurrence_claims_do_not_depend_on_visiting_order() {
+        fn member(name: &str) -> PersistedZoneChangeFingerprint {
+            let plain = printed_zone_change_record(None);
+            fingerprint_of(&match name {
+                // Display-free, raw form a.
+                "A" => plain,
+                // Display-free alias of A: typed-equal, raw-unequal.
+                "A'" => edited(plain, |m| {
+                    m.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+                }),
+                "P" => printed_zone_change_record(Some("SPAA")),
+                "Q" => printed_zone_change_record(Some("SQQQ")),
+                // Rules-different.
+                "R" => edited(plain, |m| {
+                    m.insert("power".to_string(), serde_json::json!(9));
+                }),
+                other => panic!("unknown fixture member {other}"),
+            })
+        }
+        fn permutations(items: &[&'static str]) -> Vec<Vec<&'static str>> {
+            if items.len() <= 1 {
+                return vec![items.to_vec()];
+            }
+            let mut all = Vec::new();
+            for (position, item) in items.iter().enumerate() {
+                let mut rest = items.to_vec();
+                rest.remove(position);
+                for mut tail in permutations(&rest) {
+                    tail.insert(0, *item);
+                    all.push(tail);
+                }
+            }
+            all
+        }
+
+        // The pairwise relation: display-free pairs compare raw, any pair with display data
+        // compares the rules projection.
+        for (a, b, expected) in [
+            ("A", "A", true),
+            ("A", "A'", false),
+            ("A", "P", true),
+            ("P", "A", true),
+            ("P", "Q", true),
+            ("A", "R", false),
+            ("P", "R", false),
+        ] {
+            assert_eq!(member(a).same_occurrence(&member(b)), expected, "{a} ~ {b}");
+        }
+
+        // The group verdict is the pairwise relation applied to the whole group, in any order.
+        let groups: [(&[&'static str], bool); 6] = [
+            (&["A", "P"], true),
+            (&["P", "Q"], true),
+            (&["A", "A", "P"], true),
+            (&["A", "A'"], false),
+            (&["A", "A'", "P"], false),
+            (&["A", "R"], false),
+        ];
+        for (group, coherent) in groups {
+            for order in permutations(group) {
+                let mut claim = OccurrenceClaim::of(member(order[0]));
+                let admitted = order
+                    .iter()
+                    .skip(1)
+                    .try_fold((), |(), name| claim.admit(member(name)));
+                assert_eq!(admitted.is_ok(), coherent, "group {order:?}");
+                if let Err(error) = admitted {
+                    assert_eq!(error, ZONE_CHANGE_CONFLICTING_CLAIMS);
+                }
+            }
+        }
+    }
+
+    /// Runs the production reconciliation on a hand-built persisted state whose ledger holds
+    /// `ledger` and whose `deferred_entry_events` carrier holds `live`. Records keep their
+    /// serialized `(0, 0)` stamps, which request a new binding.
+    fn reconcile_fixture(
+        ledger: Vec<PersistedRecord>,
+        live: Vec<PersistedRecord>,
+    ) -> (Result<(), String>, serde_json::Value) {
+        let mut state = serde_json::json!({
+            "turn_number": 19,
+            "zone_changes_this_turn": ledger
+                .into_iter()
+                .map(serde_json::Value::Object)
+                .collect::<Vec<_>>(),
+            "deferred_entry_events": live
+                .into_iter()
+                .map(|record| serde_json::json!({"ZoneChanged": {"record": record}}))
+                .collect::<Vec<_>>(),
+        });
+        let result = reconcile_persisted_zone_change_occurrences(&mut state, &[]);
+        (result, state)
+    }
+
+    fn live_stamps(state: &serde_json::Value) -> Vec<(u64, u64)> {
+        state["deferred_entry_events"]
+            .as_array()
+            .expect("carrier is an array")
+            .iter()
+            .map(|event| {
+                let record = &event["ZoneChanged"]["record"];
+                (
+                    record["recorded_turn_number"]
+                        .as_u64()
+                        .expect("bound record has a turn stamp"),
+                    record["turn_zone_change_index"]
+                        .as_u64()
+                        .expect("bound record has an index stamp"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_source_rule_binds_only_without_display_data() {
+        let plain = printed_zone_change_record(None);
+        let alias = edited(plain.clone(), |m| {
+            m.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+        });
+        let spaa = printed_zone_change_record(Some("SPAA"));
+        let sqqq = printed_zone_change_record(Some("SQQQ"));
+        let stronger = edited(plain.clone(), |m| {
+            m.insert("power".to_string(), serde_json::json!(9));
+        });
+
+        // (b) one typed candidate binds, display data or not, and the stamps are inserted.
+        let (result, state) = reconcile_fixture(vec![spaa.clone()], vec![sqqq.clone()]);
+        result.expect("a printing-only difference keeps one occurrence");
+        assert_eq!(live_stamps(&state), vec![(19, 0)]);
+        let (result, state) = reconcile_fixture(vec![alias.clone()], vec![plain.clone()]);
+        result.expect("a display-free legacy alias with a single typed candidate binds");
+        assert_eq!(live_stamps(&state), vec![(19, 0)]);
+
+        // (c) two display-free candidates: today's raw rule decides.
+        let (result, state) =
+            reconcile_fixture(vec![alias.clone(), plain.clone()], vec![plain.clone()]);
+        result.expect("exactly one raw match binds");
+        assert_eq!(live_stamps(&state), vec![(19, 1)]);
+        let (result, _) =
+            reconcile_fixture(vec![plain.clone(), plain.clone()], vec![plain.clone()]);
+        assert_eq!(
+            result.expect_err("raw-identical rows are ambiguous"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+        // Reach: the alias row really was a distinct raw candidate in the binding case.
+        assert_ne!(alias, plain);
+
+        // (c) a display-bearing member, or a display-bearing record, disables the fallback.
+        let (result, _) = reconcile_fixture(vec![plain.clone(), spaa.clone()], vec![plain.clone()]);
+        assert_eq!(
+            result.expect_err("a display-bearing member disables the raw fallback"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+        let (result, _) = reconcile_fixture(vec![plain.clone(), alias.clone()], vec![spaa.clone()]);
+        assert_eq!(
+            result.expect_err("a display-bearing record disables the raw fallback"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+        let (result, _) = reconcile_fixture(vec![spaa.clone(), sqqq], vec![spaa.clone()]);
+        assert_eq!(
+            result.expect_err("a printing never chooses between rules-identical rows"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+
+        // (d) no typed candidate is today's error, with a display-bearing or display-free ledger.
+        for ledger in [spaa, plain] {
+            let (result, _) = reconcile_fixture(vec![ledger], vec![stronger.clone()]);
+            assert_eq!(
+                result.expect_err("a rules difference has no candidate"),
+                ZONE_CHANGE_NO_OCCURRENCE
+            );
+        }
+    }
+
     /// A mid-pause discard batch carrying one current-turn `ZoneChanged`.
     /// The event is the point: `preceding_events` is a LIVE event carrier, so
     /// its records must be rebound on load like every other one.
@@ -44209,6 +44878,7 @@ mod tests {
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -44330,6 +45000,7 @@ mod tests {
         fn snapshot(power: i32) -> LKISnapshot {
             LKISnapshot {
                 name: "Loop Entrant".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(power),
                 toughness: Some(2),
@@ -44620,6 +45291,7 @@ mod tests {
         fn snapshot(controller: PlayerId) -> LKISnapshot {
             LKISnapshot {
                 name: "Prodigal Pyromancer".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -44722,6 +45394,7 @@ mod tests {
         fn snapshot(controller: PlayerId) -> LKISnapshot {
             LKISnapshot {
                 name: "Prodigal Pyromancer".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),
@@ -44924,6 +45597,7 @@ mod tests {
         let pyromancer = ObjectId(50);
         let snapshot = LKISnapshot {
             name: "Prodigal Pyromancer".to_string(),
+            printing: Default::default(),
             token_image_ref: None,
             power: Some(1),
             toughness: Some(1),
@@ -54229,5 +54903,117 @@ mod replacement_subtree_boundary_tests {
             boundary.is_retired(&state.resolution_stack),
             "the subtree retires with the nested child"
         );
+    }
+}
+
+/// CR 104.4b + CR 203.1 + CR 206.1: the casting reversal's identity is its
+/// comparison list; a descriptor saved without one compares by its restoration
+/// list and never equals one that has a comparison list.
+#[cfg(test)]
+mod spell_cast_reversal_equality {
+    use super::{SpellCastReversal, SpellCastUndo};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use std::sync::Arc;
+
+    fn edits(tag: &str) -> Vec<SpellCastUndo> {
+        vec![SpellCastUndo::Value {
+            path: vec!["players".into(), "0".into(), tag.into()],
+            before: Some(serde_json::json!(tag)),
+        }]
+    }
+
+    fn descriptor(
+        comparison_undo: Option<Vec<SpellCastUndo>>,
+        undo: Vec<SpellCastUndo>,
+        journal_start: usize,
+    ) -> SpellCastReversal {
+        SpellCastReversal {
+            comparison_undo,
+            undo,
+            ..SpellCastReversal::announced(ObjectId(1), PlayerId(0), journal_start)
+        }
+    }
+
+    /// Seven separately constructed descriptors in five equality classes:
+    /// {W1, W2}, {W3}, {L1, L2}, {L3}, {S}.
+    fn descriptors() -> [(&'static str, SpellCastReversal); 7] {
+        [
+            ("W1", descriptor(Some(edits("x")), edits("u"), 3)),
+            ("W2", descriptor(Some(edits("x")), edits("v"), 3)),
+            ("W3", descriptor(Some(edits("y")), edits("u"), 3)),
+            ("L1", descriptor(None, edits("u"), 3)),
+            ("L2", descriptor(None, edits("u"), 3)),
+            ("L3", descriptor(None, edits("v"), 3)),
+            ("S", descriptor(Some(edits("x")), edits("u"), 4)),
+        ]
+    }
+
+    fn class(name: &str) -> u8 {
+        match name {
+            "W1" | "W2" => 0,
+            "W3" => 1,
+            "L1" | "L2" => 2,
+            "L3" => 3,
+            "S" => 4,
+            other => panic!("unknown descriptor {other}"),
+        }
+    }
+
+    #[test]
+    fn spell_cast_reversal_equality_is_an_equivalence() {
+        let set = descriptors();
+        // Reach: both the with-list and the without-list class are populated.
+        assert!(set.iter().any(|(_, d)| d.comparison_undo.is_some()));
+        assert!(set.iter().any(|(_, d)| d.comparison_undo.is_none()));
+
+        for (name_a, a) in &set {
+            assert!(a == a, "{name_a} is reflexive");
+            for (name_b, b) in &set {
+                let expected = class(name_a) == class(name_b);
+                assert_eq!(a == b, expected, "{name_a} == {name_b}");
+                assert_eq!(a == b, b == a, "{name_a}, {name_b} is symmetric");
+                for (name_c, c) in &set {
+                    if a == b && b == c {
+                        assert!(a == c, "{name_a} == {name_b} == {name_c} is transitive");
+                    }
+                }
+            }
+        }
+
+        let by_name = |name: &str| {
+            set.iter()
+                .find(|(candidate, _)| *candidate == name)
+                .map(|(_, d)| d.clone())
+                .expect("fixture exists")
+        };
+        // Differing restoration lists are ignored while a comparison list decides.
+        assert!(by_name("W1") == by_name("W2"));
+        assert!(by_name("W1") != by_name("W3"));
+        // Without comparison lists the restoration lists decide, as before.
+        assert!(by_name("L1") == by_name("L2"));
+        assert!(by_name("L1") != by_name("L3"));
+        // A descriptor with a comparison list never equals one without, whatever
+        // their restoration lists.
+        assert!(by_name("W1") != by_name("L1"));
+        assert!(by_name("L1") != by_name("W1"));
+        // Every other field still separates descriptors.
+        assert!(by_name("S") != by_name("W1"));
+    }
+
+    #[test]
+    fn the_same_verdicts_hold_through_optional_arcs() {
+        let set = descriptors();
+        for (name_a, a) in &set {
+            for (name_b, b) in &set {
+                let left = Some(Arc::new(a.clone()));
+                let right = Some(Arc::new(b.clone()));
+                assert_eq!(
+                    left == right,
+                    class(name_a) == class(name_b),
+                    "Some(Arc({name_a})) == Some(Arc({name_b}))"
+                );
+            }
+        }
     }
 }

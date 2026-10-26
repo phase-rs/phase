@@ -50,6 +50,15 @@ export function build_ai_card_subset(): string;
 export function canonicalCardNames(names: any): any;
 
 /**
+ * Resource bounds on one deck list's printings sidecar, for the P2P host's guest
+ * admission (`handleNewGuest` in `client/src/adapter/p2p-adapter.ts`). Takes the
+ * guest deck's `printings` value as received. Decodes it with the one sidecar decoder
+ * (which refuses more than `MAX_DECK_PRINTING_ENTRIES` elements of any shape) and applies
+ * `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
+ */
+export function checkDeckPrintingsBounds(printings: any): void;
+
+/**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
  * `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
  * classification — the frontend must not compute this from card lists itself.
@@ -738,6 +747,7 @@ export interface InitOutput {
     readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly canonicalCardNames: (a: any) => [number, number, number];
+    readonly checkDeckPrintingsBounds: (a: any) => [number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];

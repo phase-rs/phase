@@ -3237,6 +3237,11 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: Vec::new(),
+                printings: serde_json::from_value(serde_json::json!([{
+                    "section":"main_deck", "name":"Secret annotation", "count":1,
+                    "printing":{"set_code":"secret-set","collector_number":"001"}
+                }]))
+                .unwrap(),
             },
             None,
         )
@@ -3253,6 +3258,23 @@ mod tests {
             !json.contains("main_deck"),
             "view should not contain submitted deck contents"
         );
+        assert_eq!(session.submitted_decks[&PlayerId(0)].printings.len(), 1);
+        let spectator = filter_for_spectator(&session, SpectatorVisibility::Public);
+        assert!(spectator.seats[0].has_submitted_deck);
+        for json in [json, serde_json::to_string(&spectator).unwrap()] {
+            assert!(
+                !json.contains("Secret annotation"),
+                "another seat's annotation name is private"
+            );
+            assert!(
+                !json.contains("secret-set"),
+                "another seat's owner printing is private"
+            );
+            assert!(
+                !json.contains("\"printings\""),
+                "submissions are not a public carrier"
+            );
+        }
     }
 
     #[test]

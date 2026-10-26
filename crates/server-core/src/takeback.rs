@@ -273,7 +273,13 @@ impl GameSession {
             return None;
         }
         let pending = self.pending_takeback.take().expect("checked above");
+        // A takeback installs an earlier state in place: continue the replaced state's revision
+        // and advance it, so the restored snapshot and every later one carry revisions not used
+        // by the discarded branch.
+        let replaced_revision = self.state.state_revision;
         self.state = pending.target_state;
+        self.state.state_revision = replaced_revision;
+        engine::game::public_state::bump_state_revision(&mut self.state);
         engine::game::rekey_after_trusted_restore(&mut self.state);
         bind_fresh_interaction_session(&mut self.state, &self.game_code);
         // The rolled-back state is the new baseline. Snapshots *after* the

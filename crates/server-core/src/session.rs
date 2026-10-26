@@ -1184,21 +1184,11 @@ impl GameSession {
         // server-core's `self.decks` stores the fully-resolved `PlayerDeckPayload`
         // because `start_game` and the broadcast paths consume that shape.
         // Resolve at the boundary using the live `CardDatabase`. `resolve_deck`
-        // takes a `DeckData` which has the same shape as `PlayerDeckList`.
+        // takes a `DeckData` which has the same shape as `PlayerDeckList`; the
+        // engine's conversion carries every field (sticker sheets, bracket tier
+        // and the printings sidecar included).
         for (seat_idx, _, ref deck) in &delta.new_ai {
-            let deck_data = crate::starter_decks::DeckData {
-                main_deck: deck.main_deck.clone(),
-                sideboard: deck.sideboard.clone(),
-                commander: deck.commander.clone(),
-                companion: deck.companion.clone(),
-                planar_deck: deck.planar_deck.clone(),
-                scheme_deck: deck.scheme_deck.clone(),
-                attraction_deck: deck.attraction_deck.clone(),
-                contraption_deck: deck.contraption_deck.clone(),
-                sticker_sheets: deck.sticker_sheets.clone(),
-                signature_spell: deck.signature_spell.clone(),
-                bracket_tier: deck.bracket_tier,
-            };
+            let deck_data = crate::starter_decks::DeckData::from(deck.clone());
             // The resolver (`ServerDeckResolver::resolve` in phase-server)
             // has already validated these names against the same `db`, so
             // this should never error in practice. The `Err` arm exists as
@@ -4517,6 +4507,8 @@ mod tests {
         );
 
         let mut session = mgr.try_session(&code).unwrap();
+        let replaced_revision = session.state.state_revision;
+        assert!(state_before.state_revision < replaced_revision);
         let outcome = session
             .request_takeback(priority_player, RewindTarget::LastAction)
             .unwrap();
@@ -4529,6 +4521,7 @@ mod tests {
 
         let outcome = session.respond_takeback(other_player, true).unwrap();
         assert_eq!(outcome, TakebackOutcome::Approved);
+        assert!(session.state.state_revision > replaced_revision);
         assert_eq!(
             session.state.waiting_for, state_before.waiting_for,
             "approved takeback should restore the pre-action waiting_for"
@@ -4661,10 +4654,12 @@ mod tests {
         );
     }
 
-    /// A contest's identity must survive a takeback of a COMPLETED contest. Undoing the
-    /// cast and replaying it reaches the same state revision, so an identity derived from
-    /// the revision alone would repeat — and a click frame stamped for the discarded
-    /// branch's contest would count in the replayed one. The restore rotates the
+    /// A contest's identity must survive a takeback of a COMPLETED contest: a click frame
+    /// stamped for the discarded branch's contest must not count in the replayed one.
+    /// A takeback continues the state revision, so the replay already differs by revision;
+    /// the session term the identity also hashes is pinned on its own, at an equal revision,
+    /// by `contest_identity_separates_equal_revisions_by_interaction_session` (V13).
+    /// The restore rotates the
     /// interaction session, and the identity is bound to it.
     #[test]
     fn a_contest_replayed_after_a_takeback_has_a_new_identity_and_rejects_the_old_frame() {
@@ -4745,6 +4740,36 @@ mod tests {
         );
         let (current, _) = contest_click(&mut session.state, second, P0, 1, go + 20, &mut events);
         assert_eq!(current, ClickDisposition::Counted);
+    }
+
+    #[test]
+    fn contest_identity_separates_equal_revisions_by_interaction_session() {
+        const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let base = scenario.build().state().clone();
+        let mut first = base.clone();
+        let mut second = base;
+        bind_fresh_interaction_session(&mut first, "equal-revision");
+        bind_fresh_interaction_session(&mut second, "equal-revision");
+        assert_ne!(first.interaction_session_id, second.interaction_session_id);
+        assert_eq!(first.state_revision, second.state_revision);
+        let same_session = first.clone();
+        let cast_into_contest = |state| {
+            let mut runner = GameRunner::from_state(state);
+            runner.cast(spell).target_objects(&[victim]).resolve();
+            match &runner.state().waiting_for {
+                WaitingFor::PhysicalContest { contest, .. } => contest.id,
+                other => panic!("the cast must park the game on the contest, got {other:?}"),
+            }
+        };
+        let first_id = cast_into_contest(first);
+        assert_ne!(first_id, cast_into_contest(second));
+        assert_eq!(first_id, cast_into_contest(same_session));
     }
 
     /// A takeback restores a live shortcut offer through the same rekeying
@@ -9497,6 +9522,73 @@ mod tests {
             .iter()
             .flat_map(|entry| std::iter::repeat_n(entry.card.name.clone(), entry.count as usize))
             .collect()
+    }
+
+    /// Mirrors `phase-server`'s `ServerDeckResolver` without its database check: a
+    /// `DeckList` converts through the engine's `From<DeckData> for PlayerDeckList`,
+    /// so every field the wire list carries reaches the seat delta.
+    struct ConvertingResolver;
+
+    impl seat_reducer::types::DeckResolver for ConvertingResolver {
+        fn resolve(
+            &self,
+            choice: &DeckChoice,
+        ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+            match choice {
+                DeckChoice::DeckList(data) => Ok(engine::game::deck_loading::PlayerDeckList::from(
+                    (**data).clone(),
+                )),
+                DeckChoice::Named(_) | DeckChoice::Random => {
+                    Err("this resolver only converts submitted lists".to_string())
+                }
+            }
+        }
+    }
+
+    /// An AI seat's submitted list keeps its printings sidecar through the reducer's
+    /// delta into the session's stored payload. Reverting `apply_seat_delta` to a
+    /// hand-written `DeckData` literal without the field leaves `decks[1].printings`
+    /// empty and fails the last assertion.
+    #[test]
+    fn an_ai_seat_deck_list_keeps_its_printings_through_apply_seat_delta() {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+
+        let mut mgr = SessionManager::new();
+        let (code, _token) = mgr.create_game(make_deck(), None);
+        let db = lands_db();
+        let mut data = name_deck("Forest", 1);
+        data.printings = vec![DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Forest".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: "lea".to_string(),
+                collector_number: "294".to_string(),
+            },
+        }];
+
+        let resolver = ConvertingResolver;
+        let ctx = seat_reducer::types::ReducerCtx {
+            platform: Platform::Native,
+            deck_resolver: &resolver,
+        };
+        let mut seat_state = mgr.try_session(&code).unwrap().seat_state();
+        let delta = seat_reducer::apply(
+            &mut seat_state,
+            seat_ai_at(1, DeckChoice::DeckList(Box::new(data.clone()))),
+            &ctx,
+        )
+        .expect("legal mutation");
+        mgr.try_session(&code)
+            .unwrap()
+            .apply_seat_delta(seat_state, &delta, &db);
+
+        let session = mgr.try_session(&code).unwrap();
+        let payload = session.decks[1].as_ref().expect("the AI seat resolved");
+        // Reach guard: the seat's deck resolved, so the sidecar assertion below
+        // is not reading a seat that was cleared.
+        assert_eq!(main_deck_names(payload), vec!["Forest".to_string()]);
+        assert_eq!(payload.printings, data.printings);
     }
 
     #[test]

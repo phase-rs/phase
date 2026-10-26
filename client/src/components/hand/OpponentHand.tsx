@@ -159,6 +159,7 @@ function VisibleOpponentCardThumbnail({ cardId, card }: { cardId: ObjectId; card
     size: "small",
     oracleId: card.printed_ref?.oracle_id,
     faceName: card.printed_ref?.face_name,
+    ownerPrinting: card.printing,
     isToken: card.display_source === "Token",
     tokenImageRef: card.token_image_ref,
   });

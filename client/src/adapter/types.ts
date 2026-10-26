@@ -551,6 +551,26 @@ export interface MatchScore {
   draws: number;
 }
 
+/** Mirrors the engine's `DeckSection`: the deck-list field a printing annotates.
+ *  `"unknown"` is a section a newer peer sent that this build does not know. */
+export type DeckSection =
+  | "main_deck" | "sideboard" | "commander" | "companion" | "attraction_deck"
+  | "planar_deck" | "scheme_deck" | "contraption_deck" | "signature_spell" | "unknown";
+
+/** Mirrors the engine's `CardPrinting`. */
+export interface CardPrinting {
+  set_code: string;
+  collector_number: string;
+}
+
+/** Mirrors the engine's `DeckPrinting`: an owner's explicit printing for `count` copies. */
+export interface DeckPrinting {
+  section: DeckSection;
+  name: string;
+  count: number;
+  printing: CardPrinting;
+}
+
 /** Name-only per-player deck list, mirroring the engine's `PlayerDeckList`. */
 export interface ReplayPlayerDeckList {
   main_deck: string[];
@@ -562,6 +582,8 @@ export interface ReplayPlayerDeckList {
   sticker_sheets: string[];
   signature_spell: string[];
   bracket_tier: string;
+  /** The owner's explicit printing choices; display-only. Absent when empty. */
+  printings?: DeckPrinting[];
 }
 
 /** Mirrors the engine's `DeckList` — the name-only deck payload `initializeGame` accepts. */
@@ -1676,7 +1698,11 @@ export interface GameObject {
    * label. Distinct from `printed_ref` — an emblem is not represented by that
    * card (CR 114.5); this is purely presentational. Present only on emblems.
    */
-  emblem_source?: { name: string; printed_ref?: PrintedRef | null } | null;
+  emblem_source?: {
+    name: string;
+    printed_ref?: PrintedRef | null;
+    printing?: CardPrinting | null;
+  } | null;
   /**
    * CR 111.1: Whether this object is a token (not a card). Independent of
    * `display_source`: a token-copy of a real card (Twinflame, Helm of the
@@ -1734,6 +1760,9 @@ export interface GameObject {
    * generic tokens) may not carry a printed identity.
    */
   printed_ref?: PrintedRef | null;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
   back_face?: {
     name: string;
     power: number | null;
@@ -1916,6 +1945,9 @@ export interface LibrarySearchCardView {
   zone: Zone;
   identity: ObjectIncarnationRef;
   card_id: CardId;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
   current_face: LibrarySearchCardFaceView;
   front_face: LibrarySearchCardFaceView;
   back_face?: LibrarySearchCardFaceView | null;
@@ -2176,6 +2208,11 @@ export type StackAbilityKindView =
 export interface StackEntryDisplay {
   source_name: string;
   token_image_ref?: TokenImageRef | null;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
+  /** Oracle and face authority from the row printing's selected source read. */
+  printed_ref?: PrintedRef | null;
   kind_label: string;
   ability_kind?: StackAbilityKindView;
   ability_description?: string;
@@ -4073,6 +4110,10 @@ export type BlockerAssignmentPair = [ObjectId, ObjectId];
 export interface DebugLibraryCardView {
   object_id: ObjectId;
   name: string;
+  printed_ref?: PrintedRef | null;
+  /** Display-only printing of the physical card (CR 203.1/206.1); absent when the owner
+   *  chose none or the viewer may not see it. */
+  printing?: CardPrinting | null;
 }
 
 /** Engine-classified identity for a candidate in a legend-rule choice. */
@@ -4123,6 +4164,10 @@ export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
+  /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */
+  waiting_for_identity?: string;
+  /** Authoritative transition count; compare only for equality, including decreases. */
+  state_revision?: number;
   /** Viewer-visible object ids in each player's exile pile, keyed by PlayerId. */
   visible_exile_object_ids?: Record<string, ObjectId[]>;
   /**

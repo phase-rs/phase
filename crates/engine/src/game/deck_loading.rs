@@ -1,5 +1,5 @@
 use crate::types::game_state::RandomDraw;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rand::seq::SliceRandom;
@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::CardDatabase;
 use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::starter_decks::DeckData;
 use crate::types::card::CardFace;
+use crate::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::CardId;
@@ -60,6 +62,14 @@ impl DeckEntry {
     }
 }
 
+/// Lookup identity retained at resolution, indexed before command-zone netting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeckEntryLookupName {
+    pub section: DeckSection,
+    pub entry_index: usize,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlayerDeckPayload {
     #[serde(default)]
@@ -100,6 +110,18 @@ pub struct PlayerDeckPayload {
     /// field continue to deserialize correctly.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// Normalized owner choices, display-only (CR 203.1 + CR 206.1).
+    /// Resolvers bind these to original entries before database-free loading.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
+    /// Required correspondence for nonempty normalized printing streams.
+    /// Legacy annotated payloads must be normalized with a database before loading.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub printing_entry_names: Vec<DeckEntryLookupName>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -149,6 +171,85 @@ pub struct PlayerDeckList {
     /// omit it, which `#[serde(default)]` handles transparently).
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The owner's explicit printing choices for this list's cards, keyed by
+    /// section and name. Display-only (CR 203.1 + CR 206.1). Absent from the wire
+    /// when empty; decoded by `deserialize_deck_printings`.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
+}
+
+/// `DeckData` (the wire deck) and `PlayerDeckList` (the engine's name-only seat list)
+/// carry the same fields. These conversions are the single authority between them:
+/// each destructures its source and builds its target without `..`, so a field added
+/// to either type is a build error here, not a value one transport silently drops.
+impl From<DeckData> for PlayerDeckList {
+    fn from(deck: DeckData) -> Self {
+        let DeckData {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        } = deck;
+        Self {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        }
+    }
+}
+
+impl From<PlayerDeckList> for DeckData {
+    fn from(list: PlayerDeckList) -> Self {
+        let PlayerDeckList {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        } = list;
+        Self {
+            main_deck,
+            sideboard,
+            commander,
+            companion,
+            attraction_deck,
+            planar_deck,
+            scheme_deck,
+            contraption_deck,
+            sticker_sheets,
+            signature_spell,
+            bracket_tier,
+            printings,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -257,6 +358,101 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
     entries
 }
 
+/// A lookup key that resolves back to this exact face, including homonyms.
+pub fn round_trip_name(db: &CardDatabase, face: &CardFace) -> String {
+    let Some(oracle_id) = face.scryfall_oracle_id.as_deref() else {
+        return face.name.clone();
+    };
+    match db.get_face_by_name(&face.name) {
+        Some(found) if found.scryfall_oracle_id.as_deref() == Some(oracle_id) => face.name.clone(),
+        Some(_) | None => format!("{} [{}]", face.name.to_lowercase(), oracle_id),
+    }
+}
+
+fn section_entries(payload: &PlayerDeckPayload, section: DeckSection) -> &[DeckEntry] {
+    match section {
+        DeckSection::MainDeck => &payload.main_deck,
+        DeckSection::Sideboard => &payload.sideboard,
+        DeckSection::Commander => &payload.commander,
+        DeckSection::Companion => &payload.companion,
+        DeckSection::AttractionDeck => &payload.attraction_deck,
+        DeckSection::PlanarDeck => &payload.planar_deck,
+        DeckSection::SchemeDeck => &payload.scheme_deck,
+        DeckSection::ContraptionDeck => &payload.contraption_deck,
+        DeckSection::SignatureSpell => &payload.signature_spell,
+        DeckSection::Unknown => &[],
+    }
+}
+
+fn section_index(section: DeckSection) -> usize {
+    match section {
+        DeckSection::MainDeck => 0,
+        DeckSection::Sideboard => 1,
+        DeckSection::Commander => 2,
+        DeckSection::Companion => 3,
+        DeckSection::AttractionDeck => 4,
+        DeckSection::PlanarDeck => 5,
+        DeckSection::SchemeDeck => 6,
+        DeckSection::ContraptionDeck => 7,
+        DeckSection::SignatureSpell => 8,
+        DeckSection::Unknown => 9,
+    }
+}
+
+/// Normalize annotation validity and bind surviving streams to resolved entries.
+/// Invalid choices silently disappear; they never change deck rules or counts.
+/// CR 203.1 + CR 206.1: illustration and expansion symbol have no game effect.
+pub fn normalize_deck_printings(db: &CardDatabase, payload: &mut PlayerDeckPayload) {
+    let submitted = std::mem::take(&mut payload.printings);
+    payload.printing_entry_names.clear();
+    let mut budgets: [HashMap<String, u64>; 10] = std::array::from_fn(|_| HashMap::new());
+    for mut row in submitted {
+        if row.section == DeckSection::Unknown
+            || row.count == 0
+            || [
+                &row.name,
+                &row.printing.set_code,
+                &row.printing.collector_number,
+            ]
+            .into_iter()
+            .any(|s| s.is_empty() || s.chars().any(char::is_control))
+        {
+            continue;
+        }
+        let Some(face) = db.get_face_by_name(&row.name) else {
+            continue;
+        };
+        let name = round_trip_name(db, face);
+        let budget = budgets[section_index(row.section)]
+            .entry(name.clone())
+            .or_insert_with(|| {
+                let mut total = 0u64;
+                let mut bindings = Vec::new();
+                for (entry_index, entry) in section_entries(payload, row.section).iter().enumerate()
+                {
+                    if round_trip_name(db, &entry.card) == name {
+                        total += u64::from(entry.count);
+                        bindings.push(DeckEntryLookupName {
+                            section: row.section,
+                            entry_index,
+                            name: name.clone(),
+                        });
+                    }
+                }
+                if total > 0 {
+                    payload.printing_entry_names.extend(bindings);
+                }
+                total
+            });
+        row.count = u64::from(row.count).min(*budget) as u32;
+        if row.count != 0 {
+            *budget -= u64::from(row.count);
+            row.name = name;
+            payload.printings.push(row);
+        }
+    }
+}
+
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
 ///
@@ -264,8 +460,10 @@ fn resolve_names(db: &CardDatabase, names: &[String]) -> Vec<DeckEntry> {
 /// already carries the declared tier, so there is no separate parameter to
 /// keep in sync. Callers that need a specific tier set it on the
 /// `PlayerDeckList` before calling.
+///
+/// Printing choices are normalized and bound to resolved entries.
 pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
-    PlayerDeckPayload {
+    let mut payload = PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
         commander: resolve_names(db, &list.commander),
@@ -277,60 +475,30 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
-    }
+        printings: list.printings.clone(),
+        printing_entry_names: Vec::new(),
+    };
+    normalize_deck_printings(db, &mut payload);
+    payload
 }
 
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
 ///
-/// Each `PlayerDeckList`'s `bracket_tier` field is forwarded directly to the
-/// corresponding `PlayerDeckPayload`, so callers that populate the tier before
-/// calling this function receive correctly-tiered payloads. Old payloads that
-/// omit the field deserialize with `CommanderBracketTier::Core` (the `default`).
+/// Each seat (player, opponent and every AI deck) resolves through
+/// `resolve_player_deck_list`, preserving each seat's `bracket_tier` and
+/// normalizing its printing choices against that seat's resolved entries.
+/// Callers that populate the tier before calling this
+/// function receive correctly-tiered payloads. Old payloads that omit the field
+/// deserialize with `CommanderBracketTier::Core` (the `default`).
 pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
     DeckPayload {
-        player: PlayerDeckPayload {
-            main_deck: resolve_names(db, &list.player.main_deck),
-            sideboard: resolve_names(db, &list.player.sideboard),
-            commander: resolve_names(db, &list.player.commander),
-            companion: resolve_names(db, &list.player.companion),
-            attraction_deck: resolve_names(db, &list.player.attraction_deck),
-            planar_deck: resolve_names(db, &list.player.planar_deck),
-            scheme_deck: resolve_names(db, &list.player.scheme_deck),
-            contraption_deck: resolve_names(db, &list.player.contraption_deck),
-            sticker_sheets: list.player.sticker_sheets.clone(),
-            signature_spell: resolve_names(db, &list.player.signature_spell),
-            bracket_tier: list.player.bracket_tier,
-        },
-        opponent: PlayerDeckPayload {
-            main_deck: resolve_names(db, &list.opponent.main_deck),
-            sideboard: resolve_names(db, &list.opponent.sideboard),
-            commander: resolve_names(db, &list.opponent.commander),
-            companion: resolve_names(db, &list.opponent.companion),
-            attraction_deck: resolve_names(db, &list.opponent.attraction_deck),
-            planar_deck: resolve_names(db, &list.opponent.planar_deck),
-            scheme_deck: resolve_names(db, &list.opponent.scheme_deck),
-            contraption_deck: resolve_names(db, &list.opponent.contraption_deck),
-            sticker_sheets: list.opponent.sticker_sheets.clone(),
-            signature_spell: resolve_names(db, &list.opponent.signature_spell),
-            bracket_tier: list.opponent.bracket_tier,
-        },
+        player: resolve_player_deck_list(db, &list.player),
+        opponent: resolve_player_deck_list(db, &list.opponent),
         ai_decks: list
             .ai_decks
             .iter()
-            .map(|deck| PlayerDeckPayload {
-                main_deck: resolve_names(db, &deck.main_deck),
-                sideboard: resolve_names(db, &deck.sideboard),
-                commander: resolve_names(db, &deck.commander),
-                companion: resolve_names(db, &deck.companion),
-                attraction_deck: resolve_names(db, &deck.attraction_deck),
-                planar_deck: resolve_names(db, &deck.planar_deck),
-                scheme_deck: resolve_names(db, &deck.scheme_deck),
-                contraption_deck: resolve_names(db, &deck.contraption_deck),
-                sticker_sheets: deck.sticker_sheets.clone(),
-                signature_spell: resolve_names(db, &deck.signature_spell),
-                bracket_tier: deck.bracket_tier,
-            })
+            .map(|deck| resolve_player_deck_list(db, deck))
             .collect(),
         // ai_difficulties is carried through from the DeckList so the caller's
         // per-seat difficulty annotations survive resolution.
@@ -527,6 +695,9 @@ fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
         bracket_tier: CommanderBracketTier::default(),
+        // Synthetic decks have no submitted printing choices or bindings.
+        printings: Vec::new(),
+        printing_entry_names: Vec::new(),
     }
 }
 
@@ -548,7 +719,23 @@ fn dandan_pile_payload(
     };
     let seat_payload = |seat: PlayerId| {
         if seat == pile_seat {
-            main_deck_only_payload(pile.clone())
+            let mut payload = main_deck_only_payload(pile.clone());
+            if !submitted_pile.is_empty() {
+                let source = payload_for_player(submitted, pile_seat);
+                payload.printings = source
+                    .printings
+                    .iter()
+                    .filter(|row| row.section == DeckSection::MainDeck)
+                    .cloned()
+                    .collect();
+                payload.printing_entry_names = source
+                    .printing_entry_names
+                    .iter()
+                    .filter(|binding| binding.section == DeckSection::MainDeck)
+                    .cloned()
+                    .collect();
+            }
+            payload
         } else {
             PlayerDeckPayload::default()
         }
@@ -684,9 +871,14 @@ pub fn create_attraction_deck_card(
     obj_id
 }
 
-fn load_player_attraction_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for face in shuffled_entry_faces(state, entries) {
-        create_attraction_deck_card(state, face, owner);
+fn load_player_attraction_deck(
+    state: &mut GameState,
+    payload: &PlayerDeckPayload,
+    owner: PlayerId,
+) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::AttractionDeck, None) {
+        let id = create_attraction_deck_card(state, copy.face, owner);
+        stamp_created_card(state, id, copy.printing);
     }
 }
 
@@ -709,10 +901,11 @@ pub fn create_planar_deck_card(
     obj_id
 }
 
-fn load_shared_planar_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+fn load_shared_planar_deck(state: &mut GameState, payload: &PlayerDeckPayload, owner: PlayerId) {
     state.planar_deck.clear();
-    for face in shuffled_entry_faces(state, entries) {
-        create_planar_deck_card(state, face, owner);
+    for copy in shuffled_entry_copies(state, payload, DeckSection::PlanarDeck, None) {
+        let id = create_planar_deck_card(state, copy.face, owner);
+        stamp_created_card(state, id, copy.printing);
     }
     state.planar_controller = Some(owner);
     crate::game::planechase::restamp_planar_objects_to_controller(state);
@@ -737,10 +930,11 @@ pub fn create_scheme_deck_card(
     obj_id
 }
 
-fn load_shared_scheme_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
+fn load_shared_scheme_deck(state: &mut GameState, payload: &PlayerDeckPayload, owner: PlayerId) {
     state.scheme_deck.clear();
-    for face in shuffled_entry_faces(state, entries) {
-        create_scheme_deck_card(state, face, owner);
+    for copy in shuffled_entry_copies(state, payload, DeckSection::SchemeDeck, None) {
+        let id = create_scheme_deck_card(state, copy.face, owner);
+        stamp_created_card(state, id, copy.printing);
     }
     state.archenemy = Some(owner);
 }
@@ -769,9 +963,14 @@ pub fn create_contraption_deck_card(
     obj_id
 }
 
-fn load_player_contraption_deck(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for face in shuffled_entry_faces(state, entries) {
-        create_contraption_deck_card(state, face, owner);
+fn load_player_contraption_deck(
+    state: &mut GameState,
+    payload: &PlayerDeckPayload,
+    owner: PlayerId,
+) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::ContraptionDeck, None) {
+        let id = create_contraption_deck_card(state, copy.face, owner);
+        stamp_created_card(state, id, copy.printing);
     }
 }
 
@@ -820,7 +1019,17 @@ pub fn create_signature_spell_from_card_face(
 }
 
 /// Load deck data into a GameState, creating GameObjects in each player's library and shuffling.
+///
+/// Panics before mutating state if printing streams lack consistent retained
+/// entry bindings. Raw/legacy annotated payloads require database normalization;
+/// printing-free legacy payloads need no bindings.
 pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
+    for deck in std::iter::once(&payload.player)
+        .chain(std::iter::once(&payload.opponent))
+        .chain(&payload.ai_decks)
+    {
+        validate_printing_bindings(deck);
+    }
     state.booster_pack_pool = payload.booster_pack_pool.clone().map(Arc::new);
     state.booster_shelf = Arc::default();
     state.deck_pools.clear();
@@ -872,7 +1081,6 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             };
             target.count = target.count.saturating_sub(entry.count);
         }
-        netted.retain(|entry| entry.count > 0);
         netted
     };
     // The netted slots must mirror the command-zone placement loops below
@@ -928,7 +1136,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // would strand its commander in the library.
     let place_commanders = state.format_config.command_zone_holds_decklist_commander();
     let oathbreaker = state.format_config.format == crate::types::format::GameFormat::Oathbreaker;
-    let main_deck_for = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
+    let netted_main_deck = |deck: &PlayerDeckPayload| -> Vec<DeckEntry> {
         let mut command: Vec<&[DeckEntry]> = Vec::new();
         if place_commanders {
             command.push(deck.commander.as_slice());
@@ -937,6 +1145,11 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             command.push(deck.signature_spell.as_slice());
         }
         net_command_zone(&deck.main_deck, &command)
+    };
+    let main_deck_for = |deck: &PlayerDeckPayload| {
+        let mut entries = netted_main_deck(deck);
+        entries.retain(|entry| entry.count > 0);
+        entries
     };
     // CR 702.139a: The Commander-family external companion slot represents one
     // card, even when a transport bypasses name-list validation and supplies a
@@ -1062,21 +1275,21 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // the library holds exactly the copies the command zone did not claim. The
     // registered pools above were built from the same `main_deck_for` output,
     // so library and pool cannot disagree about the 100.
-    let p0_library = main_deck_for(&payload.player);
-    let p1_library = main_deck_for(&payload.opponent);
+    let p0_library = netted_main_deck(&payload.player);
+    let p1_library = netted_main_deck(&payload.opponent);
     if library_holders.contains(&PlayerId(0)) {
-        load_player_library(state, &p0_library, PlayerId(0));
+        load_player_library(state, &payload.player, &p0_library, PlayerId(0));
     }
     if library_holders.contains(&PlayerId(1)) {
-        load_player_library(state, &p1_library, PlayerId(1));
+        load_player_library(state, &payload.opponent, &p1_library, PlayerId(1));
     }
 
     // Load additional AI decks into PlayerId(2), PlayerId(3), etc.
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
         if library_holders.contains(&player_id) {
-            let library = main_deck_for(ai_deck);
-            load_player_library(state, &library, player_id);
+            let library = netted_main_deck(ai_deck);
+            load_player_library(state, ai_deck, &library, player_id);
         }
     }
 
@@ -1086,40 +1299,28 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `commander` slot must neither place a command-zone object nor net the
     // slot out of the library, or a populated-but-inert `commander` slot would
     // add a 61st card to a constructed game.
-    let commander_decks: Vec<(PlayerId, &[DeckEntry])> = if !place_commanders {
-        Vec::new()
-    } else {
-        std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
-            .chain(std::iter::once((
-                PlayerId(1),
-                payload.opponent.commander.as_slice(),
-            )))
-            .chain(
-                payload
-                    .ai_decks
-                    .iter()
-                    .enumerate()
-                    .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
-            )
-            .collect()
-    };
-    for (owner, entries) in commander_decks {
-        for entry in entries {
-            for _ in 0..entry.count {
-                create_commander_from_card_face(state, &entry.card, owner);
+    if place_commanders {
+        for (seat, deck) in std::iter::once(&payload.player)
+            .chain(std::iter::once(&payload.opponent))
+            .chain(&payload.ai_decks)
+            .enumerate()
+        {
+            for copy in entry_copies(deck, DeckSection::Commander, None) {
+                let id = create_commander_from_card_face(state, copy.face, PlayerId(seat as u8));
+                stamp_created_card(state, id, copy.printing);
             }
         }
     }
 
-    load_player_attraction_deck(state, &payload.player.attraction_deck, PlayerId(0));
-    load_player_attraction_deck(state, &payload.opponent.attraction_deck, PlayerId(1));
+    load_player_attraction_deck(state, &payload.player, PlayerId(0));
+    load_player_attraction_deck(state, &payload.opponent, PlayerId(1));
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
-        load_player_attraction_deck(state, &ai_deck.attraction_deck, PlayerId((2 + i) as u8));
+        load_player_attraction_deck(state, ai_deck, PlayerId((2 + i) as u8));
     }
-    load_player_contraption_deck(state, &payload.player.contraption_deck, PlayerId(0));
-    load_player_contraption_deck(state, &payload.opponent.contraption_deck, PlayerId(1));
+    load_player_contraption_deck(state, &payload.player, PlayerId(0));
+    load_player_contraption_deck(state, &payload.opponent, PlayerId(1));
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
-        load_player_contraption_deck(state, &ai_deck.contraption_deck, PlayerId((2 + i) as u8));
+        load_player_contraption_deck(state, ai_deck, PlayerId((2 + i) as u8));
     }
     crate::game::stickers::set_player_sticker_sheets(
         state,
@@ -1141,36 +1342,25 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 
     if state.format_config.format == crate::types::format::GameFormat::Oathbreaker {
         // Oathbreaker RC: Place signature spells in the command zone at game start.
-        let sig_decks: Vec<(PlayerId, &[DeckEntry])> =
-            std::iter::once((PlayerId(0), payload.player.signature_spell.as_slice()))
-                .chain(std::iter::once((
-                    PlayerId(1),
-                    payload.opponent.signature_spell.as_slice(),
-                )))
-                .chain(
-                    payload
-                        .ai_decks
-                        .iter()
-                        .enumerate()
-                        .map(|(i, d)| (PlayerId((2 + i) as u8), d.signature_spell.as_slice())),
-                )
-                .collect();
-        for (owner, entries) in sig_decks {
-            for entry in entries {
-                for _ in 0..entry.count {
-                    create_signature_spell_from_card_face(state, &entry.card, owner);
-                }
+        for (seat, deck) in std::iter::once(&payload.player)
+            .chain(std::iter::once(&payload.opponent))
+            .chain(&payload.ai_decks)
+            .enumerate()
+        {
+            for copy in entry_copies(deck, DeckSection::SignatureSpell, None) {
+                let id =
+                    create_signature_spell_from_card_face(state, copy.face, PlayerId(seat as u8));
+                stamp_created_card(state, id, copy.printing);
             }
         }
     }
 
     if state.format_config.format == crate::types::format::GameFormat::Planechase {
-        load_shared_planar_deck(state, &payload.player.planar_deck, PlayerId(0));
+        load_shared_planar_deck(state, &payload.player, PlayerId(0));
     }
     if state.format_config.format == crate::types::format::GameFormat::Archenemy {
         let archenemy = crate::game::topology::archenemy(state).unwrap_or(PlayerId(0));
-        let entries = &payload_for_player(payload, archenemy).scheme_deck;
-        load_shared_scheme_deck(state, entries, archenemy);
+        load_shared_scheme_deck(state, payload_for_player(payload, archenemy), archenemy);
     }
 
     // Momir Basic: grant each player a game-start command-zone emblem carrying
@@ -1197,6 +1387,7 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 obj.emblem_source = Some(crate::game::game_object::EmblemSource {
                     name: MOMIR_EMBLEM_SOURCE_NAME.to_string(),
                     printed_ref: None,
+                    printing: crate::types::display_only::DisplayOnly::default(),
                 });
             }
         }
@@ -1278,22 +1469,146 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 /// identity behind any later face-down spell. The normal library shuffle is
 /// intentionally separate: revealed ID/name pairs carry no information about
 /// the current order of unrevealed cards.
-fn load_player_library(state: &mut GameState, entries: &[DeckEntry], owner: PlayerId) {
-    for face in shuffled_entry_faces(state, entries) {
-        create_object_from_card_face(state, face, owner);
+fn load_player_library(
+    state: &mut GameState,
+    payload: &PlayerDeckPayload,
+    retained: &[DeckEntry],
+    owner: PlayerId,
+) {
+    for copy in shuffled_entry_copies(state, payload, DeckSection::MainDeck, Some(retained)) {
+        let id = create_object_from_card_face(state, copy.face, owner);
+        stamp_created_card(state, id, copy.printing);
     }
 }
 
 /// Produces a fresh ID-allocation order for every hidden-order deck before its
 /// usual game-start shuffle. This prevents a public object ID from encoding the
 /// submitted deck-list position once the card is later revealed.
-fn shuffled_entry_faces<'a>(state: &mut GameState, entries: &'a [DeckEntry]) -> Vec<&'a CardFace> {
-    let mut faces = entries
+fn shuffled_entry_copies<'a>(
+    state: &mut GameState,
+    payload: &'a PlayerDeckPayload,
+    section: DeckSection,
+    retained: Option<&[DeckEntry]>,
+) -> Vec<DeckCardCopy<'a>> {
+    let mut copies = entry_copies(payload, section, retained);
+    copies.shuffle(state.rng.draw(RandomDraw::Placement));
+    copies
+}
+
+struct DeckCardCopy<'a> {
+    face: &'a CardFace,
+    printing: Option<&'a CardPrinting>,
+}
+
+/// Validate correspondence before any object, pool or RNG mutation.
+fn validate_printing_bindings(payload: &PlayerDeckPayload) {
+    let mut bindings = HashMap::new();
+    let mut capacities: [HashMap<&str, u64>; 10] = std::array::from_fn(|_| HashMap::new());
+    for binding in &payload.printing_entry_names {
+        let entry = section_entries(payload, binding.section)
+            .get(binding.entry_index)
+            .expect("printing binding index must name an original resolved entry");
+        let key = (section_index(binding.section), binding.entry_index);
+        if let Some(previous) = bindings.insert(key, binding.name.as_str()) {
+            assert_eq!(
+                previous, binding.name,
+                "conflicting printing entry bindings"
+            );
+        } else {
+            *capacities[key.0].entry(&binding.name).or_default() += u64::from(entry.count);
+        }
+    }
+    for row in &payload.printings {
+        let remaining = capacities[section_index(row.section)]
+            .get_mut(row.name.as_str())
+            .expect("annotated payload requires normalized printing entry bindings");
+        assert!(
+            row.count > 0 && u64::from(row.count) <= *remaining,
+            "printing stream exceeds resolved entry capacity"
+        );
+        *remaining -= u64::from(row.count);
+    }
+}
+
+struct PrintingCursor<'a> {
+    rows: Vec<&'a DeckPrinting>,
+    row: usize,
+    consumed: u32,
+}
+
+impl<'a> PrintingCursor<'a> {
+    fn next(&mut self) -> Option<&'a CardPrinting> {
+        let row = self.rows.get(self.row)?;
+        self.consumed += 1;
+        if self.consumed == row.count {
+            self.row += 1;
+            self.consumed = 0;
+        }
+        Some(&row.printing)
+    }
+}
+
+fn entry_copies<'a>(
+    payload: &'a PlayerDeckPayload,
+    section: DeckSection,
+    retained: Option<&[DeckEntry]>,
+) -> Vec<DeckCardCopy<'a>> {
+    let entries = section_entries(payload, section);
+    let mut streams: HashMap<&str, PrintingCursor<'a>> = HashMap::new();
+    for row in payload
+        .printings
         .iter()
-        .flat_map(|entry| std::iter::repeat_n(&entry.card, entry.count as usize))
-        .collect::<Vec<_>>();
-    faces.shuffle(state.rng.draw(RandomDraw::Placement));
-    faces
+        .filter(|row| row.section == section)
+    {
+        streams
+            .entry(&row.name)
+            .or_insert_with(|| PrintingCursor {
+                rows: Vec::new(),
+                row: 0,
+                consumed: 0,
+            })
+            .rows
+            .push(row);
+    }
+    let bindings: HashMap<usize, &str> = payload
+        .printing_entry_names
+        .iter()
+        .filter(|binding| binding.section == section)
+        .map(|binding| (binding.entry_index, binding.name.as_str()))
+        .collect();
+    let capacity = retained
+        .unwrap_or(entries)
+        .iter()
+        .map(|entry| entry.count as usize)
+        .sum();
+    let mut copies = Vec::with_capacity(capacity);
+    for (index, entry) in entries.iter().enumerate() {
+        let removed = retained.map_or(0, |counts| entry.count - counts[index].count);
+        let mut cursor = bindings.get(&index).and_then(|name| streams.get_mut(name));
+        for ordinal in 0..entry.count {
+            let printing = cursor.as_mut().and_then(|cursor| cursor.next());
+            if ordinal >= removed {
+                copies.push(DeckCardCopy {
+                    face: &entry.card,
+                    printing,
+                });
+            }
+        }
+    }
+    copies
+}
+
+/// Creation-only display metadata; never called by hydration or gameplay transitions.
+fn stamp_created_card(
+    state: &mut GameState,
+    id: crate::types::identifiers::ObjectId,
+    printing: Option<&CardPrinting>,
+) {
+    if let Some(printing) = printing {
+        let object = state.objects.get_mut(&id).expect("just created");
+        object.printing = crate::types::display_only::DisplayOnly::new(Some(printing.clone()));
+        object.base_printing = crate::types::display_only::DisplayOnly::new(Some(printing.clone()));
+    }
 }
 
 /// Canonical init sequence for every transport layer: load the decks into

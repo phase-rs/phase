@@ -1203,6 +1203,20 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   /**
+   * Engine resource-bound check of one guest deck's printings sidecar (the P2P
+   * host's admission, `P2PHostAdapter.handleNewGuest`). Resolves when the
+   * sidecar is within the engine's bounds and rejects with the engine's reason
+   * when it is not. Reads no card database, so it does not wait for one.
+   */
+  async checkDeckPrintingsBounds(printings: unknown): Promise<void> {
+    await this.initialize();
+    if (this.engine) {
+      return this.engine.checkDeckPrintingsBounds(printings);
+    }
+    return this.fallback!.checkDeckPrintingsBounds(printings);
+  }
+
+  /**
    * Axis A: ask the ENGINE to capture a lobby `FormatConfig` as a saved
    * custom-format definition. Rejects (with the engine's own message) for a
    * source format whose behavior cannot be represented — Planechase, Archenemy,
@@ -1525,6 +1539,7 @@ interface MainThreadFallback {
   estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
   evaluateDeckCompatibility(request: unknown): Promise<unknown>;
   evaluateDeckFormatGate(request: unknown): Promise<unknown>;
+  checkDeckPrintingsBounds(printings: unknown): Promise<void>;
   customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown>;
   formatConfigForCustomRules(customRules: unknown): Promise<unknown>;
   getCardFaceData(cardName: string): Promise<unknown>;
@@ -1865,6 +1880,9 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
     // fallback cannot silently inherit the UI-hint path's Custom downgrade.
     evaluateDeckFormatGate: (request: unknown) =>
       enqueue(() => wasm.evaluateDeckFormatGate(request)),
+
+    checkDeckPrintingsBounds: (printings: unknown) =>
+      enqueue(() => wasm.checkDeckPrintingsBounds(printings)),
 
     customFormatFromLobbyConfig: (name: string, formatConfig: unknown) =>
       enqueue(() => wasm.customFormatFromLobbyConfig(name, formatConfig)),

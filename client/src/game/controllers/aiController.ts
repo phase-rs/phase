@@ -84,6 +84,22 @@ function waitingForFingerprint(waitingFor: WaitingFor | null | undefined): strin
   return JSON.stringify(waitingFor ?? null);
 }
 
+type EnginePromptFence = { identity: string; revision: number };
+type AttemptPrompt = { fence: EnginePromptFence | null; waitingFor: WaitingFor };
+
+function enginePromptFence(state: GameState | null): EnginePromptFence | null {
+  const identity = state?.derived?.waiting_for_identity;
+  const revision = state?.derived?.state_revision;
+  return identity == null || revision == null ? null : { identity, revision };
+}
+
+function sameAttemptPrompt(a: AttemptPrompt, b: AttemptPrompt): boolean {
+  if (a.fence && b.fence) {
+    return a.fence.identity === b.fence.identity && a.fence.revision === b.fence.revision;
+  }
+  return waitingForFingerprint(a.waitingFor) === waitingForFingerprint(b.waitingFor);
+}
+
 function waitingForDebugLabel(waitingFor: WaitingFor | null | undefined): string {
   if (waitingFor == null) return "none";
   const data = (waitingFor as { data?: { player?: number } }).data;
@@ -207,7 +223,7 @@ export function createAIController(config: AIControllerConfig): AIController {
   interface AIAttempt {
     generation: number;
     gameSessionGeneration: number;
-    waitingForFingerprint: string;
+    prompt: AttemptPrompt;
     playerId: number;
   }
 
@@ -322,12 +338,12 @@ export function createAIController(config: AIControllerConfig): AIController {
     return state.priority_player === PLAYER_ID ? null : state.priority_player;
   }
 
-  function beginAttempt(waitingFor: WaitingFor, playerId: number): AIAttempt {
+  function beginAttempt(state: GameState, playerId: number): AIAttempt {
     const store = useGameStore.getState();
     const attempt: AIAttempt = {
       generation: ++attemptGeneration,
       gameSessionGeneration: store.gameSessionGeneration,
-      waitingForFingerprint: waitingForFingerprint(waitingFor),
+      prompt: { fence: enginePromptFence(state), waitingFor: state.waiting_for },
       playerId,
     };
     pending = true;
@@ -341,7 +357,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     const state = store.gameState;
     const waitingFor = state?.waiting_for ?? null;
     if (!state || !waitingFor) return false;
-    if (waitingForFingerprint(waitingFor) !== attempt.waitingForFingerprint) return false;
+    if (!sameAttemptPrompt(attempt.prompt, { fence: enginePromptFence(state), waitingFor })) return false;
     if (authorizedAiPlayer(waitingFor, state) !== attempt.playerId) return false;
     return true;
   }
@@ -440,12 +456,12 @@ export function createAIController(config: AIControllerConfig): AIController {
     const difficulty = difficultyByPlayerId.get(playerId) ?? "Medium";
     const waitingForType = gameState?.waiting_for?.type;
     const scheduledWaitingFor = gameState?.waiting_for ?? null;
-    if (!scheduledWaitingFor) return;
+    if (!gameState || !scheduledWaitingFor) return;
     const getProposal = useTacticalFallback
       ? adapter?.getAiTacticalActionProposal
       : adapter?.getAiActionProposal;
     if (!getProposal) return;
-    const attempt = beginAttempt(scheduledWaitingFor, playerId);
+    const attempt = beginAttempt(gameState, playerId);
     const waitingFor = waitingForDebugLabel(scheduledWaitingFor);
     recordAiDecisionDiagnostic({
       stage: "awaiting-proposal",
@@ -675,19 +691,32 @@ export function createAIController(config: AIControllerConfig): AIController {
     // controller supervises. No per-seat iteration needed; the bug that
     // previously stalled P3/P4 was caused by an action-only API accepting a
     // default `playerId` elsewhere, not by this loop.
-    let observedWaitingFor = useGameStore.getState().waitingFor;
-    let observedSessionGeneration = useGameStore.getState().gameSessionGeneration;
+    const initialStore = useGameStore.getState();
+    let observedWaitingFor = initialStore.waitingFor;
+    let observedFence = enginePromptFence(initialStore.gameState);
+    let observedSessionGeneration = initialStore.gameSessionGeneration;
+    let observedActor = initialStore.gameState
+      ? authorizedAiPlayer(initialStore.gameState.waiting_for, initialStore.gameState)
+      : null;
     unsubscribe = useGameStore.subscribe(
       (s) => s,
       () => {
         if (!active) return;
         const store = useGameStore.getState();
-        const waitingForChanged = store.waitingFor !== observedWaitingFor;
+        const fence = enginePromptFence(store.gameState);
+        const actor = store.gameState
+          ? authorizedAiPlayer(store.gameState.waiting_for, store.gameState)
+          : null;
+        const promptChanged = observedFence && fence
+          ? observedFence.identity !== fence.identity || observedFence.revision !== fence.revision || actor !== observedActor
+          : store.waitingFor !== observedWaitingFor;
         const sessionChanged = store.gameSessionGeneration !== observedSessionGeneration;
         observedWaitingFor = store.waitingFor;
+        observedFence = fence;
         observedSessionGeneration = store.gameSessionGeneration;
+        observedActor = actor;
 
-        if (waitingForChanged || sessionChanged) {
+        if (promptChanged || sessionChanged) {
           invalidateAttempt();
           // A new snapshot gets a fresh failure budget even for an A→A
           // transition whose serialized WaitingFor payload is identical.

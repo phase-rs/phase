@@ -16,9 +16,11 @@ use crate::types::ability::{
 use crate::types::card::{
     LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
 };
+use crate::types::card_printing::CardPrinting;
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
+use crate::types::display_only::DisplayOnly;
 use crate::types::game_state::{
     AttackDeclarationRecord, CastOccurrence, GameState, LKISnapshot, TriggerSourceContext,
 };
@@ -548,6 +550,11 @@ pub struct EmblemSource {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The source card's printing, rendered on the emblem chip. Display-only: CR 203.1 +
+    /// CR 206.1, a printing has no effect on game play, so no rules or AI path reads it.
+    /// Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<CardPrinting>>,
 }
 
 /// CR 607.1d + CR 607.5 + CR 400.7: an emblem's pairing identity — the exact
@@ -999,6 +1006,11 @@ pub struct GameObject {
     pub color: Vec<ManaColor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The printing of the physical card this object represents, as its owner chose it.
+    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
+    /// AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<CardPrinting>>,
     /// Exact token-art lookup metadata, populated only when the engine can
     /// identify one printed token catalog entry without guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1141,6 +1153,16 @@ pub struct GameObject {
     /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_ref: Option<PrintedCardRef>,
+    /// The physical card's submitted printing; transform, flip, control change and zone changes
+    /// leave it unchanged. Paired with `printing` as `base_printed_ref` is with `printed_ref`,
+    /// but card-level: no face install or copy changes it. Both printings are cleared by
+    /// `conceal_printing` when the object becomes able to hide its name (turned face down, or
+    /// merged) and no later face write returns them; the one authority that replays recorded
+    /// values, the cast reversal (CR 733.1), can return the printing held before a cast. Tokens
+    /// never carry one. Display-only: CR 203.1 + CR 206.1, a printing has no effect on game
+    /// play, so no rules or AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub base_printing: DisplayOnly<Option<CardPrinting>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub base_characteristics_initialized: bool,
 
@@ -1910,6 +1932,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cleave_variant: _,
         color: _,
         printed_ref: _,
+        // OMITTED, DISPLAY-ONLY: CR 203.1 + CR 206.1, a printing has no effect on game play, and
+        // `DisplayOnly` is always equal, so no comparator could tell two printings apart.
+        printing: _,
         token_image_ref: _,
         token_art: _,
         source_related_token_ids: _,
@@ -1947,6 +1972,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_static_definitions: _,
         base_color: _,
         base_printed_ref: _,
+        // OMITTED, DISPLAY-ONLY (see `printing`).
+        base_printing: _,
         base_characteristics_initialized: _,
         timestamp: _,
         incarnation: _,
@@ -3223,7 +3250,9 @@ impl GameObject {
             static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
+            printing: DisplayOnly::default(),
             base_printed_ref: None,
+            base_printing: DisplayOnly::default(),
             token_image_ref: None,
             token_art: None,
             source_related_token_ids: Vec::new(),
@@ -3347,10 +3376,21 @@ impl GameObject {
         }
     }
 
+    /// CR 708.2 + CR 708.5: forget the physical card's printing on the authoritative object at the
+    /// moment the object becomes able to hide its name (turned face down, or merged). Nothing writes a
+    /// printing after an object is created except a clone of an existing object, so a concealed
+    /// printing stays concealed through every later face rewrite (turn up, flip, specialize,
+    /// transform, reload) and every capture of the object carries none.
+    pub(crate) fn conceal_printing(&mut self) {
+        self.printing = DisplayOnly::default();
+        self.base_printing = DisplayOnly::default();
+    }
+
     /// Capture public object characteristics for event-time look-back queries.
     pub fn snapshot_public_characteristics(&self) -> LKISnapshot {
         LKISnapshot {
             name: self.name.clone(),
+            printing: self.printing.clone(),
             token_image_ref: self.token_image_ref.clone(),
             power: self.power,
             toughness: self.toughness,

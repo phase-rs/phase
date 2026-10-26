@@ -1,7 +1,7 @@
 import type { ImgHTMLAttributes, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 
-import type { GameObject, TokenImageRef } from "../../adapter/types.ts";
+import type { CardPrinting, GameObject, TokenImageRef } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
@@ -15,6 +15,8 @@ export interface AnimationImageSnapshot {
   isToken: boolean;
   tokenFilters?: TokenSearchFilters;
   tokenImageRef?: TokenImageRef | null;
+  /** Captured visible carrier value; the viewer preference stays live in the facade. */
+  ownerPrinting?: CardPrinting | null;
 }
 
 export function visibleAnimationImageSnapshot(
@@ -30,6 +32,7 @@ export function visibleAnimationImageSnapshot(
     isToken,
     tokenFilters,
     tokenImageRef,
+    ownerPrinting,
   } = objectImageProps(object);
   return {
     objectId: object.id,
@@ -40,6 +43,7 @@ export function visibleAnimationImageSnapshot(
     isToken,
     tokenFilters,
     tokenImageRef,
+    ownerPrinting,
   };
 }
 
@@ -74,6 +78,7 @@ export function ResolvedAnimationImage({
     tokenImageRef: snapshot.tokenImageRef,
     oracleId: snapshot.oracleId,
     faceName: snapshot.faceName,
+    ownerPrinting: snapshot.ownerPrinting,
   });
   const settledRef = useRef(false);
 

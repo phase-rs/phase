@@ -10,26 +10,26 @@
     {
       "seat": 0,
       "updates": 187,
-      "json_bytes": 13991377,
-      "wire_bytes": 1152328
+      "json_bytes": 14086049,
+      "wire_bytes": 1176517
     },
     {
       "seat": 1,
       "updates": 187,
-      "json_bytes": 14149300,
-      "wire_bytes": 1175503
+      "json_bytes": 14248256,
+      "wire_bytes": 1198945
     },
     {
       "seat": 2,
       "updates": 187,
-      "json_bytes": 14072275,
-      "wire_bytes": 1159534
+      "json_bytes": 14169293,
+      "wire_bytes": 1183008
     },
     {
       "seat": 3,
       "updates": 187,
-      "json_bytes": 14206232,
-      "wire_bytes": 1166140
+      "json_bytes": 14303199,
+      "wire_bytes": 1189194
     }
   ]
 }

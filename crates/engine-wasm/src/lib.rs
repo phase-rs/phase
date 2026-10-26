@@ -41,6 +41,7 @@ use engine::game::{
     PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
+use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
 use engine::types::custom_format::{CustomFormatDef, CustomFormatRules};
 use engine::types::events::GameEvent;
 use engine::types::format::{
@@ -1432,6 +1433,50 @@ pub fn evaluate_deck_format_gate_js(request: JsValue) -> Result<JsValue, JsValue
     })
 }
 
+/// Resource bounds on one deck list's printings sidecar, for the P2P host's guest
+/// admission (`handleNewGuest` in `client/src/adapter/p2p-adapter.ts`). Takes the
+/// guest deck's `printings` value as received. Decodes it with the one sidecar decoder
+/// (which refuses more than `MAX_DECK_PRINTING_ENTRIES` elements of any shape) and applies
+/// `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
+#[wasm_bindgen(js_name = checkDeckPrintingsBounds)]
+pub fn check_deck_printings_bounds_js(printings: JsValue) -> Result<(), JsValue> {
+    check_printings_bounds(serde_wasm_bindgen::Deserializer::from(printings)).map_err(|e| match e {
+        // The decoder's own error is already a JS `Error` whose `.message` is the bare
+        // reason; its `Display` would prefix "Error: " (`String(error)`).
+        PrintingsRefusal::Decode(e) => JsValue::from(e),
+        PrintingsRefusal::Bounds(reason) => JsValue::from_str(&reason),
+    })
+}
+
+/// Why `check_printings_bounds` refused a guest deck's `printings` value.
+#[derive(Debug)]
+enum PrintingsRefusal<E> {
+    /// The sidecar decoder refused it (the entry cap).
+    Decode(E),
+    /// `validate_deck_printings_bounds` refused it (the byte caps).
+    Bounds(String),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for PrintingsRefusal<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(e) => e.fmt(f),
+            Self::Bounds(reason) => f.write_str(reason),
+        }
+    }
+}
+
+/// The P2P admission half of D8: decodes a guest deck's `printings` value with the one
+/// sidecar decoder (the entry cap) and applies `validate_deck_printings_bounds` (the byte
+/// caps). Native-testable body of `checkDeckPrintingsBounds`; the two refusal sources stay
+/// distinct so the export can surface each in its native JS form.
+fn check_printings_bounds<'de, D: serde::Deserializer<'de>>(
+    printings: D,
+) -> Result<(), PrintingsRefusal<D::Error>> {
+    let printings = deserialize_deck_printings(printings).map_err(PrintingsRefusal::Decode)?;
+    validate_deck_printings_bounds("printings", &printings).map_err(PrintingsRefusal::Bounds)
+}
+
 /// Axis A: capture a lobby's live, fully-resolved `FormatConfig` as a saved
 /// custom-format DEFINITION (`CustomFormatDef`), which the client persists
 /// locally. Never produces an active config — `formatConfigForCustomRules`
@@ -1690,6 +1735,35 @@ pub fn initialize_multiplayer_host_game(
     )
 }
 
+/// Every seat of a `DeckList` with the label its refusal reasons carry: the local
+/// player, the AI opponent, then each further AI player.
+fn labelled_seats(deck_list: &DeckList) -> impl Iterator<Item = (String, &PlayerDeckList)> {
+    [
+        ("Player".to_string(), &deck_list.player),
+        ("AI opponent".to_string(), &deck_list.opponent),
+    ]
+    .into_iter()
+    .chain(
+        deck_list
+            .ai_decks
+            .iter()
+            .enumerate()
+            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
+    )
+}
+
+/// The WASM initialize half of the printings sidecar's resource bound (A3/D8):
+/// applies the engine's single `validate_deck_printings_bounds` to every seat's
+/// sidecar, returning `Some(reasons)` at the first refusal and `None` when every
+/// seat is in bounds. Native-testable for the same reason as `validate_deck_list_seats`.
+fn deck_list_printings_violations(deck_list: &DeckList) -> Option<Vec<String>> {
+    labelled_seats(deck_list).find_map(|(seat, deck)| {
+        validate_deck_printings_bounds("printings", &deck.printings)
+            .err()
+            .map(|reason| vec![format!("{seat} deck: {reason}")])
+    })
+}
+
 /// Validate every seat's deck in a `DeckList` against the selected format,
 /// returning `Some(reasons)` at the first refusal and `None` when every seat
 /// passes. Each reason is labelled with the seat it came from, because the
@@ -1707,19 +1781,7 @@ fn validate_deck_list_seats(
     match_type: Option<MatchType>,
     player_count: usize,
 ) -> Option<Vec<String>> {
-    let seats = [
-        ("Player".to_string(), &deck_list.player),
-        ("AI opponent".to_string(), &deck_list.opponent),
-    ]
-    .into_iter()
-    .chain(
-        deck_list
-            .ai_decks
-            .iter()
-            .enumerate()
-            .map(|(idx, deck)| (format!("AI player {}", idx + 2), deck)),
-    );
-    for (seat, deck) in seats {
+    for (seat, deck) in labelled_seats(deck_list) {
         if let Err(reasons) = validate_name_deck_for_format_full(
             db,
             &deck.main_deck,
@@ -1831,6 +1893,14 @@ fn initialize_game_impl(
                 }));
             }
         };
+        // Resource bound on every seat's printings sidecar (the decoder has already
+        // refused more than the entry cap): refused before the list is recorded.
+        if let Some(reasons) = deck_list_printings_violations(&deck_list) {
+            return to_js(&serde_json::json!({
+                "error": true,
+                "reasons": reasons,
+            }));
+        }
         recorded_deck_list = Some(deck_list.clone());
 
         let card_db_missing = CARD_DB.with(|cell| cell.borrow().is_none());
@@ -3169,6 +3239,16 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     // A contest's timestamps belong to the host clock that stamped them; this restore
     // may be an import from another page or worker (see the engine function).
     engine::game::contest::cancel_contest_after_restore(&mut state);
+    // A restore over a live game replaces it in place (undo, developer restore, recovery):
+    // continue the replaced state's revision and advance it, so the restored snapshot never
+    // repeats a revision already used with different rules state (the clients' staleness key).
+    if let Some(replaced_revision) = GAME_STATE.with(|cell| {
+        let replaced = cell.take();
+        replaced.as_ref().map(|replaced| replaced.state_revision)
+    }) {
+        state.state_revision = replaced_revision;
+        engine::game::public_state::bump_state_revision(&mut state);
+    }
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -3325,6 +3405,77 @@ mod restored_card_db_requirements_tests {
         assert!(error.contains("card database"));
         assert!(GAME_STATE.with(|cell| cell.replace(None).is_none()));
         assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn restore_continues_live_revision_and_preserves_fresh_decode_revision() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+        let decoded_revision = decode_and_rehydrate_restored_game_state(&json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("independent decode succeeds")
+        .state
+        .state_revision;
+        let mut live = GameState::new_two_player(17);
+        live.state_revision = 41;
+        GAME_STATE.with(|cell| cell.set(Some(live)));
+        for expected in [42, 43] {
+            restore_game_state_inner(&json).expect("live restore succeeds");
+            assert_eq!(with_state(|state| state.state_revision).unwrap(), expected);
+        }
+        for _ in 0..2 {
+            clear_game_state();
+            restore_game_state_inner(&json).expect("fresh restore succeeds");
+            assert_eq!(
+                with_state(|state| state.state_revision).unwrap(),
+                decoded_revision
+            );
+        }
+        clear_game_state();
+    }
+
+    #[test]
+    fn restore_revokes_proposals_independently_of_revision() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+        let json = serde_json::to_string(&GameState::new_two_player(17)).unwrap();
+        let decoded_revision = decode_and_rehydrate_restored_game_state(&json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("independent decode succeeds")
+        .state
+        .state_revision;
+        for live_revision in [None, Some(41)] {
+            clear_game_state();
+            if let Some(revision) = live_revision {
+                let mut live = GameState::new_two_player(17);
+                live.state_revision = revision;
+                GAME_STATE.with(|cell| cell.set(Some(live)));
+            }
+            let token = AI_PROPOSALS.with(|registry| {
+                registry.borrow_mut().insert(AiDecisionContract {
+                    semantic_owner: PlayerId(0),
+                    authorized_actor: PlayerId(0),
+                    state_revision: decoded_revision,
+                    candidates: Vec::new(),
+                })
+            });
+            assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+            restore_game_state_inner(&json).expect("restore succeeds");
+            let expected_revision = live_revision.map_or(decoded_revision, |revision| revision + 1);
+            assert_eq!(
+                with_state(|state| state.state_revision).unwrap(),
+                expected_revision
+            );
+            assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        }
+        clear_game_state();
     }
 
     /// Pins the legacy-compatible generic restore boundary: rounds 4-6 tried,
@@ -4781,21 +4932,11 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // Stay at the name-only layer — `wasm.initialize_game` re-resolves
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
-            // shape coercion at every JS boundary. The declared bracket_tier is
-            // carried through so a cEDH seat's declaration survives the round-trip.
-            Ok(PlayerDeckList {
-                main_deck: deck_data.main_deck,
-                sideboard: deck_data.sideboard,
-                commander: deck_data.commander,
-                companion: deck_data.companion,
-                attraction_deck: deck_data.attraction_deck,
-                planar_deck: deck_data.planar_deck,
-                scheme_deck: deck_data.scheme_deck,
-                contraption_deck: deck_data.contraption_deck,
-                sticker_sheets: deck_data.sticker_sheets,
-                signature_spell: deck_data.signature_spell,
-                bracket_tier: deck_data.bracket_tier,
-            })
+            // shape coercion at every JS boundary. Every field, the declared
+            // bracket tier (so a cEDH seat's declaration survives the round-trip)
+            // and the printings sidecar included, is carried by the engine's
+            // conversion.
+            Ok(PlayerDeckList::from(deck_data))
         }
     }
 
@@ -5538,9 +5679,31 @@ mod tests {
             "stale"
         );
 
-        let token = install_issued_candidate(priority_state(player), player, &action);
-        let state_json = export_game_state_json().expect("live state exports");
-        restore_game_state(&state_json).expect("same-revision restore succeeds");
+        load_minimal_test_card_database();
+        set_multiplayer_mode(false);
+        let seed_json = serde_json::to_string(&priority_state(player)).unwrap();
+        let prepared = decode_and_rehydrate_restored_game_state(&seed_json, |state| {
+            state.rehydrate_rng();
+            Ok(())
+        })
+        .expect("prepared state decodes")
+        .state;
+        let token = install_issued_candidate(prepared, player, &action);
+        let issued_revision = AI_PROPOSALS.with(|registry| {
+            registry
+                .borrow()
+                .proposal(&token)
+                .expect("issued token exists")
+                .contract
+                .state_revision
+        });
+        let state_json = export_game_state_json().expect("prepared live state exports");
+        GAME_STATE.with(|cell| cell.take());
+        restore_game_state(&state_json).expect("same-revision fresh restore succeeds");
+        assert_eq!(
+            with_state(|state| state.state_revision).expect("restored state exists"),
+            issued_revision
+        );
         assert_eq!(proposal_outcome(&token, player, &action)["status"], "stale");
         clear_game_state();
     }
@@ -8032,6 +8195,139 @@ mod deck_list_seat_validation_tests {
                  being a commander: Plains"
                     .to_string()
             ]),
+        );
+    }
+
+    fn printing_entry(set_code: &str) -> engine::types::card_printing::DeckPrinting {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: "Plains".to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: set_code.to_string(),
+                collector_number: "1".to_string(),
+            },
+        }
+    }
+
+    fn seat_with_printings(
+        printings: Vec<engine::types::card_printing::DeckPrinting>,
+    ) -> PlayerDeckList {
+        PlayerDeckList {
+            printings,
+            ..Default::default()
+        }
+    }
+
+    /// P2-V6 (D8): the WASM initialize half applies the engine's printings bound to
+    /// EVERY seat, labelling the refusal with the seat it came from.
+    #[test]
+    fn printings_bound_is_applied_to_every_seat_with_its_label() {
+        let oversized = || seat_with_printings(vec![printing_entry(&"s".repeat(33))]);
+        // Invalid but in-bounds annotations: the reach guard that the `None` below is
+        // a real acceptance of a non-empty sidecar, not a loop over empty seats.
+        let invalid_in_bounds = || {
+            seat_with_printings(vec![
+                printing_entry(""),
+                printing_entry("M\u{0}21"),
+                printing_entry("ZZZ"),
+            ])
+        };
+        let all_in_bounds = DeckList {
+            player: invalid_in_bounds(),
+            opponent: invalid_in_bounds(),
+            ai_decks: vec![invalid_in_bounds(), invalid_in_bounds()],
+            ..Default::default()
+        };
+        assert_eq!(deck_list_printings_violations(&all_in_bounds), None);
+
+        let violation = |reason_seat: &str| {
+            Some(vec![format!(
+                "{reason_seat} deck: printings[0].printing.set_code must be at most 32 bytes"
+            )])
+        };
+        let on_ai_player_3 = DeckList {
+            ai_decks: vec![invalid_in_bounds(), oversized()],
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_ai_player_3),
+            violation("AI player 3")
+        );
+        let on_opponent = DeckList {
+            opponent: oversized(),
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_opponent),
+            violation("AI opponent")
+        );
+        let on_player = DeckList {
+            player: oversized(),
+            ..all_in_bounds.clone()
+        };
+        assert_eq!(
+            deck_list_printings_violations(&on_player),
+            violation("Player")
+        );
+    }
+
+    /// A valid element followed by invalid annotations, the array `lobby-broker`'s
+    /// frame tests (P2-V4) use too: none of them is resource abuse.
+    fn invalid_annotations() -> serde_json::Value {
+        serde_json::json!([
+            { "section": "main_deck", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "mystery_zone", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            0,
+            { "section": "main_deck", "name": "Plains", "count": "one",
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "", "count": 1,
+              "printing": { "set_code": "", "collector_number": "" } },
+            { "section": "main_deck", "name": "Bad\nName", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "No Such Card Anywhere", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "Plains", "count": 0,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+        ])
+    }
+
+    /// P2-V13: the P2P admission export's engine verdict applies the decode-time
+    /// entry cap and the byte caps, and admits a guest deck with no sidecar.
+    #[test]
+    fn admission_check_applies_the_entry_cap_and_the_byte_caps() {
+        let check = check_printings_bounds::<serde_json::Value>;
+
+        // Reach guards: the same helper admits invalid annotations (the decoder ran
+        // and the check passed them) and a deck with no `printings` key (`null`).
+        assert!(check(invalid_annotations()).is_ok());
+        assert!(check(serde_json::Value::Null).is_ok());
+        assert!(check(serde_json::json!(vec![0; 2048])).is_ok());
+
+        // Decode-time cap: 2049 elements the lenient decoder would drop. It surfaces as
+        // the decoder's own error (a JS `Error` object on the real path), not a string.
+        let err = check(serde_json::json!(vec![0; 2049])).unwrap_err();
+        assert!(matches!(err, PrintingsRefusal::Decode(_)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("printings must contain at most 2048 entries"),
+            "{err}"
+        );
+
+        // Byte cap: fails if the `validate_deck_printings_bounds` line is removed,
+        // because the decoder alone admits it.
+        let long_code = serde_json::json!([{
+            "section": "main_deck", "name": "Plains", "count": 1,
+            "printing": { "set_code": "s".repeat(33), "collector_number": "1" },
+        }]);
+        let err = check(long_code).unwrap_err();
+        assert!(
+            matches!(&err, PrintingsRefusal::Bounds(reason)
+                if reason == "printings[0].printing.set_code must be at most 32 bytes"),
+            "{err}"
         );
     }
 }

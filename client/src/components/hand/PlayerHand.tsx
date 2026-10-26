@@ -16,7 +16,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { getPlayerId, useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { previewAutomaticManaPayment } from "../../game/manaPaymentPreview.ts";
-import type { GameObject, ManaCost, ObjectId, Zone } from "../../adapter/types.ts";
+import type { CardPrinting, GameObject, ManaCost, ObjectId, PrintedRef, Zone } from "../../adapter/types.ts";
 import {
   collectObjectActions,
   resolveDirectPlayOrCastAction,
@@ -662,6 +662,8 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
                 objectId={obj.id}
                 zone="Exile"
                 cardName={obj.name}
+                ownerPrinting={obj.printing}
+                ownerPrintedRef={obj.printed_ref}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
                 unimplementedMechanics={obj.unimplemented_mechanics}
@@ -696,6 +698,7 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
               cardName={obj.name}
               oracleId={obj.printed_ref?.oracle_id}
               faceName={obj.printed_ref?.face_name}
+              ownerPrinting={obj.printing}
               manaCost={obj.mana_cost}
               backFaceManaCost={obj.back_face?.mana_cost}
               unimplementedMechanics={obj.unimplemented_mechanics}
@@ -736,6 +739,8 @@ export function PlayerHand({ interactionDisabled = false }: PlayerHandProps) {
                 objectId={obj.id}
                 zone="Graveyard"
                 cardName={obj.name}
+                ownerPrinting={obj.printing}
+                ownerPrintedRef={obj.printed_ref}
                 manaCost={obj.mana_cost}
                 backFaceManaCost={obj.back_face?.mana_cost}
                 unimplementedMechanics={obj.unimplemented_mechanics}
@@ -852,6 +857,7 @@ interface HandCardProps {
   cardName: string;
   oracleId?: string;
   faceName?: string;
+  ownerPrinting?: CardPrinting | null;
   manaCost: ManaCost;
   backFaceManaCost?: ManaCost;
   unimplementedMechanics?: string[];
@@ -886,6 +892,7 @@ const HandCard = memo(function HandCard({
   cardName,
   oracleId,
   faceName,
+  ownerPrinting,
   manaCost,
   backFaceManaCost,
   unimplementedMechanics,
@@ -1059,6 +1066,7 @@ const HandCard = memo(function HandCard({
           size="normal"
           oracleId={oracleId}
           faceName={faceName}
+          ownerPrinting={ownerPrinting}
           unimplementedMechanics={unimplementedMechanics}
           className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"
         />
@@ -1096,6 +1104,8 @@ interface ZoneFanCardProps {
    *  card from an exiled one. */
   zone: Zone;
   cardName: string;
+  ownerPrinting?: CardPrinting | null;
+  ownerPrintedRef?: PrintedRef | null;
   manaCost: ManaCost;
   backFaceManaCost?: ManaCost;
   unimplementedMechanics?: string[];
@@ -1128,6 +1138,8 @@ const ZoneFanCard = memo(function ZoneFanCard({
   objectId,
   zone,
   cardName,
+  ownerPrinting,
+  ownerPrintedRef,
   manaCost,
   backFaceManaCost,
   unimplementedMechanics,
@@ -1225,6 +1237,8 @@ const ZoneFanCard = memo(function ZoneFanCard({
       >
         <CardImage
           cardName={cardName}
+          ownerPrinting={ownerPrinting}
+          ownerPrintedRef={ownerPrintedRef}
           size="normal"
           unimplementedMechanics={unimplementedMechanics}
           className="!w-[var(--hand-card-w)] !h-[var(--hand-card-h)]"

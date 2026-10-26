@@ -135,7 +135,7 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
       }),
     ];
 
-    const groups = groupByName(objects, new Set(), unboundedPileIds, undefined);
+    const groups = groupByName(objects, new Set(), unboundedPileIds, undefined, false);
     const groupOf = (id: ObjectId) => {
       const group = groups.find((g) => g.ids.includes(id));
       expect(group, `no group contains ${id}`).toBeDefined();

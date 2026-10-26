@@ -6,6 +6,7 @@ import type { AttackTarget, ObjectId } from "../../../adapter/types.ts";
 import { AttackTargetPicker } from "../AttackTargetPicker.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import {
   buildGameObjectWithCoreTypes,
   buildObjectMap,
@@ -77,9 +78,13 @@ describe("AttackTargetPicker", () => {
     // Opponents fall back to "Opp N" labels with an empty name map.
     useMultiplayerStore.setState({ activePlayerId: 0, playerNames: new Map() });
     useGameStore.setState({ gameState: makeState() });
+    usePreferencesStore.setState({ showOwnerPrintings: true });
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => {
+    cleanup();
+    usePreferencesStore.setState(usePreferencesStore.getInitialState());
+  });
 
   it("keeps Attack All mode working (one click sends every attacker to a target)", () => {
     const { onConfirm } = renderPicker();
@@ -365,6 +370,32 @@ describe("AttackTargetPicker", () => {
       [102, P1],
       [103, P1],
     ]);
+  });
+
+  it("regroups live printing rows without losing per-object assignments on unchanged state", () => {
+    const state = makeState();
+    for (const id of ATTACKERS) {
+      state.objects[id].printing = { set_code: "own", collector_number: id === 103 ? "2" : "1" };
+      state.objects[id].printed_ref = { oracle_id: "oracle-a", face_name: state.objects[id].name };
+    }
+    useGameStore.setState({ gameState: state });
+    const { onConfirm } = renderPicker();
+    enterDistribute();
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(2);
+    // First A member (101) goes to P1; B (103) goes to P2 before regrouping.
+    fireEvent.click(screen.getAllByRole("button", { name: /Assign one to Opp 2/ })[0]);
+    fireEvent.click(screen.getAllByRole("button", { name: /Assign one to Opp 3/ })[1]);
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(1);
+    expect(screen.getAllByText("×3")).toHaveLength(2);
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(true));
+    expect(document.querySelectorAll("tbody > tr")).toHaveLength(2);
+    expect(screen.getAllByText("×2")).toHaveLength(2);
+    // The remaining A member (102) goes to P2; all three original IDs must survive.
+    fireEvent.click(screen.getAllByRole("button", { name: /Assign one to Opp 3/ })[0]);
+    fireEvent.click(screen.getByRole("button", { name: /Declare 3 Attackers/ }));
+    expect(onConfirm).toHaveBeenCalledExactlyOnceWith([[101, P1], [102, P2], [103, P2]]);
+    expect(useGameStore.getState().gameState).toBe(state);
   });
 });
 

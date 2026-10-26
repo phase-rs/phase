@@ -3435,6 +3435,7 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
             object_id: subject.identity.object_id,
             lki: LKISnapshot {
                 name: subject.name.clone(),
+                printing: crate::types::display_only::DisplayOnly::default(),
                 token_image_ref: None,
                 power: subject.power,
                 toughness: subject.toughness,
@@ -3495,6 +3496,7 @@ fn revealed_object_context_from_events(
 fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapshot {
     LKISnapshot {
         name: record.name.clone(),
+        printing: crate::types::display_only::DisplayOnly::default(),
         token_image_ref: None,
         power: record.power,
         toughness: record.toughness,
@@ -34601,6 +34603,7 @@ mod tests {
             source,
             LKISnapshot {
                 name: "Choice Source".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: None,
                 toughness: None,
@@ -38692,6 +38695,7 @@ mod tests {
             sacrificed,
             crate::types::game_state::LKISnapshot {
                 name: "Sacrificed".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(1),
                 toughness: Some(1),

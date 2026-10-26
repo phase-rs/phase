@@ -28,6 +28,7 @@ import { MAX_MATERIALIZED_VIRTUAL_BASICS } from "../components/draft/workspace/t
 import type { DraftCardPlacement, DraftWorkspaceState } from "../components/draft/workspace/types";
 import { BASIC_LAND_NAMES } from "../constants/game";
 import { autosaveDraftDeck } from "../services/draftDeckAutosave";
+import { captureSubmissionArtPreferences, submitDeckList } from "../services/deckSubmission";
 import {
   appendWorkspaceInstanceToResolvedDestination,
   createDraftWorkspaceState,
@@ -2285,6 +2286,7 @@ export const useMultiplayerDraftStore = create<
     // already have committed before its own `throwIfAborted()` fires.
     let matchController: GameLoopController | undefined;
     try {
+      const artSnapshot = captureSubmissionArtPreferences();
       // `startMatch`'s local precedent: the transport modules load through
       // `await import()` so the P2P bundle stays out of the pod's chunk. This
       // is a deliberate code-split, not a CLAUDE.md inline-import violation —
@@ -2296,6 +2298,9 @@ export const useMultiplayerDraftStore = create<
 
       // The room is LIVE before any seat is told about it.
       host = await hostRoom(abort.signal, { preferredRoomCode: commanderRoomCode });
+
+      // This independent source await precedes the fresh roster read.
+      const boosterPackPool = await hostAdapter.boosterPackPoolForGame();
 
       // RE-READ, and this is a CONTRACT rather than caution.
       // `P2PDraftHost.commanderSeatDecks`/`sendCommanderLaunches` require the
@@ -2333,10 +2338,15 @@ export const useMultiplayerDraftStore = create<
       // PURE — sends nothing, and synthesizes every seat's deck exactly once.
       const decks = await hostAdapter.commanderSeatDecks(launchView, localSeat);
 
-      // The host-only source accessor may yield. It must settle before the
-      // final abort check and synchronous constructor below, otherwise a cancel
-      // landing during this await could create an adapter no handle owns.
-      const boosterPackPool = await hostAdapter.boosterPackPoolForGame();
+      // Complete decks are available only after classification. Prepare one
+      // owner batch here; the inherited classification-to-send drift remains.
+      // Keep `decks` name-only for launch messages and persisted handoffs.
+      const [hostDeck, engineSeatDecks] = await Promise.all([
+        submitDeckList(decks.hostDeck, artSnapshot),
+        Promise.all(decks.engineSeatDecks.map(async ({ seat, deck }) => ({
+          seat, deck: await submitDeckList(deck, artSnapshot),
+        }))),
+      ]);
 
       // INVARIANT, not a hope: a non-null `handle.adapter` means
       // `cancelCommanderLaunch` can reach the adapter. Rechecking here is what
@@ -2355,7 +2365,7 @@ export const useMultiplayerDraftStore = create<
 
       const matchAdapter = new P2PHostAdapter(
         {
-          player: decks.hostDeck,
+          player: hostDeck,
           opponent: { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] },
           ai_decks: [],
           // CR 903.13f(3): the point at which the draft's set list ENTERS the
@@ -2450,7 +2460,7 @@ export const useMultiplayerDraftStore = create<
       // the END of `initializeInner`, so a guest invited earlier takes
       // `firstWaitingSeat()` = 1 and the `SetKind` on that index then
       // invalidates its token and KICKS it.
-      for (const { seat, deck } of decks.engineSeatDecks) {
+      for (const { seat, deck } of engineSeatDecks) {
         // `DraftDeckPayload` is structurally assignable to
         // `DeckChoice.DeckList.data`; naming the two engine types makes a
         // mistyped key a `tsc` error rather than a silent shape mismatch.
@@ -2593,6 +2603,7 @@ export const useMultiplayerDraftStore = create<
     let matchAdapter: P2PGuestAdapter | undefined;
     let matchController: GameLoopController | undefined;
     try {
+      const artSnapshot = captureSubmissionArtPreferences();
       // The same deliberate code-split as `launchCommanderGame`: the P2P bundle
       // stays out of the pod's chunk. Both modules' TYPE imports are static at
       // file top, so this is not a CLAUDE.md inline-import violation.
@@ -2605,13 +2616,15 @@ export const useMultiplayerDraftStore = create<
       // parks on it for the whole PeerJS round-trip — the longest span in the
       // join, and the one worth making cancellable.
       join = await joinRoom(launch.roomCode, abort.signal);
+      const localDeck = await submitDeckList(launch.localDeck, artSnapshot);
+      abort.signal.throwIfAborted();
 
       matchAdapter = new P2PGuestAdapter(
         // Only this seat's own drafted deck. `launch.draftSetCodes` is NOT
         // plumbed in here: deck legality under CR 903.13f(3) is judged
         // host-side from the HOST's payload, and a guest's `deckData` never
         // carries a set list.
-        { player: launch.localDeck },
+        { player: localDeck },
         join.peer,
         join.conn.peer,
         join.conn,
@@ -2803,6 +2816,9 @@ export const useMultiplayerDraftStore = create<
     let built: { adapter: EngineAdapter; release: () => void } | undefined;
     let controller: GameLoopController | undefined;
     try {
+      // Draft handoffs stay name-only: bind pins/chain here, never pool art.
+      // The local owner also configures Bot seats, but never a human opponent.
+      const artSnapshot = captureSubmissionArtPreferences();
       let runtime: { adapter: EngineAdapter; initResult: SubmitResult; mode: "ai" | "online" };
       if (matchPairing.type === "HumanHost") {
         // Lower seat# hosts the match (D-09).
@@ -2815,10 +2831,12 @@ export const useMultiplayerDraftStore = create<
           preferredRoomCode: matchPairing.matchRoomCode,
         });
         unowned = host;
+        // Only the host's own seat is ours to select; the guest stays name-only.
+        const player = await submitDeckList(matchPairing.deckPayload.player, artSnapshot);
         abort.signal.throwIfAborted();
 
         const matchAdapter = new P2PHostAdapter(
-          matchPairing.deckPayload,
+          { ...matchPairing.deckPayload, player },
           host.peer,
           host.onGuestConnected,
           2, // 1v1 match
@@ -2925,11 +2943,12 @@ export const useMultiplayerDraftStore = create<
 
         const { conn, peer, destroyPeer } = await joinRoom(matchPairing.matchRoomCode, abort.signal);
         unowned = { destroy: destroyPeer };
+        const localDeck = await submitDeckList(matchPairing.localDeck, artSnapshot);
         abort.signal.throwIfAborted();
 
         const matchAdapter = new P2PGuestAdapter(
           {
-            player: matchPairing.localDeck,
+            player: localDeck,
           },
           peer,
           conn.peer,
@@ -2980,6 +2999,12 @@ export const useMultiplayerDraftStore = create<
         };
       } else {
         const { WasmAdapter } = await import("../adapter/wasm-adapter");
+        const [player, opponent, aiDecks] = await Promise.all([
+          submitDeckList(matchPairing.deckPayload.player, artSnapshot),
+          submitDeckList(matchPairing.deckPayload.opponent, artSnapshot),
+          Promise.all(matchPairing.deckPayload.ai_decks.map((deck) => submitDeckList(deck, artSnapshot))),
+        ]);
+        abort.signal.throwIfAborted();
         const matchAdapter = new WasmAdapter();
         built = { adapter: matchAdapter, release: () => matchAdapter.dispose() };
         // #7920: a bot match installs no transport-side whole-match concede,
@@ -2998,8 +3023,9 @@ export const useMultiplayerDraftStore = create<
             });
         });
         await matchAdapter.initialize();
+        abort.signal.throwIfAborted();
         const initResult = await matchAdapter.initializeGame(
-          matchPairing.deckPayload,
+          { ...matchPairing.deckPayload, player, opponent, ai_decks: aiDecks },
           DRAFT_MATCH_FORMAT_CONFIG,
           2,
           matchPairing.matchConfig,

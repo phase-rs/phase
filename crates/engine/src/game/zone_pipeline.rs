@@ -3859,6 +3859,10 @@ pub(crate) fn deliver_replaced_zone_change(
         if face_down_preflight {
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.face_down = true;
+                // CR 708.3: turned face down before it enters, so the origin-exit LKI and the
+                // zone-change record `move_to_zone` captures next carry no printing. A rejected
+                // entry rolls back only the flag.
+                obj.conceal_printing();
             }
         }
         // pod-lab loop-3 Q5: tracks whether this delivery took the plain,

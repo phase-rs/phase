@@ -12,9 +12,11 @@ use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
 use engine::types::actions::GameAction;
 use engine::types::counter::{has_positive_counters, positive_counter_entries};
+use engine::types::display_only::rules_projection;
 use engine::types::game_state::{DayNight, GameState, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use serde::Serialize;
 
 use crate::card_hints::should_play_now_with_facts;
 use crate::cast_facts::cast_facts_for_action;
@@ -354,15 +356,14 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
 
     // Pending state (resolution frames, replacements, triggers affect game
     // flow). The typed stack may retain an ability continuation below its
-    // active prompt, so nonempty stacks hash their full ordered wire shape
-    // rather than inspecting a non-top frame. The overwhelmingly common empty
-    // stack stays allocation-free on this hot cache-key path.
+    // active prompt, so nonempty stacks hash the rules projection of their
+    // full ordered wire shape rather than inspecting a non-top frame. The
+    // overwhelmingly common empty stack stays allocation-free on this hot
+    // cache-key path.
     let has_resolution_frames = !state.resolution_stack.is_empty();
     has_resolution_frames.hash(&mut hasher);
     if has_resolution_frames {
-        let resolution_stack = serde_json::to_value(&state.resolution_stack)
-            .expect("resolution stack serializes for the planner cache key");
-        hash_json_value(&resolution_stack, &mut hasher);
+        hash_rules_projection(&state.resolution_stack, "resolution stack", &mut hasher);
     }
     state.pending_replacement.is_some().hash(&mut hasher);
     state.pending_trigger.is_some().hash(&mut hasher);
@@ -417,10 +418,7 @@ fn fold_object_keywords(keywords: &[Keyword], hasher: &mut DefaultHasher) {
         // future new keyword) serde-folds -> sound by default.
         match Keyword::promote_keyword_kind(kw.kind()) {
             Some(unit) if &unit == kw => {} // parameterless -> discriminant suffices
-            _ => hash_json_value(
-                &serde_json::to_value(kw).expect("keyword serializes"),
-                hasher,
-            ),
+            _ => hash_rules_projection(kw, "keyword", hasher),
         }
     }
 }
@@ -454,20 +452,14 @@ pub fn search_position_hash(state: &GameState) -> u64 {
     // eval_cache 256-cap means this eval-leaf read is not reliably memoized.
     // Serialize but not Hash -> serde-fold. Empty in non-commander games -> skipped.
     if !state.commander_damage.is_empty() {
-        hash_json_value(
-            &serde_json::to_value(&state.commander_damage).expect("commander_damage serializes"),
-            &mut hasher,
-        );
+        hash_rules_projection(&state.commander_damage, "commander damage", &mut hasher);
     }
 
     // Stack entry targets/modes: NOT covered by either cache (post-apply
     // divergence — e.g. "Shock target A" vs "Shock target B" share source_id +
     // controller). Empty stack (common) -> skipped.
     for entry in &state.stack {
-        hash_json_value(
-            &serde_json::to_value(entry).expect("stack entry serializes"),
-            &mut hasher,
-        );
+        hash_rules_projection(entry, "stack entry", &mut hasher);
     }
 
     // Per-battlefield-object: summoning sickness (available_mana eval leaf) and
@@ -493,9 +485,9 @@ pub fn search_position_hash(state: &GameState) -> u64 {
 /// `ModeChoice`), so two states with identical boards but different
 /// `waiting_for` would collide in a hash keyed only on board state and return
 /// a cached context populated with wrong candidates. Include the full
-/// `WaitingFor` payload as a canonical structural projection; map keys are
-/// sorted so hash-equal waiting states do not depend on `HashMap` iteration
-/// order.
+/// `WaitingFor` payload through the rules projection (display-only values
+/// omitted); map keys are sorted so hash-equal waiting states do not depend on
+/// `HashMap` iteration order.
 pub fn candidate_cache_key(state: &GameState) -> u64 {
     let mut hasher = DefaultHasher::new();
     quick_state_hash(state).hash(&mut hasher);
@@ -556,52 +548,67 @@ pub struct RungStat {
 }
 
 fn hash_waiting_for(waiting_for: &WaitingFor, hasher: &mut impl Hasher) {
-    let value = serde_json::to_value(waiting_for).expect("WaitingFor serializes");
-    hash_json_value(&value, hasher);
+    hash_rules_projection(waiting_for, "WaitingFor", hasher);
 }
 
-fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
-    match value {
-        serde_json::Value::Null => 0u8.hash(hasher),
-        serde_json::Value::Bool(value) => {
-            1u8.hash(hasher);
-            value.hash(hasher);
-        }
-        serde_json::Value::Number(value) => {
-            2u8.hash(hasher);
-            if let Some(value) = value.as_i64() {
-                0u8.hash(hasher);
-                value.hash(hasher);
-            } else if let Some(value) = value.as_u64() {
+/// The planner keys' only door from serialized state to a hash: every root is
+/// hashed through the engine's rules projection, so display-only data never
+/// reaches a key (CR 203.1 + CR 206.1). Object entries are hashed in sorted key
+/// order, so `HashMap` iteration order never reaches the key.
+///
+/// An unserializable root is a programming error, so it panics naming `root`.
+fn hash_rules_projection<T: Serialize + ?Sized>(
+    value: &T,
+    root: &'static str,
+    hasher: &mut impl Hasher,
+) {
+    fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
+        match value {
+            serde_json::Value::Null => 0u8.hash(hasher),
+            serde_json::Value::Bool(value) => {
                 1u8.hash(hasher);
                 value.hash(hasher);
-            } else if let Some(value) = value.as_f64() {
+            }
+            serde_json::Value::Number(value) => {
                 2u8.hash(hasher);
-                value.to_bits().hash(hasher);
+                if let Some(value) = value.as_i64() {
+                    0u8.hash(hasher);
+                    value.hash(hasher);
+                } else if let Some(value) = value.as_u64() {
+                    1u8.hash(hasher);
+                    value.hash(hasher);
+                } else if let Some(value) = value.as_f64() {
+                    2u8.hash(hasher);
+                    value.to_bits().hash(hasher);
+                }
             }
-        }
-        serde_json::Value::String(value) => {
-            3u8.hash(hasher);
-            value.hash(hasher);
-        }
-        serde_json::Value::Array(values) => {
-            4u8.hash(hasher);
-            values.len().hash(hasher);
-            for value in values {
-                hash_json_value(value, hasher);
+            serde_json::Value::String(value) => {
+                3u8.hash(hasher);
+                value.hash(hasher);
             }
-        }
-        serde_json::Value::Object(entries) => {
-            5u8.hash(hasher);
-            entries.len().hash(hasher);
-            let mut entries: Vec<_> = entries.iter().collect();
-            entries.sort_by_key(|(left, _)| *left);
-            for (key, value) in entries {
-                key.hash(hasher);
-                hash_json_value(value, hasher);
+            serde_json::Value::Array(values) => {
+                4u8.hash(hasher);
+                values.len().hash(hasher);
+                for value in values {
+                    hash_json_value(value, hasher);
+                }
+            }
+            serde_json::Value::Object(entries) => {
+                5u8.hash(hasher);
+                entries.len().hash(hasher);
+                let mut entries: Vec<_> = entries.iter().collect();
+                entries.sort_by_key(|(left, _)| *left);
+                for (key, value) in entries {
+                    key.hash(hasher);
+                    hash_json_value(value, hasher);
+                }
             }
         }
     }
+
+    let projected = rules_projection(value)
+        .unwrap_or_else(|error| panic!("{root} serializes for the planner key: {error}"));
+    hash_json_value(&projected, hasher);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2113,6 +2120,7 @@ mod tests {
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
+    use engine::types::display_only::DisplayOnly;
     use engine::types::game_state::{
         CommanderDamageEntry, PendingContinuation, StackEntry, StackEntryKind, WaitingFor,
     };
@@ -3286,6 +3294,83 @@ mod tests {
         PlannerServices::new_default(PlayerId(0), config, policies)
     }
 
+    /// A nontrivial state whose every serialized planner-key root is populated:
+    /// a parked resolution continuation, a stack ability with a target, a
+    /// commander-damage entry, a battlefield creature with a parameterized Ward
+    /// keyword, and a `DeclareBlockers` waiting state with two-entry maps.
+    fn planner_key_root_fixture() -> GameState {
+        let mut state = make_state();
+        let creature = add_bf_creature(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .keywords
+            .push(Keyword::Ward(WardCost::PayLife(2)));
+
+        let continuation = PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(0),
+                PlayerId(0),
+            )),
+            &state,
+        );
+        state.park_ability_continuation(continuation);
+
+        let src = ObjectId(500);
+        state.stack.push_back(StackEntry {
+            id: src,
+            source_id: src,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: src,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![TargetRef::Object(ObjectId(999))],
+                    src,
+                    PlayerId(0),
+                )),
+            },
+        });
+
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: ObjectId(7),
+            damage: 3,
+        });
+
+        let mut targets = HashMap::new();
+        targets.insert(ObjectId(10), vec![ObjectId(1), ObjectId(2)]);
+        targets.insert(ObjectId(20), vec![ObjectId(3)]);
+        let mut requirements = HashMap::new();
+        requirements.insert(
+            ObjectId(10),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
+        requirements.insert(
+            ObjectId(20),
+            BlockRequirement {
+                count: 1,
+                sources: vec![],
+            },
+        );
+        state.waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(30)],
+            valid_block_targets: targets,
+            block_requirements: requirements,
+            blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
+        };
+        state
+    }
+
     // Row 1: a unit-keyword-only difference that `quick_state_hash` aliases must
     // be distinguished by `search_position_hash`'s discriminant fold.
     #[test]
@@ -3450,6 +3535,339 @@ mod tests {
         assert!(
             elapsed.as_millis() < 500,
             "keyword-dense position hash too slow ({elapsed:?}) — the fold regressed"
+        );
+    }
+
+    #[derive(Serialize)]
+    struct ShownRow {
+        name: String,
+        power: i32,
+        #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+        shown: DisplayOnly<Option<String>>,
+    }
+
+    #[derive(Serialize)]
+    enum ShownEvent {
+        Changed {
+            power: i32,
+            #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+            shown: DisplayOnly<Option<String>>,
+        },
+    }
+
+    #[derive(Serialize)]
+    struct ShownTree {
+        rows: Vec<ShownRow>,
+        event: ShownEvent,
+    }
+
+    fn shown_tree(shown: Option<&str>, power: i32) -> ShownTree {
+        let shown = || DisplayOnly::new(shown.map(str::to_owned));
+        ShownTree {
+            rows: vec![ShownRow {
+                name: "Bear".to_string(),
+                power,
+                shown: shown(),
+            }],
+            event: ShownEvent::Changed {
+                power: 1,
+                shown: shown(),
+            },
+        }
+    }
+
+    fn projection_digest<T: Serialize>(value: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        hash_rules_projection(value, "test tree", &mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn planner_key_hash_ignores_display_only_values() {
+        let present = shown_tree(Some("SENTINEL"), 2);
+        let absent = shown_tree(None, 2);
+
+        // Reach-guard: the wire form did carry the display-only value at both
+        // positions (a `Vec` element and an enum struct-variant field).
+        let wire = serde_json::to_string(&present).unwrap();
+        assert_eq!(wire.matches("SENTINEL").count(), 2);
+        assert!(!serde_json::to_string(&absent).unwrap().contains("SENTINEL"));
+
+        // Revert-failing: hashing `serde_json::to_value` would tell these apart.
+        assert_eq!(projection_digest(&present), projection_digest(&absent));
+        // Positive control: a rules difference at the same position still moves it.
+        assert_ne!(
+            projection_digest(&present),
+            projection_digest(&shown_tree(Some("SENTINEL"), 3))
+        );
+    }
+
+    /// One real `TriggerSourceContext` at each serialized planner root: a parked
+    /// optional-effect event, a stack trigger's source context and a waiting-state event.
+    /// `powers` is the rules fact each position carries beside the printing.
+    fn printing_carrier_fixture(
+        printing: Option<engine::types::card_printing::CardPrinting>,
+        powers: [i32; 3],
+    ) -> GameState {
+        use engine::types::events::GameEvent;
+        use engine::types::resolution::OptionalEffectFrame;
+
+        let mut state = make_state();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Carrier Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let record = |power: i32| {
+            let mut record = state
+                .objects
+                .get(&id)
+                .expect("the carrier object exists")
+                .snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard);
+            let context = record
+                .trigger_source_context
+                .as_mut()
+                .expect("a real record carries its source context");
+            context.lki.printing = DisplayOnly::new(printing.clone());
+            context.lki.power = Some(power);
+            record
+        };
+        let event = |power: i32| GameEvent::ZoneChanged {
+            object_id: id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record(power)),
+        };
+        let optional_event = event(powers[0]);
+        let waiting_event = event(powers[2]);
+        let mut trigger_ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
+
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
+            trigger_event: Some(optional_event),
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+            return_result_occurrence: None,
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: id,
+                ability: Box::new(trigger_ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: Some(waiting_event),
+            trigger_events: Vec::new(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+            source_id: None,
+            description: None,
+        };
+        state
+    }
+
+    fn planner_keys(state: &GameState) -> [u64; 4] {
+        [
+            quick_state_hash(state),
+            search_position_hash(state),
+            candidate_cache_key(state),
+            transposition_key(state),
+        ]
+    }
+
+    #[test]
+    fn planner_keys_ignore_printing_in_real_carriers() {
+        use engine::types::card_printing::CardPrinting;
+
+        let s1 = CardPrinting {
+            set_code: "SNTA".to_string(),
+            collector_number: "1".to_string(),
+        };
+        let s2 = CardPrinting {
+            set_code: "SNTB".to_string(),
+            collector_number: "2".to_string(),
+        };
+        let powers = [2, 2, 2];
+        let none = printing_carrier_fixture(None, powers);
+        let first = printing_carrier_fixture(Some(s1.clone()), powers);
+        let second = printing_carrier_fixture(Some(s2), powers);
+
+        // Reach: every root really carries the printing on the wire, and the projection the
+        // keys fold omits it.
+        for (label, wire, projected) in [
+            (
+                "resolution stack",
+                serde_json::to_string(&first.resolution_stack).unwrap(),
+                serde_json::to_string(&rules_projection(&first.resolution_stack).unwrap()).unwrap(),
+            ),
+            (
+                "stack entry",
+                serde_json::to_string(&first.stack[0]).unwrap(),
+                serde_json::to_string(&rules_projection(&first.stack[0]).unwrap()).unwrap(),
+            ),
+            (
+                "waiting state",
+                serde_json::to_string(&first.waiting_for).unwrap(),
+                serde_json::to_string(&rules_projection(&first.waiting_for).unwrap()).unwrap(),
+            ),
+        ] {
+            assert!(
+                wire.contains("SNTA"),
+                "{label}: the wire carries the printing"
+            );
+            assert!(
+                !projected.contains("SNTA"),
+                "{label}: the projection omits it"
+            );
+        }
+
+        // Revert-failing: a root hashed from `serde_json::to_value` would tell these apart.
+        let keys = planner_keys(&none);
+        assert_eq!(keys, planner_keys(&first));
+        assert_eq!(keys, planner_keys(&second));
+
+        // Positive controls, one per position: the same `lki.power` changed under a printing
+        // moves exactly the keys that read that root.
+        let changed =
+            |powers: [i32; 3]| planner_keys(&printing_carrier_fixture(Some(s1.clone()), powers));
+        let [quick, position, candidate, transposition] = keys;
+        let [q, p, c, t] = changed([3, 2, 2]);
+        assert!(q != quick && p != position && c != candidate && t != transposition);
+        let [q, p, c, t] = changed([2, 3, 2]);
+        assert!(
+            q == quick && c == candidate,
+            "the stack entry is not in the cheap keys"
+        );
+        assert!(p != position && t != transposition);
+        let [q, p, c, t] = changed([2, 2, 3]);
+        assert!(
+            q == quick && p == position,
+            "the waiting state is not in the position keys"
+        );
+        assert!(c != candidate && t != transposition);
+    }
+
+    #[test]
+    fn planner_key_roots_project_to_their_wire_form() {
+        let state = planner_key_root_fixture();
+
+        fn assert_wire_form<T: Serialize>(root: &T) -> serde_json::Value {
+            let wire = serde_json::to_value(root).unwrap();
+            assert_eq!(rules_projection(root).unwrap(), wire);
+            wire
+        }
+
+        // Reach-guards: each root is the populated shape the keys fold.
+        let resolution = assert_wire_form(&state.resolution_stack);
+        let frames = resolution["frames"]
+            .as_array()
+            .expect("resolution stack frames serialize as an array");
+        assert!(!frames.is_empty());
+        assert_eq!(frames[0]["type"], "AbilityContinuation");
+
+        assert!(!state.stack.is_empty());
+        for entry in &state.stack {
+            assert!(assert_wire_form(entry).is_object());
+        }
+
+        assert!(!state.commander_damage.is_empty());
+        assert!(assert_wire_form(&state.commander_damage)
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()));
+
+        let ward_roots = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .flat_map(|obj| obj.keywords.iter())
+            .filter(|kw| matches!(kw, Keyword::Ward(_)))
+            .map(assert_wire_form)
+            .count();
+        assert_eq!(ward_roots, 1);
+
+        let waiting = assert_wire_form(&state.waiting_for);
+        let waiting_text = serde_json::to_string(&waiting).unwrap();
+        assert!(waiting_text.contains("\"10\"") && waiting_text.contains("\"20\""));
+    }
+
+    #[test]
+    fn planner_key_projection_dense_waiting_for_stays_fast() {
+        let mut state = make_state();
+        let mut targets = HashMap::new();
+        let mut requirements = HashMap::new();
+        for i in 0..400u64 {
+            let attacker = ObjectId(1000 + i);
+            targets.insert(attacker, vec![ObjectId(1), ObjectId(2)]);
+            requirements.insert(
+                attacker,
+                BlockRequirement {
+                    count: 1,
+                    sources: vec![],
+                },
+            );
+        }
+        state.waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(30)],
+            valid_block_targets: targets,
+            block_requirements: requirements,
+            blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
+        };
+
+        // Reach: the projected waiting state carries all 400 target keys.
+        let projected =
+            serde_json::to_string(&rules_projection(&state.waiting_for).unwrap()).unwrap();
+        for i in 0..400u64 {
+            assert!(
+                projected.contains(&format!("\"{}\":", 1000 + i)),
+                "attacker {} missing from the projected waiting state",
+                1000 + i
+            );
+        }
+
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = transposition_key(&state);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "projection-hashed dense WaitingFor too slow ({elapsed:?})"
+        );
+
+        // Measurement only (not asserted): projection cost relative to `to_value`.
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = rules_projection(&state.waiting_for).unwrap();
+        }
+        let projection = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = serde_json::to_value(&state.waiting_for).unwrap();
+        }
+        let to_value = start.elapsed();
+        eprintln!(
+            "MEASURE 50x rules_projection={projection:?} 50x to_value={to_value:?} ratio={:.2}",
+            projection.as_secs_f64() / to_value.as_secs_f64()
         );
     }
 

@@ -22,6 +22,7 @@ import type {
   RewindTarget,
   SubmitResult,
   FormatConfig,
+  DeckPrinting,
 } from "./types";
 import type {
   InteractionPreview,
@@ -49,6 +50,8 @@ import type { WireFormat } from "../network/wireEnvelope";
 /** Deck data format matching server protocol. */
 export interface DeckData {
   bracket_tier?: CommanderBracketTier;
+  /** The owner's explicit printing choices; display-only. Omitted when empty. */
+  printings?: DeckPrinting[];
   main_deck: string[];
   sideboard: string[];
   commander?: string[];

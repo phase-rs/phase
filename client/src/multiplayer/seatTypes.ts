@@ -1,4 +1,4 @@
-import type { FormatConfig } from "../adapter/types";
+import type { DeckPrinting, FormatConfig } from "../adapter/types";
 import type { CommanderBracketTier } from "../types/bracketEstimate";
 
 export type DeckChoice =
@@ -14,6 +14,8 @@ export type DeckChoice =
         scheme_deck?: string[];
         /** Declared Commander bracket tier; the engine defaults an omitted tier to Core. */
         bracket_tier?: CommanderBracketTier;
+        /** The owner's explicit printing choices; display-only. Omitted when empty. */
+        printings?: DeckPrinting[];
       };
     };
 

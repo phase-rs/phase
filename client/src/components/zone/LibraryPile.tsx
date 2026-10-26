@@ -47,6 +47,7 @@ function VisibleTopCard({ object }: { object: GameObject }) {
       tokenImageRef: imageProps.tokenImageRef,
       oracleId: imageProps.oracleId,
       faceName: imageProps.faceName,
+      ownerPrinting: imageProps.ownerPrinting,
     },
   );
 

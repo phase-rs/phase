@@ -372,9 +372,12 @@
       "split": "分屏牌桌"
     },
     "opponentHoverPreview": "对手悬停预览",
+    "ownerCardArt": "拥有者的卡牌插画",
+    "ownerPrintingsHint": "若有可用插画，则使用每张牌的拥有者选择的插画。关闭后将使用你自己的卡牌插画偏好。",
     "showCardPreviewFooter": "在卡牌预览下方显示信息",
     "showKeywords": "在战场上的卡牌显示关键字",
     "showOpponentBoard": "悬停 HUD 时显示对手的场面",
+    "showOwnerPrintings": "按拥有者的选择显示卡牌",
     "title": "画面",
     "vfxQuality": "特效质量",
     "vfxQualityOptions": {

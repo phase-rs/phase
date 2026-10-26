@@ -25,6 +25,7 @@ export function PlanechasePanel() {
             cardName={activePlane.name}
             oracleId={activePlane.printed_ref?.oracle_id ?? undefined}
             faceName={activePlane.printed_ref?.face_name ?? undefined}
+            ownerPrinting={activePlane.printing}
             faceDown={activePlane.face_down}
             size="small"
           />

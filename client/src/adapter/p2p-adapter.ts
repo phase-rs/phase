@@ -20,6 +20,7 @@ import type {
   SubmitResult,
   ViewerSnapshot,
   WaitingFor,
+  DeckPrinting,
 } from "./types";
 import type {
   InteractionPreview,
@@ -183,6 +184,8 @@ interface DeckSeatPayload {
   planar_deck?: string[];
   scheme_deck?: string[];
   bracket_tier?: CommanderBracketTier;
+  /** The owner's explicit printing choices; display-only. Omitted when empty. */
+  printings?: DeckPrinting[];
 }
 
 interface DeckListPayload {
@@ -2269,6 +2272,30 @@ export class P2PHostAdapter implements EngineAdapter {
       )
         ? guestDeckRaw
         : { main_deck: [], sideboard: [], commander: [], planar_deck: [], scheme_deck: [] };
+
+      // Resource bounds on the guest's printings sidecar, decided by the engine (one
+      // authority with every server ingress). Fail-closed: a refusal or a failed check
+      // kicks before the deck is stored, persisted, forwarded to the native bridge or
+      // started, so a native-side refusal can never fall back to an unchecked admission.
+      let refusal: string | null = null;
+      try {
+        await this.wasm.checkDeckPrintingsBounds(guestDeck.printings);
+      } catch (err) {
+        refusal = err instanceof Error ? err.message : String(err);
+      }
+      // The await yields: a same-session resume may have claimed the host lease, or the
+      // guest may have disconnected. Re-check both before acting on the verdict or
+      // attaching natively, exactly as after the native attach below.
+      if (!this.ownsAuthority()) {
+        this.rejectSuperseded(session);
+        return;
+      }
+      if (this.closedPregameSessions.has(session)) return;
+      if (refusal !== null) {
+        void this.send(session, { type: "kick", reason: `Deck rejected: ${refusal}` });
+        session.close("Deck rejected");
+        return;
+      }
 
       if (this.nativeBridge) {
         try {

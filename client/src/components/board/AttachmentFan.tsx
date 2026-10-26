@@ -301,6 +301,7 @@ function FanCard({
           faceIndex={lookup.faceIndex}
           oracleId={lookup.oracleId}
           faceName={lookup.faceName}
+          ownerPrinting={lookup.ownerPrinting}
           size="large"
           isToken={isToken}
           tokenFilters={isToken ? tokenFiltersForObject(obj) : undefined}

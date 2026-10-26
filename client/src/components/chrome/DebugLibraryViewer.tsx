@@ -162,7 +162,7 @@ function LibraryCard({
           onOpenMenu(event.currentTarget, event.clientX, event.clientY);
         }}
       >
-        <CardImage cardName={card.name} size="normal" />
+        <CardImage cardName={card.name} ownerPrinting={card.printing} ownerPrintedRef={card.printed_ref} size="normal" />
       </button>
       {/* Quick-move buttons for the two most common debug destinations; the
           full zone list is one click away via the card's debug context menu. */}

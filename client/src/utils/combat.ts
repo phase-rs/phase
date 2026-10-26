@@ -172,6 +172,7 @@ export interface AttackerStack {
 export function groupAttackers(
   attackerIds: ObjectId[],
   state: GameState | null,
+  showOwnerPrintings: boolean,
   targetsFor?: (id: ObjectId) => AttackTarget[],
 ): AttackerStack[] {
   if (!state) {
@@ -204,7 +205,7 @@ export function groupAttackers(
 
   // CR 122.1: the engine's counter-display projection is part of the group IDENTITY, so attacker
   // stacks split exactly where the battlefield does (mirrors buildPlayerBattlefieldView).
-  return groupByName(objects, ringBearerIds, unboundedPileIds, state.derived?.counter_display)
+  return groupByName(objects, ringBearerIds, unboundedPileIds, state.derived?.counter_display, showOwnerPrintings)
     .flatMap((group) =>
       subdivideByTargets(
         [...group.ids],

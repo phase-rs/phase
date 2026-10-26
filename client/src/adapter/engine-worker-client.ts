@@ -239,6 +239,12 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckFormatGate", request });
   }
 
+  /** Engine resource-bound check of one guest deck's printings sidecar; rejects
+   *  with the engine's reason on abuse. See `P2PHostAdapter.handleNewGuest`. */
+  async checkDeckPrintingsBounds(printings: unknown): Promise<void> {
+    await this.request<null>({ type: "checkDeckPrintingsBounds", printings });
+  }
+
   async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "customFormatFromLobbyConfig", name, formatConfig });
   }

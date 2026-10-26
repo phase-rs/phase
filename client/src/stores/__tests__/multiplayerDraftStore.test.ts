@@ -39,6 +39,12 @@ import {
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
 import { useConnectivityStore } from "../connectivityStore";
+import { usePreferencesStore } from "../preferencesStore";
+import { detectAndParseDeck, expandParsedDeck } from "../../services/deckParser";
+import type { PrintingEntry } from "../../services/scryfall";
+import type * as Scryfall from "../../services/scryfall";
+import type { SubmissionDeck } from "../../services/deckSubmission";
+import { P2PGuestAdapter, P2PHostAdapter } from "../../adapter/p2p-adapter";
 import {
   getDeckMeta,
   loadSavedDeck,
@@ -56,6 +62,48 @@ const guestRecovery = vi.hoisted(() => ({
   inspect: vi.fn(),
   loadSession: vi.fn(),
   clearIfCurrent: vi.fn(),
+}));
+
+const submissionIo = vi.hoisted(() => ({
+  face: vi.fn(), printings: vi.fn(), bounds: vi.fn(),
+  hostDestroy: vi.fn(), guestDestroy: vi.fn(),
+}));
+
+vi.mock("../../services/scryfall", async (importOriginal) => ({
+  ...await importOriginal<typeof Scryfall>(),
+  getCardPrintings: submissionIo.printings,
+}));
+
+vi.mock("../../network/connection", () => ({
+  hostRoom: vi.fn(async () => ({
+    peer: { id: "host" }, onGuestConnected: vi.fn(), destroy: submissionIo.hostDestroy,
+  })),
+  joinRoom: vi.fn(async () => ({
+    peer: { id: "guest" }, conn: { peer: "host" }, destroyPeer: submissionIo.guestDestroy,
+  })),
+}));
+
+vi.mock("../../adapter/p2p-adapter", () => ({
+  P2PHostAdapter: vi.fn(function () {
+    let listener: ((event: unknown) => void) | undefined;
+    return {
+      onEvent: (next: (event: unknown) => void) => { listener = next; return () => {}; },
+      initialize: vi.fn(async () => { listener?.({ type: "roomFull" }); }),
+      startPregameGame: vi.fn(async () => ({ log_entries: [] })),
+      getSnapshot: wasmMatchAdapterMock.adapter.getSnapshot,
+      terminateGame: vi.fn(async () => {}),
+      dispose: vi.fn(),
+    };
+  }),
+  P2PGuestAdapter: vi.fn(function () {
+    return {
+      onEvent: vi.fn(() => () => {}),
+      initialize: vi.fn(async () => {}),
+      initializeGame: vi.fn(async () => ({ log_entries: [] })),
+      getSnapshot: wasmMatchAdapterMock.adapter.getSnapshot,
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 const mockHostAdapter = {
@@ -118,7 +166,7 @@ const wasmMatchAdapterMock = vi.hoisted(() => {
       adapter.sendMatchConcede = () => boundConcede?.();
     }),
     initialize: vi.fn(async () => {}),
-    initializeGame: vi.fn(async () => ({ log_entries: [] })),
+    initializeGame: vi.fn(async (..._args: unknown[]) => ({ log_entries: [] })),
     getSnapshot: vi.fn(async () => ({
       seq: 1,
       state: { waiting_for: { type: "Priority", data: {} } },
@@ -171,6 +219,10 @@ vi.mock("../../services/draftPersistence", async (importOriginal) => ({
 
 vi.mock("../../adapter/wasm-adapter", () => ({
   WasmAdapter: wasmMatchAdapterMock.WasmAdapter,
+  getSharedAdapter: () => ({
+    getCardFaceData: submissionIo.face,
+    checkDeckPrintingsBounds: submissionIo.bounds,
+  }),
 }));
 
 vi.mock("../../game/controllers/gameLoopController", () => ({
@@ -253,6 +305,7 @@ function card(instanceId: string, name = instanceId): DraftPlayerView["pool"][nu
 describe("multiplayerDraftStore", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    usePreferencesStore.setState({ artChain: [], artOverrides: {} });
     mockHostAdapter.updateWorkspace.mockResolvedValue(undefined);
     mockGuestAdapter.updateWorkspace.mockResolvedValue(undefined);
     capturedHostEventHandler = null;
@@ -2967,6 +3020,162 @@ describe("multiplayerDraftStore", () => {
         data: { play_first: true },
       }, 0);
       expect(useAppNotificationStore.getState().notification).toBeNull();
+    });
+  });
+
+  describe("owner printing at the 1v1 handover (V9)", () => {
+    const catalog: PrintingEntry[] = ["aaa", "bbb", "ccc", "tst"].map((set, index) => ({
+      id: set, set, set_name: set, collector_number: `00${index + 1}`,
+      released_at: `200${index}-01-01`, border_color: "black", frame_effects: [],
+      full_art: false, faces: [],
+    }));
+    const deck = () => expandParsedDeck(detectAndParseDeck("Deck\n2 Forest\n1 Island\n\nSideboard\n1 Forest"));
+    const rows = [
+      { section: "main_deck", name: "Forest", count: 2, printing: { set_code: "aaa", collector_number: "001" } },
+      { section: "main_deck", name: "Island", count: 1, printing: { set_code: "bbb", collector_number: "002" } },
+      { section: "sideboard", name: "Forest", count: 1, printing: { set_code: "aaa", collector_number: "001" } },
+    ];
+
+    // The client's configured Promise library predates Promise.withResolvers.
+    function held<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((done) => { resolve = done; });
+      return { promise, resolve };
+    }
+
+    function pairing(type: "HumanHost" | "HumanGuest" | "Bot"): DraftMatchLaunch {
+      const common = {
+        matchId: "owner-art", round: 1, localSeat: 0,
+        matchConfig: { match_type: "Bo1" as const },
+        binding: {
+          podId: "pod", matchId: "owner-art", round: 1, sessionKey: "s", lease: "l",
+          nonce: "n", revision: 1, matchAuthoritySeat: 0,
+        },
+      };
+      if (type === "Bot") return {
+        ...common, type, botSeat: 1, botName: "Bot",
+        deckPayload: { player: deck(), opponent: deck(), ai_decks: [deck()] },
+      };
+      const human = { ...common, opponentSeat: 1, opponentName: "Other", matchRoomCode: "MATCH", matchHostPeerId: "host" };
+      return type === "HumanHost"
+        ? { ...human, type, deckPayload: { player: deck(), opponent: deck(), ai_decks: [] } }
+        : { ...human, type, localDeck: deck() };
+    }
+
+    async function install(type: "HumanHost" | "HumanGuest" | "Bot") {
+      await useMultiplayerDraftStore.getState().hostDraft({
+        poolInput: { type: "Set", data: { pools: [{ code: "TST" }], sequence: ["TST"] } },
+        kind: "Premier", podSize: 8, hostDisplayName: "Host", tournamentFormat: "Swiss", podPolicy: "Competitive",
+      });
+      const launch = pairing(type);
+      useMultiplayerDraftStore.setState({
+        matchPairing: launch, phase: "pairing",
+        view: { ...mockView("MatchInProgress"), pool: [card("004", "Forest")] },
+      });
+      return launch;
+    }
+
+    function preferences() {
+      const chain = { type: "set" as const, setCode: "bbb", label: "B" };
+      const pin = { scryfallId: "aaa", setCode: "aaa", collectorNumber: "001" };
+      usePreferencesStore.setState({
+        artChain: [{ type: "source_printing" }, chain], artOverrides: { Forest: pin },
+      });
+      return { chain, pin };
+    }
+
+    function outgoing(type: "HumanHost" | "HumanGuest" | "Bot") {
+      if (type === "HumanHost") return vi.mocked(P2PHostAdapter).mock.calls[0][0];
+      if (type === "HumanGuest") return vi.mocked(P2PGuestAdapter).mock.calls[0][0];
+      return wasmMatchAdapterMock.adapter.initializeGame.mock.calls[0][0];
+    }
+
+    beforeEach(() => {
+      submissionIo.face.mockImplementation(async (name: string) => ({ scryfall_oracle_id: name }));
+      submissionIo.printings.mockResolvedValue(catalog);
+      submissionIo.bounds.mockResolvedValue(undefined);
+    });
+
+    it.each(["HumanHost", "HumanGuest", "Bot"] as const)("%s submits frozen owner choices without changing the pairing", async (type) => {
+      const launch = await install(type);
+      const raw = JSON.stringify(launch);
+      const { chain, pin } = preferences();
+      const metadata = held<PrintingEntry[]>();
+      submissionIo.printings.mockReturnValue(metadata.promise);
+      const started = useMultiplayerDraftStore.getState().startMatch();
+      // Capture must precede even the transport module import, not merely metadata.
+      usePreferencesStore.setState({ artChain: [{ type: "set", setCode: "ccc", label: "C" }], artOverrides: {} });
+      await vi.waitFor(() => expect(submissionIo.printings).toHaveBeenCalled());
+      chain.setCode = "ccc";
+      pin.scryfallId = "ccc";
+      metadata.resolve(catalog);
+
+      expect(await started).toBe("draft-match-owner-art");
+      // The mock handover retains the real adapter payload, including optional AI seats.
+      const payload = outgoing(type) as { player: SubmissionDeck; opponent?: SubmissionDeck; ai_decks?: SubmissionDeck[] };
+      expect(payload.player.printings, `${type} player owner rows`).toEqual(rows);
+      if (type === "HumanHost" && launch.type === "HumanHost") {
+        expect(payload.opponent, "HumanHost guest payload stays name-only").toEqual(launch.deckPayload.opponent);
+        expect(payload.opponent).not.toHaveProperty("printings");
+      } else if (type === "HumanGuest") {
+        expect(Object.keys(payload)).toEqual(["player"]);
+      } else {
+        expect(payload.opponent?.printings, "Bot opponent owner rows").toEqual(rows);
+        expect(payload.ai_decks?.map((seat) => seat.printings), "Bot AI owner rows").toEqual([rows]);
+      }
+      expect(JSON.stringify(launch), "matchPairing remains name-only").toBe(raw);
+      expect(JSON.stringify(useMultiplayerDraftStore.getState().matchPairing)).toBe(raw);
+      expect(useMultiplayerDraftStore.getState().matchAdapter).toBe(useGameStore.getState().adapter);
+      expect(matchLoopMock.controller.start).toHaveBeenCalledOnce();
+      expect(useMultiplayerDraftStore.getState().phase).toBe("matchInProgress");
+    });
+
+    it.each(["HumanHost", "HumanGuest", "Bot"] as const)("%s does not infer draft-pool source printing", async (type) => {
+      await install(type);
+      usePreferencesStore.setState({ artChain: [{ type: "source_printing" }], artOverrides: {} });
+      expect(await useMultiplayerDraftStore.getState().startMatch()).toBe("draft-match-owner-art");
+      expect(submissionIo.face).toHaveBeenCalledWith("Forest");
+      const payload = outgoing(type) as { player: SubmissionDeck };
+      expect(payload.player).not.toHaveProperty("printings");
+    });
+
+    it.each([
+      ["HumanHost", "leave"], ["HumanHost", "reset"],
+      ["HumanGuest", "leave"], ["HumanGuest", "reset"],
+      ["Bot", "leave"], ["Bot", "reset"],
+    ] as const)("%s held preparation then %s never constructs a stale game", async (type, end) => {
+      await install(type);
+      preferences();
+      const metadata = held<PrintingEntry[]>();
+      submissionIo.printings.mockReturnValue(metadata.promise);
+      const started = useMultiplayerDraftStore.getState().startMatch();
+      await vi.waitFor(() => expect(submissionIo.printings).toHaveBeenCalled());
+      if (end === "leave") await useMultiplayerDraftStore.getState().leave();
+      else useMultiplayerDraftStore.getState().reset();
+      metadata.resolve(catalog);
+      expect(await started).toBeNull();
+      expect(P2PHostAdapter, `${type} cancellation blocks host construction`).not.toHaveBeenCalled();
+      expect(P2PGuestAdapter, `${type} cancellation blocks guest construction`).not.toHaveBeenCalled();
+      expect(wasmMatchAdapterMock.WasmAdapter, `${type} cancellation blocks WASM construction`).not.toHaveBeenCalled();
+      expect(wasmMatchAdapterMock.adapter.initializeGame).not.toHaveBeenCalled();
+      if (type === "HumanHost") expect(submissionIo.hostDestroy).toHaveBeenCalledOnce();
+      if (type === "HumanGuest") expect(submissionIo.guestDestroy).toHaveBeenCalledOnce();
+      expect(useMultiplayerDraftStore.getState().matchAdapter).toBeNull();
+      expect(matchLoopMock.controller.start).not.toHaveBeenCalled();
+    });
+
+    it("Bot abort after adapter initialization prevents initializeGame", async () => {
+      await install("Bot");
+      preferences();
+      const initialization = held<void>();
+      wasmMatchAdapterMock.adapter.initialize.mockReturnValueOnce(initialization.promise);
+      const started = useMultiplayerDraftStore.getState().startMatch();
+      await vi.waitFor(() => expect(wasmMatchAdapterMock.adapter.initialize).toHaveBeenCalledOnce());
+      useMultiplayerDraftStore.getState().reset();
+      initialization.resolve();
+      expect(await started).toBeNull();
+      expect(wasmMatchAdapterMock.adapter.initializeGame, "Bot cancellation blocks initGame").not.toHaveBeenCalled();
+      expect(wasmMatchAdapterMock.adapter.dispose).toHaveBeenCalledOnce();
     });
   });
 

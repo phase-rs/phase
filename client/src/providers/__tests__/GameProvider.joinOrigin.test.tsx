@@ -1,5 +1,6 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getSharedAdapter } from "../../adapter/wasm-adapter";
 
 /**
  * The join/spectate origin is carried by the route and handed to
@@ -130,21 +131,8 @@ vi.mock("../../constants/storage", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../constants/storage")>(),
   ACTIVE_DECK_KEY: "active-deck",
   isRandomDeckSelection: () => false,
-  loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
+  loadActiveDeck: () => ({ main: [{ count: 1, name: "Island", sourcePrinting: { setCode: "aaa", collectorNumber: "001" } }], sideboard: [] }),
   loadSavedDeckBracket: () => null,
-}));
-
-vi.mock("../../services/deckParser", () => ({
-  expandParsedDeck: (deck: { main: string[]; sideboard: string[] }) => ({
-    main_deck: deck.main,
-    sideboard: deck.sideboard,
-    commander: [],
-    planar_deck: [],
-    scheme_deck: [],
-    signature_spell: [],
-    companion: [],
-    sticker_sheets: [],
-  }),
 }));
 
 // Partially mocked: `deckCatalog` reads real registry tables at module scope.
@@ -164,7 +152,7 @@ vi.mock("../../services/randomDeckSelection", () => ({
 vi.mock("../../stores/preferencesStore", () => ({
   AI_DECK_RANDOM: "Random",
   usePreferencesStore: Object.assign(vi.fn(), {
-    getState: () => ({ aiSeats: [], cedhMode: false, nativeEngineEnabled: false }),
+    getState: () => ({ aiSeats: [], cedhMode: false, nativeEngineEnabled: false, artChain: [], artOverrides: {} }),
   }),
 }));
 
@@ -290,6 +278,8 @@ describe("GameProvider join origin", () => {
     await waitFor(() => {
       expect(tryReconnect).toHaveBeenCalled();
     });
+    // A sourced active deck would reach the shared metadata adapter on a fresh join.
+    expect(getSharedAdapter).not.toHaveBeenCalled();
   });
 
   it("opens no socket for an online route with neither a join code nor a saved session", async () => {

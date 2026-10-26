@@ -24,6 +24,7 @@ export function ArchenemyPanel() {
             cardName={primaryScheme.name}
             oracleId={primaryScheme.printed_ref?.oracle_id ?? undefined}
             faceName={primaryScheme.printed_ref?.face_name ?? undefined}
+            ownerPrinting={primaryScheme.printing}
             faceDown={primaryScheme.face_down}
             size="small"
           />

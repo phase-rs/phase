@@ -1128,6 +1128,8 @@ fn submit_deck_inner(
                 seat: 0,
                 main_deck,
                 commanders,
+                // Dedicated local/P2P wrappers remain name-only.
+                printings: Vec::new(),
             },
             None,
         )
@@ -1361,6 +1363,7 @@ fn submit_deck_for_seat_inner(
                 seat,
                 main_deck,
                 commanders,
+                printings: Vec::new(),
             },
             None,
         )
@@ -5015,6 +5018,11 @@ mod create_multiplayer_draft_tests {
                 submission.commanders, commanders,
                 "CR 903.3: the designation arrives verbatim and in order"
             );
+            assert!(submission.printings.is_empty());
+            assert!(serde_json::to_value(submission)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();
@@ -5285,6 +5293,11 @@ mod create_multiplayer_draft_tests {
                 .expect("seat 2's submission is keyed by its own player id");
             assert_eq!(seat2.seat, 2);
             assert_eq!(seat2.commanders, seat2_commanders);
+            assert!(seat2.printings.is_empty());
+            assert!(serde_json::to_value(seat2)
+                .unwrap()
+                .get("printings")
+                .is_none());
 
             let seat0 = session
                 .submitted_decks
@@ -5295,6 +5308,11 @@ mod create_multiplayer_draft_tests {
                 seat0.commanders, seat0_commanders,
                 "a later seat's designation must not be attributed to an earlier one"
             );
+            assert!(seat0.printings.is_empty());
+            assert!(serde_json::to_value(seat0)
+                .unwrap()
+                .get("printings")
+                .is_none());
         });
 
         clear_state();

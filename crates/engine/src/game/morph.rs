@@ -268,6 +268,10 @@ pub fn apply_face_down_creature_characteristics(
     // `turn_face_up` → `apply_back_face_to_object`.
     obj.printed_ref = None;
     obj.base_printed_ref = None;
+    // CR 708.2a + CR 708.3 + CR 708.4: the face-down object has no printed identity, so it
+    // forgets the physical card's printing as well, for good (a turn-up restores the face from
+    // `back_face`, which carries none).
+    obj.conceal_printing();
     // CR 708.2a + CR 306.5b + CR 310.4b: a face-down permanent is a 2/2
     // creature — it has no loyalty or defense characteristic. Blanking here
     // keeps `intrinsic_etb_counters` from seeding loyalty/defense counters on

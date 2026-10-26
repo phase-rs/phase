@@ -496,7 +496,7 @@ export const PermanentCard = memo(function PermanentCard({
     obj.available_mana_pips,
     controllerIdentity || undefined,
   );
-  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
+  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName, ownerPrinting } = cardImageLookup(obj);
   // The battlefield TILE of a face-down permanent always shows the cause
   // marker / card back, exactly as the physical card lies in paper — for the
   // controller too: the engine blanks a face-down permanent's live name and
@@ -917,7 +917,7 @@ export const PermanentCard = memo(function PermanentCard({
       ) : (
         <>
           <div className="relative z-10 rounded-lg overflow-hidden">
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} ownerPrinting={ownerPrinting} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} />
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
             {isPhasedOut && (
@@ -1277,7 +1277,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
     obj.available_mana_pips,
     controllerIdentity || undefined,
   );
-  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName } = cardImageLookup(obj);
+  const { name: imgName, faceIndex: imgFace, oracleId: imgOracleId, faceName: imgFaceName, ownerPrinting } = cardImageLookup(obj);
   const useArtCrop = battlefieldCardDisplay === "art_crop";
 
   return (
@@ -1292,7 +1292,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} faceDownCause={obj.face_down_cause} />
+        <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} ownerPrinting={ownerPrinting} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={obj.face_down} faceDownCause={obj.face_down_cause} />
       )}
     </div>
   );

@@ -146,7 +146,7 @@ vi.mock("../../services/aiDeckCatalog", () => ({ buildLegalAiDeckCatalog: vi.fn(
 vi.mock("../../stores/preferencesStore", () => ({
   AI_DECK_RANDOM: "Random",
   usePreferencesStore: Object.assign(vi.fn(), {
-    getState: () => ({ aiSeats: [], cedhMode: false, nativeEngineEnabled: true }),
+    getState: () => ({ aiSeats: [], cedhMode: false, nativeEngineEnabled: true, artChain: [], artOverrides: {} }),
   }),
 }));
 vi.mock("../../services/cedhLock", () => ({ effectiveAiDifficulty: (difficulty: string) => difficulty }));

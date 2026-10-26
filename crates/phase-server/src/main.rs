@@ -7451,19 +7451,7 @@ impl DeckResolver for ServerDeckResolver<'_> {
         // that caused it. Validating here causes the reducer to return `Err`,
         // which phase-server then surfaces to the client.
         server_core::resolve_deck(self.db, &deck)?;
-        Ok(engine::game::deck_loading::PlayerDeckList {
-            main_deck: deck.main_deck,
-            sideboard: deck.sideboard,
-            commander: deck.commander,
-            companion: deck.companion,
-            planar_deck: deck.planar_deck,
-            scheme_deck: deck.scheme_deck,
-            attraction_deck: deck.attraction_deck,
-            contraption_deck: deck.contraption_deck,
-            sticker_sheets: deck.sticker_sheets,
-            signature_spell: deck.signature_spell,
-            bracket_tier: deck.bracket_tier,
-        })
+        Ok(engine::game::deck_loading::PlayerDeckList::from(deck))
     }
 }
 
@@ -16174,6 +16162,126 @@ mod issue_4548_full_create_tests {
         );
     }
 
+    /// Sends the Dandan empty-host-deck create of
+    /// `full_mode_create_accepts_an_empty_host_deck_for_dandan`, with
+    /// `data.deck.printings` replaced by `printings`, as one text frame through a real
+    /// socket to a Full-mode server, and returns the server's reply.
+    async fn create_with_printings(printings: serde_json::Value) -> ServerMessage {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            let hello = ClientMessage::ClientHello {
+                client_version: env!("CARGO_PKG_VERSION").to_string(),
+                build_commit: build_commit().to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+                wire_formats: Vec::new(),
+            };
+            socket
+                .send(WsMessage::Text(
+                    serde_json::to_string(&hello).expect("hello json").into(),
+                ))
+                .await
+                .expect("send hello");
+            let create = ClientMessage::CreateGameWithSettings {
+                deck: empty_deck(),
+                display_name: "Alice".to_string(),
+                public: true,
+                password: None,
+                timer_seconds: None,
+                player_count: 2,
+                match_config: Default::default(),
+                ai_seats: Vec::new(),
+                format_config: Some(engine::types::format::FormatConfig::dandan()),
+                room_name: None,
+                host_peer_id: None,
+                draft_metadata: None,
+                start_when_full: true,
+                ranked: false,
+                requested_code: None,
+                booster_pack_pool: None,
+            };
+            let mut frame = serde_json::to_value(&create).expect("create value");
+            frame["data"]["deck"]["printings"] = printings;
+            let frame = frame.to_string();
+            assert!(frame.len() <= MAX_WS_MESSAGE_BYTES);
+            socket
+                .send(WsMessage::Text(frame.into()))
+                .await
+                .expect("send create");
+            recv_server_message(&mut socket).await
+        })
+        .await;
+        server.abort();
+        result.expect("full-mode create with printings timed out")
+    }
+
+    /// P2-V5 (N1): more than the entry cap of raw elements, all of them malformed
+    /// (so lenient decoding would drop every one), is refused at decode time through
+    /// the native `#[serde(flatten)]` envelope, with the reply naming the field.
+    #[tokio::test]
+    async fn full_mode_create_refuses_a_sidecar_over_the_entry_cap() {
+        let reply = create_with_printings(serde_json::json!(vec![0; 2049])).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("expected an error, got {reply:?}");
+        };
+        assert!(
+            message.contains("printings must contain at most 2048 entries"),
+            "{message}"
+        );
+    }
+
+    /// P2-V5 (N2): an in-count sidecar with an oversized string is refused by the
+    /// server guard, naming the field.
+    #[tokio::test]
+    async fn full_mode_create_refuses_an_oversized_sidecar_name() {
+        let printings = serde_json::json!([{
+            "section": "main_deck",
+            "name": "x".repeat(257),
+            "count": 1,
+            "printing": { "set_code": "M21", "collector_number": "1" },
+        }]);
+        let reply = create_with_printings(printings).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("expected an error, got {reply:?}");
+        };
+        assert!(message.contains("deck.printings[0].name"), "{message}");
+    }
+
+    /// P2-V5 (N3): a sidecar of merely invalid annotations plus one valid element
+    /// is admitted; the same create without the sidecar is accepted at base.
+    #[tokio::test]
+    async fn full_mode_create_admits_a_sidecar_of_invalid_annotations() {
+        let printings = serde_json::json!([
+            { "section": "main_deck", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "mystery_zone", "name": "Plains", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            0,
+            { "section": "main_deck", "name": "Plains", "count": "one",
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "", "count": 1,
+              "printing": { "set_code": "", "collector_number": "" } },
+            { "section": "main_deck", "name": "Bad\nName", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "No Such Card Anywhere", "count": 1,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+            { "section": "main_deck", "name": "Plains", "count": 0,
+              "printing": { "set_code": "M21", "collector_number": "1" } },
+        ]);
+        let reply = create_with_printings(printings).await;
+        assert!(
+            matches!(reply, ServerMessage::GameCreated { .. }),
+            "expected GameCreated, got {reply:?}"
+        );
+    }
+
     #[tokio::test]
     async fn full_mode_accepts_native_multi_ai_setup_larger_than_eight_kib() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -21250,6 +21358,7 @@ mod handshake_tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                printings: vec![],
             },
             draft_core::types::DraftAction::ReportMatchResult {
                 match_id: "m1".into(),

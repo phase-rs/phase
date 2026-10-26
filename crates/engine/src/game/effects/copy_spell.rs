@@ -4479,6 +4479,7 @@ mod tests {
             object_id: ObjectId(99),
             lki: LKISnapshot {
                 name: "Sacrifice".to_string(),
+                printing: Default::default(),
                 token_image_ref: None,
                 power: Some(4),
                 toughness: Some(4),

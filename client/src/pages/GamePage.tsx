@@ -2663,6 +2663,8 @@ function MulliganDecisionPrompt({
               >
                 <CardImage
                   cardName={obj.name}
+                  ownerPrinting={obj.printing}
+                  ownerPrintedRef={obj.printed_ref}
                   size="normal"
                   className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                 />
@@ -2886,6 +2888,8 @@ function MulliganBottomCardsPrompt({
                 >
                   <CardImage
                     cardName={obj.name}
+                    ownerPrinting={obj.printing}
+                    ownerPrintedRef={obj.printed_ref}
                     size="normal"
                     className="h-[clamp(200px,40vh,360px)] w-[clamp(143px,28.6vh,257px)]"
                   />
@@ -3412,6 +3416,7 @@ function AbilityChoiceModal() {
       footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
+      previewObjectId={obj.id}
       previewCardTypes={obj.card_types}
       options={[
         ...pending.actions.map((action, i) => {

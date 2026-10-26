@@ -7,6 +7,7 @@ import type { PlayerAvatarIdentity } from "../services/playerAvatars.ts";
 import type {
   BuiltInGameFormat,
   CustomGameFormat,
+  DeckPrinting,
   FormatConfig,
   GameFormat,
   LobbyGame,
@@ -176,6 +177,7 @@ function asDeckPayload(deck: HostingDeck): {
   planar_deck: string[];
   scheme_deck: string[];
   bracket_tier?: CommanderBracketTier;
+  printings?: DeckPrinting[];
 } {
   return {
     main_deck: deck.main_deck,
@@ -184,6 +186,7 @@ function asDeckPayload(deck: HostingDeck): {
     planar_deck: deck.planar_deck ?? [],
     scheme_deck: deck.scheme_deck ?? [],
     ...(deck.bracket_tier ? { bracket_tier: deck.bracket_tier } : {}),
+    ...(deck.printings !== undefined ? { printings: deck.printings } : {}),
   };
 }
 
@@ -1490,6 +1493,8 @@ export interface HostingDeck {
   scheme_deck?: string[];
   /** Declared Commander bracket tier; omitted decks default to Core on the engine. */
   bracket_tier?: CommanderBracketTier;
+  /** Already selected by the submitting owner; hosting only carries it. */
+  printings?: DeckPrinting[];
 }
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the

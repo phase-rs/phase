@@ -1,10 +1,17 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GameAction, GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
+import type { CardPrinting, GameAction, GameObject, GameState, WaitingFor } from "../../../adapter/types.ts";
 import { dispatchAction } from "../../../game/dispatch.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { loadScryfallData, type PrintingEntry } from "../../../services/scryfall.ts";
+import type * as Platform from "../../../services/platform.ts";
+import type { ResolvedAsset } from "../../../services/visualPacks/types.ts";
+import { assetKey, catalogRoot, installedRevision, packId } from "../../../services/visualPacks/types.ts";
+import { encodeCandidateKey } from "../../../services/visualPacks/candidateKeys.ts";
 import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
 import {
   buildGameState,
@@ -51,9 +58,64 @@ vi.mock("../../../game/dispatch.ts", () => ({
   dispatchInteraction: vi.fn(),
 }));
 
-vi.mock("../../../hooks/useCardImage.ts", () => ({
-  useCardImage: () => ({ src: null, isLoading: false, isRotated: false, isFlip: false }),
+const installed = vi.hoisted(() => new Map<string, ResolvedAsset[]>());
+vi.mock("../../../services/platform.ts", async (original) => ({
+  ...await original<typeof Platform>(),
+  loadVisualPackBackend: async () => ({
+    resolve: async (keys: { key: string }[]) => ({
+      revision: installedRevision("0"),
+      entries: keys.map((key, ordinal) => ({ key, ordinal, matches: installed.get(key.key) ?? [] })),
+    }),
+    subscribeRevision: async () => () => {},
+  }),
 }));
+
+const ORACLE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OTHER_ORACLE = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const A = "11111111-1111-4111-8111-111111111111";
+const B = "22222222-2222-4222-8222-222222222222";
+const V = "33333333-3333-4333-8333-333333333333";
+const printingA: CardPrinting = { set_code: "own", collector_number: "1" };
+const printingB: CardPrinting = { set_code: "own", collector_number: "2" };
+let admitCatalog: () => void;
+
+beforeAll(async () => {
+  const entry = { oracle_id: ORACLE, name: "Alpha", face_names: ["alpha"], layout: "normal",
+    mana_cost: "{1}", cmc: 1, type_line: "Creature", colors: [], color_identity: [], keywords: [],
+    faces: [{ normal: "/canonical.jpg", art_crop: "/canonical-crop.jpg" }] };
+  const catalog: Record<string, PrintingEntry[]> = { [ORACLE]: [
+    [A, "own", "1"], [B, "own", "2"], [V, "pin", "3"],
+  ].map(([id, set, collector_number]) => ({
+    id, set, collector_number, set_name: set, released_at: "2026-01-01", border_color: "black",
+    frame_effects: [], full_art: false, faces: [{ normal: `/${id}.jpg`, art_crop: `/${id}-crop.jpg` }],
+  })) };
+  catalog[OTHER_ORACLE] = [{ ...catalog[ORACLE][0], id: B,
+    faces: [{ normal: `/${B}.jpg`, art_crop: `/${B}-crop.jpg` }] }];
+  const gate = new Promise<Response>((resolve) => {
+    admitCatalog = () => resolve(new Response(JSON.stringify(catalog)));
+  });
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+    new URL(String(input), "http://localhost").pathname === "/scryfall-printings.json"
+      ? gate : new Response(JSON.stringify({ [ORACLE]: entry, alpha: entry,
+        [OTHER_ORACLE]: { ...entry, oracle_id: OTHER_ORACLE } }))));
+  for (const id of [A, B, V]) {
+    installed.set(encodeCandidateKey("english_printing", [id, 0, "art_crop", "art_crop"]), [{
+      packId: packId("complete"), assetKey: assetKey("asset:v1:exact_printing:QQ"),
+      catalogRoot: catalogRoot("a".repeat(64)), url: `/${id}-crop.jpg`, media: "image/jpeg",
+    }]);
+  }
+  await loadScryfallData();
+});
+
+beforeEach(() => {
+  useMultiplayerStore.setState({ activePlayerId: 0, isSpectator: false });
+  usePreferencesStore.setState({ ...usePreferencesStore.getInitialState(), language: "en",
+    showOwnerPrintings: true, artChain: [],
+    artOverrides: { [ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" } } });
+});
+afterEach(() => {
+  usePreferencesStore.setState(usePreferencesStore.getInitialState());
+});
 
 const EMBLEM_ID = 700;
 /** A SECOND emblem that groups with EMBLEM_ID — the non-representative member. */
@@ -385,5 +447,164 @@ describe("CommandZone grouped-emblem activation identity", () => {
 
     fireEvent.click(screen.getByTestId("emblem-card"));
     expect(dispatchAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("CommandZone owner-printing groups", () => {
+  beforeEach(() => {
+    vi.mocked(dispatchAction).mockReset();
+    vi.mocked(dispatchAction).mockResolvedValue(undefined);
+    useUiStore.setState(useUiStore.getInitialState());
+  });
+  afterEach(() => cleanup());
+
+  function seedPrintings(printings: Array<CardPrinting | null | undefined>, legal = true, holdCatalog = false) {
+    if (!holdCatalog) admitCatalog();
+    const emblems = printings.map((printing, index) => ({
+      ...makeEmblem({ id: 700 + index }),
+      // Deliberately contradict the source on the first chip. Own artwork must
+      // neither select nor partition a synthetic emblem's source image.
+      printing: index === 0 ? printingB : printingA,
+      emblem_source: { name: "Alpha", printed_ref: { oracle_id: ORACLE, face_name: "Alpha" }, printing },
+    }));
+    const waitingFor = buildPriorityWaitingFor();
+    const state = buildGameState({ players: buildPlayers([0, 1]), objects: buildObjectMap(...emblems),
+      command_zone: emblems.map((emblem) => emblem.id), waiting_for: waitingFor });
+    useGameStore.setState({ gameMode: "local", gameState: state, waitingFor,
+      legalActionsByObject: legal ? { "701": [{
+        type: "ActivateAbility", data: { source_id: 701, ability_index: 0 },
+      }] } : {}, viewerInteraction: null });
+    return state;
+  }
+
+  it("partitions captured source A/A/B before admission and preserves sibling activation through a live cycle", async () => {
+    const state = seedPrintings([printingA, { collector_number: "1", set_code: "own" }, printingB], true, true);
+    const { container } = render(<CommandZone playerId={0} />);
+    expect(screen.getAllByTestId("emblem-card").map((chip) => chip.dataset.groupedIds)).toEqual(["700 701", "702"]);
+    await waitFor(() => expect(container.querySelectorAll(`img[src="/${V}-crop.jpg"]`)).toHaveLength(2));
+    admitCatalog();
+    await waitFor(() => {
+      expect(screen.getAllByTestId("emblem-card")[0].querySelector("img")).toHaveAttribute("src", `/${A}-crop.jpg`);
+      expect(screen.getAllByTestId("emblem-card")[1].querySelector("img")).toHaveAttribute("src", `/${B}-crop.jpg`);
+    });
+    for (const enabled of [true, false, true]) {
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(enabled));
+      const chips = screen.getAllByTestId("emblem-card");
+      expect(chips.map((chip) => chip.dataset.groupedIds)).toEqual(enabled ? ["700 701", "702"] : ["700 701 702"]);
+      expect(screen.getByText(enabled ? "×2" : "×3")).toBeInTheDocument();
+      expect(chips[0]).toHaveAttribute("data-object-id", "701");
+      await waitFor(() => expect(chips[0].querySelector("img")).toHaveAttribute("src", `/${enabled ? A : V}-crop.jpg`));
+      vi.mocked(dispatchAction).mockClear();
+      fireEvent.click(chips[0]);
+      expect(dispatchAction).toHaveBeenCalledExactlyOnceWith({
+        type: "ActivateAbility", data: { source_id: 701, ability_index: 0 },
+      });
+    }
+    expect(useGameStore.getState().gameState).toBe(state);
+  });
+
+  it("keeps source null and omission together, separates present source art, and preserves the no-source fallback", async () => {
+    const state = seedPrintings([null, undefined, printingA], false);
+    const noSource = makeEmblem({ id: 703 });
+    state.objects[703] = noSource;
+    state.command_zone!.push(703);
+    const { container } = render(<CommandZone playerId={0} />);
+    expect(screen.getAllByTestId("emblem-card").map((chip) => chip.dataset.groupedIds)).toEqual(["700 701", "702", "703"]);
+    await waitFor(() => expect(container.querySelector(`img[src="/${A}-crop.jpg"]`)).not.toBeNull());
+    const chips = screen.getAllByTestId("emblem-card");
+    expect(chips[2].querySelector('img[alt="Emblem"]')).toBeNull();
+    expect(chips[2]).toHaveTextContent("Create a token.");
+    fireEvent.click(chips[0]);
+    expect(dispatchAction).not.toHaveBeenCalled();
+    act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+    expect(screen.getAllByTestId("emblem-card").map((chip) => chip.dataset.groupedIds)).toEqual(["700 701 702", "703"]);
+  });
+
+  it("ignores own-printing changes and keeps same-source equal pairs compact", async () => {
+    const state = seedPrintings([printingA, { ...printingA }]);
+    const { container } = render(<CommandZone playerId={0} />);
+    expect(screen.getByTestId("emblem-card")).toHaveAttribute("data-grouped-ids", "700 701");
+    await waitFor(() => expect(container.querySelector("img")).toHaveAttribute("src", `/${A}-crop.jpg`));
+    act(() => useGameStore.setState({ gameState: {
+      ...state, objects: { ...state.objects, "701": { ...state.objects[701],
+        printing: { set_code: "unrelated", collector_number: "99" } } },
+    } }));
+    expect(screen.getByTestId("emblem-card")).toHaveAttribute("data-grouped-ids", "700 701");
+    expect(screen.getByTestId("emblem-card").querySelector("img")).toHaveAttribute("src", `/${A}-crop.jpg`);
+  });
+
+  it.each(["different", "missing", "equal", "legacy"] as const)(
+    "uses selected own emblem authority with equal provenance: %s", async (authority) => {
+      for (const reverse of [false, true]) {
+        const state = seedPrintings([printingA, printingA]);
+        usePreferencesStore.setState({ showOwnerPrintings: true, artOverrides: {
+          [ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" },
+          [OTHER_ORACLE]: { scryfallId: V, setCode: "pin", collectorNumber: "3" },
+        } });
+        for (const id of [700, 701]) {
+          state.objects[id].printing = printingA;
+          state.objects[id].printed_ref = { oracle_id: authority === "different" && id === 701 ? OTHER_ORACLE : ORACLE, face_name: "Alpha" };
+          state.objects[id].emblem_source = { name: "Alpha", printed_ref: null, printing: printingB };
+        }
+        if (authority === "missing" || authority === "legacy") state.objects[701].printed_ref = null;
+        if (authority === "legacy") state.objects[700].printed_ref = null;
+        if (reverse) state.command_zone!.reverse();
+        act(() => useGameStore.setState({ gameState: { ...state } }));
+        const surface = render(<CommandZone playerId={0} />);
+        const split = authority === "different" || authority === "missing";
+        const order = reverse ? [701, 700] : [700, 701];
+        const chips = screen.getAllByTestId("emblem-card");
+        expect(chips.map((chip) => chip.dataset.groupedIds)).toEqual(split ? order.map(String) : [order.join(" ")]);
+        for (const [index, chip] of chips.entries()) {
+          const id = order[index];
+          const expected = authority === "legacy" || (authority === "missing" && id === 701)
+            ? V : authority === "different" && id === 701 ? B : A;
+          await waitFor(() => expect(chip.querySelector("img")).toHaveAttribute("src", `/${expected}-crop.jpg`));
+        }
+        for (const id of [700, 701]) {
+          const action = { type: "ActivateAbility" as const, data: { source_id: id, ability_index: 0 } };
+          act(() => useGameStore.setState({ legalActionsByObject: { [id]: [action] } }));
+          vi.mocked(dispatchAction).mockClear();
+          const chip = screen.getAllByTestId("emblem-card").find((element) => element.dataset.groupedIds!.split(" ").includes(String(id)))!;
+          fireEvent.click(chip);
+          expect(dispatchAction).toHaveBeenCalledExactlyOnceWith(action);
+        }
+        act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+        expect(screen.getByTestId("emblem-card").dataset.groupedIds).toBe(order.join(" "));
+        await waitFor(() => expect(screen.getByTestId("emblem-card").querySelector("img")).toHaveAttribute("src", `/${V}-crop.jpg`));
+        surface.unmount();
+      }
+    },
+  );
+
+  it.each([
+    [printingA, { set_code: "other", collector_number: "1" }],
+    [{ set_code: "a|b", collector_number: "c" }, { set_code: "a", collector_number: "b|c" }],
+    [{ set_code: "invalid", collector_number: "x" }, { set_code: "foreign", collector_number: "x" }],
+  ])("compares source pairs, not admitted artwork (%j versus %j)", async (first, second) => {
+    seedPrintings([first, { ...first }, second], false);
+    const { container } = render(<CommandZone playerId={0} />);
+    expect(screen.getAllByTestId("emblem-card").map((chip) => chip.dataset.groupedIds)).toEqual(["700 701", "702"]);
+    await waitFor(() => expect(container.querySelectorAll(`img[src="/${V}-crop.jpg"]`)).toHaveLength(first === printingA ? 1 : 2));
+  });
+
+  it("keeps the sibling action inert from another seat, with the own-seat action as a control", () => {
+    seedPrintings([printingA, printingA]);
+    const { rerender } = render(<CommandZone playerId={0} />);
+    act(() => {
+      useGameStore.setState({ gameMode: "online" });
+      useMultiplayerStore.setState({ activePlayerId: 1 });
+    });
+    const chip = screen.getByTestId("emblem-card");
+    expect(chip).not.toHaveAttribute("data-activatable");
+    fireEvent.click(chip);
+    expect(dispatchAction).not.toHaveBeenCalled();
+    act(() => useMultiplayerStore.setState({ activePlayerId: 0 }));
+    rerender(<CommandZone playerId={0} />);
+    expect(screen.getByTestId("emblem-card")).toHaveAttribute("data-activatable", "true");
+    fireEvent.click(screen.getByTestId("emblem-card"));
+    expect(dispatchAction).toHaveBeenCalledExactlyOnceWith({
+      type: "ActivateAbility", data: { source_id: 701, ability_index: 0 },
+    });
   });
 });

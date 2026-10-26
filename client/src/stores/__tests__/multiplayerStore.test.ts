@@ -71,6 +71,7 @@ import {
   type ServerInfo,
 } from "../../adapter/ws-adapter";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { P2PHostAdapter } from "../../adapter/p2p-adapter";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import {
   clearWsSession,
@@ -1282,6 +1283,42 @@ describe("multiplayerStore", () => {
     expect(frame.type).toBe("CreateGameWithSettings");
     expect(frame.data.deck.bracket_tier).toBe("cedh");
     expect(frame.data.ai_seats[0].deck.data.bracket_tier).toBe("cedh");
+  });
+
+  it.each(["server", "p2p"] as const)("carries owner printings through %s hosting without changing nonprinting sections", async (transport) => {
+    const printings = [
+      { section: "main_deck" as const, name: "Forest", count: 1, printing: { set_code: "lea", collector_number: "001" } },
+      { section: "companion" as const, name: "Companion", count: 1, printing: { set_code: "iko", collector_number: "002" } },
+    ];
+    const deck = {
+      main_deck: ["Forest"], sideboard: ["Island"], commander: ["Commander"],
+      planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "cedh" as const,
+      companion: ["Companion"], signature_spell: ["Spell"], sticker_sheets: ["Stickers"],
+      attraction_deck: ["Attraction"], contraption_deck: ["Contraption"], printings,
+    };
+    const aiDeck = { type: "DeckList" as const, data: deck };
+    const settings = hostingSettings({
+      aiSeats: [{ seatIndex: 1, difficulty: "Hard", deckName: null, deck: aiDeck }],
+    });
+    const expected = {
+      main_deck: ["Forest"], sideboard: ["Island"], commander: ["Commander"],
+      planar_deck: ["Plane"], scheme_deck: ["Scheme"], bracket_tier: "cedh", printings,
+    };
+    if (transport === "server") {
+      useMultiplayerStore.getState().startHosting(settings, deck, HOST_URL);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string);
+      expect(frame.data.deck).toEqual(expected);
+      expect(frame.data.ai_seats[0].deck).toEqual(aiDeck);
+    } else {
+      expect(await useMultiplayerStore.getState().startP2PHostingSession(settings, deck, { brokerUrl: null })).toBe(true);
+      const calls = vi.mocked(P2PHostAdapter).mock.calls;
+      expect(calls[calls.length - 1][0]).toMatchObject({ player: expected });
+      expect(p2pMocks.applySeatMutation).toHaveBeenCalledWith({
+        type: "SetKind",
+        data: { seatIndex: 1, kind: { type: "Ai", data: { difficulty: "Hard", deck: aiDeck } } },
+      });
+    }
   });
 
   it("leaves the host deck's bracket tier off the frame when none is declared", async () => {

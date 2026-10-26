@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::validation::{LimitedDeckError, STANDARD_BASIC_LANDS};
 use engine::types::card::DraftEffect;
+use engine::types::card_printing::DeckPrinting;
 use engine::types::match_config::{MatchConfig, MatchType};
 use engine::types::player::PlayerId;
 
@@ -1679,6 +1680,14 @@ pub enum DraftAction {
         /// [`MAX_COMMANDER_DESIGNATIONS`](crate::types::MAX_COMMANDER_DESIGNATIONS).
         #[serde(default)]
         commanders: Vec<String>,
+        /// Optional owner choices; native ingress bounds them before dispatch.
+        /// Name-only and server-generated submissions carry no annotations.
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "engine::types::card_printing::deserialize_deck_printings"
+        )]
+        printings: Vec<DeckPrinting>,
     },
     /// Generate the next round's pairings. Carries no round: the reducer is the
     /// single authority for which round that is (`DraftSession::next_pairing_round`).
@@ -1993,6 +2002,14 @@ pub struct DraftDeckSubmission {
     /// `validate_limited_deck`.
     #[serde(default)]
     pub commanders: Vec<String>,
+    /// Snapshotted with the accepted names. Every accepted resubmission replaces
+    /// this vector, including an empty vector clearing previous owner choices.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "engine::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
 }
 
 /// Win/loss record for a player in the draft event.
@@ -2392,6 +2409,49 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn submitted_printings_wire_compatibility() {
+        use super::{DraftAction, DraftDeckSubmission};
+        let old_data = r#"{"seat":0,"main_deck":["Plains"],"commanders":[]}"#;
+        let annotated_data = r#"{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":[{"section":"main_deck","name":"Plains","count":1,"printing":{"set_code":"lea","collector_number":"001"}}]}"#;
+        for data in [old_data, annotated_data] {
+            let stored: DraftDeckSubmission = serde_json::from_str(data).unwrap();
+            assert_eq!(
+                serde_json::to_string(&stored).unwrap(),
+                data,
+                "stored wire bytes"
+            );
+            let expected = format!(r#"{{"type":"SubmitDeck","data":{data}}}"#);
+            for frame in [
+                expected.clone(),
+                format!(r#"{{"data":{data},"type":"SubmitDeck"}}"#),
+            ] {
+                let action: DraftAction = serde_json::from_str(&frame).unwrap();
+                assert_eq!(
+                    serde_json::to_string(&action).unwrap(),
+                    expected,
+                    "action wire bytes"
+                );
+            }
+        }
+        let explicit_empty = r#"{"seat":0,"main_deck":["Plains"],"commanders":[],"printings":[]}"#;
+        let stored: DraftDeckSubmission = serde_json::from_str(explicit_empty).unwrap();
+        assert_eq!(
+            serde_json::to_string(&stored).unwrap(),
+            old_data,
+            "empty sidecar preserves old stored bytes"
+        );
+        let action: DraftAction = serde_json::from_str(&format!(
+            r#"{{"type":"SubmitDeck","data":{explicit_empty}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&action).unwrap(),
+            format!(r#"{{"type":"SubmitDeck","data":{old_data}}}"#),
+            "empty sidecar preserves old action bytes"
+        );
+    }
+
     /// THE PUBLISHED CAPABILITY AND THE REFUSAL ARE ONE ANSWER.
     ///
     /// `allowed_set_layouts` is what the setup page renders; `validate_source`
