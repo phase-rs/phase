@@ -5112,12 +5112,10 @@ pub(super) fn handle_resolution_choice(
                     chosen.len()
                 )));
             }
-            for card_id in &chosen {
-                if !cards.contains(card_id) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected card not in search results".to_string(),
-                    ));
-                }
+            if !effects::search_library::selection_is_distinct_subset(&chosen, &cards) {
+                return Err(EngineError::InvalidAction(
+                    "Selected search cards must be distinct and in the offered pool".to_string(),
+                ));
             }
 
             // CR 608.2c: Enforce the printed-text selection restriction at the

@@ -158,6 +158,20 @@ fn library_search_top_limit(state: &GameState, searcher_id: PlayerId) -> Option<
         .min()
 }
 
+/// CR 701.23a + CR 608.2d: Each found card must be a distinct object from
+/// the offered search pool. Empty selections are structurally valid; callers
+/// separately enforce count policy, printed constraints, and scoped liveness.
+/// Borrows the selections without allocating or changing their delivery order.
+pub(crate) fn selection_is_distinct_subset(
+    chosen: &[crate::types::identifiers::ObjectId],
+    offered: &[crate::types::identifiers::ObjectId],
+) -> bool {
+    chosen
+        .iter()
+        .enumerate()
+        .all(|(index, id)| offered.contains(id) && !chosen[..index].contains(id))
+}
+
 /// CR 608.2c: Validate a chosen card-id set against the search-selection
 /// constraint propagated from `Effect::SearchLibrary.selection_constraint`.
 /// Centralized here so the resolver, the engine submission guard, and the AI
@@ -890,6 +904,66 @@ mod tests {
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn distinct_subset_accepts_only_distinct_offered_objects_without_reordering() {
+        let mut state = GameState::new_two_player(42);
+        let a = add_library_creature(&mut state, 1, PlayerId(0), "Same name");
+        let b = add_library_creature(&mut state, 2, PlayerId(0), "Same name");
+        let c = add_library_creature(&mut state, 3, PlayerId(0), "Third");
+        let foreign = add_library_creature(&mut state, 4, PlayerId(1), "Same name");
+        let offered = [a, b, c];
+        assert!(selection_is_distinct_subset(&[], &[]));
+        assert!(selection_is_distinct_subset(&[], &offered));
+        let chosen = [c, a, b];
+        assert!(selection_is_distinct_subset(&chosen, &offered));
+        assert_eq!(chosen, [c, a, b]);
+        for invalid in [vec![a, a], vec![a, b, a], vec![a, foreign]] {
+            assert!(!selection_is_distinct_subset(&invalid, &offered));
+        }
+        assert!(!selection_is_distinct_subset(&[a], &[]));
+    }
+
+    /// Supplemental typed producer, not a real-card support claim.
+    #[test]
+    fn ordinary_submission_retains_printed_constraint_after_structural_validation() {
+        use crate::game::engine::{apply_as_current, EngineError};
+        use crate::types::actions::GameAction;
+        let mut state = GameState::new_two_player(42);
+        let a = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Small", 2);
+        let b = add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "Mid", 4);
+        let c = add_library_creature_with_cmc(&mut state, 3, PlayerId(0), "Large", 5);
+        let mut search = make_search_ability(TargetFilter::Any, 2);
+        let Effect::SearchLibrary {
+            selection_constraint,
+            ..
+        } = &mut search.effect
+        else {
+            unreachable!()
+        };
+        *selection_constraint = SearchSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: 6,
+        };
+        resolve(&mut state, &search, &mut Vec::new()).unwrap();
+        let WaitingFor::SearchChoice { cards, .. } = &state.waiting_for else {
+            panic!("typed producer must prompt")
+        };
+        assert!(selection_is_distinct_subset(&[a, c], cards));
+        let before = serde_json::to_value(&state).unwrap();
+        // CR 608.2c: structural legality does not override a printed set constraint.
+        assert!(matches!(
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![a, c] }),
+            Err(EngineError::InvalidAction(_))
+        ));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![a, b] }).unwrap();
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.active_library_searches.is_empty());
+        assert!([a, b, c]
+            .iter()
+            .all(|id| state.objects[id].zone == Zone::Library));
+    }
 
     /// CR 701.23a + CR 701.23b + CR 608.2c: Completion without candidates
     /// publishes a missing object even when the synchronous search has a split destination.

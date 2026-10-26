@@ -1433,6 +1433,7 @@ mod screaming_nemesis_life_lock;
 mod scroll_of_fate_manifest_from_hand;
 mod scroll_rack_linked_exile;
 mod scythecat_cub_second_resolution;
+mod search_choice_duplicate_ids;
 mod search_delivery_observer_dedup;
 mod season_points_budget_modal;
 mod seasoned_dungeoneer_initiative_room_trigger;

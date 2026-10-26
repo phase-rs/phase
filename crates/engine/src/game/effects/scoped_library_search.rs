@@ -316,12 +316,10 @@ pub(crate) fn submit_selection(
             chosen.len()
         )));
     }
-    for id in chosen {
-        if !cards.contains(id) {
-            return Err(EffectError::InvalidParam(
-                "Selected card not in scoped search results".to_string(),
-            ));
-        }
+    if !search_library::selection_is_distinct_subset(chosen, cards) {
+        return Err(EffectError::InvalidParam(
+            "Selected search cards must be distinct and in the offered pool".to_string(),
+        ));
     }
     let ScopedLibrarySearchPhase::CollectSelections {
         prepared_choices, ..
@@ -348,14 +346,6 @@ pub(crate) fn submit_selection(
                 "selected scoped search card is stale".to_string(),
             ));
         }
-    }
-    let mut distinct = chosen.to_vec();
-    distinct.sort_unstable_by_key(|id| id.0);
-    distinct.dedup();
-    if distinct.len() != chosen.len() {
-        return Err(EffectError::InvalidParam(
-            "Cannot select the same search card more than once".to_string(),
-        ));
     }
     if !search_library::selection_satisfies_constraint(state, chosen, constraint) {
         return Err(EffectError::InvalidParam(
@@ -983,6 +973,75 @@ mod tests {
         )
         .sub_ability(delivery);
         (state, search, cards)
+    }
+
+    /// Supplemental hostile state staging; no player can act mid-resolution.
+    #[test]
+    fn scoped_submission_rechecks_prepared_identity_and_zone() {
+        for stale_case in 0..4 {
+            let (mut state, search, cards) = three_player_scoped_search(false);
+            let sibling = create_object(
+                &mut state,
+                CardId(90),
+                PlayerId(0),
+                "Live sibling".to_string(),
+                Zone::Library,
+            );
+            start(&mut state, &search, &[PlayerId(0)], None, &mut Vec::new()).unwrap();
+            assert!(
+                matches!(&state.waiting_for, WaitingFor::SearchChoice { player: PlayerId(0), cards: offered, .. }
+                if offered.contains(&cards[0]) && offered.contains(&sibling))
+            );
+            let legal = GameAction::SelectCards {
+                cards: vec![cards[0]],
+            };
+            assert!(!crate::ai_support::structurally_valid_search_selection(
+                &state, &legal
+            ));
+            let mut control = state.clone();
+            apply_as_current(&mut control, legal.clone()).unwrap();
+            assert_eq!(control.objects[&cards[0]].zone, Zone::Hand);
+            assert!(control.pending_scoped_library_search.is_none());
+            assert!(matches!(control.waiting_for, WaitingFor::Priority { .. }));
+            // CR 400.7: numeric membership cannot substitute for prepared identity.
+            match stale_case {
+                0 => state.objects.get_mut(&cards[0]).unwrap().incarnation += 1,
+                1 => state.objects.get_mut(&cards[0]).unwrap().zone = Zone::Graveyard,
+                2 => {
+                    state.objects.remove(&cards[0]);
+                }
+                3 => {
+                    let pending = state.pending_scoped_library_search.as_mut().unwrap();
+                    let ScopedLibrarySearchPhase::CollectSelections {
+                        prepared_choices, ..
+                    } = &mut pending.phase
+                    else {
+                        unreachable!()
+                    };
+                    prepared_choices[0]
+                        .candidates
+                        .retain(|candidate| candidate.object_id != cards[0]);
+                }
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&state).unwrap();
+            assert!(matches!(
+                apply_as_current(&mut state, legal),
+                Err(crate::game::engine::EngineError::InvalidAction(_))
+            ));
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![sibling],
+                },
+            )
+            .unwrap();
+            assert_eq!(state.objects[&sibling].zone, Zone::Hand);
+            assert!(state.pending_scoped_library_search.is_none());
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
     }
 
     #[test]
