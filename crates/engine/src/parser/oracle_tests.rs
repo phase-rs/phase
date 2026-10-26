@@ -29205,7 +29205,7 @@ fn azors_gateway_transform_condition_parses_with_zero_swallowed_clauses() {
     assert!(matches!(
         transform.effect.as_ref(),
         Effect::Transform {
-            target: TargetFilter::ParentTarget,
+            target: TargetFilter::SelfRef,
             ..
         }
     ));

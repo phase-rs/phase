@@ -46425,9 +46425,25 @@ fn parse_effect_chain_ir_body(
                     }
                 )
             });
+        // CR 608.2c + CR 701.27a: "untap ~, then transform it" (Civilized
+        // Scholar, Cecil, Dark Knight's class) — the bare "it" of a transform
+        // clause names the source object the prior clause named via `~`. Left as
+        // `ParentTarget`, it resolves to whatever the chain carries down (for
+        // Civilized Scholar the discarded card, now in the graveyard), so the
+        // permanent never transforms. Rebinding to the source is rules-correct
+        // for every such chain; with no carried target the source was already the
+        // fallback subject, so those cards are unchanged.
+        let transform_anaphor_after_self_ref_clause = matches!(
+            &clause.effect,
+            Effect::Transform {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        );
         if (typed_trigger_subject
             || exile_then_return_transformed
-            || attach_anaphor_after_self_ref_transform)
+            || attach_anaphor_after_self_ref_transform
+            || transform_anaphor_after_self_ref_clause)
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && builder
                 .clauses()
