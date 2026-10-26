@@ -95026,7 +95026,7 @@ fn harsh_mercy_destroy_sentence_with_chosen_type_anaphor_is_refused() {
 
 /// Sarulf's exile threshold names a BOUND quantity-position anaphor ("the
 /// number of counters removed this way" → `PreviousEffectAmount` via the
-/// quantity authority, CR 608.2c + CR 122.1) — a numeric amount, not an
+/// quantity authority, CR 608.2c + CR 608.2i) — a numeric amount, not an
 /// unbound object-membership restriction. The mass-exile dispatcher must keep
 /// the sentence supported with the threshold intact, not refuse it.
 #[test]
@@ -95124,6 +95124,20 @@ fn flickerform_return_with_exiled_this_way_and_attach_tail_is_refused() {
         !matches!(&*no_trigger_sub.effect, Effect::Unimplemented { .. }),
         "reach guard: without \"this way\" the rewriter must still proceed, got {:?}",
         no_trigger_sub.effect
+    );
+    assert!(
+        matches!(&*no_trigger_sub.effect, Effect::ChangeZone { .. }),
+        "reach guard: without \"this way\" the return must stay a supported ChangeZone, got {:?}",
+        no_trigger_sub.effect
+    );
+    let no_trigger_attach = no_trigger_sub
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: without \"this way\" the attach tail must survive as a sub-ability");
+    assert!(
+        matches!(&*no_trigger_attach.effect, Effect::Attach { .. }),
+        "reach guard: the attach dependent must be an Attach effect, got {:?}",
+        no_trigger_attach.effect
     );
 
     let refused = parse_effect_chain(

@@ -1,5 +1,6 @@
-//! CR 608.2c + CR 122.1 — Sarulf, Realm Eater's upkeep exile keeps its bound
-//! numeric threshold.
+//! CR 608.2c + CR 608.2i — Sarulf, Realm Eater's upkeep exile keeps its bound
+//! numeric threshold: the ordered if-you-do sequence reads back the number
+//! the removal instruction left behind.
 //!
 //! "exile each other nonland permanent with mana value less than or equal to
 //! the number of counters removed this way" names a quantity-position anaphor
