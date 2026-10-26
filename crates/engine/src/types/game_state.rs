@@ -44792,8 +44792,8 @@ mod tests {
                 incarnation: Some(incarnation),
             };
             let context = ResolvingTriggerContext {
-                event: (kind % 2 == 0).then(|| tapped.clone()),
-                events: if kind % 2 == 1 {
+                event: kind.is_multiple_of(2).then(|| tapped.clone()),
+                events: if !kind.is_multiple_of(2) {
                     vec![tapped.clone()]
                 } else {
                     vec![]
