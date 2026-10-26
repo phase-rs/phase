@@ -40,9 +40,10 @@ const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 
-vi.mock("../../services/cardData", () => ({
+vi.mock("../main-thread-engine", () => ({
   ensureWasmInit,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
+  loadEngineModule: () => import("@wasm/engine"),
 }));
 
 vi.mock("@wasm/engine", () => ({

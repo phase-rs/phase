@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,29 +71,43 @@ describe("adapter boundary guardrails", () => {
     }
   });
 
-  it("keeps gameplay card-data ownership in the shared engine worker", () => {
-    const root = repoRoot();
-    const gameProvider = readFileSync(
-      resolve(root, "client/src/providers/GameProvider.tsx"),
-      "utf8",
+  it("keeps one engine instance per tab", () => {
+    // Each runtime load of `@wasm/engine` outside the worker is a second engine
+    // in the tab: another 40 MB module compile and, once it loads the card
+    // database, ~540 MB more WASM memory. That is past iOS Safari's ceiling, so
+    // the tab is killed (#9696 did this from the Play setup screen). UI code asks
+    // the engine through `getSharedAdapter()`, or `services/engineRuntime`,
+    // which routes there.
+    const RUNTIME_ENGINE_IMPORT = new RegExp(
+      [
+        /^\s*(?:import|export)\s+(?!type\b)[^;]*?\bfrom\s*["']@wasm\/engine["']/.source,
+        /(?<!typeof\s*)\bimport\(\s*["']@wasm\/engine["']\s*\)/.source,
+      ].join("|"),
+      "m",
     );
+    // The fallback's loaders allocate that second instance too; only the
+    // adapter may call them, and only when no worker could start.
+    const FALLBACK_LOADER_IMPORT =
+      /import\s*{[^}]*\b(?:ensureWasmInit|ensureCardDatabase|loadEngineModule)\b[^}]*}\s*from\s*["'][^"']*main-thread-engine(?:\.ts)?["']/;
+    const ENGINE_OWNERS = new Set(["adapter/engine-worker.ts", "adapter/main-thread-engine.ts"]);
 
-    // The shared WasmAdapter loads the corpus before game creation/restoration.
-    // Importing the main-thread card-data service here would allocate a second
-    // WASM module and full corpus whenever gameplay mounts or resumes.
-    expect(gameProvider).not.toMatch(/from ["']\.\.\/services\/cardData["']/);
+    const srcDir = resolve(repoRoot(), "client/src");
+    const sources = readdirSync(srcDir, { recursive: true, encoding: "utf8" }).filter(
+      (file) => /\.tsx?$/.test(file) && !/(^|\/)__tests__\//.test(file) && !file.startsWith("wasm/"),
+    );
+    expect(sources.length).toBeGreaterThan(100);
 
-    const cardDataHook = readFileSync(
-      resolve(root, "client/src/hooks/useEngineCardData.ts"),
-      "utf8",
-    );
-    const mainThreadRuntimeImport = cardDataHook.match(
-      /import\s*{([^}]*)}\s*from ["']\.\.\/services\/engineRuntime["']/,
-    );
-    expect(mainThreadRuntimeImport?.[1] ?? "").not.toMatch(
-      /getCardFaceData|getCardParseDetails|getCardRulings/,
-    );
-    expect(cardDataHook).toContain('import { getSharedAdapter } from "../adapter/wasm-adapter";');
+    const offenders = sources.filter((file) => {
+      const source = readFileSync(resolve(srcDir, file), "utf8");
+      return (!ENGINE_OWNERS.has(file) && RUNTIME_ENGINE_IMPORT.test(source))
+        || (file !== "adapter/wasm-adapter.ts" && FALLBACK_LOADER_IMPORT.test(source));
+    });
+    expect(offenders).toEqual([]);
+
+    // The scan must still see the owners, or a rename would pass it vacuously.
+    for (const owner of ENGINE_OWNERS) {
+      expect(RUNTIME_ENGINE_IMPORT.test(readFileSync(resolve(srcDir, owner), "utf8")), owner).toBe(true);
+    }
   });
 
   it("keeps the frontend WaitingFor union in lockstep with the engine enum", () => {
