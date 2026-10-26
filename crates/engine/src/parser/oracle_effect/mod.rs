@@ -44705,6 +44705,15 @@ fn parse_effect_chain_ir_body(
         // <property> among <filter>" (Wretched Banquet class).
         let (superlative_target_cond, text) = strip_superlative_target_conditional(&text);
         let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
+        // CR 608.2c + CR 202.3: "<instruction> if it has the same <quality> as
+        // <object>" (Counterbalance, Hisoka). Only claimed when no leading general
+        // conditional was stripped: `guard_condition` keeps `condition` first, so a
+        // rider stripped beside one would be discarded.
+        let (same_quality_cond, text) = if condition.is_none() {
+            strip_same_quality_as_conditional(&text, ctx)
+        } else {
+            (None, text)
+        };
         // A deferred `When you do, if <guard>, ...` retains its reflexive
         // marker in `if_you_do` while the ordered specialized parsers claim the
         // guard. Ordinary reflexive connectors still block these parsers, as
@@ -44717,6 +44726,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
         {
             strip_cast_from_zone_conditional(&text)
         } else {
@@ -44728,6 +44738,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
         {
             strip_card_type_conditional(&text)
@@ -44740,6 +44751,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
         {
@@ -44755,6 +44767,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44770,6 +44783,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44797,6 +44811,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44860,6 +44875,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44884,6 +44900,7 @@ fn parse_effect_chain_ir_body(
             .or(mv_cond)
             .or(superlative_target_cond)
             .or(target_supertype_cond)
+            .or(same_quality_cond)
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
@@ -44943,8 +44960,17 @@ fn parse_effect_chain_ir_body(
             (Some(reflexive), Some(guard)) if reflexive.has_when_you_do_marker() => {
                 Some(reflexive.with_when_you_do_guard(guard))
             }
-            // Preserve the established specialized-condition precedence for
-            // non-marker reflexive connectors (for example "if they don't").
+            // CR 118.12 + CR 608.2c: "If you do, <instruction> if <gate>" — the
+            // instruction happens only if the optional action was performed AND its
+            // own gate holds; neither displaces the other (Counterbalance).
+            (Some(reflexive), Some(guard)) if reflexive.is_optional_effect_performed() => {
+                Some(AbilityCondition::And {
+                    conditions: vec![reflexive, guard],
+                })
+            }
+            // Preserve the established specialized-condition precedence for the
+            // remaining non-marker reflexive connectors (for example "if they
+            // don't").
             (_, Some(guard)) => Some(guard),
             (Some(reflexive), None) => Some(reflexive),
             (None, None) => None,

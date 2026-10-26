@@ -4,7 +4,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while};
 use nom::character::complete::{char, multispace0, satisfy};
-use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value, verify};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -20,8 +20,10 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{
-    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_zone_word,
-    peek_zone_boundary, slot_matches_anaphor, slot_zone_class, AnaphorNoun, AnaphorZoneClass,
+    parse_cost_paid_object_reference, parse_cost_paid_participle_object, parse_shared_quality,
+    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    parse_word_bounded, parse_zone_word, peek_zone_boundary, slot_matches_anaphor, slot_zone_class,
+    AnaphorNoun, AnaphorZoneClass,
 };
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 #[cfg(test)]
@@ -39,8 +41,8 @@ use crate::types::ability::{
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
     CoinFlipResult, Comparator, ControllerRef, CountScope, DamageChannel, DigSource, Duration,
     Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SpentColor, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -4064,6 +4066,121 @@ pub(super) fn strip_superlative_target_conditional(
     (None, text.to_string())
 }
 
+/// CR 608.2c + CR 202.3: Strip a trailing "<instruction> if it has the same
+/// <quality> as <object>" rider (Counterbalance, Hisoka, Minamo Sensei) into
+/// `AbilityCondition::ObjectsShareQuality`. A sibling of the spell-target
+/// gates: it runs under a reflexive "If you do" connector, and "it" names the
+/// object the gated instruction acts on. Only single-object references are
+/// owned ("the revealed card", a cost-paid object); existential references
+/// ("as a permanent", "as a card in your graveyard") are a different
+/// condition and are left untouched.
+pub(super) fn strip_same_quality_as_conditional(
+    text: &str,
+    ctx: &ParseContext,
+) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    let Some(if_pos) = find_trailing_condition_start(&lower) else {
+        return (None, text.to_string());
+    };
+    let Ok((_, (quality, reference))) = all_consuming(terminated(
+        |i| parse_same_quality_as_predicate(i, ctx),
+        (opt(tag(".")), multispace0),
+    ))
+    .parse(&lower[if_pos + " if ".len()..]) else {
+        return (None, text.to_string());
+    };
+    let body = text[..if_pos].trim();
+    let Some(subject) = trailing_rider_subject(body, ctx) else {
+        return (None, text.to_string());
+    };
+    (
+        Some(AbilityCondition::ObjectsShareQuality {
+            subject,
+            reference,
+            quality,
+        }),
+        body.to_string(),
+    )
+}
+
+/// CR 608.2c + CR 202.3: "it has the same <quality> as <object>" — the
+/// predicate of a trailing same-quality rider.
+fn parse_same_quality_as_predicate<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (SharedQuality, TargetFilter)> {
+    let (rest, _) = parse_word_bounded(input, "it")?;
+    let (rest, _) = tag(" has the same ").parse(rest)?;
+    let (rest, quality) = verify(parse_shared_quality, quality_reads_as_the_same).parse(rest)?;
+    let (rest, _) = tag(" as ").parse(rest)?;
+    let (rest, reference) = parse_same_quality_reference(rest, ctx)?;
+    Ok((rest, (quality, reference)))
+}
+
+/// CR 201.2a + CR 202.3 + CR 208.1: qualities Oracle text compares with "has
+/// the same <quality> as" — each names one value per object (two objects have
+/// the same name when they have a name in common). Multi-valued qualities
+/// (color, types) are compared with "shares" wording instead.
+fn quality_reads_as_the_same(quality: &SharedQuality) -> bool {
+    match quality {
+        SharedQuality::Name
+        | SharedQuality::ManaValue
+        | SharedQuality::Power
+        | SharedQuality::Toughness
+        | SharedQuality::TotalPowerToughness => true,
+        SharedQuality::CreatureType
+        | SharedQuality::Color
+        | SharedQuality::CardType
+        | SharedQuality::PermanentType
+        | SharedQuality::LandType => false,
+    }
+}
+
+/// CR 701.20a + CR 608.2k: the closed set of single-object references a
+/// same-quality rider compares against. "the revealed card" is the card the
+/// ability revealed earlier (`LastRevealed`). A cost participle ("the
+/// discarded card", "the sacrificed creature", and "the exiled card" only when
+/// the ability has an exile cost) is the object paid for this ability's cost
+/// (`CostPaidObject`); a triggered ability has no cost, so cost participles are
+/// declined there. Any other phrase ("that card", "a permanent") is not owned.
+fn parse_same_quality_reference<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let cost_paid_reference = |i: &'a str| -> OracleResult<'a, TargetFilter> {
+        if ctx.in_trigger {
+            return Err(oracle_err(i));
+        }
+        alt((
+            value(
+                TargetFilter::CostPaidObject,
+                parse_cost_paid_participle_object,
+            ),
+            |i| parse_cost_paid_object_reference(i, ctx),
+        ))
+        .parse(i)
+    };
+    alt((
+        value(TargetFilter::LastRevealed, tag("the revealed card")),
+        cost_paid_reference,
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c: "it" in a trailing rider names the object the gated instruction
+/// acts on — its single-object anaphor verbatim ("that spell" → the trigger's
+/// spell), or the instruction's declared target (`ParentTarget`). `None` when
+/// the instruction acts on no single object.
+fn trailing_rider_subject(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    match effect_target_filter(effect_text, ctx)? {
+        filter if super::subject::is_single_object_ref(&filter) => Some(filter),
+        filter if !filter.is_context_ref() && !matches!(filter, TargetFilter::Any) => {
+            Some(TargetFilter::ParentTarget)
+        }
+        _ => None,
+    }
+}
+
 /// Parse the body of a leading mana-value conditional — "`<N>` or less/greater, [effect]" —
 /// and compute the body offset into `original`. `use_lki` is threaded into the constructed
 /// `TargetMatchesFilter` condition: past-tense ("was") callers pass `true` (CR 400.7 — LKI
@@ -4584,11 +4701,15 @@ pub(super) fn strip_routed_suffix_conditional(
 /// filter is a player-chosen target (not a context reference or the untyped
 /// `Any` fallback). Parses on a throwaway context so the caller's is untouched.
 fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
-    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    clause
-        .effect
-        .target_filter()
+    effect_target_filter(effect_text, ctx)
         .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
+}
+
+/// The typed target filter of the effect `effect_text` lowers to, parsed on a
+/// throwaway context so the caller's is untouched.
+fn effect_target_filter(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    clause.effect.target_filter().cloned()
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -11487,6 +11608,139 @@ mod tests {
             ))),
             "aggregate filter should be creatures on the battlefield, got {filter:?}"
         );
+    }
+
+    /// CR 608.2c + CR 202.3 + CR 201.2a + CR 208.1: the trailing same-quality
+    /// rider lowers to `ObjectsShareQuality` across the quality axis (name, mana
+    /// value, power, toughness) and the reference axis ("the revealed card" →
+    /// `LastRevealed`; a cost participle → `CostPaidObject`). "it" is the
+    /// instruction's declared target (`ParentTarget`).
+    #[test]
+    fn strip_same_quality_as_conditional_covers_quality_and_reference_axes() {
+        let ctx = ParseContext::default();
+        for (quality_text, quality) in [
+            ("name", SharedQuality::Name),
+            ("mana value", SharedQuality::ManaValue),
+            ("power", SharedQuality::Power),
+            ("toughness", SharedQuality::Toughness),
+        ] {
+            for (reference_text, reference) in [
+                ("the revealed card", TargetFilter::LastRevealed),
+                ("the discarded card", TargetFilter::CostPaidObject),
+                ("the sacrificed creature", TargetFilter::CostPaidObject),
+            ] {
+                let text = format!(
+                    "Counter target spell if it has the same {quality_text} as {reference_text}."
+                );
+                let (condition, body) = strip_same_quality_as_conditional(&text, &ctx);
+                assert_eq!(body, "Counter target spell", "{text}");
+                assert_eq!(
+                    condition,
+                    Some(AbilityCondition::ObjectsShareQuality {
+                        subject: TargetFilter::ParentTarget,
+                        reference: reference.clone(),
+                        quality: quality.clone(),
+                    }),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2k: "the exiled card" names the cost-paid object only when the
+    /// ability has an exile cost. Reach guard for the no-exile-cost decline.
+    #[test]
+    fn strip_same_quality_as_conditional_exiled_card_with_exile_cost() {
+        let ctx = ParseContext {
+            current_ability_exile_cost_zone: Some(Zone::Graveyard),
+            ..Default::default()
+        };
+        let (condition, body) = strip_same_quality_as_conditional(
+            "Counter target spell if it has the same mana value as the exiled card.",
+            &ctx,
+        );
+        assert_eq!(body, "Counter target spell");
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::ObjectsShareQuality {
+                subject: TargetFilter::ParentTarget,
+                reference: TargetFilter::CostPaidObject,
+                quality: SharedQuality::ManaValue,
+            })
+        );
+    }
+
+    /// The stripper declines every shape outside the single-object class and
+    /// returns the text unchanged. Each decline is paired with a positive
+    /// sibling that differs only in the declined axis.
+    #[test]
+    fn strip_same_quality_as_conditional_declines_outside_the_class() {
+        let default_ctx = ParseContext::default();
+        let trigger_ctx = ParseContext {
+            in_trigger: true,
+            ..Default::default()
+        };
+        let declined: [(&str, &ParseContext); 6] = [
+            // Multi-valued quality: compared with "shares", not "has the same".
+            (
+                "Counter target spell if it has the same color as the revealed card.",
+                &default_ctx,
+            ),
+            // Existential reference (Retraced Image, verbatim).
+            (
+                "Reveal a card in your hand, then put that card onto the battlefield if it has the same name as a permanent.",
+                &default_ctx,
+            ),
+            // Jester's Scepter's effect (verbatim): "that card" is not owned.
+            (
+                "Counter target spell if it has the same name as that card.",
+                &default_ctx,
+            ),
+            // A triggered ability has no cost to have discarded a card for.
+            (
+                "Counter target spell if it has the same mana value as the discarded card.",
+                &trigger_ctx,
+            ),
+            // "exiled" is an effect participle without an exile cost.
+            (
+                "Counter target spell if it has the same mana value as the exiled card.",
+                &default_ctx,
+            ),
+            // No object for "it".
+            (
+                "Draw a card if it has the same name as the revealed card.",
+                &default_ctx,
+            ),
+        ];
+        for (text, ctx) in declined {
+            let (condition, body) = strip_same_quality_as_conditional(text, ctx);
+            assert_eq!(condition, None, "{text}");
+            assert_eq!(body, text, "{text}");
+        }
+
+        // Positive siblings (reach guards): the same predicate with "the
+        // revealed card" is claimed under both contexts, so each decline above
+        // is decided by its declined axis, not an upstream short-circuit.
+        for ctx in [&default_ctx, &trigger_ctx] {
+            for quality_text in ["name", "mana value"] {
+                let text = format!(
+                    "Counter target spell if it has the same {quality_text} as the revealed card."
+                );
+                let (condition, body) = strip_same_quality_as_conditional(&text, ctx);
+                assert!(
+                    matches!(
+                        condition,
+                        Some(AbilityCondition::ObjectsShareQuality {
+                            subject: TargetFilter::ParentTarget,
+                            reference: TargetFilter::LastRevealed,
+                            ..
+                        })
+                    ),
+                    "{text}: {condition:?}"
+                );
+                assert_eq!(body, "Counter target spell", "{text}");
+            }
+        }
     }
 
     #[test]

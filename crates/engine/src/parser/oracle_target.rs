@@ -7806,24 +7806,47 @@ fn parse_mana_value_reference_qty(
 fn parse_cost_paid_mana_value_reference(
     input: &str,
 ) -> super::oracle_nom::error::OracleResult<'_, QuantityRef> {
-    let (rest, _) = opt(tag("the ")).parse(input)?;
-    let (rest, _) = alt((tag("discarded "), tag("sacrificed "))).parse(rest)?;
-    let (rest, _) = alt((
-        tag("creature"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ))
-    .parse(rest)?;
-    Ok((
-        rest,
+    value(
         QuantityRef::ObjectManaValue {
             scope: ObjectScope::CostPaidObject,
         },
-    ))
+        parse_cost_paid_participle_object,
+    )
+    .parse(input)
+}
+
+/// CR 608.2k: the object noun of a cost participle phrase ("the sacrificed
+/// creature", "the discarded card"). The single vocabulary shared by every
+/// reader of an object paid for an ability's cost.
+pub(crate) fn parse_cost_paid_object_noun(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("creature"),
+            tag("card"),
+            tag("permanent"),
+            tag("artifact"),
+            tag("enchantment"),
+            tag("planeswalker"),
+            tag("land"),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 608.2k + CR 701.9a: "the discarded <noun>" / "the sacrificed <noun>" —
+/// an untargeted reference to the object discarded or sacrificed to pay this
+/// ability's cost. Both participles are always cost participles here.
+pub(crate) fn parse_cost_paid_participle_object(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            opt(tag("the ")),
+            alt((tag("discarded "), tag("sacrificed "))),
+            parse_cost_paid_object_noun,
+        ),
+    )
+    .parse(input)
 }
 
 fn parse_bare_any_counter_suffix(input: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
@@ -8815,7 +8838,7 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
 /// table, which keeps "the exiled card" → `TrackedSet` for the common
 /// effect-exile case.
-fn parse_cost_paid_object_reference<'a>(
+pub(crate) fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
 ) -> nom::IResult<&'a str, TargetFilter, OracleError<'a>> {
@@ -8826,16 +8849,7 @@ fn parse_cost_paid_object_reference<'a>(
         nom::combinator::verify(tag("exiled "), |_: &str| exile_is_cost),
     ))
     .parse(rest)?;
-    let (rest, _) = alt((
-        tag("creature"),
-        tag("card"),
-        tag("permanent"),
-        tag("artifact"),
-        tag("enchantment"),
-        tag("planeswalker"),
-        tag("land"),
-    ))
-    .parse(rest)?;
+    let (rest, _) = parse_cost_paid_object_noun(rest)?;
     Ok((rest, TargetFilter::CostPaidObject))
 }
 

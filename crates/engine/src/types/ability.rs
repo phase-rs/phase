@@ -30554,10 +30554,14 @@ pub enum AbilityCondition {
     },
     /// CR 608.2c + CR 201.2: Compare whether two anaphoric object references
     /// share at least one value of the named quality at resolution time.
-    /// Covers "if it shares a card type with that permanent" (Amareth) and the
-    /// full `SharedQuality` axis (color, creature type, name, mana value, etc.).
-    /// `subject` and `reference` are resolved via `resolved_targets` — typical
-    /// pairings are `LastRevealed` × `TriggeringSource`.
+    /// Covers "if it shares a card type with that permanent" (Amareth), the
+    /// trailing "<instruction> if it has the same <quality> as <object>" rider
+    /// (Counterbalance, Hisoka, Minamo Sensei) and the full `SharedQuality`
+    /// axis (color, creature type, name, mana value, etc.). `subject` and
+    /// `reference` are resolved via `resolved_targets` — typical pairings are
+    /// `LastRevealed` × `TriggeringSource` — except a `CostPaidObject` operand,
+    /// which CR 608.2k + CR 608.2h read from the cost snapshot's last known
+    /// information.
     ObjectsShareQuality {
         subject: TargetFilter,
         reference: TargetFilter,
