@@ -24671,7 +24671,7 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub control_change_captures: BTreeMap<u64, crate::types::events::ControlChangeLink>,
     /// The next `control_change_captures` key.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_capture_id: u64,
     /// CR 603.10d: every published control change's immediately-before
     /// observation, keyed by the id its `ControllerChanged` event carries
@@ -24685,7 +24685,7 @@ declare_game_state! {
     pub control_change_observations:
         BTreeMap<u64, crate::types::events::ControlChangeObservation>,
     /// The next `control_change_observations` key.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_observation_id: u64,
 
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
