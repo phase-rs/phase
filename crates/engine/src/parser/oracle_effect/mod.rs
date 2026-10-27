@@ -24664,6 +24664,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         if matches!(
             ast,
             ShuffleImperativeAst::ChangeZoneAllToLibrary { .. }
+                | ShuffleImperativeAst::SelfAndZonesToLibrary { .. }
                 | ShuffleImperativeAst::TargetedChangeZoneToLibrary { all: true, .. }
         ) {
             return Some(lower_shuffle_ast(ast));

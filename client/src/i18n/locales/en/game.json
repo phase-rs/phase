@@ -1369,7 +1369,8 @@
     "passwordPrompt": "This room requires a password:",
     "toasts": {
       "connectionFailed": "Connection failed. Retry or change server in Settings.",
-      "eliminatedSpectating": "You have been eliminated. Now spectating."
+      "eliminatedSpectating": "You have been eliminated. Now spectating.",
+      "retainedTerminalUnreadable": "Retained terminal delivery could not be read"
     },
     "resumeReset": {
       "appUpdated": "The app was updated and your saved game is incompatible with the new version.",

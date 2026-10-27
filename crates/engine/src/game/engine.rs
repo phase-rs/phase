@@ -12558,7 +12558,11 @@ fn apply_non_priority_pass_action(
 
     // CR 608.2g: whether this action answers a step of a spell being cast or
     // an ability being activated — see the resolution settle below the match.
-    let answers_a_cast_step = state.waiting_for.has_pending_cast();
+    // CR 709.3 / CR 712.11b: choosing which half or face to cast is a step of
+    // that cast, made before it is put onto the stack and before any
+    // `PendingCast` exists.
+    let answers_a_cast_step = state.waiting_for.has_pending_cast()
+        || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -12976,38 +12980,43 @@ fn apply_non_priority_pass_action(
                     },
                     &mut events,
                 );
-                if result.is_err() {
-                    if let Some(object) = resolution_object_before {
-                        state.objects.insert(*object_id, object);
+                match result {
+                    // CR 608.2g: the elected face's cast continues through the
+                    // shared post-action seam below, which finishes the
+                    // still-resolving parent once the cast leaves priority.
+                    Ok(waiting_for) => waiting_for,
+                    Err(error) => {
+                        if let Some(object) = resolution_object_before {
+                            state.objects.insert(*object_id, object);
+                        }
+                        return Err(error);
                     }
                 }
-                return result.map(|waiting_for| {
-                    ActionResult::applied(std::mem::take(&mut events), waiting_for)
-                });
-            }
-            // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
-            // type. A land face is put onto the battlefield via the play-land
-            // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
-            // // The Prismatic Bridge). After a swap
-            // the new back_face (from snapshot_object_face) has layout_kind: None,
-            // and a front-face choice clears it explicitly — so neither the
-            // both-faces-land intercept nor the spell-face intercept re-fires.
-            let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
-                obj.card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-            });
-            if active_is_land {
-                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
             } else {
-                casting::handle_cast_spell_with_payment_mode(
-                    state,
-                    *player,
-                    *object_id,
-                    *card_id,
-                    *payment_mode,
-                    &mut events,
-                )?
+                // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
+                // type. A land face is put onto the battlefield via the play-land
+                // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
+                // // The Prismatic Bridge). After a swap
+                // the new back_face (from snapshot_object_face) has layout_kind: None,
+                // and a front-face choice clears it explicitly — so neither the
+                // both-faces-land intercept nor the spell-face intercept re-fires.
+                let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
+                    obj.card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                });
+                if active_is_land {
+                    handle_play_land(state, *player, *object_id, *card_id, &mut events)?
+                } else {
+                    casting::handle_cast_spell_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
             }
         }
         // CR 118.9: Player chooses between the printed mana cost and the

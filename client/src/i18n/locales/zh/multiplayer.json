@@ -352,5 +352,10 @@
     "ownTitle": "已请求悔棋",
     "requestedMessage": "要将牌局回退到其最后一步行动之前吗？",
     "requestedTitle": "{{name}} 请求悔棋"
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "认输已进入 Full 终局状态，但无法发布原生最终视图。",
+    "concedeUnreconciled": "无法核对认输结果；该席位仍处于锁定状态。",
+    "receiptUnsent": "无法发送持久的终局回执；正在等待重新投递"
   }
 }

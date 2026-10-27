@@ -20,8 +20,8 @@ use crate::types::ability::{
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
     ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
-    VoterScope,
+    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
+    VoteVisibility, VoterScope,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -94909,4 +94909,131 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         );
         assert!(unimplemented, "{text}: {def:?}");
     }
+}
+
+/// CR 701.24c + CR 400.6: "Shuffle ~ and your graveyard into their owner's
+/// library" moves the source and the WHOLE graveyard (Elixir of Immortality),
+/// not a single chosen graveyard card.
+#[test]
+fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
+}
+
+/// CR 701.24c + CR 400.6: "Shuffle this artifact and your graveyard into their owner's library"
+/// recognizes "this artifact" via `nom_target::parse_self_reference` without requiring `~` normalization.
+#[test]
+fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle this artifact and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+}
+
+/// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's
+/// library" preserves the parsed possessor as `TargetFilter::Owner` in `ChangeZoneAll`.
+#[test]
+fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and its owner's graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Owner,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
 }

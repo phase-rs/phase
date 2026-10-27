@@ -4928,6 +4928,20 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
     )
 }
 
+/// CR 601.2a-h: the object of the spell whose casting is in progress, if any —
+/// its face election (`ModalFaceChoice`, before any `PendingCast` exists), or
+/// the announcement held by any live `PendingCastOwner`.
+fn spell_cast_in_flight(state: &GameState) -> Option<ObjectId> {
+    match &state.waiting_for {
+        WaitingFor::ModalFaceChoice { object_id, .. } => Some(*object_id),
+        _ => state
+            .live_pending_cast_owners()
+            .first()
+            .and_then(|owner| state.pending_cast_at(*owner))
+            .map(|pending| pending.object_id),
+    }
+}
+
 /// CR 603.10 + CR 608.2c: `next` is about to run inline. When it begins a later instruction,
 /// every entry an earlier instruction completed is observed now, before `next` can change the
 /// entrant (counters a later instruction puts on it, CR 608.2c; "then attach", CR 702.92a).
@@ -12110,6 +12124,7 @@ struct LegacyEffectBoundary {
     frame_count: usize,
     continuation: Option<PendingContinuation>,
     discard: Option<DiscardFrameId>,
+    cast_in_flight: Option<ObjectId>,
 }
 
 impl LegacyEffectBoundary {
@@ -12149,11 +12164,23 @@ impl LegacyEffectBoundary {
                 .resolution_stack
                 .active_discard()
                 .map(|frame| frame.id),
+            cast_in_flight: spell_cast_in_flight(state),
         }
     }
 
     fn classify(self, state: &GameState, ability: &ResolvedAbility) -> ResolutionProgress {
         if waits_for_resolution_choice(&state.waiting_for) {
+            return ResolutionProgress::Waiting;
+        }
+        // CR 608.2g + CR 601.2c + CR 608.2c: a spell this invocation began
+        // casting during resolution (`casting::initiate_cast_during_resolution`)
+        // is still being cast while it asks its caster for a face, targets, or
+        // costs. Casting it is part of this instruction, so the next one ("Then
+        // put the exiled cards that weren't cast this way on the bottom" —
+        // Chaos Wand) waits until the spell is on the stack or the cast is
+        // withdrawn. A cast already in flight when this invocation began (a
+        // mana ability activated while paying for it) is not this invocation's.
+        if spell_cast_in_flight(state).is_some_and(|cast| Some(cast) != self.cast_in_flight) {
             return ResolutionProgress::Waiting;
         }
         // CR 701.9a + CR 608.2c: Recruit retains a settled domain result until
