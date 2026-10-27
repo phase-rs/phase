@@ -9111,9 +9111,10 @@ pub(crate) fn filter_contains_filter_prop(
 }
 
 /// One node of the filter grammar as the grammar walkers below reach it: a
-/// `TargetFilter` at its entry, or a `FilterProp` at its entry. Private: the
-/// walkers are generic over what a caller looks for, and each public entry
-/// above names the node kind it tests.
+/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
+/// generic over what a caller looks for; each entry that calls them names the
+/// node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family).
 #[derive(Clone, Copy)]
 pub(crate) enum FilterGrammarNode<'a> {
     Filter(&'a TargetFilter),
