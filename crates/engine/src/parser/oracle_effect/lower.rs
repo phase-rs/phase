@@ -11227,7 +11227,7 @@ pub(super) fn compute_sentence_leading_duration(chunks: &[ClauseChunk]) -> Vec<O
 
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
     for needle in [", where x is ", " where x is "] {
-        if let Some((before, after)) = tp.split_around(needle) {
+        if let Some((before, after)) = tp.split_around_outside_quotes(needle) {
             // CR 608.2c: A where-X binding can precede further instructions in
             // the same resolution. Bound the expression structurally, not by
             // enumerating the verbs that may start the next instruction.
@@ -11727,7 +11727,9 @@ fn parse_where_x_quantity_with_owner(
         .parse(lower.as_str())
         .is_ok()
     {
-        return None;
+        return nom_quantity::parse_quantity_ref_complete(lower.as_str())
+            .ok()
+            .map(|(_, qty)| QuantityExpr::Ref { qty });
     }
     // CR 608.2c + CR 115.10a + CR 202.3: "that card's mana value" in a "where X
     // is …" binding is anaphoric, not targeted. The revealed/looked-at card is
@@ -12110,6 +12112,25 @@ pub(crate) fn apply_where_x_quantity_expression(
                 where_x_expression,
             )?),
         },
+        QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(mut aggregate),
+        } => {
+            let mut unbound = None;
+            let complete = aggregate.source_mut().try_for_each_member_mut(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |source| {
+                    if let CardTypeSetSource::Objects { filter } = source {
+                        bind_where_x_filter(filter, where_x_expression, &mut unbound);
+                    }
+                },
+            );
+            if !complete || unbound.is_some() {
+                return None;
+            }
+            QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(aggregate),
+            }
+        }
         other => other,
     })
 }
@@ -12212,6 +12233,11 @@ pub(super) fn apply_where_x_effect_expression(
     let mut unbound_where_x: Option<String> = None;
     let mut unbound_prevention_where_x: Option<String> = None;
     match effect {
+        Effect::Mana { produced, .. } => {
+            produced.for_each_quantity_expr_mut(&mut |amount| {
+                bind_where_x_quantity(amount, where_x_expression, &mut unbound_where_x);
+            });
+        }
         Effect::DealDamage { amount, .. }
         | Effect::DamageAll { amount, .. }
         | Effect::DamageEachPlayer { amount, .. }
@@ -12434,7 +12460,9 @@ pub(super) fn apply_where_x_effect_expression(
                 bind_where_x_quantity(count, where_x_expression, &mut unbound_where_x);
             }
         }
-        Effect::Destroy { target, .. } | Effect::Bounce { target, .. } => {
+        Effect::Destroy { target, .. }
+        | Effect::Bounce { target, .. }
+        | Effect::Counter { target, .. } => {
             bind_where_x_filter(target, where_x_expression, &mut unbound_where_x);
         }
         // `BounceAll` carries an optional count ("return X target creatures …") beside its
@@ -12679,17 +12707,20 @@ fn where_x_binds_to_placeholder(expression: &str) -> bool {
     )
 }
 
-/// Does an unbound `QuantityRef::Variable { name: "X" }` survive anywhere in `effect`?
-///
-/// Uses the key-anchored typed-evidence probe (`QUANTITY_KEYS`) rather than a
-/// hand-rolled 64-variant visitor: a value reached through a quantity key IS a quantity
-/// by construction, so no cross-enum name collision is reachable. `QuantityRef` must
-/// never be probed unanchored — ten of its variant names are shared with other
-/// internally-tagged enums (see `swallow_evidence`).
+/// Does an unbound X survive in this resolution's quantities? Registered later
+/// programs are checked when their own definitions are lowered. Their independent
+/// X must neither invalidate this registration nor inherit its binding.
 fn effect_retains_unbound_x(effect: &Effect) -> bool {
-    crate::parser::swallow_evidence::UnitEvidence::of_effect(effect).any_quantity_ref(
-        |qty| matches!(qty, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X")),
-    )
+    use crate::types::ability_visit::{visit_effect_scoped, ResolutionScope};
+    let mut unbound = false;
+    let _ = visit_effect_scoped(effect, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        effect.for_each_quantity_ref(&mut |qty| {
+            unbound |=
+                matches!(qty, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X"));
+        });
+        std::ops::ControlFlow::Continue(())
+    });
+    unbound
 }
 
 /// CR 107.3i + CR 611.2c: Substitute a "where X is <expression>" binding into a
@@ -13431,6 +13462,10 @@ pub(super) fn apply_where_x_ability_expression(
     // effectively unbounded.
     for constraint in def.target_constraints.iter_mut() {
         apply_where_x_to_target_constraint(constraint, where_x_expression, &mut unbound_where_x);
+    }
+    if let Some(payment) = def.unless_pay.as_mut() {
+        apply_where_x_to_ability_cost(&mut payment.cost, where_x_expression, &mut unbound_where_x);
+        bind_where_x_filter(&mut payment.payer, where_x_expression, &mut unbound_where_x);
     }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     // CR 107.3c: the clause defines X, but we cannot represent that definition.
@@ -17797,6 +17832,72 @@ mod dq_d_player_set_lift_tests {
 mod jev_seek_binder_tests {
     use super::*;
     use crate::types::zones::EtbTapState;
+
+    #[test]
+    fn where_x_quoted_emblem_tail_stays_with_its_own_program() {
+        let text = "You get an emblem with \"Whenever you cast a red spell, this emblem deals X damage to any target, where X is the amount of mana spent to cast that spell.\"";
+        let lower = text.to_lowercase();
+        let (outer, binding) = strip_trailing_where_x(TextPair::new(text, &lower));
+        assert_eq!(outer.original, text);
+        assert_eq!(binding, None);
+        let inner = "this emblem deals X damage to any target, where X is the amount of mana spent to cast that spell.";
+        let lower = inner.to_lowercase();
+        let (_, binding) = strip_trailing_where_x(TextPair::new(inner, &lower));
+        assert_eq!(
+            binding.as_deref(),
+            Some("the amount of mana spent to cast that spell")
+        );
+    }
+
+    #[test]
+    fn where_x_bound_mana_is_idempotent_and_does_not_inherit_a_later_definition() {
+        let mut definition = super::super::parse_effect_chain(
+            "Add X mana of any one color, where X is the amount of life you gained this turn.",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(definition.effect.as_ref(), Effect::Mana { .. }));
+        let bound = definition.clone();
+        for expression in [
+            "the amount of life you gained this turn",
+            "the number of creatures you control",
+            "an unknown quantity",
+        ] {
+            apply_where_x_ability_expression(&mut definition, Some(expression));
+            assert_eq!(
+                definition, bound,
+                "already bound quantities must remain owned: {expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn where_x_descended_uses_complete_quantity_grammar_without_accepting_unknown_events() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the number of times you descended this turn"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeCountThisTurn {
+                    from: None,
+                    to: Some(Zone::Graveyard),
+                    filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                        FilterProp::NonToken,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You
+                        },
+                    ])),
+                },
+            })
+        );
+        for unknown in [
+            "the number of times you winked this turn",
+            "the number of times you descended this turn plus an unknown amount",
+        ] {
+            assert_eq!(
+                parse_where_x_quantity_expression(unknown),
+                None,
+                "{unknown}"
+            );
+        }
+    }
 
     #[test]
     fn jev_existing_where_x_binder_rewrites_seek_filter_and_count() {

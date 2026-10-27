@@ -3924,8 +3924,31 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         if let Some(ref sub) = clause_sub {
             current_defs.push(*sub.clone());
         }
+        let mut token_antecedent = defs
+            .last()
+            .map(|previous: &AbilityDefinition| previous.effect.as_ref());
+        let local_where_x = clause_ir.source.fragment().and_then(|fragment| {
+            let lower = fragment.to_lowercase();
+            super::lower::strip_trailing_where_x(crate::parser::oracle_util::TextPair::new(
+                fragment, &lower,
+            ))
+            .1
+        });
         for current in &mut current_defs {
+            // Resolve the anaphoric constructor before binding this clause's X.
+            // The later whole-chain pass no longer has its peeled where-clause.
+            if let Some(antecedent) = token_antecedent {
+                rewrite_those_tokens_from_antecedent(current.effect.as_mut(), antecedent);
+            }
+            // Only this instruction's own tail defines its delayed body's X.
+            // A sentence-inherited outer binding must not cross this boundary.
+            if let (Effect::CreateDelayedTrigger { effect: body, .. }, Some(expression)) =
+                (current.effect.as_mut(), local_where_x.as_deref())
+            {
+                apply_where_x_ability_expression(body, Some(expression));
+            }
             apply_where_x_ability_expression(current, clause_ir.where_x_expression.as_deref());
+            token_antecedent = Some(current.effect.as_ref());
         }
 
         // CR 615.5 + CR 609.7: In a "damage is prevented this way" rider, the

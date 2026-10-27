@@ -55,6 +55,675 @@ const PRINTED: &[&str] = &[
     r###"{"name":"The Unspeakable","manaCost":"{6}{U}{U}{U}","manaValue":9,"type":"Legendary Creature — Spirit","types":["Creature"],"subtypes":["Spirit"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"6","toughness":"7","layout":"normal","text":"Flying, trample\nWhenever The Unspeakable deals combat damage to a player, you may return target Arcane card from your graveyard to your hand.","keywords":["Flying","Trample"],"identifiers":{"scryfallOracleId":"64e413c9-96e5-43c3-a182-84d53fef4327"}}"###,
 ];
 
+// Full Oracle faces from the same pinned MTGJSON, independent of exported fixtures.
+const QUANTITY_PRINTED: &[&str] = &[
+    r###"{"name":"Thassa's Rebuff","manaCost":"{1}{U}","manaValue":2.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Counter target spell unless its controller pays {X}, where X is your devotion to blue. (Each {U} in the mana costs of permanents you control counts toward your devotion to blue.)","identifiers":{"scryfallOracleId":"bc5d9899-1a1c-4779-b9f0-b00f2c233699"}}"###,
+    r###"{"name":"Mona Lisa, Science Geek","manaCost":"{2}{G}","manaValue":3.0,"type":"Legendary Creature — Lizard Mutant","types":["Creature"],"subtypes":["Lizard","Mutant"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"power":"1","toughness":"3","layout":"normal","text":"Reach\n{T}: Add X mana of any one color, where X is Mona Lisa's power.","keywords":["Reach"],"identifiers":{"scryfallOracleId":"e6490e98-37a9-4a8b-a04c-cceeb22b0c35"}}"###,
+    r###"{"name":"Lifestream's Blessing","manaCost":"{4}{G}{G}","manaValue":6.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"Draw X cards, where X is the greatest power among creatures you controlled as you cast this spell. If this spell was cast from exile, you gain twice X life.\nForetell {4}{G} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)","keywords":["Foretell"],"identifiers":{"scryfallOracleId":"7cbdba72-ed33-40c6-a9c0-4d65c280a4d0"}}"###,
+    r###"{"name":"Xenagos, the Reveler","manaCost":"{2}{R}{G}","manaValue":4.0,"type":"Legendary Planeswalker — Xenagos","types":["Planeswalker"],"subtypes":["Xenagos"],"supertypes":["Legendary"],"colors":["G","R"],"colorIdentity":["G","R"],"loyalty":"3","layout":"normal","text":"[+1]: Add X mana in any combination of {R} and/or {G}, where X is the number of creatures you control.\n[0]: Create a 2/2 red and green Satyr creature token with haste.\n[−6]: Exile the top seven cards of your library. You may put any number of creature and/or land cards from among them onto the battlefield.","identifiers":{"scryfallOracleId":"942a318e-90eb-4f10-bb30-2e10f5cc922a"}}"###,
+    r###"{"name":"The Legend of Kyoshi // Avatar Kyoshi","faceName":"Avatar Kyoshi","side":"b","manaValue":6.0,"type":"Legendary Creature — Avatar","types":["Creature"],"subtypes":["Avatar"],"supertypes":["Legendary"],"colors":[],"colorIdentity":["G"],"power":"5","toughness":"4","layout":"transform","text":"Lands you control have trample and hexproof.\n{T}: Add X mana of any one color, where X is the greatest power among creatures you control.","keywords":["Earthbend","Transform"],"identifiers":{"scryfallOracleId":"e41e8754-028c-4399-b530-de9e134d04b0"}}"###,
+    r###"{"name":"The Eternity Elevator","manaCost":"{5}","manaValue":5.0,"type":"Legendary Artifact — Spacecraft","types":["Artifact"],"subtypes":["Spacecraft"],"supertypes":["Legendary"],"colors":[],"colorIdentity":[],"layout":"normal","text":"{T}: Add {C}{C}{C}.\nStation (Tap another creature you control: Put charge counters equal to its power on this Spacecraft. Station only as a sorcery.)\n20+ | {T}: Add X mana of any one color, where X is the number of charge counters on The Eternity Elevator.","keywords":["Station"],"identifiers":{"scryfallOracleId":"11323af4-b8b8-4ca9-932f-377c7fd77dea"}}"###,
+    r###"{"name":"Azor's Gateway // Sanctum of the Sun","faceName":"Sanctum of the Sun","side":"b","manaValue":2.0,"type":"Legendary Land","types":["Land"],"subtypes":[],"supertypes":["Legendary"],"colors":[],"colorIdentity":[],"layout":"transform","text":"(Transforms from Azor's Gateway.)\n{T}: Add X mana of any one color, where X is your life total.","keywords":["Transform"],"identifiers":{"scryfallOracleId":"c0cbb347-b060-43ce-a9c5-8c835be3cf1b"}}"###,
+    r###"{"name":"Ride the Avalanche","manaCost":"{G}{U}","manaValue":2.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["G","U"],"colorIdentity":["G","U"],"layout":"normal","text":"The next spell you cast this turn can be cast as though it had flash. When you next cast a spell this turn, put X +1/+1 counters on up to one target creature, where X is the mana value of that spell.","identifiers":{"scryfallOracleId":"d49c94fa-712a-47c0-b571-4db7e064a590"}}"###,
+    r###"{"name":"Accomplished Alchemist","manaCost":"{3}{G}","manaValue":4.0,"type":"Creature — Elf Druid","types":["Creature"],"subtypes":["Elf","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"5","layout":"normal","text":"{T}: Add one mana of any color.\n{T}: Add X mana of any one color, where X is the amount of life you gained this turn.","identifiers":{"scryfallOracleId":"97e18a8d-9068-4782-a744-280d28c68228"}}"###,
+    r###"{"name":"Empowered Autogenerator","manaCost":"{4}","manaValue":4.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"This artifact enters tapped.\n{T}: Put a charge counter on this artifact. Add X mana of any one color, where X is the number of charge counters on this artifact.","identifiers":{"scryfallOracleId":"6832f9e2-294a-44a2-8af9-eb16ccfdfc36"}}"###,
+    r###"{"name":"Food Chain","manaCost":"{2}{G}","manaValue":3.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"Exile a creature you control: Add X mana of any one color, where X is 1 plus the exiled creature's mana value. Spend this mana only to cast creature spells.","identifiers":{"scryfallOracleId":"5c8e5092-962e-49ef-ab82-8434e475e4e7"}}"###,
+    r###"{"name":"Baldur's Gate","manaValue":0.0,"type":"Legendary Land — Gate","types":["Land"],"subtypes":["Gate"],"supertypes":["Legendary"],"colors":[],"colorIdentity":[],"layout":"normal","text":"{T}: Add {C}.\n{2}, {T}: Add X mana of any one color, where X is the number of other Gates you control.","identifiers":{"scryfallOracleId":"da307ea2-4df7-4d6b-be0f-9dc6ac93db61"}}"###,
+    r###"{"name":"Sanctum Weaver","manaCost":"{1}{G}","manaValue":2.0,"type":"Enchantment Creature — Dryad","types":["Enchantment","Creature"],"subtypes":["Dryad"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"0","toughness":"2","layout":"normal","text":"{T}: Add X mana of any one color, where X is the number of enchantments you control.","identifiers":{"scryfallOracleId":"acfe7ec0-0606-4d5e-b1fa-25f0c7aeec47"}}"###,
+    r###"{"name":"Harabaz Druid","manaCost":"{1}{G}","manaValue":2.0,"type":"Creature — Human Druid Ally","types":["Creature"],"subtypes":["Human","Druid","Ally"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"0","toughness":"1","layout":"normal","text":"{T}: Add X mana of any one color, where X is the number of Allies you control.","identifiers":{"scryfallOracleId":"ead985ec-f29f-4a3b-b8b1-061142cc5bd1"}}"###,
+    r###"{"name":"Selvala, Heart of the Wilds","manaCost":"{1}{G}{G}","manaValue":3.0,"type":"Legendary Creature — Elf Scout","types":["Creature"],"subtypes":["Elf","Scout"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"3","layout":"normal","text":"Whenever another creature enters, its controller may draw a card if its power is greater than each other creature's power.\n{G}, {T}: Add X mana in any combination of colors, where X is the greatest power among creatures you control.","identifiers":{"scryfallOracleId":"1d725121-e50c-42f0-9128-56802f07c89e"}}"###,
+    r###"{"name":"Kami of Whispered Hopes","manaCost":"{2}{G}","manaValue":3.0,"type":"Creature — Spirit","types":["Creature"],"subtypes":["Spirit"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"1","toughness":"1","layout":"normal","text":"If one or more +1/+1 counters would be put on a permanent you control, that many plus one +1/+1 counters are put on that permanent instead.\n{T}: Add X mana of any one color, where X is this creature's power.","identifiers":{"scryfallOracleId":"f122624f-f30d-444e-a62a-939829241045"}}"###,
+    r###"{"name":"Doc Samson, Super Psychiatrist","manaCost":"{4}{G}","manaValue":5.0,"type":"Legendary Creature — Gamma Doctor Hero","types":["Creature"],"subtypes":["Gamma","Doctor","Hero"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"power":"3","toughness":"6","layout":"normal","text":"If you would put one or more counters on a permanent you control, put that many plus one of each of those kinds of counters on that permanent instead.\n{T}: Add X mana of any one color, where X is Doc Samson's power.","identifiers":{"scryfallOracleId":"699610c9-c991-4faf-b712-d015ef0799ad"}}"###,
+    r###"{"name":"Spellstutter Sprite","manaCost":"{1}{U}","manaValue":2.0,"type":"Creature — Faerie Wizard","types":["Creature"],"subtypes":["Faerie","Wizard"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"1","toughness":"1","layout":"normal","text":"Flash\nFlying\nWhen this creature enters, counter target spell with mana value X or less, where X is the number of Faeries you control.","keywords":["Flash","Flying"],"identifiers":{"scryfallOracleId":"32e60fb4-e841-4f82-9c83-5e63766e8e6f"}}"###,
+    r###"{"name":"Wirewood Channeler","manaCost":"{3}{G}","manaValue":4.0,"type":"Creature — Elf Druid","types":["Creature"],"subtypes":["Elf","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"2","layout":"normal","text":"{T}: Add X mana of any one color, where X is the number of Elves on the battlefield.","identifiers":{"scryfallOracleId":"8badfd34-9b63-4ada-8012-b8cddaf5b492"}}"###,
+    r###"{"name":"Arbor Adherent","manaCost":"{3}{G}","manaValue":4.0,"type":"Creature — Dog Druid","types":["Creature"],"subtypes":["Dog","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"4","layout":"normal","text":"{T}: Add one mana of any color.\n{T}: Add X mana of any one color, where X is the greatest toughness among other creatures you control.","identifiers":{"scryfallOracleId":"9640225a-8f31-495f-b9de-53ed348ff24b"}}"###,
+    r###"{"name":"The Mycotyrant","manaCost":"{1}{B}{G}","manaValue":3.0,"type":"Legendary Creature — Elder Fungus","types":["Creature"],"subtypes":["Elder","Fungus"],"supertypes":["Legendary"],"colors":["B","G"],"colorIdentity":["B","G"],"power":"*","toughness":"*","layout":"normal","text":"Trample\nThe Mycotyrant's power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.\nAt the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)","keywords":["Trample"],"identifiers":{"scryfallOracleId":"b69bbb8d-7f8c-45d6-983a-759b5fce6ebd"}}"###,
+    r###"{"name":"Matzalantli, the Great Door // The Core","faceName":"The Core","side":"b","manaValue":3.0,"type":"Legendary Land","types":["Land"],"subtypes":[],"supertypes":["Legendary"],"colors":[],"colorIdentity":[],"layout":"transform","text":"(Transforms from Matzalantli.)\nFathomless descent — {T}: Add X mana of any one color, where X is the number of permanent cards in your graveyard.","keywords":["Fathomless descent","Transform"],"identifiers":{"scryfallOracleId":"16182e01-22ff-4786-985d-919b47c4aa4d"}}"###,
+    r###"{"name":"Redshift, Rocketeer Chief","manaCost":"{R}{G}","manaValue":2.0,"type":"Legendary Creature — Goblin Pilot","types":["Creature"],"subtypes":["Goblin","Pilot"],"supertypes":["Legendary"],"colors":["G","R"],"colorIdentity":["G","R"],"power":"2","toughness":"3","layout":"normal","text":"Vigilance\n{T}: Add X mana of any one color, where X is Redshift's power. Spend this mana only to activate abilities.\nExhaust — {10}{R}{G}: Put any number of permanent cards from your hand onto the battlefield. (Activate each exhaust ability only once.)","keywords":["Exhaust","Vigilance"],"identifiers":{"scryfallOracleId":"582c7e54-d64c-4ffb-ae5f-d2752b3ed10b"}}"###,
+    r###"{"name":"Klauth, Unrivaled Ancient","manaCost":"{5}{R}{G}","manaValue":7.0,"type":"Legendary Creature — Dragon","types":["Creature"],"subtypes":["Dragon"],"supertypes":["Legendary"],"colors":["G","R"],"colorIdentity":["G","R"],"power":"4","toughness":"4","layout":"normal","text":"Flying, haste\nWhenever Klauth attacks, add X mana in any combination of colors, where X is the total power of attacking creatures. Spend this mana only to cast spells. Until end of turn, you don't lose this mana as steps and phases end.","keywords":["Flying","Haste"],"identifiers":{"scryfallOracleId":"8cefa5d6-5151-4e75-8b72-f210a4c751ea"}}"###,
+    r###"{"name":"Brigid, Clachan's Heart // Brigid, Doun's Mind","faceName":"Brigid, Doun's Mind","side":"b","manaValue":3.0,"type":"Legendary Creature — Kithkin Soldier","types":["Creature"],"subtypes":["Kithkin","Soldier"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G","W"],"power":"3","toughness":"2","layout":"transform","text":"{T}: Add X {G} or X {W}, where X is the number of other creatures you control.\nAt the beginning of your first main phase, you may pay {W}. If you do, transform Brigid.","keywords":["Transform"],"identifiers":{"scryfallOracleId":"60fc89a1-cc6f-4a32-84c3-09abf7a4a1df"}}"###,
+    r###"{"name":"Deathbloom Ritualist","manaCost":"{3}{B}{G}","manaValue":5.0,"type":"Creature — Elf Warlock","types":["Creature"],"subtypes":["Elf","Warlock"],"supertypes":[],"colors":["B","G"],"colorIdentity":["B","G"],"power":"3","toughness":"5","layout":"normal","text":"{T}: Add X mana of any one color, where X is the number of creature cards in your graveyard.","identifiers":{"scryfallOracleId":"b52148c3-fe97-4cc0-a814-a5a0f5d426f6"}}"###,
+    r###"{"name":"Chandra, Dressed to Kill","manaCost":"{1}{R}{R}","manaValue":3.0,"type":"Legendary Planeswalker — Chandra","types":["Planeswalker"],"subtypes":["Chandra"],"supertypes":["Legendary"],"colors":["R"],"colorIdentity":["R"],"loyalty":"3","layout":"normal","text":"[+1]: Add {R}. Chandra deals 1 damage to up to one target player or planeswalker.\n[+1]: Exile the top card of your library. If it's red, you may cast it this turn.\n[−7]: Exile the top five cards of your library. You may cast red spells from among them this turn. You get an emblem with \"Whenever you cast a red spell, this emblem deals X damage to any target, where X is the amount of mana spent to cast that spell.\"","identifiers":{"scryfallOracleId":"4686f776-2055-470c-bd99-7c4bb32902c0"}}"###,
+    r###"{"name":"Woodland Weavemaster","manaCost":"{1}{G}","manaValue":2.0,"type":"Creature — Elf Druid","types":["Creature"],"subtypes":["Elf","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"1","toughness":"2","layout":"normal","text":"Vigilance\nWhenever another Elf you control enters, this creature gets +1/+1 until end of turn.\n{T}: Add X mana of any one color, where X is this creature's power. Spend this mana only to cast Elf spells and activate abilities of Elf sources.","keywords":["Vigilance"],"identifiers":{"scryfallOracleId":"28ffddca-a3c4-467d-a2dc-2c5e62393e11"}}"###,
+    r###"{"name":"Carpet of Flowers","manaCost":"{G}","manaValue":1.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"At the beginning of each of your main phases, if you haven't added mana with this ability this turn, you may add X mana of any one color, where X is the number of Islands target opponent controls.","identifiers":{"scryfallOracleId":"2ffc6372-f63b-4f32-8dd0-2d7938aeb412"}}"###,
+    r###"{"name":"Runecarved Obelisk","manaCost":"{4}","manaValue":4.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"{T}: Add {C}{C}. Put two charge counters on Runecarved Obelisk.\n{T}, Sacrifice Runecarved Obelisk: Seek a card with the highest mana value among cards in your library with mana value X or less, where X is the number of charge counters on Runecarved Obelisk.","keywords":["Seek"],"identifiers":{"scryfallOracleId":"40bf6454-04a8-427c-b791-6d9afbdc43bc"}}"###,
+    r###"{"name":"Vivi Ornitier","manaCost":"{1}{U}{R}","manaValue":3.0,"type":"Legendary Creature — Wizard","types":["Creature"],"subtypes":["Wizard"],"supertypes":["Legendary"],"colors":["R","U"],"colorIdentity":["R","U"],"power":"0","toughness":"3","layout":"normal","text":"{0}: Add X mana in any combination of {U} and/or {R}, where X is Vivi Ornitier's power. Activate only during your turn and only once each turn.\nWhenever you cast a noncreature spell, put a +1/+1 counter on Vivi Ornitier and it deals 1 damage to each opponent.","identifiers":{"scryfallOracleId":"0452be2a-e97a-4269-a9e3-b616265ecb2e"}}"###,
+    r###"{"name":"Séance Board","manaCost":"{2}","manaValue":2.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"Morbid — At the beginning of each end step, if a creature died this turn, put a soul counter on this artifact.\n{T}: Add X mana of any one color, where X is the number of soul counters on this artifact. Spend this mana only to cast instant, sorcery, Demon, and Spirit spells.","keywords":["Morbid"],"identifiers":{"scryfallOracleId":"8331d2ff-3729-4014-8dcb-278644d2632a"}}"###,
+    r###"{"name":"Sanctum of Fruitful Harvest","manaCost":"{2}{G}","manaValue":3.0,"type":"Legendary Enchantment — Shrine","types":["Enchantment"],"subtypes":["Shrine"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"At the beginning of your first main phase, add X mana of any one color, where X is the number of Shrines you control.","identifiers":{"scryfallOracleId":"132859dd-de66-45c6-8af4-ab5e202a17b0"}}"###,
+    r###"{"name":"Axebane Guardian","manaCost":"{2}{G}","manaValue":3.0,"type":"Creature — Human Druid","types":["Creature"],"subtypes":["Human","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"0","toughness":"3","layout":"normal","text":"Defender\n{T}: Add X mana in any combination of colors, where X is the number of creatures you control with defender.","keywords":["Defender"],"identifiers":{"scryfallOracleId":"060e0378-e335-4b3d-82aa-ae36639339f6"}}"###,
+    r###"{"name":"Prismatic Geoscope","manaCost":"{5}","manaValue":5.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"This artifact enters tapped.\nDomain — {T}: Add X mana in any combination of colors, where X is the number of basic land types among lands you control.","keywords":["Domain"],"identifiers":{"scryfallOracleId":"be838f57-4e74-44ad-aee1-506e63b0ff37"}}"###,
+    r###"{"name":"Lotus Blossom","manaCost":"{2}","manaValue":2.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"At the beginning of your upkeep, you may put a petal counter on this artifact.\n{T}, Sacrifice this artifact: Add X mana of any one color, where X is the number of petal counters on this artifact.","identifiers":{"scryfallOracleId":"32e66ea0-5f35-4df8-8d00-580403c51bb5"}}"###,
+    r###"{"name":"Glittering Stockpile","manaCost":"{2}{R}","manaValue":3.0,"type":"Artifact — Treasure","types":["Artifact"],"subtypes":["Treasure"],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","text":"{T}: Add {R}. Put a stash counter on this artifact.\n{T}, Sacrifice this artifact: Add X mana of any one color, where X is the number of stash counters on this artifact.","identifiers":{"scryfallOracleId":"feaf9dcb-d845-4cf9-b35d-cd58175162e7"}}"###,
+    r###"{"name":"Burnt Offering","manaCost":"{B}","manaValue":1.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B","R"],"layout":"normal","text":"As an additional cost to cast this spell, sacrifice a creature.\nAdd X mana in any combination of {B} and/or {R}, where X is the sacrificed creature's mana value.","identifiers":{"scryfallOracleId":"86eb30a0-0beb-42db-9ddf-cf8be6c99dd3"}}"###,
+    r###"{"name":"Helga, Skittish Seer","manaCost":"{G}{W}{U}","manaValue":3.0,"type":"Legendary Creature — Frog Druid","types":["Creature"],"subtypes":["Frog","Druid"],"supertypes":["Legendary"],"colors":["G","U","W"],"colorIdentity":["G","U","W"],"power":"1","toughness":"3","layout":"normal","text":"Whenever you cast a creature spell with mana value 4 or greater, you draw a card, gain 1 life, and put a +1/+1 counter on Helga.\n{T}: Add X mana of any one color, where X is Helga's power. Spend this mana only to cast creature spells with mana value 4 or greater or creature spells with {X} in their mana costs.","identifiers":{"scryfallOracleId":"0a0d25a8-4f28-453b-9270-4d449fe0ca65"}}"###,
+    r###"{"name":"Heronblade Elite","manaCost":"{2}{G}","manaValue":3.0,"type":"Creature — Human Warrior","types":["Creature"],"subtypes":["Human","Warrior"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"1","toughness":"1","layout":"normal","text":"Vigilance\nWhenever another Human you control enters, put a +1/+1 counter on this creature.\n{T}: Add X mana of any one color, where X is this creature's power.","keywords":["Vigilance"],"identifiers":{"scryfallOracleId":"e3e255e0-ab04-4488-bdc1-bb1542f51e16"}}"###,
+    r###"{"name":"White Lotus Tile","manaCost":"{4}","manaValue":4.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"This artifact enters tapped.\n{T}: Add X mana of any one color, where X is the greatest number of creatures you control that have a creature type in common.","identifiers":{"scryfallOracleId":"f8a5e009-45b7-4e62-a494-1579f5fc0ba6"}}"###,
+    r###"{"name":"Metamorphosis","manaCost":"{G}","manaValue":1.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"As an additional cost to cast this spell, sacrifice a creature.\nAdd X mana of any one color, where X is 1 plus the sacrificed creature's mana value. Spend this mana only to cast creature spells.","identifiers":{"scryfallOracleId":"7140d726-0136-43af-84b5-85005a66a186"}}"###,
+    r###"{"name":"The Final Days","manaCost":"{2}{B}{B}","manaValue":4.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Create two tapped 2/2 black Horror creature tokens. If this spell was cast from a graveyard, instead create X of those tokens, where X is the number of creature cards in your graveyard.\nFlashback {4}{B}{B} (You may cast this card from your graveyard for its flashback cost. Then exile it.)","keywords":["Flashback"],"identifiers":{"scryfallOracleId":"f2b88031-bfb7-46c4-abdd-3b6b5f5acfa4"}}"###,
+    r###"{"name":"Adipose Offspring","manaCost":"{3}{W}","manaValue":4.0,"type":"Creature — Alien","types":["Creature"],"subtypes":["Alien"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"2","toughness":"2","layout":"normal","text":"Emerge {5}{W} (You may cast this spell by sacrificing a creature and paying the emerge cost reduced by that creature's mana value.)\nWhen this creature enters, create a 2/2 white Alien creature token. If this creature's emerge cost was paid, instead create X of those tokens, where X is the sacrificed creature's toughness.","keywords":["Emerge"],"identifiers":{"scryfallOracleId":"1e21e57e-3bc9-41a8-9746-57b583a5ad63"}}"###,
+    r###"{"name":"Busted!","manaCost":"{1}{U}","manaValue":2.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Counter target spell unless its controller pays {X}, where X is the number of words in the name with the most words among permanents you control.","identifiers":{"scryfallOracleId":"69671d09-fbb6-4b85-a3d1-e9e52253ef6a"}}"###,
+    r###"{"name":"Cephalid Shrine","manaCost":"{1}{U}{U}","manaValue":3.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Whenever a player casts a spell, counter that spell unless that player pays {X}, where X is the number of cards in all graveyards with the same name as the spell.","identifiers":{"scryfallOracleId":"95f05f77-bdc3-4799-910b-5ca7ffadffe3"}}"###,
+];
+
+fn quantity_databases() -> [CardDatabase; 2] {
+    use std::io::Write;
+    let mut export = serde_json::Map::new();
+    for record in QUANTITY_PRINTED {
+        let atomic: AtomicCard = serde_json::from_str(record).unwrap();
+        let face = if atomic.face_name.is_some() {
+            build_oracle_face_multi(&atomic, atomic.identifiers.scryfall_oracle_id.clone())
+        } else {
+            build_oracle_face(&atomic, atomic.identifiers.scryfall_oracle_id.clone())
+        };
+        let mut entry = serde_json::to_value(&face).unwrap();
+        entry["layout"] = serde_json::json!(atomic.layout);
+        entry["face_index"] = serde_json::json!(usize::from(atomic.side.as_deref() == Some("b")));
+        export.insert(face.name.to_lowercase(), entry);
+    }
+    let json = serde_json::to_string(&export).unwrap();
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    file.write_all(json.as_bytes()).unwrap();
+    file.flush().unwrap();
+    [
+        CardDatabase::from_json_str(&json).unwrap(),
+        CardDatabase::from_export(file.path()).unwrap(),
+    ]
+}
+
+#[test]
+fn quantity_preservation_complete_faces_survive_both_normal_loaders() {
+    use engine::types::ability::{Effect, QuantityRef};
+    for db in quantity_databases() {
+        for record in QUANTITY_PRINTED {
+            let atomic: AtomicCard = serde_json::from_str(record).unwrap();
+            let name = atomic.face_name.as_deref().unwrap_or(&atomic.name);
+            let face = db.get_face_by_name(name).unwrap();
+            let mut gaps = Vec::new();
+            let mut bare_x = false;
+            for definition in face.abilities.iter().chain(
+                face.triggers
+                    .iter()
+                    .filter_map(|trigger| trigger.execute.as_deref()),
+            ) {
+                let _ = engine::types::ability_visit::visit_ability_def(
+                    definition,
+                    &mut |effect| {
+                        if let Effect::Unimplemented { name, .. } = effect {
+                            gaps.push(name.clone());
+                        }
+                        effect.for_each_quantity_expr(&mut |quantity| {
+                        bare_x |= quantity.any_ref(&mut |reference| {
+                            matches!(reference, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X"))
+                        });
+                    });
+                        std::ops::ControlFlow::Continue(())
+                    },
+                );
+            }
+            match name {
+                "Lifestream's Blessing" | "Busted!" => {
+                    assert!(
+                        !gaps.is_empty(),
+                        "{name} must retain its honest unsupported definition"
+                    );
+                }
+                "Cephalid Shrine" => {
+                    assert!(
+                        !bare_x,
+                        "an unless payment cannot silently read an undefined X"
+                    );
+                    for trigger in &face.triggers {
+                        if let Some(payment) = trigger
+                            .execute
+                            .as_ref()
+                            .and_then(|body| body.unless_pay.as_ref())
+                        {
+                            assert!(
+                                !matches!(&payment.cost, engine::types::ability::AbilityCost::ManaDynamic { quantity } if quantity.any_ref(&mut |q| matches!(q,QuantityRef::Variable {name} if name.eq_ignore_ascii_case("X"))))
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    assert!(gaps.is_empty(), "{name}: {gaps:?}");
+                    assert!(!bare_x, "{name} lost its printed definition of X");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn quantity_preservation_mana_counts_paid_life_gain_without_subtracting_loss() {
+    use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt};
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let alchemist =
+            scenario.add_real_card(P0, "Accomplished Alchemist", Zone::Battlefield, &db);
+        let gain = scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid life-gain fixture", true, "You gain 4 life.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        let loss = scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid life-loss fixture", true, "You lose 2 life.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        blue_pool(&mut scenario, P0, 2);
+        let mut runner = scenario.build();
+        runner.cast(gain).resolve();
+        runner.cast(loss).resolve();
+        assert_eq!(runner.life(P0), 22);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: alchemist,
+                ability_index: 1,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "the printed count must reach its actual mana choice: {:?}",
+                runner.state().waiting_for
+            )
+        };
+        assert_eq!(*player, P0);
+        assert!(options.contains(&ManaType::Green));
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
+            })
+            .unwrap();
+        assert!(runner.state().objects[&alchemist].tapped);
+        assert_eq!(
+            runner.state().players[0]
+                .mana_pool
+                .count_color(ManaType::Green),
+            4
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 4);
+        assert_eq!(runner.life(P1), 20);
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_spellstutter_announces_and_counters_a_two_mana_spell() {
+    use engine::types::ability::TargetRef;
+    for db in quantity_databases() {
+        for remove_faerie in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let sprite = scenario.add_real_card(P0, "Spellstutter Sprite", Zone::Hand, &db);
+            let other = scenario
+                .add_creature(P0, "Other Faerie", 1, 1)
+                .with_subtypes(vec!["Faerie"])
+                .id();
+            // The opposing Faerie must not enlarge the controller's X.
+            scenario
+                .add_creature(P1, "Foreign Faerie", 1, 1)
+                .with_subtypes(vec!["Faerie"]);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P1,
+                    "Paid opposing two-mana spell",
+                    true,
+                    "You gain 1 life.",
+                )
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            let bounce = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Paid Faerie response",
+                    true,
+                    "Return target creature to its owner's hand.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Blue],
+                })
+                .id();
+            blue_pool(&mut scenario, P0, 3);
+            blue_pool(&mut scenario, P1, 2);
+            let mut runner = scenario.build();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.cast(spell).commit();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.cast(sprite).commit();
+            runner.resolve_top();
+            let WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                selection,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "the actual ETB must announce its counter target: {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(*player, P0);
+            assert!(target_slots[selection.current_slot]
+                .legal_targets
+                .contains(&TargetRef::Object(spell)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(spell)),
+                })
+                .unwrap();
+            if remove_faerie {
+                runner.cast(bounce).target_object(other).resolve();
+                assert_eq!(runner.state().objects[&other].zone, Zone::Hand);
+            }
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&sprite].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(
+                runner.life(P1),
+                if remove_faerie { 21 } else { 20 },
+                "the target's live mana-value bound is checked again after the paid response"
+            );
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                if remove_faerie { 0 } else { 1 }
+            );
+            assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+            settled(&runner);
+        }
+    }
+}
+
+#[test]
+fn quantity_preservation_obelisk_binds_both_cap_and_maximum_population() {
+    use engine::types::game_state::CastPaymentMode;
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let obelisk = scenario.add_real_card(P0, "Runecarved Obelisk", Zone::Battlefield, &db);
+        scenario.with_counter(obelisk, CounterType::Generic("charge".into()), 3);
+        let low = scenario
+            .add_spell_to_library_top(P0, "Below maximum", false)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let hit = scenario
+            .add_spell_to_library_top(P0, "Maximum within cap", false)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        let high = scenario
+            .add_spell_to_library_top(P0, "Outside cap", false)
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: obelisk,
+                ability_index: 1,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&obelisk].zone, Zone::Graveyard);
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&hit].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&low].zone, Zone::Library);
+        assert_eq!(runner.state().objects[&high].zone, Zone::Library);
+        assert_eq!(runner.state().players[0].hand.len(), 1);
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_descend_uses_real_permanent_card_zone_events() {
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_real_card(P0, "The Mycotyrant", Zone::Battlefield, &db);
+        let instant = scenario
+            .add_spell_to_library_top(P0, "Milled nonpermanent", true)
+            .id();
+        let first = scenario
+            .add_spell_to_library_top(P0, "Milled creature one", false)
+            .as_creature()
+            .id();
+        let second = scenario
+            .add_spell_to_library_top(P0, "Milled creature two", false)
+            .as_creature()
+            .id();
+        let mill = scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid descend producer", true, "Mill three cards.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        blue_pool(&mut scenario, P0, 1);
+        let mut runner = scenario.build();
+        runner.cast(mill).resolve();
+        for id in [instant, first, second, mill] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+        }
+        runner.advance_to_end_step();
+        runner.advance_until_stack_empty();
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Fungus"
+            })
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            2,
+            "two permanent cards descended; neither instant did"
+        );
+        assert!(tokens.iter().all(|token| token.controller == P0));
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_next_cast_body_binds_the_later_spell_and_completes() {
+    use engine::types::ability::TargetRef;
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ride = scenario.add_real_card(P0, "Ride the Avalanche", Zone::Hand, &db);
+        let creature = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
+        let later = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Paid three-mana later spell",
+                true,
+                "You gain 1 life.",
+            )
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ],
+        );
+        blue_pool(&mut scenario, P0, 3);
+        let mut runner = scenario.build();
+        runner.cast(ride).resolve();
+        settled(&runner);
+        runner.cast(later).commit();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            selection,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "delayed trigger must announce after the later cast: {:?}",
+                runner.state().waiting_for
+            )
+        };
+        assert_eq!(*player, P0);
+        assert!(target_slots[selection.current_slot]
+            .legal_targets
+            .contains(&TargetRef::Object(creature)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(creature)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().objects[&creature]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(runner.state().objects[&ride].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&later].zone, Zone::Graveyard);
+        assert_eq!(runner.life(P0), 21);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_emblem_keeps_its_own_cast_payment_binding() {
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let chandra =
+            scenario.add_real_card(P0, "Chandra, Dressed to Kill", Zone::Battlefield, &db);
+        scenario.with_counter(chandra, CounterType::Loyalty, 7);
+        let red_spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Paid red emblem trigger", true, "You gain 1 life.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+        blue_pool(&mut scenario, P0, 2);
+        let mut runner = scenario.build();
+        let loyalty_before = runner.state().objects[&chandra].counters[&CounterType::Loyalty];
+        // An empty library avoids exercising the independent cast-permission
+        // restriction; the printed ultimate still registers its full emblem.
+        runner.activate(chandra, 2).resolve();
+        assert_eq!(
+            runner.state().objects[&chandra].counters[&CounterType::Loyalty],
+            loyalty_before - 7
+        );
+        let emblem = *runner
+            .state()
+            .command_zone
+            .last()
+            .expect("printed ultimate creates an emblem");
+        assert_eq!(runner.state().objects[&emblem].controller, P0);
+        settled(&runner);
+        let committed = runner.cast(red_spell).target_player(P1).commit();
+        assert!(committed
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == emblem
+                && matches!(
+                    entry.kind,
+                    engine::types::game_state::StackEntryKind::TriggeredAbility { .. }
+                )));
+        committed.resolve();
+        assert_eq!(
+            runner.life(P1),
+            17,
+            "the emblem reads three actually spent mana from its own triggering spell"
+        );
+        assert_eq!(runner.life(P0), 21);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().objects[&red_spell].zone, Zone::Graveyard);
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_final_days_rebinds_the_late_token_constructor() {
+    use engine::types::game_state::CastingVariant;
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario.add_real_card(P0, "The Final Days", Zone::Graveyard, &db);
+        for name in [
+            "Own graveyard creature one",
+            "Own graveyard creature two",
+            "Own graveyard creature three",
+        ] {
+            scenario.add_creature_to_graveyard(P0, name, 1, 1);
+        }
+        scenario.add_creature_to_graveyard(P1, "Foreign graveyard creature", 1, 1);
+        scenario.add_land_to_graveyard(P0, "Own graveyard land");
+        scenario.with_mana_pool(
+            P0,
+            (0..2)
+                .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        blue_pool(&mut scenario, P0, 4);
+        let mut runner = scenario.build();
+        runner
+            .cast(spell)
+            .casting_variant(CastingVariant::Flashback)
+            .resolve();
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Horror"
+            })
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            3,
+            "the replacement token instruction reads only own graveyard creatures"
+        );
+        assert!(tokens
+            .iter()
+            .all(|token| token.controller == P0 && token.tapped));
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_emerge_token_count_uses_the_paid_creatures_toughness() {
+    use engine::types::game_state::CastingVariant;
+    for db in quantity_databases() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let offspring = scenario.add_real_card(P0, "Adipose Offspring", Zone::Hand, &db);
+        let fodder = scenario
+            .add_creature(P0, "Chosen emerge sacrifice", 1, 5)
+            .with_mana_cost(ManaCost::generic(4))
+            .id();
+        scenario
+            .add_creature(P0, "Unchosen larger sacrifice", 8, 8)
+            .with_mana_cost(ManaCost::generic(8));
+        scenario.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ],
+        );
+        let mut runner = scenario.build();
+        runner
+            .cast(offspring)
+            .casting_variant(CastingVariant::Emerge)
+            .sacrifice_with(&[fodder])
+            .resolve();
+        assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&offspring].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            0,
+            "5W minus the selected sacrifice's mana value costs 1W"
+        );
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| {
+                object.is_token && object.zone == Zone::Battlefield && object.name == "Alien"
+            })
+            .collect();
+        assert_eq!(tokens.len(),5,"toughness of the actual paid creature is independent of announced X and the unchosen creature");
+        assert!(tokens.iter().all(|token| token.controller == P0));
+        settled(&runner);
+    }
+}
+
+#[test]
+fn quantity_preservation_unless_payment_uses_the_defined_devotion() {
+    for db in quantity_databases() {
+        for pay in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let rebuff = scenario.add_real_card(P0, "Thassa's Rebuff", Zone::Hand, &db);
+            for name in [
+                "First blue permanent",
+                "Second blue permanent",
+                "Third blue permanent",
+            ] {
+                scenario
+                    .add_creature(P0, name, 1, 1)
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![ManaCostShard::Blue],
+                    });
+            }
+            let target = scenario
+                .add_spell_to_hand_from_oracle(
+                    P1,
+                    "Paid devotion counter target",
+                    true,
+                    "You gain 1 life.",
+                )
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            blue_pool(&mut scenario, P0, 2);
+            blue_pool(&mut scenario, P1, 5);
+            let mut runner = scenario.build();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.cast(target).commit();
+            runner.act(GameAction::PassPriority).unwrap();
+            runner.cast(rebuff).target_object(target).commit();
+            runner.resolve_top();
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::UnlessPayment { player: P1, .. }
+                ),
+                "actual unless payment must be offered to the spell controller"
+            );
+            assert_eq!(runner.state().players[1].mana_pool.total(), 3);
+            runner.act(GameAction::PayUnlessCost { pay }).unwrap();
+            assert_eq!(
+                runner.state().players[1].mana_pool.total(),
+                if pay { 0 } else { 3 },
+                "the printed where-X defines the actual payment, not an unchosen zero"
+            );
+            assert_eq!(
+                runner.state().objects[&target].zone,
+                if pay { Zone::Stack } else { Zone::Graveyard }
+            );
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.life(P1), if pay { 21 } else { 20 });
+            assert_eq!(runner.state().objects[&rebuff].zone, Zone::Graveyard);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            settled(&runner);
+        }
+    }
+}
+
 pub(super) fn printed_db() -> CardDatabase {
     let mut export = serde_json::Map::new();
     for record in PRINTED {
