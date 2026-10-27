@@ -255,9 +255,11 @@ export function isObjectReportableToViewer(
  *                            copied, second scales); a click carries no order.
  *   - `ChooseOneOfBranch` -> `ChooseBranch { index }`; `parent_targets` is
  *                            continuation context the modal never reads.
- * All of the above are host-wrapped (absent from
- * `DialogHost.CLICK_THROUGH_WAITING_FOR_TYPES`), so a HUD glow beneath their
- * `fixed inset-0` host could not be clicked even if it were offered.
+ * All of the above are host-wrapped (`isClickThroughWaitingFor` is false for
+ * them: absent from `DialogHost.CLICK_THROUGH_WAITING_FOR_TYPES`, or, for
+ * multi-pick `ChooseObjectsSelection`, excluded by its `max !== 1` guard), so a
+ * HUD glow beneath their `fixed inset-0` host could not be clicked even if it
+ * were offered.
  *
  * A single-pick `ChooseObjectsSelection` (`max === 1`) meets both criteria: the
  * engine also accepts one `ChooseTarget` for it, and `eligible` is `TargetRef[]`.
