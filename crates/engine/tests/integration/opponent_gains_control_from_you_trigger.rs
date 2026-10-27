@@ -2596,3 +2596,424 @@ fn aminatous_unpartitioned_team_handoff_does_not_fire() {
         "only the opponent's gain counts (CR 102.3)"
     );
 }
+
+/// Verbatim Oracle text (Scryfall), Risky Move.
+const RISKY_MOVE: &str = "At the beginning of each player's upkeep, that player gains control \
+    of this enchantment.\nWhen you gain control of this enchantment from another player, choose \
+    a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent \
+    gains control of that creature.";
+/// Verbatim Oracle text (Scryfall), Opalescence.
+const OPALESCENCE: &str = "Each other non-Aura enchantment is a creature in addition to its \
+    other types and has base power and base toughness each equal to its mana value.";
+/// Verbatim Oracle text (Scryfall), Overwhelming Splendor.
+const OVERWHELMING_SPLENDOR: &str = "Enchant player\nCreatures enchanted player controls lose all \
+    abilities and have base power and toughness 1/1.\nEnchanted player can't activate abilities \
+    that aren't mana abilities or loyalty abilities.";
+/// Verbatim Oracle text (Scryfall), Word of Seizing.
+const WORD_OF_SEIZING: &str = "Split second (As long as this spell is on the stack, players can't \
+    cast spells or activate abilities that aren't mana abilities.)\nUntap target permanent and \
+    gain control of it until end of turn. It gains haste until end of turn.";
+
+fn has_control_change_trigger(runner: &GameRunner, id: ObjectId) -> bool {
+    let state = runner.state();
+    engine::game::functioning_abilities::active_trigger_definitions(state, &state.objects[&id]).any(
+        |active| {
+            matches!(
+                active.definition.mode,
+                engine::types::triggers::TriggerMode::ChangesController { .. }
+            )
+        },
+    )
+}
+
+/// P1 casts Word of Seizing on P0's Risky Move. Opalescence (P1's) makes Risky
+/// Move a creature, so Overwhelming Splendor, when it curses `cursed`, strips
+/// its abilities while that player controls it. Returns (Risky Move had its
+/// gain trigger before, has it after, Risky Move triggers that resulted).
+fn risky_move_gain_board(cursed: Option<PlayerId>) -> (bool, bool, usize) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let risky = scenario
+        .add_enchantment_from_oracle(P0, "Risky Move", RISKY_MOVE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red, ManaCostShard::Red],
+            generic: 3,
+        })
+        .id();
+    scenario.add_enchantment_from_oracle(P1, "Opalescence", OPALESCENCE);
+    scenario.add_vanilla(P1, 2, 2);
+    scenario.add_vanilla(P0, 2, 2);
+    let splendor = cursed.map(|_| {
+        let mut builder = scenario.add_creature_from_oracle(
+            P1,
+            "Overwhelming Splendor",
+            0,
+            0,
+            OVERWHELMING_SPLENDOR,
+        );
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.id()
+    });
+    let word = scenario
+        .add_spell_to_hand_from_oracle(P1, "Word of Seizing", true, "")
+        .from_oracle_text_with_keywords(&["Split second"], WORD_OF_SEIZING)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    if let (Some(splendor), Some(player)) = (splendor, cursed) {
+        engine::game::effects::attach::attach_to_player(runner.state_mut(), splendor, player);
+    }
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    let before = has_control_change_trigger(&runner, risky);
+
+    give_priority(&mut runner, P1);
+    runner.cast(word).target_object(risky).commit();
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == word)
+        {
+            if let Ok(result) = runner.act(GameAction::PassPriority) {
+                events.extend(result.events);
+            }
+        }
+    }
+    assert_eq!(controller(&runner, risky), P1, "REACH: P1 took Risky Move");
+    let after = has_control_change_trigger(&runner, risky);
+    let triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == risky && entry.controller == P1)
+        .count();
+    (before, after, triggers)
+}
+
+/// R2-1 (CR 603.10): "When you gain control of this enchantment from another
+/// player" is an ordinary trigger, checked immediately after the event, unlike
+/// the CR 603.10d lose side. Which abilities exist is read from the board after
+/// the change:
+/// - uncursed: Risky Move has its trigger throughout; one P1 trigger;
+/// - Splendor on P0 (the loser): it had no abilities under P0 and regains
+///   them under P1; exactly one P1 trigger;
+/// - Splendor on P1 (the gainer): it had them under P0 and loses them under
+///   P1; no trigger.
+#[test]
+fn risky_moves_gain_trigger_reads_the_board_after_the_change() {
+    assert_eq!(
+        risky_move_gain_board(None),
+        (true, true, 1),
+        "uncursed positive"
+    );
+    assert_eq!(
+        risky_move_gain_board(Some(P0)),
+        (false, true, 1),
+        "abilities restored by the change"
+    );
+    assert_eq!(
+        risky_move_gain_board(Some(P1)),
+        (true, false, 0),
+        "abilities removed by the change"
+    );
+}
+
+/// Verbatim Oracle text (Scryfall), Roaming Throne.
+const ROAMING_THRONE: &str = "Ward {2}\nAs this creature enters, choose a creature type.\nThis \
+    creature is the chosen type in addition to its other types.\nIf a triggered ability of \
+    another creature you control of the chosen type triggers, it triggers an additional time.";
+/// Labelled synthetic: steal, then sacrifice it (the thief does).
+const STEAL_AND_SACRIFICE: &str = "Gain control of target creature. Sacrifice it.";
+/// Labelled synthetic: steal, then blink into a new object under the thief.
+const STEAL_AND_BLINK: &str =
+    "Gain control of target creature. Exile it, then return that card to the battlefield under your control.";
+
+/// What happens to the stolen Roaming Throne in the same resolution.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThroneAftermath {
+    /// Act of Treason: it stays, now P1's.
+    Kept,
+    /// It's sacrificed: it ends the resolution in the graveyard.
+    Sacrificed,
+    /// It's exiled and returned under P1, a new object; P1 makes its
+    /// as-enters choice (Elf), a choice boundary inside the resolution.
+    Blinked,
+}
+
+/// R2-2 (CR 603.2d + CR 603.10d): the doubler is judged as it was immediately
+/// before the change, including its source-relative facts. P0 controls Zidane
+/// (a Human) and a Roaming Throne that chose `chosen`; P1 steals the Throne,
+/// paying its ward. Zidane triggers for the loss, and the Throne, as it was
+/// then, was P0's doubler of `chosen`. Returns P0's Treasures.
+fn roaming_throne_board(chosen: &str, aftermath: ThroneAftermath) -> usize {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let zidane = add_zidane(&mut scenario, P0);
+    let throne = scenario
+        .add_creature_to_hand_from_oracle(P0, "Roaming Throne", 4, 4, "")
+        .from_oracle_text_with_keywords(&["Ward"], ROAMING_THRONE)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Golem"])
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let splendor = {
+        let mut builder = scenario.add_creature_from_oracle(
+            P0,
+            "Overwhelming Splendor",
+            0,
+            0,
+            OVERWHELMING_SPLENDOR,
+        );
+        builder.as_enchantment();
+        builder.with_subtypes(vec!["Aura", "Curse"]);
+        builder.id()
+    };
+    let steal = match aftermath {
+        ThroneAftermath::Kept => {
+            add_free_spell(&mut scenario, P1, "Act of Treason", ACT_OF_TREASON)
+        }
+        ThroneAftermath::Sacrificed => add_free_spell(
+            &mut scenario,
+            P1,
+            "Steal and Sacrifice",
+            STEAL_AND_SACRIFICE,
+        ),
+        ThroneAftermath::Blinked => {
+            add_free_spell(&mut scenario, P1, "Steal and Blink", STEAL_AND_BLINK)
+        }
+    };
+    // The Throne's ward {2}: P1 pays it, so the steal resolves.
+    scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    engine::game::effects::attach::attach_to_player(runner.state_mut(), splendor, P1);
+
+    // The Throne is cast and its as-enters choice made.
+    give_priority(&mut runner, P0);
+    runner.cast(throne).commit();
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::NamedChoice { .. } => {
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: chosen.to_string(),
+                    })
+                    .expect("the creature type is chosen");
+            }
+            WaitingFor::Priority { .. } if !runner.state().stack.is_empty() => {
+                let _ = runner.act(GameAction::PassPriority);
+            }
+            _ => break,
+        }
+    }
+    let throne = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Roaming Throne")
+        .expect("REACH: the Throne entered");
+    assert!(
+        runner.state().objects[&throne]
+            .chosen_attributes
+            .iter()
+            .any(|attribute| matches!(
+                attribute,
+                engine::types::ability::ChosenAttribute::CreatureType(t) if t == chosen
+            )),
+        "REACH: {chosen} was really chosen"
+    );
+    assert_eq!(controller(&runner, zidane), P0);
+    let before = treasures(&runner, P0);
+
+    give_priority(&mut runner, P1);
+    runner.cast(steal).target_object(throne).commit();
+    let mut events = Vec::new();
+    for _ in 0..8 {
+        if !runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == steal)
+            && !matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. })
+        {
+            break;
+        }
+        let action = match runner.state().waiting_for {
+            WaitingFor::UnlessPayment { .. } => GameAction::PayUnlessCost { pay: true },
+            // The returned Throne's own as-enters choice, made by P1: a type
+            // that doesn't match Zidane.
+            WaitingFor::NamedChoice { .. } => GameAction::ChooseOption {
+                choice: "Elf".to_string(),
+            },
+            _ => GameAction::PassPriority,
+        };
+        if let Ok(result) = runner.act(action) {
+            events.extend(result.events);
+        }
+    }
+    let evidence = events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ControllerChanged {
+                object_id,
+                evidence,
+                ..
+            } if *object_id == throne => Some(*evidence),
+            _ => None,
+        })
+        .expect("REACH: P1 gained control of the Throne");
+    let observation = runner
+        .state()
+        .control_change_observation(evidence)
+        .expect("REACH: Zidane's pending trigger keeps the observation");
+    assert!(
+        observation
+            .doublers
+            .iter()
+            .any(|doubler| doubler.source_id() == throne && doubler.controller() == P0),
+        "REACH: the observation latched P0's Throne as a doubler"
+    );
+    if aftermath == ThroneAftermath::Sacrificed {
+        assert_eq!(
+            runner.state().objects[&throne].zone,
+            Zone::Graveyard,
+            "REACH: the Throne was sacrificed in the same resolution"
+        );
+    }
+    if aftermath == ThroneAftermath::Blinked {
+        let returned = runner
+            .state()
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| runner.state().objects[id].name == "Roaming Throne")
+            .expect("REACH: the Throne returned");
+        let object = &runner.state().objects[&returned];
+        assert_eq!(object.controller, P1, "REACH: it returned under P1");
+        assert!(
+            object.chosen_attributes.iter().any(|attribute| matches!(
+                attribute,
+                engine::types::ability::ChosenAttribute::CreatureType(t) if t == "Elf"
+            )),
+            "REACH: the returned Throne is a new object that chose Elf"
+        );
+    }
+    runner.advance_until_stack_empty();
+    treasures(&runner, P0) - before
+}
+
+/// R2-2: the Throne's chosen type is latched with it, and judged as it was
+/// when Zidane's ability triggered. A Human Throne: 2 whether it stays, is
+/// sacrificed in the same resolution (in the graveyard, it no longer has a
+/// chosen type) or is blinked. An Elf Throne: 1.
+///
+/// The blinked leg is documentation only: the returned Throne's as-enters
+/// choice is a boundary at which the pending triggers are collected, before
+/// it chooses again, so it doesn't discriminate (the sacrificed leg does).
+#[test]
+fn a_latched_doubler_keeps_its_chosen_type() {
+    use ThroneAftermath::*;
+    for aftermath in [Kept, Sacrificed, Blinked] {
+        assert_eq!(
+            roaming_throne_board("Human", aftermath),
+            2,
+            "Human Throne, {aftermath:?}"
+        );
+    }
+    assert_eq!(
+        roaming_throne_board("Elf", Sacrificed),
+        1,
+        "non-matching type"
+    );
+}
+
+/// R2-2 at the doubling seam (CR 603.2d + CR 603.10d), discriminating: the
+/// event carries evidence captured from the board, latching Zidane under P0
+/// and P0's Roaming Throne that chose Human. The live Throne then reads Elf (as
+/// a new object at the same id would), and the change is collected. Zidane's
+/// trigger is counted against the Throne as latched: P0's Human doubler, so it
+/// triggers twice. A doubler read from the live object (Elf) wouldn't double.
+#[test]
+fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
+    use engine::types::ability::{ChosenAttribute, ContinuousModification, Duration, TargetFilter};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let zidane = add_zidane(&mut scenario, P0);
+    let throne = scenario
+        .add_creature_from_oracle(P0, "Roaming Throne", 4, 4, "")
+        .from_oracle_text_with_keywords(&["Ward"], ROAMING_THRONE)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Golem"])
+        .id();
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.objects.get_mut(&throne).unwrap().chosen_attributes =
+        vec![ChosenAttribute::CreatureType("Human".to_string())];
+    engine::game::layers::flush_layers(state);
+
+    let evidence = state.control_change_evidence_for_test(throne);
+    let observation = state
+        .control_change_observation(evidence)
+        .expect("REACH: the evidence is recorded");
+    assert!(
+        observation
+            .doublers
+            .iter()
+            .any(|doubler| doubler.source_id() == throne && doubler.controller() == P0),
+        "REACH: the capture latched P0's Human Throne"
+    );
+    assert!(
+        observation
+            .watchers
+            .iter()
+            .any(|watcher| watcher.identity.reference.object_id == zidane),
+        "REACH: the capture latched Zidane"
+    );
+
+    state
+        .add_transient_continuous_effect(
+            throne,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: throne },
+            vec![ContinuousModification::ChangeController],
+            None,
+        )
+        .expect("the control effect installs");
+    state.objects.get_mut(&throne).unwrap().chosen_attributes =
+        vec![ChosenAttribute::CreatureType("Elf".to_string())];
+    engine::game::layers::flush_layers(state);
+    assert_eq!(
+        state.objects[&throne].controller, P1,
+        "REACH: P1 controls it"
+    );
+
+    engine::game::triggers::process_triggers(
+        state,
+        &[GameEvent::ControllerChanged {
+            object_id: throne,
+            old_controller: P0,
+            new_controller: P1,
+            evidence,
+        }],
+    );
+    let zidane_triggers = state
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == zidane && entry.controller == P0)
+        .count();
+    assert_eq!(
+        zidane_triggers, 2,
+        "Zidane's trigger and its additional trigger from the latched Human Throne"
+    );
+}

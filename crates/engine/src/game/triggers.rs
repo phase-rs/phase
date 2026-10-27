@@ -2385,8 +2385,9 @@ fn trigger_source_context_for_event(
 }
 
 /// CR 603.10 + CR 603.10d: latch every functioning look-back control-change
-/// watcher, with its controller and trigger entries, immediately before a
-/// control-change instruction. The source contexts come from the same
+/// watcher (a lose-side `ChangesController` trigger source; the gain side is
+/// an ordinary trigger, checked after the event), with its controller and
+/// trigger entries, immediately before a control-change instruction. The source contexts come from the same
 /// `trigger_source_context_for_latch` authority the zone-change group latch
 /// uses. CR 702.26b: phased-out permanents don't trigger; CR 113.6: printed
 /// control-change triggers function on the battlefield.
@@ -2396,14 +2397,24 @@ pub(crate) fn latch_control_change_watchers(state: &GameState) -> Vec<TriggerSou
         .filter_map(|source_id| state.objects.get(&source_id))
         .filter(|source| {
             super::functioning_abilities::active_trigger_definitions(state, source).any(|active| {
-                matches!(
-                    active.definition.mode,
-                    TriggerMode::ChangesController { .. }
-                ) && trigger_definition_functions_in_zone(active.definition, Zone::Battlefield)
+                is_look_back_control_change(&active.definition.mode)
+                    && trigger_definition_functions_in_zone(active.definition, Zone::Battlefield)
             })
         })
         .map(|source| trigger_source_context_for_latch(state, source))
         .collect()
+}
+
+/// CR 603.10d: "when you lose control of ?" / "an opponent gains control of ?
+/// from you" look back in time; CR 603.10: "when you gain control of ?" is an
+/// ordinary trigger, checked immediately after the event.
+pub(crate) fn is_look_back_control_change(mode: &TriggerMode) -> bool {
+    matches!(
+        mode,
+        TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses
+        }
+    )
 }
 
 /// CR 603.10: Capture the full immediately-before authority for a logical
@@ -3156,8 +3167,9 @@ fn collect_matching_triggers_inner(
         // controller, as of immediately before the change, so it is collected
         // only from the watcher latched then (`ControlChangeWatcher`), never
         // from a live, cached or post-event view; and that visit collects
-        // nothing else.
-        if matches!(trig_def.mode, TriggerMode::ChangesController { .. })
+        // nothing else. The gain side (CR 603.10) is collected by the ordinary
+        // visits, from the board after the event.
+        if is_look_back_control_change(&trig_def.mode)
             != matches!(visit, TriggerSourceVisit::ControlChangeWatcher)
         {
             continue;
@@ -11629,8 +11641,7 @@ pub(crate) fn active_trigger_doublers(
                 unreachable!("filter above guarantees DoubleTriggers");
             };
             Some(crate::types::events::LatchedTriggerDoubler {
-                source_id: obj_id,
-                controller: obj.controller,
+                source: trigger_source_context_for_latch(state, obj),
                 cause: cause.clone(),
                 affected: doubler.affected.clone(),
             })
@@ -11656,16 +11667,26 @@ fn control_change_doubling_authority<'a>(
     };
     let observation = state.control_change_observation(*evidence)?;
     let source = trigger.ability.trigger_source.as_ref()?;
+    let definition = trigger.ability.trigger_definition_ref.as_ref()?;
+    // The trigger is one of a latched watcher's look-back definitions (not a
+    // gain-side trigger of the same source, collected after the event).
     observation
         .watchers
         .iter()
-        .any(|watcher| watcher.identity == source.identity)
+        .find(|watcher| watcher.identity == source.identity)?
+        .trigger_entries
+        .iter()
+        .any(|entry| {
+            entry.occurrence == definition.occurrence
+                && is_look_back_control_change(&entry.definition.mode)
+        })
         .then_some((observation.doublers.as_slice(), source))
 }
 
 /// CR 603.2d + CR 603.10d: match a look-back trigger's latched source against
 /// a latched doubler's scope: the source's snapshot from immediately before the
-/// change, with "you" the doubler's controller then.
+/// change, judged from the doubler as observed then ("you" is its controller,
+/// and source-relative scope reads its observed facts, such as a chosen type).
 fn latched_source_matches_doubler_filter(
     state: &GameState,
     source: &TriggerSourceContext,
@@ -11682,7 +11703,7 @@ fn latched_source_matches_doubler_filter(
         source.identity.reference.object_id,
         &source.lki,
         filter,
-        &FilterContext::from_source_with_controller(doubler.source_id, doubler.controller),
+        &FilterContext::from_trigger_source(&doubler.source),
     )
 }
 
@@ -11704,7 +11725,7 @@ fn doubler_applies(
         return false;
     }
     // Controller match: trigger source must be controlled by the doubler's controller
-    if trigger.controller != doubler.controller {
+    if trigger.controller != doubler.controller() {
         return false;
     }
     // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
@@ -11718,7 +11739,7 @@ fn doubler_applies(
         .affected
         .as_ref()
         .is_some_and(filter_references_self);
-    if !affected_references_self && trigger.source_id == doubler.source_id {
+    if !affected_references_self && trigger.source_id == doubler.source_id() {
         return false;
     }
     // CR 603.2d: Check the cause predicate against the spawning event.
@@ -11726,7 +11747,7 @@ fn doubler_applies(
         state,
         &doubler.cause,
         trigger.trigger_event.as_ref(),
-        doubler.controller,
+        doubler.controller(),
     ) {
         return false;
     }
@@ -11738,7 +11759,7 @@ fn doubler_applies(
         .is_none_or(|filter| match latched_source {
             Some(source) => latched_source_matches_doubler_filter(state, source, filter, doubler),
             None => {
-                trigger_source_matches_doubler_filter(state, trigger, filter, doubler.source_id)
+                trigger_source_matches_doubler_filter(state, trigger, filter, doubler.source_id())
             }
         })
 }

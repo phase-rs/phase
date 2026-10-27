@@ -3713,14 +3713,20 @@ pub(super) fn match_taps_for_mana(
 /// delayed reflexive, and "Whenever an opponent gains control of a permanent
 /// from you" (Zidane, Tantalus Thief; `valid_target` names the gaining player).
 ///
-/// Gains-side producers: "When you gain control of ~ [from another player]"
-/// (Risky Move).
+/// The gain side, "When you gain control of ~ [from another player]" (Risky
+/// Move), is an ordinary trigger (CR 603.10): it's collected from the board
+/// after the event and matched on it. The changing object is "~" itself
+/// (`valid_card`), and "you" is the gainer, whom
+/// `collect_matching_triggers_inner` makes the trigger's controller (CR
+/// 603.3a). A non-self source fires when its controller is the gainer.
 ///
-/// Everything is judged on the event's evidence, which the instruction captured
-/// immediately before its first mutation (CR 603.10: "the existence of those
-/// abilities and the appearance of objects immediately prior to the event"):
-///   * `Unrecorded` evidence (a pre-change saved payload) authorizes nothing.
-///     It is never reconstructed from current state.
+/// The lose side looks back in time (CR 603.10d) and is judged entirely on the
+/// event's evidence, which the instruction captured immediately before its
+/// first mutation (CR 603.10: "the existence of those abilities and the
+/// appearance of objects immediately prior to the event"):
+///   * `Unrecorded` evidence (a pre-change saved payload, or a fan-out shape
+///     outside the capture contract) authorizes nothing. It is never
+///     reconstructed from current state.
 ///   * CR 110.1: the subject was a permanent, judged by its observed zone. A
 ///     spell changing control on the stack (CR 109.4) never matches, and a
 ///     permanent stolen and then sacrificed or exiled in the same resolution
@@ -3729,18 +3735,13 @@ pub(super) fn match_taps_for_mana(
 ///     incarnation (CR 400.7), `SpecificObject` (Stolen Uniform's bound
 ///     Equipment) by id, and any other filter only when an event snapshot can
 ///     answer it exactly.
-///   * "you" is the participant the trigger's `side` names
-///     (`ControlChangeSide::participant`). `Loses` (CR 603.10d look-back): the
-///     source context's controller, i.e. the watcher latched immediately before
-///     the change (the collector admits printed `ChangesController` definitions
-///     only from that latch), or a delayed trigger's creation-time controller
-///     (CR 603.7d); the event fires only when it's the old controller. `Gains`
-///     (CR 603.10): the gainer itself for a self-reference (the changing object
-///     is the source), otherwise the source context's controller, which must be
-///     the new controller.
-///   * `valid_target` judges the other participant relative to that "you": the
-///     gaining player on the lose side ("an opponent gains control … from you",
-///     CR 102.2 / CR 102.3), the losing player on the gain side.
+///   * "you" is the source context's controller: for a printed trigger, the
+///     watcher latched immediately before the change (the collector admits
+///     printed lose-side definitions only from that latch); for a delayed
+///     trigger, its creation-time controller (CR 603.7d). The event fires only
+///     when "you" is the old controller (CR 603.2).
+///   * `valid_target` judges the gaining player relative to that "you" ("an
+///     opponent gains control … from you", CR 102.2 / CR 102.3).
 pub(super) fn match_changes_controller(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -3751,10 +3752,10 @@ pub(super) fn match_changes_controller(
         return false;
     };
     let GameEvent::ControllerChanged {
+        object_id,
         old_controller,
         new_controller,
         evidence,
-        ..
     } = event
     else {
         return false;
@@ -3762,51 +3763,56 @@ pub(super) fn match_changes_controller(
     if old_controller == new_controller {
         return false;
     }
-    let Some(observation) = state.control_change_observation(*evidence) else {
-        return false;
-    };
-    let subject = &observation.subject;
-    if subject.zone != Zone::Battlefield {
-        return false;
-    }
-    let subject_matches = match &trigger.valid_card {
-        None => true,
-        Some(TargetFilter::SelfRef) => subject.identity == source_context.identity.reference,
-        Some(TargetFilter::SpecificObject { id }) => subject.identity.object_id == *id,
-        Some(filter) => {
-            crate::types::events::EventObjectSnapshot::classify_filter_shape(filter)
-                == crate::types::events::EventObjectFilterSupport::Supported
-                && super::filter::matches_target_filter_on_event_snapshot(
-                    state,
-                    subject,
-                    filter,
-                    &super::filter::FilterContext::from_trigger_source(source_context),
-                )
+    match side {
+        ControlChangeSide::Gains => {
+            if !valid_card_matches(trigger, state, *object_id, source_context) {
+                return false;
+            }
+            source_event_subject_id(source_context) == *object_id
+                || source_context.source_read(state).controller() == *new_controller
         }
-    };
-    if !subject_matches {
-        return false;
-    }
-    let participant = side.participant(*old_controller, *new_controller);
-    let counterparty = side.participant(*new_controller, *old_controller);
-    let you = match side {
-        ControlChangeSide::Loses => source_context.lki.controller,
-        ControlChangeSide::Gains if subject.identity == source_context.identity.reference => {
-            participant
+        ControlChangeSide::Loses => {
+            let Some(observation) = state.control_change_observation(*evidence) else {
+                return false;
+            };
+            let subject = &observation.subject;
+            if subject.zone != Zone::Battlefield {
+                return false;
+            }
+            let subject_matches = match &trigger.valid_card {
+                None => true,
+                Some(TargetFilter::SelfRef) => {
+                    subject.identity == source_context.identity.reference
+                }
+                Some(TargetFilter::SpecificObject { id }) => subject.identity.object_id == *id,
+                Some(filter) => {
+                    crate::types::events::EventObjectSnapshot::classify_filter_shape(filter)
+                        == crate::types::events::EventObjectFilterSupport::Supported
+                        && super::filter::matches_target_filter_on_event_snapshot(
+                            state,
+                            subject,
+                            filter,
+                            &super::filter::FilterContext::from_trigger_source(source_context),
+                        )
+                }
+            };
+            let you = source_context.lki.controller;
+            if !subject_matches || *old_controller != you {
+                return false;
+            }
+            // `Controller` here is the legacy lose-control payload: before
+            // this slot named the gaining player, the lose-control delayed
+            // builder stamped the losing "you" into it, and saved games still
+            // carry that. The gainer is never "you" (old == you != new), so it
+            // is read as that legacy encoding of the mode's own direction: no
+            // gainer constraint.
+            match &trigger.valid_target {
+                None | Some(TargetFilter::Controller) => true,
+                Some(filter) => {
+                    player_matches_filter_as(filter, state, *new_controller, you, source_context)
+                }
+            }
         }
-        ControlChangeSide::Gains => source_context.lki.controller,
-    };
-    if participant != you {
-        return false;
-    }
-    // `Controller` here is the legacy lose-control payload: before this slot
-    // named the counterparty, the lose-control delayed builder stamped the
-    // losing "you" into it, and saved games still carry that. The counterparty
-    // is never "you" (old != new), so it is read as that legacy encoding of the
-    // mode's own direction: no counterparty constraint.
-    match &trigger.valid_target {
-        None | Some(TargetFilter::Controller) => true,
-        Some(filter) => player_matches_filter_as(filter, state, counterparty, you, source_context),
     }
 }
 /// CR 712.14: Transformed trigger — fires when an object transforms.

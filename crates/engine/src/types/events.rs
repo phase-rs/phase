@@ -557,16 +557,26 @@ pub struct ControlChangeObservation {
 }
 
 /// CR 603.2d: one functioning "triggers an additional time" static ability
-/// (`StaticMode::DoubleTriggers`) as it stood when latched: its source, that
-/// source's controller ("you"), the spawning-event predicate and the
-/// trigger-source scope.
+/// (`StaticMode::DoubleTriggers`) as it stood when latched: its source, as an
+/// observed source context (its controller is "you", and its chosen
+/// attributes answer source-relative scope such as "of the chosen type"), the
+/// spawning-event predicate and the trigger-source scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatchedTriggerDoubler {
-    pub source_id: ObjectId,
-    pub controller: PlayerId,
+    pub source: TriggerSourceContext,
     pub cause: super::statics::TriggerCause,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affected: Option<super::ability::TargetFilter>,
+}
+
+impl LatchedTriggerDoubler {
+    pub fn source_id(&self) -> ObjectId {
+        self.source.identity.reference.object_id
+    }
+
+    pub fn controller(&self) -> PlayerId {
+        self.source.lki.controller
+    }
 }
 
 fn latched_doublers_are_empty(doublers: &std::sync::Arc<Vec<LatchedTriggerDoubler>>) -> bool {
