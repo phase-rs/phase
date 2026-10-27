@@ -12070,19 +12070,35 @@ fn latched_controller_clause_is_judged(
     }
 }
 
-/// CR 109.4: a judged controller clause, on the captured controllers.
+/// CR 109.5 + CR 603.10d: "you" is the doubler's captured controller; compare
+/// it with the watcher's captured controller.
 fn latched_controller_clause_matches(
     controller: Option<&crate::types::ability::ControllerRef>,
     watcher: &TriggerSourceContext,
     doubler: &crate::types::events::LatchedTriggerDoubler,
 ) -> bool {
+    use crate::types::ability::ControllerRef;
     match controller {
         None => true,
-        Some(crate::types::ability::ControllerRef::You) => {
-            watcher.lki.controller == doubler.controller()
-        }
+        Some(ControllerRef::You) => watcher.lki.controller == doubler.controller(),
         // Never admitted by `latched_controller_clause_is_judged`.
-        Some(_) => false,
+        Some(
+            ControllerRef::Opponent
+            | ControllerRef::ScopedPlayer
+            | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::ParentTargetController
+            | ControllerRef::EventTargetController
+            | ControllerRef::ParentTargetOwner
+            | ControllerRef::DefendingPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::DeclaredPlayer { .. }
+            | ControllerRef::SourceChosenPlayer
+            | ControllerRef::TriggeringPlayer
+            | ControllerRef::EnchantedPlayer
+            | ControllerRef::ActivePlayer
+            | ControllerRef::SpecificPlayer { .. },
+        ) => false,
     }
 }
 
