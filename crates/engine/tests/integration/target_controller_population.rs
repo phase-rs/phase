@@ -307,6 +307,27 @@ fn empty_population_still_resolves_the_head() {
 
 #[test]
 fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn() {
+    fn remaining_prevention_capacity(runner: &GameRunner, target: ObjectId) -> u32 {
+        use engine::types::ability::{PreventionAmount, ShieldKind};
+
+        // CR 615.7: only unconsumed finite shields contribute remaining capacity.
+        runner.state().objects[&target]
+            .replacement_definitions
+            .iter()
+            .filter(|replacement| !replacement.is_consumed)
+            .filter_map(|replacement| {
+                if let ShieldKind::Prevention {
+                    amount: PreventionAmount::Next(amount),
+                } = replacement.shield_kind
+                {
+                    Some(amount)
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
     for prevent_disabled in [false, true] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -334,6 +355,8 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
             .resolve()
             .assert_zone(&[blessing], Zone::Graveyard);
         finished(&runner);
+        // CR 615.7: Blessing installs its printed three-point prevention shield.
+        assert_eq!(remaining_prevention_capacity(&runner, target), 3);
 
         add_mana(&mut runner, P0, ManaType::Red, 1);
         runner
@@ -345,16 +368,26 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
         // CR 615.7: the shield protects only the selected recipient, not its peers.
         assert_eq!(runner.state().objects[&peer].damage_marked, 2);
         assert_eq!(runner.state().objects[&target].damage_marked, 0);
+        assert_eq!(remaining_prevention_capacity(&runner, target), 3);
 
         if prevent_disabled {
             cast(&mut runner, fff, target, 3);
-            // CR 615.12: the existing shield cannot prevent FFF's damage.
+            // CR 615.12: unpreventable damage neither is prevented nor reduces the shield.
             assert_eq!(runner.state().objects[&target].damage_marked, 3);
             assert_eq!(runner.state().objects[&peer].damage_marked, 3);
+            assert_eq!(remaining_prevention_capacity(&runner, target), 3);
         }
-        for (shock, expected_damage) in [
-            (first_shock, if prevent_disabled { 5 } else { 0 }),
-            (second_shock, if prevent_disabled { 7 } else { 1 }),
+        for (shock, expected_damage, expected_capacity) in [
+            (
+                first_shock,
+                if prevent_disabled { 5 } else { 0 },
+                if prevent_disabled { 3 } else { 1 },
+            ),
+            (
+                second_shock,
+                if prevent_disabled { 7 } else { 1 },
+                if prevent_disabled { 3 } else { 0 },
+            ),
         ] {
             add_mana(&mut runner, P0, ManaType::Red, 1);
             runner
@@ -365,6 +398,11 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
             finished(&runner);
             // CR 615.7 + CR 615.12: the control prevents exactly three of four
             // damage across two Shocks; FFF makes both follow-up Shocks unpreventable.
+            // Only prevented damage depletes the shield; unpreventable damage leaves it intact.
+            assert_eq!(
+                remaining_prevention_capacity(&runner, target),
+                expected_capacity
+            );
             assert_eq!(
                 runner.state().objects[&target].damage_marked,
                 expected_damage
@@ -382,6 +420,7 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
         assert_eq!(runner.state().objects[&target].damage_marked, 0);
         assert_eq!(runner.state().objects[&peer].damage_marked, 0);
         assert!(!disabled(&runner), "this-turn restriction expires");
+        assert_eq!(remaining_prevention_capacity(&runner, target), 0);
         add_mana(&mut runner, P0, ManaType::Red, 1);
         priority(&mut runner, P0);
         runner
@@ -404,6 +443,8 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
             .resolve()
             .assert_zone(&[fresh_blessing], Zone::Graveyard);
         finished(&runner);
+        // CR 615.7: a newly resolved Blessing installs a fresh three-point shield.
+        assert_eq!(remaining_prevention_capacity(&runner, target), 3);
         add_mana(&mut runner, P0, ManaType::Red, 1);
         priority(&mut runner, P0);
         runner
@@ -418,6 +459,7 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
             2,
             "a fresh shield prevents the new Shock after cleanup"
         );
+        assert_eq!(remaining_prevention_capacity(&runner, target), 1);
     }
 }
 
