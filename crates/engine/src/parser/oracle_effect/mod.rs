@@ -16629,7 +16629,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 /// inherits any future "permanent card of the chosen kind" extensions.
 fn try_parse_chosen_kind_filter(filter_text: &str) -> Option<TargetFilter> {
     let mut ctx = ParseContext::default();
-    let parsed = parse_search_filter(filter_text, &mut ctx);
+    let parsed = parse_search_filter(filter_text, &mut ctx).ok()?;
     let TargetFilter::Typed(ref tf) = parsed else {
         return None;
     };
