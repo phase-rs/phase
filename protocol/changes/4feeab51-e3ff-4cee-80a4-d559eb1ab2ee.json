@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameEvent::CardNamed (CR 201.4) joins the serialized event stream in game_setup and state_update payloads; an older full-game or P2P peer cannot decode the new event tag."
+}

@@ -3,7 +3,9 @@ use crate::game::quantity::{
     RecipientRead,
 };
 use crate::game::replacement::EventModifiers;
-use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
+use crate::game::targeting::{
+    resolve_event_context_target, triggering_spell, triggering_spell_identity, TriggeringSpell,
+};
 use crate::types::ability::{
     AbilityDefinition, CastManaObjectScope, DamageTargetFilter, DamageTargetPlayerScope, Duration,
     Effect, EffectError, EffectKind, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
@@ -270,44 +272,33 @@ fn unenforceable_lifetime(ability: &ResolvedAbility) -> EffectError {
     ))
 }
 
-/// CR 603.2 + CR 603.3b + CR 117.3b: Concretize
-/// `TRIGGERING_SPELL_PLACEHOLDER` — the parse-time sentinel
-/// `parse_whenever_you_cast_enters_with_trigger` embeds inside a floating
-/// (`TargetFilter::None`) replacement's `valid_card` — to the SPECIFIC spell
-/// object referenced by the currently-resolving triggered ability's own
-/// originating event (Runadi, Behemoth Caller and the Wildgrowth Archaic
-/// cousin family — issue #6492 review).
+/// CR 400.7 + CR 614.1c: bind an entry rider to its recipient spell occurrence,
+/// not to the installer's source or controller. The resolving carrier's pin
+/// supplies both the concrete selector and the installed identity; a later cast
+/// with the same storage id cannot inherit it, even after a control change.
 ///
-/// Without this, a bare type/mana-value filter would let a DIFFERENT
-/// qualifying creature — cast by the active player during the CR 117.3b
-/// priority window between this trigger resolving and the originally-cast
-/// spell resolving — consume the one-shot install first, leaving the intended
-/// entrant uncountered. `state.current_trigger_event` is exactly this
-/// ability's own trigger event (set by `push_resolving_trigger_context` for
-/// the duration of its resolution — see `game/triggers.rs`), so
-/// `extract_source_from_event` yields the specific cast spell's `ObjectId`.
-///
-/// If the event carries no extractable source, this fails CLOSED — matching
-/// no object via the `ObjectId(0)` sentinel (never a real permanent) — rather
-/// than silently widening back to the bare filter, which would reopen the
-/// exact bug this binding exists to close.
-///
-/// No-op for every other floating-replacement install (Kaya's until-EOT token
-/// doubler, Rankle and Torbran's damage-modification shields): none of them
-/// ever embed the placeholder, so the walk finds nothing to replace.
-fn bind_replacement_to_trigger_source(replacement: &mut ReplacementDefinition, state: &GameState) {
+/// CR 400.7: installation needs the original spell still live on the stack; a
+/// departed occurrence is a new object the rider can never name.
+/// Missing, departed, or mismatched authority rejects the install rather than
+/// storing a raw-id fallback or a permanently stale rider. Definitions without
+/// the placeholder retain their unchanged installation path.
+fn bind_replacement_to_trigger_source(
+    mut replacement: ReplacementDefinition,
+    state: &GameState,
+) -> Option<ReplacementDefinition> {
     let Some(valid_card) = replacement.valid_card.as_mut() else {
-        return;
+        return Some(replacement);
     };
     if !target_filter_contains_placeholder(valid_card) {
-        return;
+        return Some(replacement);
     }
-    let bound = state
-        .current_trigger_event
-        .as_ref()
-        .and_then(extract_source_from_event)
-        .unwrap_or(ObjectId(0));
-    concretize_triggering_spell_placeholder(valid_card, bound);
+    let pin = triggering_spell_identity(state)?;
+    if !matches!(triggering_spell(state), Some(TriggeringSpell::OnStack(_))) {
+        return None;
+    }
+    concretize_triggering_spell_placeholder(valid_card, pin.object_id);
+    replacement.triggering_spell = Some(pin);
+    Some(replacement)
 }
 
 fn target_filter_contains_placeholder(filter: &TargetFilter) -> bool {
@@ -826,8 +817,10 @@ pub fn resolve(
     // (Communal Brewing's "that creature enters with X additional +1/+1
     // counters on it").
     if matches!(target, TargetFilter::None) {
-        let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
-        bind_replacement_to_trigger_source(&mut replacement, state);
+        let replacement = replacement_with_ability_expiry(replacement, ability)?;
+        let Some(mut replacement) = bind_replacement_to_trigger_source(replacement, state) else {
+            return Ok(());
+        };
         freeze_entry_counter_quantities(&mut replacement, state, ability);
         // CR 113.7a + CR 608.2h: a floating rider may still refer to its source
         // ("this enchantment"); a battlefield source anchors host-relative gates
@@ -1967,6 +1960,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -2062,6 +2056,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -2152,6 +2147,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -2253,6 +2249,8 @@ mod tests {
             AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TypedFilter,
         };
         use crate::types::counter::CounterType;
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use crate::types::identifiers::ObjectIncarnationRef;
 
         let subtype_you = |subtype: &str| {
             TargetFilter::Typed(
@@ -2276,26 +2274,20 @@ mod tests {
                     target: TargetFilter::SelfRef,
                 },
             ))
-            .valid_card(TargetFilter::And {
-                filters: vec![
-                    TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-                    TargetFilter::SpecificObject {
-                        id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
-                    },
-                ],
+            .valid_card(TargetFilter::SpecificObject {
+                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
             })
             .destination_zone(Zone::Battlefield);
         replacement.consume_on_apply = true;
 
-        // The SpellCast event that triggered the installing ability names the
-        // entering spell (`extract_source_from_event`).
+        // Model the live recipient and the pin carried by its resolving cast trigger.
         state.current_trigger_event = Some(GameEvent::SpellCast {
             card_id: CardId(6),
             controller: PlayerId(1),
             object_id: entering,
             cast_mana_value: None,
         });
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(replacement),
                 target: TargetFilter::None,
@@ -2304,8 +2296,42 @@ mod tests {
             source,
             PlayerId(1),
         );
+        ability.context.triggering_spell =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&entering]));
+        state.stack.push_back(StackEntry {
+            id: entering,
+            source_id: entering,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(6),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let trigger_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: trigger_id,
+            source_id: source,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability.clone()),
+                condition: None,
+                trigger_event: state.current_trigger_event.clone(),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
         let mut events = Vec::new();
         resolve(state, &ability, &mut events).unwrap();
+        state.resolving_stack_entry = None;
+        // Entry replacement runs after the resolving permanent spell is popped.
+        state.stack.pop_back();
     }
 
     /// Drive the entering spell's stack-to-battlefield event through the

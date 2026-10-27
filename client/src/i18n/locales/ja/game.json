@@ -913,6 +913,8 @@
     "chooseCreatureTokenToPopulate": "居住でコピーするクリーチャー・トークンを選択",
     "chooseReturnAsAuraTarget": "エンチャントするパーマネントを選択",
     "chooseTokenHost": "トークンをつけるホストを選択",
+    "chooseOneHighlighted": "強調表示された候補から1つを選択",
+    "chooseUpToOneHighlighted": "強調表示された候補から最大1つを選択",
     "tapUntappedCreatures_one": "アンタップ状態のクリーチャー{{count}}体をタップ",
     "tapUntappedCreatures_other": "アンタップ状態のクリーチャー{{count}}体をタップ",
     "sacrificeExact_one": "パーマネント{{count}}個を生け贄に捧げる",
@@ -1372,7 +1374,8 @@
     "passwordPrompt": "この部屋にはパスワードが必要です：",
     "toasts": {
       "connectionFailed": "接続に失敗しました。再試行するか、設定でサーバーを変更してください。",
-      "eliminatedSpectating": "あなたは敗北しました。観戦に移行します。"
+      "eliminatedSpectating": "あなたは敗北しました。観戦に移行します。",
+      "retainedTerminalUnreadable": "保存された最終結果の配信を読み取れませんでした"
     },
     "resumeReset": {
       "appUpdated": "アプリが更新され、保存したゲームは新しいバージョンと互換性がありません。",
@@ -2711,6 +2714,9 @@
     "player": "プレイヤー",
     "life": "ライフ",
     "setLife": "ライフを設定",
+    "gainLife": "ライフを得る",
+    "loseLife": "ライフを失う",
+    "amount": "量",
     "count": "枚数",
     "drawCards": "カードを引く",
     "mill": "切削",

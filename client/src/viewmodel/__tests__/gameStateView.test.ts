@@ -1300,12 +1300,36 @@ describe("getWaitingForPlayerChoiceIds", () => {
     expect(getWaitingForPlayerChoiceIds(allScope)).toEqual([]);
     expect(getWaitingForPlayerChoiceIds(singleScope)).toEqual([1]);
   });
+
+  // CR 608.2d + CR 115.10a: a single-pick `ChooseObjectsSelection` (`max: 1`) is
+  // answered by one board/HUD click, so both authorities expose the engine's
+  // `eligible` verbatim — object 9 stands for a hexproof creature, which a choice
+  // never excludes. The IDENTICAL payload with `max: 2` or no `max` stays
+  // dialog-only, so the inclusion keys on the published `max`.
+  it("routes ChooseObjectsSelection(max 1) clicks and keeps the identical multi-pick payload dialog-only", () => {
+    const eligible: TargetRef[] = [{ Object: 7 }, { Object: 9 }, { Player: 0 }, { Player: 1 }];
+    const withMax = (max: number | undefined): WaitingFor => ({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible, min: 1, ...(max === undefined ? {} : { max }) },
+    });
+
+    const single = withMax(1);
+    expect(getWaitingForClickTargetRefs(single)).toEqual(eligible);
+    expect(getWaitingForObjectChoiceIds(single)).toEqual([7, 9]);
+    expect(getWaitingForPlayerChoiceIds(single)).toEqual([0, 1]);
+
+    for (const multi of [withMax(2), withMax(undefined)]) {
+      expect(getWaitingForClickTargetRefs(multi)).toBeNull();
+      expect(getWaitingForObjectChoiceIds(multi)).toEqual([]);
+      expect(getWaitingForPlayerChoiceIds(multi)).toEqual([]);
+    }
+  });
 });
 
-// V5 — the six dialog-only variants. Each carries `{Player: 1}` in its own
-// `TargetRef[]` field, and a `TargetSelection` built from the IDENTICAL list
-// returns `[1]`, so the exclusion is proven to key on the variant rather than on
-// the list contents.
+// V5 — the six dialog-only variants (multi-pick `ChooseObjectsSelection`). Each
+// carries `{Player: 1}` in its own `TargetRef[]` field, and a `TargetSelection`
+// built from the IDENTICAL list returns `[1]`, so the exclusion is proven to key
+// on the variant rather than on the list contents.
 describe("getWaitingForPlayerChoiceIds — dialog-only variants", () => {
   const DIALOG_ONLY = [
     "DistributeAmong",

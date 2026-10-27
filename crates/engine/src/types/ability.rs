@@ -1220,8 +1220,11 @@ impl ChoiceType {
         matches!(self, Self::CardPredicateGuess { .. })
     }
 
+    /// CR 608.2d: a named card is announced while applying the effect, so a
+    /// dependent instruction ("discards a card with that name") reads it from
+    /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. })
+        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -2437,7 +2440,11 @@ pub enum CastFromZoneDriver {
     /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
     /// upkeep is not blocked by the sorcery-speed gate (issue #1520), and by
     /// Rebound's next-upkeep arming hook (CR 702.88a) for the same reason
-    /// (issue #6461).
+    /// (issue #6461). Also set by a free, no-duration single-card PLAY
+    /// instruction (Hideaway's "you may play the exiled card without paying its
+    /// mana cost", Djinn of Wishes' "you may play that card …"): CR 701.18b +
+    /// CR 305.2a, the card is cast during resolution if it is a spell, or played
+    /// as a land during resolution if it is a land.
     DuringResolution,
     /// CR 608.2g: Open a RESOLUTION-SCOPED free-cast window over the batch of
     /// cards the same resolution just produced ("… from among them") — the
@@ -2554,11 +2561,17 @@ impl ResolutionCastWindow {
 /// construct a `CastFromZoneDriver` for a `from among` batch by any other route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CastMechanism {
-    /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
-    /// priority window. Chosen for paid batch casts (the free-cast window
-    /// primitive models no mana payment), CR 305.1 land plays (no
-    /// during-resolution mechanism exists), and any clause that states a
-    /// durational scope.
+    /// A per-object permission exercised at a LATER priority window. Chosen
+    /// for:
+    /// - paid batch casts — CR 118.9: the free-cast window primitive models no
+    ///   mana payment, so a cast paying a cost lingers;
+    /// - batch land plays — CR 305.1: playing a land is a special action, and
+    ///   no resolution-scoped window plays lands;
+    /// - any clause that states a durational scope — CR 611.2a: the permission
+    ///   lasts as long as the instruction states.
+    ///
+    /// At runtime a land//land modal DFC bound outside the graveyard also keeps
+    /// a lingering grant (CR 712.12 election — follow-up).
     LingeringPermission,
     /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
     /// self-library-peek form ("look at the top four cards of your library. You
@@ -16068,6 +16081,62 @@ impl AbilityCost {
             // concrete `ManaCost` at cast time, so it is a mana payment.
             AbilityCost::KeywordCostOfCastSpell { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Unimplemented { .. } => Vec::new(),
+        }
+    }
+
+    /// CR 118: Classify this cost per payment component — one entry per
+    /// component, each holding that component's `categories()`.
+    ///
+    /// Unlike `categories()`, which yields the deduplicated set of categories
+    /// the whole cost belongs to, this keeps each payment separate: a
+    /// `Composite` concatenates its children's components without
+    /// deduplication, so "Sacrifice a creature, Sacrifice an enchantment" is
+    /// two `[SacrificesPermanent]` components, not one category. `OneOf`
+    /// contributes every branch's payment components, concatenated: any branch
+    /// may be the one paid, so this over-approximates the payments the cost
+    /// can make and an ambiguous reference declines (a branch paying two
+    /// sacrifices stays two components). `PerCounter` delegates to its base
+    /// (the multiplier changes how much is paid, not which payments there
+    /// are). Every other variant is a single component, including `Behold`.
+    /// Exhaustive match with no wildcard arm, so a new compositional variant
+    /// must decide how its payments split.
+    pub fn component_categories(&self) -> Vec<Vec<CostCategory>> {
+        match self {
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
+                .iter()
+                .flat_map(AbilityCost::component_categories)
+                .collect(),
+            AbilityCost::PerCounter { base, .. } => base.component_categories(),
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::Unimplemented { .. } => vec![self.categories()],
         }
     }
 
@@ -30573,12 +30642,16 @@ pub enum AbilityCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subtype_filter: Option<Box<TargetFilter>>,
     },
-    /// CR 608.2c + CR 201.2: Compare whether two anaphoric object references
+    /// CR 608.2c + CR 608.2h: Compare whether two anaphoric object references
     /// share at least one value of the named quality at resolution time.
-    /// Covers "if it shares a card type with that permanent" (Amareth) and the
-    /// full `SharedQuality` axis (color, creature type, name, mana value, etc.).
-    /// `subject` and `reference` are resolved via `resolved_targets` — typical
-    /// pairings are `LastRevealed` × `TriggeringSource`.
+    /// Covers "if it shares a card type with that permanent" (Amareth), the
+    /// trailing "<instruction> if it has the same <quality> as <object>" rider
+    /// (Counterbalance, Hisoka, Minamo Sensei) and the full `SharedQuality`
+    /// axis (color, creature type, name, mana value, etc.). `subject` and
+    /// `reference` are resolved via `resolved_targets` — typical pairings are
+    /// `LastRevealed` × `TriggeringSource` — except a `CostPaidObject` operand,
+    /// which CR 608.2k + CR 608.2h read from the cost snapshot's last known
+    /// information.
     ObjectsShareQuality {
         subject: TargetFilter,
         reference: TargetFilter,
@@ -35144,6 +35217,24 @@ pub struct ReplacementDefinition {
     pub choice_authority: ReplacementChoiceAuthority,
     #[serde(default)]
     pub valid_card: Option<TargetFilter>,
+    /// CR 400.7 + CR 614.1c: recipient spell occurrence for a cast-triggered
+    /// entry rider. Captured when the trigger goes on the stack and latched
+    /// unchanged from the resolving carrier when the rider is installed.
+    ///
+    /// Distinct from the installer's `source_object` / `source_controller`,
+    /// `granting_object`, and `runtime_execute`. Control changes do not change
+    /// the recipient. Installation requires the pinned spell still on the
+    /// stack; absent, departed, or mismatched authority installs nothing.
+    /// Applicability checks this pin against the pre-move object for a
+    /// stack-to-battlefield event, without requiring a surviving stack entry.
+    /// Leaving and recasting the same storage id never refreshes this pin.
+    ///
+    /// Pin-bearing riders must retain `valid_card: Some(...)`, whose matcher
+    /// enforces the identity gate. Older definitions default to no pin;
+    /// historical in-flight saves with installed raw-id riders cannot be
+    /// migrated because they never recorded the recipient incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_spell: Option<ObjectIncarnationRef>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -35183,6 +35274,17 @@ pub struct ReplacementDefinition {
     /// None = any target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_target_filter: Option<DamageTargetFilter>,
+    /// CR 400.7 + CR 615.1: the incarnation of the object this object-hosted
+    /// prevention shield was installed on, recorded at install time. A shield
+    /// meant to protect one specific creature ("prevent the next damage to
+    /// target creature") must not protect that creature's replacement after a
+    /// blink: the object keeps its id but bumps its incarnation on every zone
+    /// change, so a new incarnation is a new object with no memory of the
+    /// departed one's shields. `None` for registry-hosted (population) shields
+    /// and for player recipients, which intentionally match whatever object is
+    /// damaged at event time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_recipient_incarnation: Option<u64>,
     /// CR 614.1a: Restricts to combat-only or noncombat-only damage.
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35529,6 +35631,7 @@ impl ReplacementDefinition {
             mode: ReplacementMode::Mandatory,
             choice_authority: ReplacementChoiceAuthority::AffectedPlayer,
             valid_card: None,
+            triggering_spell: None,
             description: None,
             condition: None,
             destination_zone: None,
@@ -35536,6 +35639,7 @@ impl ReplacementDefinition {
             damage_modification: None,
             damage_source_filter: None,
             damage_target_filter: None,
+            target_recipient_incarnation: None,
             combat_scope: None,
             shield_kind: ShieldKind::None,
             quantity_modification: None,
@@ -38481,6 +38585,37 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 400.7 + CR 113.7a: carry a random-result branch's source identity
+    /// without changing its actor, targets, pins, or other resolution context.
+    /// Different-source nodes bound the traversal, including their descendants;
+    /// nested definition payloads inherit only when they are materialized.
+    pub(crate) fn set_result_branch_source_identity_recursive(
+        &mut self,
+        source_id: ObjectId,
+        trigger_source: Option<&TriggerSourceContext>,
+        source_incarnation: u64,
+    ) {
+        if self.source_id != source_id {
+            return;
+        }
+        self.trigger_source = trigger_source.cloned();
+        self.source_incarnation = Some(source_incarnation);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_result_branch_source_identity_recursive(
+                source_id,
+                trigger_source,
+                source_incarnation,
+            );
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_result_branch_source_identity_recursive(
+                source_id,
+                trigger_source,
+                source_incarnation,
+            );
+        }
+    }
+
     /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity
     /// over this entire ability chain. Writes `source_id` ONLY — controller,
     /// `original_controller`, `trigger_source`, incarnation pins untouched, so
@@ -38549,6 +38684,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.update_trigger_source_context_in_resolution_segment(source);
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: Publish a name announced while applying this
+    /// effect to every later instruction of the same resolution, including
+    /// independent sequential siblings ("Choose a card name. Target player
+    /// discards a card with that name."), which the segment-scoped update
+    /// above deliberately skips.
+    pub fn update_trigger_source_context_through_chain(&mut self, source: TriggerSourceContext) {
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.update_trigger_source_context_through_chain(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.update_trigger_source_context_through_chain(source);
         }
     }
 
@@ -45189,6 +45339,125 @@ mod tests {
             for (label, cost, expected) in cases {
                 assert_eq!(cost.categories(), expected, "{label}");
             }
+        }
+
+        /// `component_categories` keeps one entry per payment component:
+        /// `Composite` concatenates its children without deduplication (two
+        /// sacrifices are two components even though `categories()` collapses
+        /// them to one category), `OneOf` concatenates every branch's
+        /// components (any branch may be paid, so a branch paying two
+        /// sacrifices stays two components), and `PerCounter` delegates to its
+        /// base.
+        #[test]
+        fn component_categories_keeps_one_entry_per_payment() {
+            let sacrifice = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
+            let discard = || AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            };
+
+            let two_sacrifices = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    sacrifice(),
+                    sacrifice(),
+                ],
+            };
+            assert_eq!(
+                two_sacrifices.categories(),
+                vec![CostCategory::ManaOnly, CostCategory::SacrificesPermanent],
+                "categories() is the deduplicated set"
+            );
+            assert_eq!(
+                two_sacrifices.component_categories(),
+                vec![
+                    vec![CostCategory::ManaOnly],
+                    vec![CostCategory::SacrificesPermanent],
+                    vec![CostCategory::SacrificesPermanent],
+                ]
+            );
+
+            let nested = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Composite {
+                        costs: vec![discard(), discard()],
+                    },
+                ],
+            };
+            assert_eq!(
+                nested.component_categories(),
+                vec![
+                    vec![CostCategory::TapsSelf],
+                    vec![CostCategory::Discards],
+                    vec![CostCategory::Discards],
+                ]
+            );
+
+            let one_of = AbilityCost::OneOf {
+                costs: vec![discard(), sacrifice()],
+            };
+            assert_eq!(
+                one_of.component_categories(),
+                vec![
+                    vec![CostCategory::Discards],
+                    vec![CostCategory::SacrificesPermanent],
+                ]
+            );
+
+            // A branch that pays two sacrifices keeps both payments, even
+            // though `categories()` on that branch collapses them to one.
+            let one_of_two_sacrifices_or_mana = AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Composite {
+                        costs: vec![sacrifice(), sacrifice()],
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                ],
+            };
+            assert_eq!(
+                one_of_two_sacrifices_or_mana.component_categories(),
+                vec![
+                    vec![CostCategory::SacrificesPermanent],
+                    vec![CostCategory::SacrificesPermanent],
+                    vec![CostCategory::ManaOnly],
+                ]
+            );
+
+            // A discard-or-mana choice still has one slot-binding component.
+            let one_of_discard_or_mana = AbilityCost::OneOf {
+                costs: vec![
+                    discard(),
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(3),
+                    },
+                ],
+            };
+            assert_eq!(
+                one_of_discard_or_mana.component_categories(),
+                vec![vec![CostCategory::Discards], vec![CostCategory::ManaOnly]]
+            );
+
+            let per_counter = AbilityCost::PerCounter {
+                counter: CounterType::Age,
+                target: TargetFilter::SelfRef,
+                base: Box::new(two_sacrifices.clone()),
+            };
+            assert_eq!(
+                per_counter.component_categories(),
+                two_sacrifices.component_categories()
+            );
+
+            assert_eq!(
+                discard().component_categories(),
+                vec![vec![CostCategory::Discards]]
+            );
         }
 
         #[test]

@@ -118,6 +118,13 @@ vi.mock("../../services/nativeEngine", () => ({
 
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class {} }));
 
+// A P2P host reads its pending Full terminal cleanup before building a deck;
+// jsdom has no IndexedDB, so these launches start with none pending.
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/gamePersistence")>(),
+  loadFullTerminalCleanupStrict: vi.fn(async () => null),
+}));
+
 vi.mock("../../stores/gameStore", () => ({
   clearActiveGame: vi.fn(),
   clearGame: vi.fn(),

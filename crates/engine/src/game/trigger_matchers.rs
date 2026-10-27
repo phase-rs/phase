@@ -1173,6 +1173,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }
@@ -3124,7 +3125,20 @@ pub(super) fn match_becomes_target(
     match target {
         TargetRef::Object(object_id) => {
             // Check if the targeted object matches the trigger's valid_card filter.
-            if trigger.valid_card.is_some() {
+            if let Some(filter) = &trigger.valid_card {
+                // CR 109.2: a zone-less subject such as "a creature" (Horobi,
+                // Death's Wail) means a creature permanent on the battlefield.
+                // A creature card targeted in a graveyard (Nezumi Graverobber's
+                // flip side) or exile is not "a creature", so it does not fire
+                // the trigger even though the card has the creature type.
+                if super::filter::filter_denotes_battlefield_permanent(filter)
+                    && state
+                        .objects
+                        .get(object_id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+                {
+                    return false;
+                }
                 valid_card_matches(trigger, state, *object_id, source_context)
             } else {
                 *object_id == source_id

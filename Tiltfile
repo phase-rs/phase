@@ -395,6 +395,56 @@ local_resource('prelowered-ratchet',
     labels = ['lint'],
 )
 
+# Gate H's full shell seams are local Tilt checks, not a separate CI suite.
+# Fixtures use the real gate/detector and the shared scanner's import dependency.
+local_resource('residue-ratchet',
+    cmd = '/bin/bash scripts/lib/residue_ratchet_tests.sh',
+    deps = ['scripts/check-parser-combinators.sh',
+            'scripts/lib/added-lines.py',
+            'scripts/lib/added-lines.sh',
+            'scripts/lib/added_lines_tests.py',
+            'scripts/lib/detect-cross-product-alts.py',
+            'scripts/lib/detect-residue-discards.py',
+            'scripts/lib/detect_cross_product_alts_tests.py',
+            'scripts/lib/detect_residue_discards_tests.py',
+            'scripts/lib/residue_ratchet_tests.sh',
+            'scripts/zone_authority_census.py',
+            'crates/engine/src/game/mod.rs'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
+# The move-aware added-line helper (scripts/lib/added-lines.py) decides which
+# added lines the four diff-based gates check. A regression in it does not show
+# up as a helper error: it silently exempts real violations or re-flags moved
+# code. The helper's own suite pins the helper; diff_gates_tests.sh runs copies
+# of the real gates on fixture moves.
+#
+# Same venue and limits as prelowered-ratchet above: Tilt under the 'lint'
+# label, local-only. CI runs the helper suite only through the parser gate
+# (ci.yml), not these suites directly -- enrolling them needs a
+# .github/workflows/** edit, a hard stop for agent changes.
+#
+# No CARGO_TARGET_DIR and no cargo: bash, python and git against fixture repos
+# in a mktemp dir, so it cannot contend for a build lock.
+local_resource('diff-gates',
+    cmd = 'python3 scripts/lib/added_lines_tests.py && /bin/bash scripts/lib/diff_gates_tests.sh',
+    deps = ['scripts/lib/added-lines.py',
+            'scripts/lib/added-lines.sh',
+            'scripts/lib/added_lines_tests.py',
+            'scripts/lib/diff_gates_tests.sh',
+            'scripts/check-parser-combinators.sh',
+            'scripts/check-engine-authorities.sh',
+            'scripts/check-test-card-data-load.sh',
+            'scripts/check-legacy-quantity-callsites.sh'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # ---------------------------------------------------------------------------
 # Data (manual trigger — click in UI to run)
 # ---------------------------------------------------------------------------

@@ -13017,3 +13017,219 @@ fn a_reversed_activation_discards_its_lifecycle_frame() {
         "a reversal must discard its lifecycle frame"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR 701.18b + CR 305.2a: playing a land during resolution
+// (`resolution_land_play_is_legal` / `play_land_during_resolution`)
+// ---------------------------------------------------------------------------
+
+/// P0's main phase with a NON-empty stack (the resolving ability's stand-in) and
+/// an exiled land owned by P0. The special action would refuse here (CR 305.1:
+/// empty stack); a play during resolution has no such gate.
+fn resolution_land_play_board() -> (GameState, ObjectId) {
+    let mut state = setup_game_at_main_phase();
+    state.stack.push_back(no_op_stack_entry(7_901, PlayerId(0)));
+    let land = create_object(
+        &mut state,
+        CardId(7_902),
+        PlayerId(0),
+        "Exiled Land".to_string(),
+        Zone::Exile,
+    );
+    let obj = state.objects.get_mut(&land).unwrap();
+    obj.card_types.core_types.push(CoreType::Land);
+    obj.base_card_types = obj.card_types.clone();
+    (state, land)
+}
+
+/// A1 — CR 305.2a + CR 116.2a + CR 110.2a: a land played during resolution enters
+/// from the zone it was in, under the player's control, and counts as the turn's
+/// land play.
+#[test]
+fn play_land_during_resolution_enters_from_exile_and_counts_the_play() {
+    let (mut state, land) = resolution_land_play_board();
+    assert!(
+        !state.stack.is_empty(),
+        "reach-guard: the stack is not empty"
+    );
+    assert!(resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    let commit = play_land_during_resolution(&mut state, PlayerId(0), land, &mut events);
+    assert_eq!(commit, Some(LandPlayCommit::Entered));
+    let obj = &state.objects[&land];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(!obj.face_down);
+    assert_eq!(obj.controller, PlayerId(0));
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert_eq!(state.players[0].lands_played_this_turn, 1);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        GameEvent::LandPlayed {
+            object_id,
+            player_id: PlayerId(0),
+            from_zone: Zone::Exile,
+        } if *object_id == land
+    )));
+}
+
+/// A2 — CR 305.2b: at the allowance the instruction is ignored; an additional
+/// land drop (CR 305.2) restores it.
+#[test]
+fn play_land_during_resolution_is_ignored_at_the_allowance() {
+    let (mut state, land) = resolution_land_play_board();
+    state.lands_played_this_turn = 1;
+    state.players[0].lands_played_this_turn = 1;
+    assert!(!resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        None
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert!(events.is_empty());
+
+    // Hostile sibling: one additional land drop makes the same play legal.
+    let source = create_object(
+        &mut state,
+        CardId(7_903),
+        PlayerId(0),
+        "Extra Drop".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(StaticDefinition::new(StaticMode::AdditionalLandDrop {
+            count: 1,
+        }));
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        Some(LandPlayCommit::Entered)
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+    assert_eq!(state.lands_played_this_turn, 2);
+}
+
+/// A3 — CR 305.3: a player can't play a land if it isn't their turn; CR 805.4c:
+/// a teammate may during the team's turn.
+#[test]
+fn play_land_during_resolution_requires_the_players_turn() {
+    let (mut state, land) = resolution_land_play_board();
+    state.active_player = PlayerId(1);
+    assert!(!resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        None
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+    assert_eq!(state.lands_played_this_turn, 0);
+
+    // CR 805.4c: under shared team turns, with P0's teammate active, P0 may
+    // still play a land during the team's turn.
+    let mut team = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+    team.turn_number = 2;
+    team.phase = Phase::PreCombatMain;
+    let teammate = crate::game::topology::team_members(&team, PlayerId(0))
+        .into_iter()
+        .find(|member| *member != PlayerId(0))
+        .expect("P0 has a teammate under Two-Headed Giant");
+    team.active_player = teammate;
+    let team_land = create_object(
+        &mut team,
+        CardId(7_904),
+        PlayerId(0),
+        "Team Land".to_string(),
+        Zone::Exile,
+    );
+    team.objects
+        .get_mut(&team_land)
+        .unwrap()
+        .card_types
+        .core_types
+        .push(CoreType::Land);
+    assert!(resolution_land_play_is_legal(&team, PlayerId(0), team_land));
+}
+
+/// A4 — CR 305.2: a "can't play lands" static refuses the play during resolution.
+#[test]
+fn play_land_during_resolution_respects_cant_play_land() {
+    let (mut state, land) = resolution_land_play_board();
+    assert!(
+        resolution_land_play_is_legal(&state, PlayerId(0), land),
+        "reach-guard: legal before the static exists"
+    );
+    let source = create_object(
+        &mut state,
+        CardId(7_905),
+        PlayerId(0),
+        "Static Source".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&source)
+        .unwrap()
+        .static_definitions
+        .push(
+            StaticDefinition::new(StaticMode::Other("CantPlayLand".to_string())).affected(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+            ),
+        );
+    assert!(!resolution_land_play_is_legal(&state, PlayerId(0), land));
+    let mut events = Vec::new();
+    assert_eq!(
+        play_land_during_resolution(&mut state, PlayerId(0), land, &mut events),
+        None
+    );
+    assert_eq!(state.objects[&land].zone, Zone::Exile);
+}
+
+/// A5 — CR 712.12: only a modal DFC whose back face is a land offers a land-face
+/// election; a transform DFC with a land back face does not (CR 712.8a).
+#[test]
+fn modal_land_face_election_requires_a_modal_land_back_face() {
+    use crate::types::card::LayoutKind;
+    let mut state = setup_game_at_main_phase();
+    let mut make = |front: CoreType, back: Option<(CoreType, LayoutKind)>| {
+        let id = create_object(
+            &mut state,
+            CardId(7_910),
+            PlayerId(0),
+            "Double Face".to_string(),
+            Zone::Exile,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(front);
+        obj.back_face = back.map(|(core, layout)| {
+            let mut card_types = CardType::default();
+            card_types.core_types.push(core);
+            BackFaceData {
+                name: "Back Face".to_string(),
+                card_types,
+                layout_kind: Some(layout),
+                ..Default::default()
+            }
+        });
+        obj.clone()
+    };
+    let spell_land = make(CoreType::Instant, Some((CoreType::Land, LayoutKind::Modal)));
+    let land_land = make(CoreType::Land, Some((CoreType::Land, LayoutKind::Modal)));
+    let transform_land = make(
+        CoreType::Enchantment,
+        Some((CoreType::Land, LayoutKind::Transform)),
+    );
+    let spell_spell = make(
+        CoreType::Sorcery,
+        Some((CoreType::Instant, LayoutKind::Modal)),
+    );
+    let single_land = make(CoreType::Land, None);
+    assert!(modal_land_face_election_available(&spell_land));
+    assert!(modal_land_face_election_available(&land_land));
+    assert!(!modal_land_face_election_available(&transform_land));
+    assert!(!modal_land_face_election_available(&spell_spell));
+    assert!(!modal_land_face_election_available(&single_land));
+}

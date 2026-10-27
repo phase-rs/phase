@@ -908,6 +908,8 @@
     "chooseCreatureTokenToPopulate": "Choose a creature token to populate",
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "chooseTokenHost": "Choose a host for the token",
+    "chooseOneHighlighted": "Choose one of the highlighted options",
+    "chooseUpToOneHighlighted": "Choose up to one of the highlighted options",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",
@@ -1367,7 +1369,8 @@
     "passwordPrompt": "This room requires a password:",
     "toasts": {
       "connectionFailed": "Connection failed. Retry or change server in Settings.",
-      "eliminatedSpectating": "You have been eliminated. Now spectating."
+      "eliminatedSpectating": "You have been eliminated. Now spectating.",
+      "retainedTerminalUnreadable": "Retained terminal delivery could not be read"
     },
     "resumeReset": {
       "appUpdated": "The app was updated and your saved game is incompatible with the new version.",
@@ -2706,6 +2709,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

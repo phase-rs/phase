@@ -162,6 +162,7 @@ fn reality_shift_manifest_resolves_via_effect_context_object_snapshot() {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         },
         incarnation: 0,
     });

@@ -875,6 +875,8 @@
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "chooseTokenHost": "Wybierz gospodarza dla żetonu",
+    "chooseOneHighlighted": "Wybierz jedną z podświetlonych opcji",
+    "chooseUpToOneHighlighted": "Wybierz maksymalnie jedną z podświetlonych opcji",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",
@@ -1329,7 +1331,8 @@
     "passwordPrompt": "Ten pokój wymaga hasła:",
     "toasts": {
       "connectionFailed": "Połączenie nie powiodło się. Spróbuj ponownie lub zmień serwer w Ustawieniach.",
-      "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz."
+      "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz.",
+      "retainedTerminalUnreadable": "Nie udało się odczytać zachowanego dostarczenia wyniku końcowego"
     },
     "resumeReset": {
       "appUpdated": "Aplikacja została zaktualizowana, a zapisana gra jest niezgodna z nową wersją.",
@@ -2706,6 +2709,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

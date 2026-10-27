@@ -4,7 +4,7 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until, take_while};
 use nom::character::complete::{char, multispace0, satisfy};
-use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value};
+use nom::combinator::{all_consuming, eof, map, opt, peek, recognize, value, verify};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
@@ -20,8 +20,10 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::{
-    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_zone_word,
-    peek_zone_boundary, slot_matches_anaphor, slot_zone_class, AnaphorNoun, AnaphorZoneClass,
+    parse_cost_paid_participle_object, parse_exile_cost_paid_object, parse_shared_quality,
+    parse_target, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
+    parse_word_bounded, parse_zone_word, peek_zone_boundary, slot_matches_anaphor, slot_zone_class,
+    AnaphorNoun, AnaphorZoneClass,
 };
 use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 #[cfg(test)]
@@ -37,10 +39,10 @@ use crate::parser::oracle_ir::effect_chain::{
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, AdditionalCostOrigin,
     AttachCardinality, AttachSelection, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid,
-    CoinFlipResult, Comparator, ControllerRef, CountScope, DamageChannel, DigSource, Duration,
-    Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SpentColor, StaticCondition,
-    TargetFilter, TypeFilter, TypedFilter,
+    CoinFlipResult, Comparator, ControllerRef, CostCategory, CountScope, DamageChannel, DigSource,
+    Duration, Effect, EffectOutcomeSignal, FilterProp, GuessOutcome, ObjectScope, ParsedCondition,
+    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality, SpentColor,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -2160,6 +2162,11 @@ pub(super) fn strip_card_type_conditional(text: &str) -> (Option<AbilityConditio
     if let Some((condition, remainder)) = parse_if_exiled_card_type_conditional(text) {
         return (Some(condition), remainder);
     }
+    if let Some((condition_text, remainder)) = split_leading_conditional(text) {
+        if let Some(condition) = parse_target_color_condition_text(&condition_text) {
+            return (Some(condition), remainder);
+        }
+    }
     let lower = text.to_lowercase();
     let rest = alt((
         tag::<_, _, OracleError<'_>>("if it's a "),
@@ -2253,16 +2260,24 @@ fn parse_target_color_condition(
 ) -> super::super::oracle_nom::error::OracleResult<'_, AbilityCondition> {
     let (rest, _) = parse_target_anaphoric_subject(input)?;
     let (rest, (negated, use_lki)) = parse_target_anaphoric_tense_polarity(rest)?;
+    let (rest, _) = opt(tag("a ")).parse(rest)?;
     let (rest, first_color) = nom_primitives::parse_color(rest)?;
     // CR 105.2: Disjunctive color condition — "white or blue" etc.
     let (rest, second_color) =
         opt(preceded(tag(" or "), nom_primitives::parse_color)).parse(rest)?;
+    // CR 105.2 + CR 205.2a: "a green creature" combines a color predicate
+    // with the creature card type on the same anaphoric object.
+    let (rest, creature_only) =
+        map(opt(tag(" creature")), |suffix| suffix.is_some()).parse(rest)?;
     let mut filters: Vec<_> = std::iter::once(first_color)
         .chain(second_color)
         .map(|color| {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
-            )
+            let mut typed = TypedFilter::default();
+            if creature_only {
+                typed.type_filters.push(TypeFilter::Creature);
+            }
+            typed.properties.push(FilterProp::HasColor { color });
+            TargetFilter::Typed(typed)
         })
         .collect();
     let filter = if filters.len() > 1 {
@@ -2698,7 +2713,7 @@ fn parse_target_anaphoric_tense_polarity(
 
 fn parse_target_color_condition_text(text: &str) -> Option<AbilityCondition> {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
-    let parsed = all_consuming(parse_target_color_condition)
+    let parsed = all_consuming(preceded(opt(tag("if ")), parse_target_color_condition))
         .parse(lower.as_str())
         .ok()
         .map(|(_, condition)| condition);
@@ -4064,6 +4079,199 @@ pub(super) fn strip_superlative_target_conditional(
     (None, text.to_string())
 }
 
+/// CR 608.2c + CR 202.3: Strip a trailing "<instruction> if it has the same
+/// <quality> as <object>" rider (Counterbalance, Hisoka, Minamo Sensei) into
+/// `AbilityCondition::ObjectsShareQuality`. A sibling of the spell-target
+/// gates: it runs under a reflexive "If you do" connector, and "it" names the
+/// object the gated instruction acts on. Only single-object references are
+/// owned ("the revealed card", a cost-paid object); existential references
+/// ("as a permanent", "as a card in your graveyard") are a different
+/// condition and are left untouched.
+pub(super) fn strip_same_quality_as_conditional(
+    text: &str,
+    ctx: &ParseContext,
+) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    let Some(if_pos) = find_trailing_condition_start(&lower) else {
+        return (None, text.to_string());
+    };
+    let Ok((_, (quality, reference))) = all_consuming(terminated(
+        |i| parse_same_quality_as_predicate(i, ctx),
+        (opt(tag(".")), multispace0),
+    ))
+    .parse(&lower[if_pos + " if ".len()..]) else {
+        return (None, text.to_string());
+    };
+    let body = text[..if_pos].trim();
+    let Some(subject) = trailing_rider_subject(body, ctx) else {
+        return (None, text.to_string());
+    };
+    (
+        Some(AbilityCondition::ObjectsShareQuality {
+            subject,
+            reference,
+            quality,
+        }),
+        body.to_string(),
+    )
+}
+
+/// CR 608.2c + CR 202.3: "it has the same <quality> as <object>" — the
+/// predicate of a trailing same-quality rider.
+fn parse_same_quality_as_predicate<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (SharedQuality, TargetFilter)> {
+    let (rest, _) = parse_word_bounded(input, "it")?;
+    let (rest, _) = tag(" has the same ").parse(rest)?;
+    let (rest, quality) = verify(parse_shared_quality, quality_reads_as_the_same).parse(rest)?;
+    let (rest, _) = tag(" as ").parse(rest)?;
+    let (rest, reference) = parse_same_quality_reference(rest, ctx)?;
+    Ok((rest, (quality, reference)))
+}
+
+/// CR 201.2a + CR 202.3 + CR 208.1: qualities Oracle text compares with "has
+/// the same <quality> as" — each names one value per object (two objects have
+/// the same name when they have a name in common). Multi-valued qualities
+/// (color, types) are compared with "shares" wording instead.
+fn quality_reads_as_the_same(quality: &SharedQuality) -> bool {
+    match quality {
+        SharedQuality::Name
+        | SharedQuality::ManaValue
+        | SharedQuality::Power
+        | SharedQuality::Toughness
+        | SharedQuality::TotalPowerToughness => true,
+        SharedQuality::CreatureType
+        | SharedQuality::Color
+        | SharedQuality::CardType
+        | SharedQuality::PermanentType
+        | SharedQuality::LandType => false,
+    }
+}
+
+/// CR 701.20a + CR 608.2k: the closed set of single-object references a
+/// same-quality rider compares against. "the revealed card" is the card the
+/// ability revealed earlier (`LastRevealed`). A cost participle is the object
+/// paid for this ability's cost (`CostPaidObject`) only when the ability's
+/// cost has that participle's action: "the discarded card" / "the sacrificed
+/// creature" need a discard / sacrifice cost
+/// (`ParseContext::current_ability_cost_components`), "the exiled card" a
+/// non-self exile cost. Without such a cost the participle names an effect's
+/// action and is declined; a triggered ability has no cost, so cost
+/// participles are declined there too. A participle is also declined when any
+/// other cost payment could write the cost-paid object (see
+/// [`is_sole_slot_binding_cost_kind`]). Any other phrase ("that card", "a
+/// permanent") is not owned.
+fn parse_same_quality_reference<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, TargetFilter> {
+    let cost_paid_reference = |i: &'a str| -> OracleResult<'a, TargetFilter> {
+        if ctx.in_trigger {
+            return Err(oracle_err(i));
+        }
+        value(
+            TargetFilter::CostPaidObject,
+            verify(
+                alt((
+                    parse_cost_paid_participle_object,
+                    value(CostCategory::ExilesCards, |i| {
+                        parse_exile_cost_paid_object(i, ctx)
+                    }),
+                )),
+                // Typed `CostCategory` comparison, not text dispatch.
+                |kind| is_sole_slot_binding_cost_kind(*kind, ctx),
+            ),
+        )
+        .parse(i)
+    };
+    alt((
+        value(TargetFilter::LastRevealed, tag("the revealed card")),
+        cost_paid_reference,
+    ))
+    .parse(input)
+}
+
+/// CR 608.2k: whether this ability's cost has exactly one slot-binding payment
+/// component and that component is of kind `kind`, so a cost participle naming
+/// that kind has exactly one referent. Each paid component that references an
+/// object overwrites the single cost-paid slot, so the count is over payment
+/// components (`ParseContext::current_ability_cost_components`), not over the
+/// deduplicated category set: "Sacrifice a creature, Sacrifice an enchantment"
+/// is two sacrifice payments and "the sacrificed creature" is ambiguous. A
+/// component is slot-binding when any of its categories is, as classified by
+/// [`cost_category_binds_cost_paid_object`]; the sole slot-binding component
+/// must have no slot-binding category other than `kind` (a behold-and-exile
+/// cost is one component that both reveals and exiles). A `OneOf` contributes
+/// every branch's components, so a "discard or sacrifice" choice is two
+/// slot-binding components. Any other shape is ambiguous and is declined (fail
+/// closed).
+fn is_sole_slot_binding_cost_kind(kind: CostCategory, ctx: &ParseContext) -> bool {
+    let binds = |category: &CostCategory| cost_category_binds_cost_paid_object(*category);
+    let mut slot_binding_components = ctx
+        .current_ability_cost_components
+        .iter()
+        .filter(|component| component.iter().any(binds));
+    match (
+        slot_binding_components.next(),
+        slot_binding_components.next(),
+    ) {
+        (Some(component), None) => component
+            .iter()
+            .filter(|category| binds(category))
+            .all(|category| *category == kind),
+        _ => false,
+    }
+}
+
+/// CR 608.2k: whether paying a cost of this category can bind (write) the
+/// ability's cost-paid object. `TargetFilter::CostPaidObject` resolves from a
+/// single cost-paid slot that each object-referencing cost payment overwrites,
+/// so a cost participle has one referent only when no other such payment can
+/// write that slot. Only the categories that move or reference no object are
+/// not slot-binding; every other category, including self-referential costs
+/// (exile-self within `ExilesCards`) and costs whose payment shape is unknown
+/// here (`KeywordCost`), is treated as binding on purpose, so an ambiguous
+/// reference stays an honest unsupported clause rather than resolving wrong.
+/// Exhaustive match with no wildcard arm, so a new category must be classified.
+fn cost_category_binds_cost_paid_object(category: CostCategory) -> bool {
+    match category {
+        CostCategory::ManaOnly
+        | CostCategory::TapsSelf
+        | CostCategory::UntapsSelf
+        | CostCategory::PaysLife
+        | CostCategory::PaysLoyalty
+        | CostCategory::PaysEnergy
+        | CostCategory::PaysSpeed => false,
+        CostCategory::SacrificesPermanent
+        | CostCategory::Discards
+        | CostCategory::ExilesCards
+        | CostCategory::TapsOtherCreatures
+        | CostCategory::RemovesCounters
+        | CostCategory::ReturnsToHand
+        | CostCategory::Unattaches
+        | CostCategory::Mills
+        | CostCategory::PutsCounters
+        | CostCategory::Reveals
+        | CostCategory::Exerts
+        | CostCategory::KeywordCost => true,
+    }
+}
+
+/// CR 608.2c: "it" in a trailing rider names the object the gated instruction
+/// acts on — its single-object anaphor verbatim ("that spell" → the trigger's
+/// spell), or the instruction's declared target (`ParentTarget`). `None` when
+/// the instruction acts on no single object.
+fn trailing_rider_subject(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    match effect_target_filter(effect_text, ctx)? {
+        filter if super::subject::is_single_object_ref(&filter) => Some(filter),
+        filter if !filter.is_context_ref() && !matches!(filter, TargetFilter::Any) => {
+            Some(TargetFilter::ParentTarget)
+        }
+        _ => None,
+    }
+}
+
 /// Parse the body of a leading mana-value conditional — "`<N>` or less/greater, [effect]" —
 /// and compute the body offset into `original`. `use_lki` is threaded into the constructed
 /// `TargetMatchesFilter` condition: past-tense ("was") callers pass `true` (CR 400.7 — LKI
@@ -4528,6 +4736,10 @@ pub(super) fn strip_routed_suffix_conditional(
         effect_prefix.to_string()
     };
 
+    if let Some(cond) = parse_target_color_condition_text(condition_core) {
+        return (general(cond), effect_text);
+    }
+
     if let Some(cond) = parse_its_a_type_condition(condition_core, ctx) {
         return (general(cond), effect_text);
     }
@@ -4584,11 +4796,15 @@ pub(super) fn strip_routed_suffix_conditional(
 /// filter is a player-chosen target (not a context reference or the untyped
 /// `Any` fallback). Parses on a throwaway context so the caller's is untouched.
 fn effect_has_declared_target(effect_text: &str, ctx: &ParseContext) -> bool {
-    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
-    clause
-        .effect
-        .target_filter()
+    effect_target_filter(effect_text, ctx)
         .is_some_and(|filter| !filter.is_context_ref() && !matches!(filter, TargetFilter::Any))
+}
+
+/// The typed target filter of the effect `effect_text` lowers to, parsed on a
+/// throwaway context so the caller's is untouched.
+fn effect_target_filter(effect_text: &str, ctx: &ParseContext) -> Option<TargetFilter> {
+    let clause = parse_effect_clause_inner(effect_text, &mut ctx.clone_throwaway());
+    clause.effect.target_filter().cloned()
 }
 
 pub(super) fn parse_quantity_comparison(text: &str) -> Option<(Comparator, QuantityExpr)> {
@@ -5617,7 +5833,8 @@ pub(crate) fn lower_instead_condition(
     cond_text: &str,
     ctx: &mut ParseContext,
 ) -> Option<AbilityCondition> {
-    try_nom_condition_as_ability_condition(cond_text, ctx)
+    parse_target_color_condition_text(cond_text)
+        .or_else(|| try_nom_condition_as_ability_condition(cond_text, ctx))
         .or_else(|| parse_condition_text_in(cond_text, ctx))
         .or_else(|| parse_control_count_as_ability_condition(cond_text))
 }
@@ -7364,9 +7581,24 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
     // is repopulated per-effect, so after the preceding effect resolves it holds
     // exactly that effect's zone changes; `Not { ZoneChangedThisWay { Any } }` is
     // true iff that effect moved nothing — i.e. "you can't".
-    if alt((tag::<_, _, OracleError<'_>>("you can't"), tag("you cannot")))
-        .parse(lower.as_str())
-        .is_ok()
+    // The instruction's actor may be named in the third person ("if they can't,
+    // you draw a card" — Brain Pry); that reads the same outcome. The third-person
+    // form must be the whole condition so "they can't block" is not swallowed.
+    if alt((
+        value(
+            (),
+            alt((tag::<_, _, OracleError<'_>>("you can't"), tag("you cannot"))),
+        ),
+        value(
+            (),
+            all_consuming(terminated(
+                alt((tag("they can't"), tag("they cannot"))),
+                (multispace0, opt(char('.'))),
+            )),
+        ),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
     {
         return Some(AbilityCondition::Not {
             condition: Box::new(AbilityCondition::ZoneChangedThisWay {
@@ -9293,8 +9525,8 @@ mod tests {
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::parser::parse_oracle_text;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CommanderOwnership, PlayerFilter, SharedQuality,
-        SharedQualityRelation,
+        AggregateFunction, CardTypeSetSource, CommanderOwnership, CostCategory, PlayerFilter,
+        SharedQuality, SharedQualityRelation,
     };
     use crate::types::counter::{CounterMatch, CounterType};
 
@@ -11020,6 +11252,23 @@ mod tests {
     }
 
     #[test]
+    fn if_they_cant_matches_only_the_whole_condition() {
+        // CR 608.2c: third-person "they can't" reads the preceding instruction's
+        // outcome like "you can't" — but only as the whole condition.
+        assert!(
+            try_nom_condition_as_ability_condition("they can't", &mut ParseContext::default())
+                .is_some()
+        );
+        assert_eq!(
+            try_nom_condition_as_ability_condition(
+                "they can't block",
+                &mut ParseContext::default()
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn leading_that_enchantment_is_aura_checks_zone_change_object() {
         let (condition, body) = strip_leading_general_conditional(
             "If that enchantment is an Aura, you may attach it to the token.",
@@ -11135,6 +11384,24 @@ mod tests {
             "expected Red color filter, got {:?}",
             filter.properties
         );
+    }
+
+    #[test]
+    fn green_creature_instead_gate_checks_parent_target_type_and_color() {
+        let (condition, body) = strip_card_type_conditional(
+            "If it's a green creature, prevent the next 2 damage instead.",
+        );
+        assert_eq!(body, "prevent the next 2 damage instead.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, .. }) = condition else {
+            panic!("expected target-relative color and type condition, got {condition:?}");
+        };
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed target filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.contains(&FilterProp::HasColor {
+            color: ManaColor::Green
+        }));
     }
 
     #[test]
@@ -11487,6 +11754,475 @@ mod tests {
             ))),
             "aggregate filter should be creatures on the battlefield, got {filter:?}"
         );
+    }
+
+    /// CR 608.2c + CR 202.3 + CR 201.2a + CR 208.1: the trailing same-quality
+    /// rider lowers to `ObjectsShareQuality` across the quality axis (name, mana
+    /// value, power, toughness) and the reference axis ("the revealed card" →
+    /// `LastRevealed`; a cost participle → `CostPaidObject`). "it" is the
+    /// instruction's declared target (`ParentTarget`).
+    #[test]
+    fn strip_same_quality_as_conditional_covers_quality_and_reference_axes() {
+        // Each cost participle is read under an activated ability whose only
+        // slot-binding cost payment is that participle's kind, so the
+        // reference is unambiguous (see the ambiguous-cost test below).
+        let cost_ctx = |components: Vec<Vec<CostCategory>>| ParseContext {
+            current_ability_cost_components: components,
+            ..Default::default()
+        };
+        let reference_rows = [
+            (
+                "the revealed card",
+                TargetFilter::LastRevealed,
+                ParseContext::default(),
+            ),
+            (
+                "the discarded card",
+                TargetFilter::CostPaidObject,
+                cost_ctx(vec![
+                    vec![CostCategory::ManaOnly],
+                    vec![CostCategory::Discards],
+                ]),
+            ),
+            (
+                "the sacrificed creature",
+                TargetFilter::CostPaidObject,
+                cost_ctx(vec![
+                    vec![CostCategory::ManaOnly],
+                    vec![CostCategory::SacrificesPermanent],
+                ]),
+            ),
+        ];
+        for (quality_text, quality) in [
+            ("name", SharedQuality::Name),
+            ("mana value", SharedQuality::ManaValue),
+            ("power", SharedQuality::Power),
+            ("toughness", SharedQuality::Toughness),
+        ] {
+            for (reference_text, reference, ctx) in &reference_rows {
+                let text = format!(
+                    "Counter target spell if it has the same {quality_text} as {reference_text}."
+                );
+                let (condition, body) = strip_same_quality_as_conditional(&text, ctx);
+                assert_eq!(body, "Counter target spell", "{text}");
+                assert_eq!(
+                    condition,
+                    Some(AbilityCondition::ObjectsShareQuality {
+                        subject: TargetFilter::ParentTarget,
+                        reference: reference.clone(),
+                        quality: quality.clone(),
+                    }),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    /// CR 608.2k: "the exiled card" names the cost-paid object only when the
+    /// ability has an exile cost. Reach guard for the no-exile-cost decline.
+    /// The context is a lone non-self exile cost ("Exile a card from your
+    /// graveyard"): one `ExilesCards` payment component plus its source zone.
+    #[test]
+    fn strip_same_quality_as_conditional_exiled_card_with_exile_cost() {
+        let ctx = ParseContext {
+            current_ability_cost_components: vec![vec![CostCategory::ExilesCards]],
+            current_ability_exile_cost_zone: Some(Zone::Graveyard),
+            ..Default::default()
+        };
+        let (condition, body) = strip_same_quality_as_conditional(
+            "Counter target spell if it has the same mana value as the exiled card.",
+            &ctx,
+        );
+        assert_eq!(body, "Counter target spell");
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::ObjectsShareQuality {
+                subject: TargetFilter::ParentTarget,
+                reference: TargetFilter::CostPaidObject,
+                quality: SharedQuality::ManaValue,
+            })
+        );
+    }
+
+    /// CR 608.2k: a cost participle is claimed only when the ability's cost has
+    /// exactly one slot-binding payment component and it is the participle's
+    /// kind. `CostPaidObject` reads one cost-paid slot that every
+    /// object-referencing cost payment (sacrifice, exile, reveal, remove
+    /// counters, ...) overwrites, so with another such payment beside it —
+    /// even a second payment of the same kind ("Sacrifice a creature,
+    /// Sacrifice an enchantment") — the reference is ambiguous and the rider is
+    /// declined, text unchanged. A `OneOf` choice contributes every branch's
+    /// payments ("discard or sacrifice"; a branch that sacrifices twice), and
+    /// one component with two slot-binding kinds (behold-and-exile) is
+    /// ambiguous too, so both are declined. Costs that reference no object (mana, tap self, life) do not make it
+    /// ambiguous. Each decline is paired with the same participle claimed
+    /// under a cost with one payment of its own kind, and "the revealed card"
+    /// stays claimed under every ambiguous context.
+    #[test]
+    fn strip_same_quality_as_conditional_ambiguous_cost_paid_reference_declines() {
+        let cost_ctx =
+            |components: Vec<Vec<CostCategory>>, exile_cost_zone: Option<Zone>| ParseContext {
+                current_ability_cost_components: components,
+                current_ability_exile_cost_zone: exile_cost_zone,
+                ..Default::default()
+            };
+        let rider = |reference_text: &str| {
+            format!("Counter target spell if it has the same mana value as {reference_text}.")
+        };
+        let claimed = Some(AbilityCondition::ObjectsShareQuality {
+            subject: TargetFilter::ParentTarget,
+            reference: TargetFilter::CostPaidObject,
+            quality: SharedQuality::ManaValue,
+        });
+
+        let discard_and_sacrifice = cost_ctx(
+            vec![
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::Discards],
+                vec![CostCategory::SacrificesPermanent],
+            ],
+            None,
+        );
+        let discard_and_exile = cost_ctx(
+            vec![
+                vec![CostCategory::Discards],
+                vec![CostCategory::ExilesCards],
+            ],
+            Some(Zone::Graveyard),
+        );
+        let discard_and_reveal = cost_ctx(
+            vec![
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::Discards],
+                vec![CostCategory::Reveals],
+            ],
+            None,
+        );
+        let discard_and_remove_counters = cost_ctx(
+            vec![
+                vec![CostCategory::Discards],
+                vec![CostCategory::RemovesCounters],
+            ],
+            None,
+        );
+        // An exile-self cost is `ExilesCards` with no non-self exile zone: it
+        // still binds the slot beside a discard, and it is not an exile cost
+        // "the exiled card" can name.
+        let discard_and_exile_self = cost_ctx(
+            vec![
+                vec![CostCategory::ExilesCards],
+                vec![CostCategory::Discards],
+            ],
+            None,
+        );
+        // Two payments of the same kind: `AbilityCost::categories()` collapses
+        // them to one category, but each payment overwrites the one cost-paid
+        // slot, so the participle has two candidate referents.
+        let two_discards = cost_ctx(
+            vec![vec![CostCategory::Discards], vec![CostCategory::Discards]],
+            None,
+        );
+        let two_sacrifices = cost_ctx(
+            vec![
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::SacrificesPermanent],
+                vec![CostCategory::SacrificesPermanent],
+            ],
+            None,
+        );
+        // Two exile payments, at least one non-self (an exile-self cost beside
+        // "Exile a card from your graveyard", or two graveyard exiles).
+        let two_exiles = cost_ctx(
+            vec![
+                vec![CostCategory::ExilesCards],
+                vec![CostCategory::ExilesCards],
+            ],
+            Some(Zone::Graveyard),
+        );
+        // "Discard a card or sacrifice a creature": a `OneOf` contributes each
+        // branch's payment, since either may be the one paid.
+        let discard_or_sacrifice = cost_ctx(
+            vec![
+                vec![CostCategory::Discards],
+                vec![CostCategory::SacrificesPermanent],
+            ],
+            None,
+        );
+        // "Sacrifice a creature, Sacrifice an artifact or {R}, {T}": the
+        // sacrifice branch pays two sacrifices into the one cost-paid slot.
+        let two_sacrifices_or_mana = cost_ctx(
+            vec![
+                vec![CostCategory::SacrificesPermanent],
+                vec![CostCategory::SacrificesPermanent],
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::TapsSelf],
+            ],
+            None,
+        );
+        // One payment component with two slot-binding kinds (a behold cost
+        // that exiles the beheld card both reveals and exiles).
+        let reveal_and_exile_component = cost_ctx(
+            vec![vec![CostCategory::Reveals, CostCategory::ExilesCards]],
+            Some(Zone::Graveyard),
+        );
+        let ambiguous = [
+            &discard_and_sacrifice,
+            &discard_and_exile,
+            &discard_and_reveal,
+            &discard_and_remove_counters,
+            &discard_and_exile_self,
+            &two_discards,
+            &two_sacrifices,
+            &two_exiles,
+            &discard_or_sacrifice,
+            &two_sacrifices_or_mana,
+            &reveal_and_exile_component,
+        ];
+        let declined = [
+            ("the discarded card", &discard_and_sacrifice),
+            ("the sacrificed creature", &discard_and_sacrifice),
+            ("the discarded card", &discard_and_exile),
+            ("the exiled card", &discard_and_exile),
+            ("the discarded card", &discard_and_reveal),
+            ("the discarded card", &discard_and_remove_counters),
+            ("the discarded card", &discard_and_exile_self),
+            ("the exiled card", &discard_and_exile_self),
+            ("the discarded card", &two_discards),
+            ("the sacrificed creature", &two_sacrifices),
+            ("the exiled card", &two_exiles),
+            ("the discarded card", &discard_or_sacrifice),
+            ("the sacrificed creature", &discard_or_sacrifice),
+            ("the sacrificed creature", &two_sacrifices_or_mana),
+            ("the exiled card", &reveal_and_exile_component),
+        ];
+        for (reference_text, ctx) in declined {
+            let text = rider(reference_text);
+            let (condition, body) = strip_same_quality_as_conditional(&text, ctx);
+            assert_eq!(condition, None, "{text} under an ambiguous cost");
+            assert_eq!(body, text);
+        }
+
+        // Reach guards: the same predicate is claimed under these contexts
+        // when its reference is not a cost participle.
+        for ctx in ambiguous {
+            let (condition, body) =
+                strip_same_quality_as_conditional(&rider("the revealed card"), ctx);
+            assert_eq!(body, "Counter target spell");
+            assert_eq!(
+                condition,
+                Some(AbilityCondition::ObjectsShareQuality {
+                    subject: TargetFilter::ParentTarget,
+                    reference: TargetFilter::LastRevealed,
+                    quality: SharedQuality::ManaValue,
+                })
+            );
+        }
+
+        // Paired positives: each participle under a cost with exactly one
+        // slot-binding payment, of its own kind. Each differs from a
+        // same-kind decline above only in the number of such payments.
+        let unambiguous = [
+            (
+                "the discarded card",
+                cost_ctx(
+                    vec![vec![CostCategory::ManaOnly], vec![CostCategory::Discards]],
+                    None,
+                ),
+            ),
+            (
+                "the discarded card",
+                cost_ctx(vec![vec![CostCategory::Discards]], None),
+            ),
+            (
+                "the sacrificed creature",
+                cost_ctx(
+                    vec![
+                        vec![CostCategory::ManaOnly],
+                        vec![CostCategory::SacrificesPermanent],
+                    ],
+                    None,
+                ),
+            ),
+            (
+                "the exiled card",
+                cost_ctx(vec![vec![CostCategory::ExilesCards]], Some(Zone::Graveyard)),
+            ),
+            (
+                "the discarded card",
+                cost_ctx(
+                    vec![
+                        vec![CostCategory::TapsSelf],
+                        vec![CostCategory::PaysLife],
+                        vec![CostCategory::Discards],
+                    ],
+                    None,
+                ),
+            ),
+            // "Pay {3} or discard a card": the `OneOf`'s other branch pays
+            // only mana, so the discard is the one slot-binding payment.
+            (
+                "the discarded card",
+                cost_ctx(
+                    vec![vec![CostCategory::Discards], vec![CostCategory::ManaOnly]],
+                    None,
+                ),
+            ),
+            // "Sacrifice a creature or {R}, {T}": one sacrifice across the
+            // branches, the pair of `two_sacrifices_or_mana` above.
+            (
+                "the sacrificed creature",
+                cost_ctx(
+                    vec![
+                        vec![CostCategory::SacrificesPermanent],
+                        vec![CostCategory::ManaOnly],
+                        vec![CostCategory::TapsSelf],
+                    ],
+                    None,
+                ),
+            ),
+        ];
+        for (reference_text, ctx) in &unambiguous {
+            let text = rider(reference_text);
+            let (condition, body) = strip_same_quality_as_conditional(&text, ctx);
+            assert_eq!(body, "Counter target spell", "{text}");
+            assert_eq!(condition, claimed, "{text}");
+        }
+    }
+
+    /// CR 608.2k + CR 701.9a + CR 701.21a: "the discarded card" / "the
+    /// sacrificed creature" name the cost-paid object only when the enclosing
+    /// ability's cost discards / sacrifices. With a mana-only cost ("{2}{U}:
+    /// Discard a card, then counter target spell if …") the participle is an
+    /// effect's action and the rider is declined, text unchanged; a cost with
+    /// the other participle's category does not bind it either. The claimed
+    /// rows (the participle's own category in scope) are the reach guards for
+    /// the declines: the sentence and every other context field are identical.
+    #[test]
+    fn strip_same_quality_as_conditional_cost_participles_need_their_cost() {
+        for (reference_text, category, other_category) in [
+            (
+                "the discarded card",
+                CostCategory::Discards,
+                CostCategory::SacrificesPermanent,
+            ),
+            (
+                "the sacrificed creature",
+                CostCategory::SacrificesPermanent,
+                CostCategory::Discards,
+            ),
+        ] {
+            let text =
+                format!("Counter target spell if it has the same mana value as {reference_text}.");
+            let cost_ctx = |components: Vec<Vec<CostCategory>>| ParseContext {
+                current_ability_cost_components: components,
+                ..Default::default()
+            };
+
+            let (condition, body) = strip_same_quality_as_conditional(
+                &text,
+                &cost_ctx(vec![vec![CostCategory::ManaOnly], vec![category]]),
+            );
+            assert_eq!(body, "Counter target spell", "{text}");
+            assert_eq!(
+                condition,
+                Some(AbilityCondition::ObjectsShareQuality {
+                    subject: TargetFilter::ParentTarget,
+                    reference: TargetFilter::CostPaidObject,
+                    quality: SharedQuality::ManaValue,
+                }),
+                "{text}"
+            );
+
+            for declining_ctx in [
+                ParseContext::default(),
+                cost_ctx(vec![vec![CostCategory::ManaOnly]]),
+                cost_ctx(vec![vec![CostCategory::ManaOnly], vec![other_category]]),
+            ] {
+                let (condition, body) = strip_same_quality_as_conditional(&text, &declining_ctx);
+                assert_eq!(
+                    condition, None,
+                    "{text} under {:?}",
+                    declining_ctx.current_ability_cost_components
+                );
+                assert_eq!(body, text);
+            }
+        }
+    }
+
+    /// The stripper declines every shape outside the single-object class and
+    /// returns the text unchanged. Each decline is paired with a positive
+    /// sibling that differs only in the declined axis.
+    #[test]
+    fn strip_same_quality_as_conditional_declines_outside_the_class() {
+        let default_ctx = ParseContext::default();
+        // In a trigger even a discard category in scope does not make "the
+        // discarded card" a cost participle: `in_trigger` alone declines it.
+        let trigger_ctx = ParseContext {
+            in_trigger: true,
+            current_ability_cost_components: vec![vec![CostCategory::Discards]],
+            ..Default::default()
+        };
+        let declined: [(&str, &ParseContext); 6] = [
+            // Multi-valued quality: compared with "shares", not "has the same".
+            (
+                "Counter target spell if it has the same color as the revealed card.",
+                &default_ctx,
+            ),
+            // Existential reference (Retraced Image, verbatim).
+            (
+                "Reveal a card in your hand, then put that card onto the battlefield if it has the same name as a permanent.",
+                &default_ctx,
+            ),
+            // Jester's Scepter's effect (verbatim): "that card" is not owned.
+            (
+                "Counter target spell if it has the same name as that card.",
+                &default_ctx,
+            ),
+            // A triggered ability has no cost to have discarded a card for.
+            (
+                "Counter target spell if it has the same mana value as the discarded card.",
+                &trigger_ctx,
+            ),
+            // "exiled" is an effect participle without an exile cost.
+            (
+                "Counter target spell if it has the same mana value as the exiled card.",
+                &default_ctx,
+            ),
+            // No object for "it".
+            (
+                "Draw a card if it has the same name as the revealed card.",
+                &default_ctx,
+            ),
+        ];
+        for (text, ctx) in declined {
+            let (condition, body) = strip_same_quality_as_conditional(text, ctx);
+            assert_eq!(condition, None, "{text}");
+            assert_eq!(body, text, "{text}");
+        }
+
+        // Positive siblings (reach guards): the same predicate with "the
+        // revealed card" is claimed under both contexts, so each decline above
+        // is decided by its declined axis, not an upstream short-circuit.
+        for ctx in [&default_ctx, &trigger_ctx] {
+            for quality_text in ["name", "mana value"] {
+                let text = format!(
+                    "Counter target spell if it has the same {quality_text} as the revealed card."
+                );
+                let (condition, body) = strip_same_quality_as_conditional(&text, ctx);
+                assert!(
+                    matches!(
+                        condition,
+                        Some(AbilityCondition::ObjectsShareQuality {
+                            subject: TargetFilter::ParentTarget,
+                            reference: TargetFilter::LastRevealed,
+                            ..
+                        })
+                    ),
+                    "{text}: {condition:?}"
+                );
+                assert_eq!(body, "Counter target spell", "{text}");
+            }
+        }
     }
 
     #[test]

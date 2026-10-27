@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#030712" />
+    <meta name="color-scheme" content="dark" />
     <title>phase.rs</title>
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
@@ -12,9 +14,34 @@
     <link rel="preconnect" href="https://api.scryfall.com" />
     <link rel="preconnect" href="https://cards.scryfall.io" crossorigin />
     <link rel="preconnect" href="https://backs.scryfall.io" crossorigin />
+    <!-- Painted before the stylesheet and the bundle arrive, so a cold load
+         shows the splash colours instead of a blank white page. React's first
+         render replaces #root's contents. -->
+    <style>
+      html, body { margin: 0; background: #030712; }
+      .boot-shell {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 24px;
+        color: #6b7280; font: 14px/1.4 system-ui, sans-serif; letter-spacing: 0.05em;
+      }
+      .boot-shell-bar {
+        width: 200px; height: 4px; overflow: hidden; border-radius: 9999px; background: #1f2937;
+      }
+      .boot-shell-bar::after {
+        content: ""; display: block; width: 40%; height: 100%; border-radius: inherit;
+        background: #6366f1; animation: boot-shell-slide 1.2s ease-in-out infinite;
+      }
+      @keyframes boot-shell-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+      @media (prefers-reduced-motion: reduce) { .boot-shell-bar::after { animation: none; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="boot-shell" role="status" aria-label="Loading phase.rs">
+        <span>phase.rs</span>
+        <div class="boot-shell-bar"></div>
+      </div>
+    </div>
     <!-- Per-deployment configuration, loaded before the bundle so the app can
          read it at startup. A self-hoster replaces this file; the copy shipped
          here is an empty placeholder, so official builds keep their build-time

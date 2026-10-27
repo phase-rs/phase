@@ -679,6 +679,21 @@ pub(crate) enum TriggeringSpell<'a> {
     Gone,
 }
 
+/// CR 601.2i + CR 400.7: the spell occurrence captured when the current cast
+/// trigger went on the stack. Read the resolving carrier, not a possibly fresh
+/// executing branch. Never manufacture a pin from a later same-id object.
+pub(crate) fn triggering_spell_identity(state: &GameState) -> Option<ObjectIncarnationRef> {
+    let GameEvent::SpellCast { object_id, .. } = state.current_trigger_event.as_ref()? else {
+        return None;
+    };
+    state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())
+        .and_then(|ability| ability.context.triggering_spell)
+        .filter(|pin| pin.object_id == *object_id)
+}
+
 /// CR 608.2h + CR 400.7 + CR 601.2i: What a spell-cast trigger's "that spell"
 /// / self-cast "this spell" now names. `None` unless
 /// `state.current_trigger_event` is `GameEvent::SpellCast`; every consumer
@@ -691,17 +706,7 @@ pub(crate) fn triggering_spell(state: &GameState) -> Option<TriggeringSpell<'_>>
         return None;
     };
     let object_id = *object_id;
-    // CR 601.2i: the pin bound when this trigger was put on the stack
-    // (`triggers.rs::triggering_spell_pin`), read from the resolving carrier
-    // — a flip branch (Krark) builds a fresh executing ability that does not
-    // itself carry the pin — and used only while it still names this event's
-    // spell.
-    let pin = state
-        .resolving_stack_entry
-        .as_ref()
-        .and_then(|entry| entry.ability())
-        .and_then(|ability| ability.context.triggering_spell)
-        .filter(|pin| pin.object_id == object_id);
+    let pin = triggering_spell_identity(state);
 
     let on_stack = state.objects.get(&object_id).is_some_and(|obj| {
         obj.zone == Zone::Stack && pin.is_none_or(|pin| pin.incarnation == obj.incarnation)
@@ -3114,6 +3119,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }

@@ -4582,8 +4582,10 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         is_suspected: _,
         was_prepared: _,
         attachments,
+        intensity,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
+    *intensity = 0;
     *token_image_ref = None;
     *power = None;
     *toughness = None;
