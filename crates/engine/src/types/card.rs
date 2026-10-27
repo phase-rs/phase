@@ -10,7 +10,7 @@ use super::card_type::CardType;
 use super::format::DeckCopyLimit;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
-use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use super::oracle_diagnostic::OracleDiagnostic;
 
 /// Card rarity as assigned per-printing in MTGJSON set data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

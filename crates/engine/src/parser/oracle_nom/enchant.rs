@@ -11,111 +11,18 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::character::complete::space1;
-use nom::combinator::{map_opt, opt, value};
+use nom::combinator::{opt, value};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::target::{parse_non_prefix, parse_supertype_prefix, parse_type_filter_word};
 use crate::parser::oracle_target::parse_without_keyword_suffix;
-use crate::parser::oracle_util::parse_subtype;
-use crate::types::ability::{
-    AttachmentKind, ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+pub(crate) use crate::types::text_grammar::{
+    parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
+    parse_enchant_qualified_type_leg, parse_enchant_type_leg,
 };
-use crate::types::card_type::{noncreature_subtype_set, SubtypeSet};
-
-/// CR 702.5a: One enchantable core-type or supported subtype token. Core
-/// types and established basic-land subtype legs stay as literal nom arms;
-/// artifact subtypes delegate to the canonical subtype classifier below.
-///
-/// Basic land subtypes (Forest, Plains, Island, Swamp, Mountain) are included
-/// per CR 205.3i — basic land types are the canonical Aura targets for
-/// "enchant Forest" / "enchant Plains" patterns used by Old-Growth Troll
-/// (KHM) and Harold and Bob, First Numens (FIN-precon). The longest-first
-/// ordering inside each cluster keeps "creature" from short-matching against
-/// future hypothetical subtype legs.
-pub(crate) fn parse_enchant_type_leg(input: &str) -> OracleResult<'_, TypeFilter> {
-    alt((
-        value(TypeFilter::Creature, tag("creature")),
-        value(TypeFilter::Artifact, tag("artifact")),
-        // CR 205.3g + CR 702.5a: Artifact subtype legs use the canonical
-        // subtype registry. This must precede `land` so `Lander` is not
-        // short-matched as the core Land type.
-        parse_artifact_subtype_enchant_leg,
-        value(TypeFilter::Land, tag("land")),
-        value(TypeFilter::Enchantment, tag("enchantment")),
-        value(TypeFilter::Planeswalker, tag("planeswalker")),
-        value(TypeFilter::Permanent, tag("permanent")),
-        // CR 702.5a: Instant / Sorcery enable hand- and graveyard-zoned Auras
-        // like Spellweaver Volute ("Enchant instant card in a graveyard").
-        value(TypeFilter::Instant, tag("instant")),
-        value(TypeFilter::Sorcery, tag("sorcery")),
-        // CR 205.3i + CR 702.5a: Basic land subtypes. Used by
-        // "enchant Forest you control" (Old-Growth Troll, Harold and Bob).
-        value(TypeFilter::Subtype("Forest".to_string()), tag("forest")),
-        value(TypeFilter::Subtype("Plains".to_string()), tag("plains")),
-        value(TypeFilter::Subtype("Island".to_string()), tag("island")),
-        value(TypeFilter::Subtype("Swamp".to_string()), tag("swamp")),
-        value(TypeFilter::Subtype("Mountain".to_string()), tag("mountain")),
-    ))
-    .parse(input)
-}
-
-fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilter> {
-    let Some((subtype, consumed)) = parse_subtype(input) else {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    };
-
-    if !matches!(
-        noncreature_subtype_set(&subtype),
-        Some(SubtypeSet::Artifact)
-    ) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-
-    Ok((&input[consumed..], TypeFilter::Subtype(subtype)))
-}
-
-/// CR 205.4a + CR 702.5a: An Enchant type leg may carry a supertype adjective
-/// such as "snow land", "basic land", or "legendary creature". Reuse the
-/// shared target-phrase supertype recognizer so Aura legality gets the same
-/// `HasSupertype` property as ordinary target phrases.
-pub(crate) fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
-    let (input, supertype) = opt(parse_supertype_prefix).parse(input)?;
-    let (input, excluded_subtype) = opt(parse_enchant_negated_subtype_prefix).parse(input)?;
-    let (input, type_filter) = parse_enchant_type_leg(input)?;
-    let mut typed = TypedFilter::new(type_filter);
-    if let Some(excluded) = excluded_subtype {
-        typed = typed.with_type(excluded);
-    }
-    let properties = supertype
-        .map(|value| FilterProp::HasSupertype { value })
-        .into_iter()
-        .collect();
-    Ok((input, typed.properties(properties)))
-}
-
-/// CR 702.5a + CR 205.3a: A negated canonical subtype adjective restricts
-/// its owning Enchant leg. Preserve the positive head and conjoin the
-/// exclusion, rather than excluding that subtype from every union leg.
-fn parse_enchant_negated_subtype_prefix(input: &str) -> OracleResult<'_, TypeFilter> {
-    map_opt(
-        terminated(preceded(parse_non_prefix, parse_type_filter_word), space1),
-        |type_filter| match type_filter {
-            subtype @ TypeFilter::Subtype(_) => Some(TypeFilter::Non(Box::new(subtype))),
-            _ => None,
-        },
-    )
-    .parse(input)
-}
 
 /// Separator between enchant list legs. Covers serial-comma (", or "/", and "),
 /// bare comma (", "), and bare conjunction (" or "/" and ") so "A, B, or C",
@@ -147,68 +54,6 @@ pub(crate) fn parse_enchant_type_list(input: &str) -> OracleResult<'_, Vec<Typed
     legs.push(first);
     legs.extend(rest);
     Ok((input, legs))
-}
-
-/// Optional trailing controller clause. Ordered longest-first so
-/// "an opponent controls" isn't shadowed by "opponent controls".
-pub(crate) fn parse_enchant_controller_suffix(input: &str) -> OracleResult<'_, ControllerRef> {
-    alt((
-        value(ControllerRef::You, tag(" you control")),
-        value(ControllerRef::Opponent, tag(" an opponent controls")),
-        value(ControllerRef::Opponent, tag(" opponent controls")),
-    ))
-    .parse(input)
-}
-
-/// CR 303.4 + CR 702.5a + CR 301.5: Optional trailing attachment qualifier on an
-/// "Enchant <type>" line — "with another Aura attached to it" (Daybreak Coronet)
-/// further restricts the legal target set to objects that already carry an
-/// attachment of the named kind. "Another" is material once SBA attachment
-/// legality rechecks the Aura already attached to its host, so preserve it as a
-/// source-exclusion axis on the `HasAttachment` filter prop. The leading space
-/// ensures the qualifier only matches after a preceding type leg (never as a
-/// standalone clause).
-pub(crate) fn parse_enchant_attachment_qualifier(input: &str) -> OracleResult<'_, FilterProp> {
-    let (input, _) = tag(" with ").parse(input)?;
-    let (input, exclude_source) = alt((
-        value(true, tag("another ")),
-        value(false, tag("an ")),
-        value(false, tag("a ")),
-    ))
-    .parse(input)?;
-    let (input, kind) = alt((
-        value(AttachmentKind::Aura, tag("aura")),
-        value(AttachmentKind::Equipment, tag("equipment")),
-    ))
-    .parse(input)?;
-    let (input, _) = tag(" attached to it").parse(input)?;
-    Ok((
-        input,
-        FilterProp::HasAttachment {
-            kind,
-            controller: None,
-            exclude_source: if exclude_source {
-                crate::types::ability::SourceExclusion::Exclude
-            } else {
-                crate::types::ability::SourceExclusion::Include
-            },
-        },
-    ))
-}
-
-/// CR 702.5d: "Enchant player" / "Enchant opponent" — the player-axis Aura.
-/// The two legs yield the typed `TargetFilter` the rest of the cast pipeline
-/// expects. "Enchant player" → `TargetFilter::Player` (any player at the
-/// table); "Enchant opponent" → typed filter scoped to opposing players.
-pub(crate) fn parse_enchant_player_base(input: &str) -> OracleResult<'_, TargetFilter> {
-    alt((
-        value(TargetFilter::Player, tag("player")),
-        value(
-            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-            tag("opponent"),
-        ),
-    ))
-    .parse(input)
 }
 
 /// CR 702.5a + CR 109.4: Compose `parse_enchant_type_list` with the optional
@@ -262,6 +107,7 @@ fn parse_enchant_without_keyword_suffix(input: &str) -> OracleResult<'_, Vec<Fil
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::{ControllerRef, TypeFilter};
     use crate::types::keywords::Keyword;
 
     // SHAPE: CR 702.5a + CR 205.3h: the exclusion belongs to the enchantment

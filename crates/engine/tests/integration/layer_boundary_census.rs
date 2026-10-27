@@ -1,9 +1,11 @@
-//! Layer-boundary census for the crate split: parser library code names no game-side module.
+//! Layer-boundary census for the crate split: parser library code names no game-side module,
+//! and AST library code names no parser module.
 //!
-//! Until the parser is its own crate, nothing but this census stops a parser edit from
-//! reaching back into `game` (or any other game-side module) and silently re-coupling the
-//! two. The census parses the source with `syn` instead of grepping it, so comments and
-//! doc text cannot count as references.
+//! Until the parser and the AST layer are their own crates, nothing but this census stops a
+//! parser edit from reaching back into `game` (or any other game-side module), or an AST edit
+//! from reaching up into `parser`, and silently re-coupling the layers. The census parses the
+//! source with `syn` instead of grepping it, so comments and doc text cannot count as
+//! references.
 //!
 //! What it walks:
 //!
@@ -17,7 +19,11 @@
 //!   naming a `crate::<game-side>::` path is a hit.
 //! * **Clause 2.** `lib.rs` (every `use`) and the `types/` tree (every non-private `use`):
 //!   neither the crate root nor the AST layer may re-export a game-side module, or a parser
-//!   path through them would cross the boundary without naming it.
+//!   path through them would cross the boundary without naming it. `lib.rs` is also checked
+//!   against `parser`, for the same reason one layer down.
+//! * **Clause 3.** The module tree from `src/types/mod.rs`, walked as in clause 1 with
+//!   `parser` as the target: AST library code names no parser module. The one exemption is
+//!   `types/game_state.rs`'s legacy attack-exert save migration, matched by exact shape.
 //!
 //! Fail-closed limits: a `#[cfg(test)]` on a statement inside a library function is not
 //! honoured (the statement is scanned as library code), and a `#[path]` inside an inline
@@ -40,6 +46,34 @@ const GAME_SIDE: &[&str] = &[
     "starter_decks",
     "testing",
     "util",
+];
+
+/// The parser layer, which the AST layer sits below.
+const PARSER: &[&str] = &["parser"];
+
+/// Why `types/game_state.rs` may still name the parser.
+const ATTACK_EXERT_MIGRATION: &str = "state-layer legacy attack-exert save migration \
+     (`migrate_legacy_attack_exert_conditions`), which the crate split leaves untouched; \
+     `game_state.rs` is a mixed AST/state file whose state half stays in `phase-engine`";
+
+/// Clause-3 exemptions: `(file, shape, reason)`. Each row must match a hit, so a row that
+/// outlives its reference fails the census instead of silently widening it.
+const AST_PARSER_EXEMPTIONS: &[(&str, &str, &str)] = &[
+    (
+        "types/game_state.rs",
+        "use name crate::parser::oracle::parse_attack_exert_header",
+        ATTACK_EXERT_MIGRATION,
+    ),
+    (
+        "types/game_state.rs",
+        "use name crate::parser::oracle::parse_unknown_conditioned_attack_exert_header",
+        ATTACK_EXERT_MIGRATION,
+    ),
+    (
+        "types/game_state.rs",
+        "use name crate::parser::oracle_nom::bridge::nom_on_lower",
+        ATTACK_EXERT_MIGRATION,
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -81,16 +115,19 @@ enum Reach {
 struct Walk {
     src: PathBuf,
     scan: Scan,
+    /// The top-level modules a hit names: `GAME_SIDE` or `PARSER`.
+    targets: &'static [&'static str],
     macros: Vec<String>,
     hits: Vec<Hit>,
     files: Vec<(PathBuf, Reach)>,
 }
 
 impl Walk {
-    fn new(src: &Path, scan: Scan, macros: Vec<String>) -> Self {
+    fn new(src: &Path, scan: Scan, targets: &'static [&'static str], macros: Vec<String>) -> Self {
         Self {
             src: src.to_path_buf(),
             scan,
+            targets,
             macros,
             hits: Vec::new(),
             files: Vec::new(),
@@ -260,7 +297,11 @@ impl Walk {
 
     fn check_use(&mut self, path: &[String], shape: &str, module: &[String], file: &str) {
         let head_is_root_or_bare = path.first().is_some_and(|f| f == "crate" || f == "?");
-        if head_is_root_or_bare && path.get(1).is_some_and(|s| GAME_SIDE.contains(&s.as_str())) {
+        if head_is_root_or_bare
+            && path
+                .get(1)
+                .is_some_and(|s| self.targets.contains(&s.as_str()))
+        {
             self.hit(file, module, format!("use {shape} {}", path.join("::")));
         }
     }
@@ -273,36 +314,36 @@ impl Walk {
                 match root_resolution(toks, i, module) {
                     // The head resolves to the crate root: `after` indexes the `::` that follows it.
                     Some((0, after)) => {
-                        for segment in root_segments(toks, after) {
-                            if GAME_SIDE.contains(&segment) {
+                        for segment in root_segments(toks, after, self.targets) {
+                            if self.targets.contains(&segment) {
                                 self.hit(file, module, format!("{t}-headed path to {segment}"));
                             }
                         }
                     }
                     Some(_) => {}
                     None => {
-                        if GAME_SIDE.contains(&t) && toks.get(i + 1).is_some_and(|n| n == "::") {
+                        if self.targets.contains(&t) && toks.get(i + 1).is_some_and(|n| n == "::") {
                             self.hit(file, module, format!("bare-headed path to {t}"));
                         }
                     }
                 }
             }
             if let Some(lit) = t.strip_prefix("<lit>") {
-                let names_game_side = syn::parse_str::<syn::LitStr>(lit).is_ok_and(|s| {
+                let names_target = syn::parse_str::<syn::LitStr>(lit).is_ok_and(|s| {
                     let value = s.value();
-                    GAME_SIDE.iter().any(|g| {
+                    self.targets.iter().any(|g| {
                         value
                             .strip_prefix("crate::")
                             .and_then(|rest| rest.strip_prefix(g))
                             .is_some_and(|rest| rest.starts_with("::"))
                     })
                 });
-                if names_game_side {
+                if names_target {
                     self.hit(file, module, format!("path string {lit}"));
                 }
             }
             if self.macros.iter().any(|m| m == t) && toks.get(i + 1).is_some_and(|n| n == "!") {
-                self.hit(file, module, format!("game-side macro {t}!"));
+                self.hit(file, module, format!("exported macro {t}!"));
             }
         }
     }
@@ -340,8 +381,8 @@ fn root_resolution(toks: &[String], i: usize, module: &[String]) -> Option<(usiz
 /// The first segments reached from a crate-root head: the segment after `::`; for a
 /// statement-level `use crate::{…}` group inside a function body, each top-level entry that is
 /// a bare name (an entry followed by `::` is already a bare-headed path to the scan); or every
-/// game-side module for a `*` glob of the crate root.
-fn root_segments(toks: &[String], after: usize) -> Vec<&str> {
+/// target module for a `*` glob of the crate root.
+fn root_segments<'a>(toks: &'a [String], after: usize, targets: &[&'a str]) -> Vec<&'a str> {
     if toks.get(after).is_none_or(|t| t != "::") {
         return Vec::new();
     }
@@ -367,7 +408,7 @@ fn root_segments(toks: &[String], after: usize) -> Vec<&str> {
             }
             out
         }
-        Some("*") => GAME_SIDE.to_vec(),
+        Some("*") => targets.to_vec(),
         Some(segment) => vec![segment],
         None => Vec::new(),
     }
@@ -544,8 +585,8 @@ fn engine_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
-/// `#[macro_export]` macros defined in game-side modules.
-fn game_side_exported_macros(src: &Path) -> Vec<String> {
+/// `#[macro_export]` macros defined in the `targets` modules.
+fn exported_macros(src: &Path, targets: &[&str]) -> Vec<String> {
     fn collect(items: &[syn::Item], out: &mut Vec<String>) {
         for item in items {
             match item {
@@ -564,7 +605,7 @@ fn game_side_exported_macros(src: &Path) -> Vec<String> {
         }
     }
     let mut macros = Vec::new();
-    for g in GAME_SIDE {
+    for g in targets {
         let dir = src.join(g);
         let mut files = if dir.is_dir() {
             rs_files(&dir)
@@ -587,12 +628,22 @@ fn game_side_exported_macros(src: &Path) -> Vec<String> {
 
 /// Clause-1 scan of one in-memory source as library code of `module`.
 fn scan_source(src: &str, module: &[&str]) -> Vec<Hit> {
-    scan_source_with(src, module, Scan::Library)
+    scan_source_with(src, module, Scan::Library, GAME_SIDE)
 }
 
-fn scan_source_with(src: &str, module: &[&str], scan: Scan) -> Vec<Hit> {
+fn scan_source_with(
+    src: &str,
+    module: &[&str],
+    scan: Scan,
+    targets: &'static [&'static str],
+) -> Vec<Hit> {
     let parsed = syn::parse_file(src).expect("planted source parses");
-    let mut walk = Walk::new(Path::new(""), scan, vec!["assert_engine_eq".to_string()]);
+    let mut walk = Walk::new(
+        Path::new(""),
+        scan,
+        targets,
+        vec!["assert_engine_eq".to_string()],
+    );
     let module: Vec<String> = module.iter().map(ToString::to_string).collect();
     let ctx = FileCtx {
         rel: "<planted>",
@@ -613,12 +664,12 @@ fn scan_source_with(src: &str, module: &[&str], scan: Scan) -> Vec<Hit> {
 #[test]
 fn parser_library_code_names_no_game_side_module() {
     let src = engine_src();
-    let macros = game_side_exported_macros(&src);
+    let macros = exported_macros(&src, GAME_SIDE);
     assert!(
         macros.iter().any(|m| m == "assert_engine_eq"),
         "reach-guard: the exported game-side macro set lost `assert_engine_eq`: {macros:?}"
     );
-    let mut walk = Walk::new(&src, Scan::Library, macros);
+    let mut walk = Walk::new(&src, Scan::Library, GAME_SIDE, macros);
     walk.walk_file(
         &src.join("parser/mod.rs"),
         vec!["parser".to_string()],
@@ -661,21 +712,33 @@ fn parser_library_code_names_no_game_side_module() {
 #[test]
 fn no_root_or_types_reexport_reaches_game_side() {
     let src = engine_src();
-    let mut root = Walk::new(&src, Scan::Reexports(UseVisibility::Any), Vec::new());
-    root.walk_file(
-        &src.join("lib.rs"),
-        Vec::new(),
-        Reach::Library,
-        Children::Skip,
-    );
-    assert!(
-        root.hits.is_empty(),
-        "`lib.rs` imports a game-side module through a `use`, so a crate-root path could \
-         reach it from the parser: {:#?}",
-        root.hits
-    );
+    for (targets, below) in [(GAME_SIDE, "the parser"), (PARSER, "the AST layer")] {
+        let mut root = Walk::new(
+            &src,
+            Scan::Reexports(UseVisibility::Any),
+            targets,
+            Vec::new(),
+        );
+        root.walk_file(
+            &src.join("lib.rs"),
+            Vec::new(),
+            Reach::Library,
+            Children::Skip,
+        );
+        assert!(
+            root.hits.is_empty(),
+            "`lib.rs` imports one of {targets:?} through a `use`, so a crate-root path could \
+             reach it from {below}: {:#?}",
+            root.hits
+        );
+    }
 
-    let mut types = Walk::new(&src, Scan::Reexports(UseVisibility::NonPrivate), Vec::new());
+    let mut types = Walk::new(
+        &src,
+        Scan::Reexports(UseVisibility::NonPrivate),
+        GAME_SIDE,
+        Vec::new(),
+    );
     types.walk_file(
         &src.join("types/mod.rs"),
         vec!["types".to_string()],
@@ -800,6 +863,7 @@ fn the_walker_flags_every_crossing_shape_and_skips_test_code() {
             src,
             &["types", "x"],
             Scan::Reexports(UseVisibility::NonPrivate),
+            GAME_SIDE,
         )
     };
     assert_eq!(
@@ -810,5 +874,107 @@ fn the_walker_flags_every_crossing_shape_and_skips_test_code() {
     assert!(
         reexports("use crate::game::dungeon::DungeonId;").is_empty(),
         "a private `use` is not a re-export"
+    );
+}
+
+#[test]
+fn ast_library_code_names_no_parser_module() {
+    let src = engine_src();
+    let mut walk = Walk::new(&src, Scan::Library, PARSER, exported_macros(&src, PARSER));
+    walk.walk_file(
+        &src.join("types/mod.rs"),
+        vec!["types".to_string()],
+        Reach::Library,
+        Children::Follow,
+    );
+
+    let library = walk.files_reached(Reach::Library);
+    let test_only = walk.files_reached(Reach::TestOnly);
+    let anchors = [
+        "types/keywords.rs",
+        "types/card.rs",
+        "types/text_grammar.rs",
+    ];
+    assert!(
+        library.len() >= 40 && anchors.iter().all(|f| library.contains(*f)),
+        "reach-guard: the types walk reached {} library files: {library:?}",
+        library.len()
+    );
+    let orphans: Vec<String> = rs_files(&src.join("types"))
+        .iter()
+        .map(|p| walk.rel(p))
+        .filter(|rel| !library.contains(rel) && !test_only.contains(rel))
+        .collect();
+    assert!(
+        orphans.is_empty(),
+        "types files the module walk never reached, so this census cannot see them: {orphans:#?}"
+    );
+
+    let is_exempt =
+        |hit: &Hit, (file, shape, _): &(&str, &str, &str)| hit.file == *file && hit.shape == *shape;
+    let (exempted, mut hits): (Vec<Hit>, Vec<Hit>) = walk
+        .hits
+        .into_iter()
+        .partition(|hit| AST_PARSER_EXEMPTIONS.iter().any(|row| is_exempt(hit, row)));
+    hits.sort();
+    assert!(
+        hits.is_empty(),
+        "AST library code names a parser module. Move the item it reaches into the AST layer \
+         (`types/text_grammar.rs` holds the grammar `Keyword` decoding needs) and re-export it \
+         at its parser path, or keep the reference in test code: {hits:#?}"
+    );
+    let stale: Vec<&(&str, &str, &str)> = AST_PARSER_EXEMPTIONS
+        .iter()
+        .filter(|row| !exempted.iter().any(|hit| is_exempt(hit, row)))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "clause-3 exemption rows that match no hit; delete them: {stale:#?}"
+    );
+}
+
+#[test]
+fn the_walker_flags_parser_crossings_from_the_ast_layer() {
+    let module = ["types", "keywords"];
+    let one_hit = |label: &str, src: &str| {
+        let hits = scan_source_with(src, &module, Scan::Library, PARSER);
+        assert_eq!(
+            hits.len(),
+            1,
+            "{label}: expected exactly one hit, got {hits:#?}"
+        );
+    };
+    let no_hit = |label: &str, src: &str| {
+        let hits = scan_source_with(src, &module, Scan::Library, PARSER);
+        assert!(hits.is_empty(), "{label}: expected no hit, got {hits:#?}");
+    };
+
+    // Positives: each planted crossing yields exactly one hit.
+    let fn_body = "fn f() { crate::parser::oracle_util::parse_subtype(\"x\"); }";
+    one_hit("crate-headed path in a fn body", fn_body);
+    let use_group = "use crate::{parser::oracle_nom::error::OracleResult, types::mana::ManaCost};";
+    one_hit("use group", use_group);
+    one_hit(
+        "super chain to the crate root",
+        "fn f() { super::super::parser::x(); }",
+    );
+    one_hit("statement-level use", "fn f() { use crate::parser::x; }");
+
+    // Negatives, each the twin of a positive above.
+    no_hit(
+        "sibling AST module",
+        "fn f() { super::text_grammar::parse_subtype(\"x\"); }",
+    );
+    no_hit(
+        "use of the AST-layer home",
+        "use crate::types::text_grammar::OracleResult;",
+    );
+    no_hit(
+        "field and local named `parser`",
+        "struct S { parser: u8 } fn f(s: S) { let parser = s.parser; let _ = parser; }",
+    );
+    no_hit(
+        "cfg(test) module",
+        &format!("#[cfg(test)] mod t {{ {fn_body} }}"),
     );
 }

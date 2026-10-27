@@ -16,9 +16,9 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
-    CostReduction, DiscardSelfScope, Effect, EffectScope, FilterProp, QuantityExpr,
-    SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, CostObjectCount, CostReduction,
+    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement, TapStateChange,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
@@ -26,7 +26,7 @@ use crate::types::keywords::{
     WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
-use crate::types::zones::Zone;
+use crate::types::text_grammar::craft_materials_from_typed_filter;
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -1229,58 +1229,6 @@ fn parse_offering_keyword_line(line: &str) -> Option<Keyword> {
     Some(Keyword::Offering(capitalized))
 }
 
-/// CR 702.167b: Build the typed materials filter for a Craft ability. A bare
-/// type/subtype in the materials clause matches *either* a permanent on the
-/// battlefield you control *or* a card in your graveyard you own (an exception
-/// to CR 109.2). The result is a `TargetFilter::Or` of those two zone-scoped
-/// legs so the dual-zone eligibility helper and the runtime filter evaluator
-/// agree on what may be exiled. This is the single authority for the materials
-/// filter shape — `FromStr`, `keyword_from_tagged`, and the Oracle-line parser
-/// all route through it.
-pub fn craft_materials_filter(types: &[TypeFilter]) -> TargetFilter {
-    craft_materials_from_typed_filter(TypedFilter {
-        type_filters: types.to_vec(),
-        ..TypedFilter::default()
-    })
-}
-
-fn craft_materials_from_typed_filter(filter: TypedFilter) -> TargetFilter {
-    let with_types = |base: TypedFilter| -> TypedFilter {
-        filter
-            .type_filters
-            .iter()
-            .cloned()
-            .fold(base, |acc, tf| acc.with_type(tf))
-    };
-    TargetFilter::Or {
-        filters: vec![
-            // Battlefield leg: a permanent you control matching the printed materials class.
-            TargetFilter::Typed(
-                with_types(TypedFilter::permanent())
-                    .controller(ControllerRef::You)
-                    .properties({
-                        let mut props = filter.properties.clone();
-                        props.push(FilterProp::InZone {
-                            zone: Zone::Battlefield,
-                        });
-                        props
-                    }),
-            ),
-            // Graveyard leg: a card you own matching the printed materials class.
-            TargetFilter::Typed(with_types(TypedFilter::card()).properties({
-                let mut props = filter.properties.clone();
-                props.push(FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                });
-                props.push(FilterProp::Owned {
-                    controller: ControllerRef::You,
-                });
-                props
-            })),
-        ],
-    }
-}
-
 fn craft_materials_from_filter(filter: TargetFilter) -> Option<TargetFilter> {
     match filter {
         TargetFilter::Typed(typed) => Some(craft_materials_from_typed_filter(typed)),
@@ -1296,12 +1244,6 @@ fn craft_materials_from_filter(filter: TargetFilter) -> Option<TargetFilter> {
 
 fn craft_materials_any() -> TargetFilter {
     craft_materials_from_typed_filter(TypedFilter::default())
-}
-
-/// CR 702.167b: Default materials class (creature) used when only the bare
-/// "Craft" keyword is available (no Oracle line to specify the materials).
-pub fn craft_materials_default() -> TargetFilter {
-    craft_materials_filter(&[TypeFilter::Creature])
 }
 
 /// CR 702.167a/b: Parse a "craft with [materials] [cost]" Oracle line into a
@@ -3213,9 +3155,10 @@ pub(crate) fn keyword_candidate_ability_word_label(line: &str) -> Option<(&str, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCost, Effect, SacrificeCost};
+    use crate::types::ability::{AbilityCost, ControllerRef, Effect, FilterProp, SacrificeCost};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
+    use crate::types::zones::Zone;
 
     // SHAPE: CR 702.5a: public full-card ingestion preserves each printed
     // Enchant restriction; unrelated sibling abilities are not claimed fixed.
