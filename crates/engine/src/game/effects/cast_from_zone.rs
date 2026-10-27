@@ -158,9 +158,11 @@ fn resolution_window_linked_batch_candidates(
 /// `CastFromZone` — the cards in `source_zone` belonging to the filter-scoped
 /// player (Buster-Sword-class "your hand" filters keep the caster; Silent-Blade
 /// Oni's `ControllerRef::TriggeringPlayer` scopes a different hand, issue #5240)
-/// that satisfy the cast filter. Single authority shared by the selection opener
-/// (`open_private_zone_cast_selection`) and the feasibility predicate
-/// (`hand_pick_eligible_is_empty`) so the "which cards can be cast" logic never
+/// that satisfy the cast filter; for a graveyard, the cards of every graveyard
+/// the filter admits. Single authority shared by the selection opener
+/// (`open_private_zone_cast_selection`) and the feasibility predicates
+/// (`hand_pick_eligible_is_empty`, `graveyard_pick_eligible_is_empty`) so the
+/// "which cards can be cast" logic never
 /// diverges between "open the prompt" and "is the prompt possible". Recurses
 /// through `Not`/`And`/`Or` (`extract_controller_ref`) so a composed filter isn't
 /// silently treated as caster-scoped. A missing scoped player yields an empty
@@ -172,6 +174,20 @@ fn compute_hand_pick_eligible(
     source_zone: Zone,
 ) -> Vec<ObjectId> {
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    // CR 400.1 + CR 400.3: each player has their own graveyard, holding only
+    // that player's cards. "From your graveyard", "from that player's graveyard",
+    // "from an opponent's graveyard" and "from a graveyard" differ only in the
+    // filter's controller/owner legs, so the pool is every graveyard and the
+    // filter (frozen, carried into each candidate's cast request) decides.
+    if source_zone == Zone::Graveyard {
+        let projection = crate::game::casting::ResolutionCastProjection::new(state);
+        return state
+            .players
+            .iter()
+            .flat_map(|player| player.graveyard.iter().copied())
+            .filter(|id| resolution_cast_is_possible(&projection, ability, *id))
+            .collect();
+    }
     let hand_owner = extract_controller_ref(target_filter)
         .and_then(|cref| {
             crate::game::filter::controller_ref_player(
@@ -189,7 +205,9 @@ fn compute_hand_pick_eligible(
     let cards: Vec<ObjectId> = match source_zone {
         Zone::Hand => player.hand.iter().copied().collect(),
         Zone::Library => looked_at_controller_library_cards(state, ability.controller),
-        _ => unreachable!("private CastFromZone selection supports only hand and library"),
+        _ => {
+            unreachable!("private CastFromZone selection supports only hand, library and graveyard")
+        }
     };
     let remapped_library_filter = (source_zone == Zone::Library)
         .then(|| crate::game::filter::remap_exiled_by_source_for_looked_cards(target_filter));
@@ -274,9 +292,10 @@ fn compute_hand_pick_eligible(
 /// (Kellan, the Kid's "If you don't, put a land") through the decline authority
 /// with the performed flag false — rather than prompting for a choice that can
 /// select nothing. Returns `Some(is_empty)` for a hand-scoped pick with no
-/// pre-bound object targets; `None` when this ability is not such a pick (the
-/// caller keeps its existing whole-ability dry-run for graveyard/exile/
-/// `LastRevealed` classes).
+/// pre-bound object targets; `None` when this ability is not such a pick (an
+/// untargeted free graveyard pick is decided by
+/// `graveyard_pick_eligible_is_empty`; the caller keeps its whole-ability
+/// dry-run for the exile/`LastRevealed` classes).
 pub(crate) fn hand_pick_eligible_is_empty(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -335,6 +354,111 @@ pub(crate) fn stash_declined_cast_fallback(
     true
 }
 
+/// CR 118.12 + CR 608.2c: once the picked card is cast during resolution, the
+/// granting ability continues with its "If you do" instruction ("If you do,
+/// Jarsyl intensifies by 1" — Jarsyl, Dark Age Scion). The pick stashed the
+/// whole ability, so the instruction is re-stashed as the pending
+/// continuation, unperformed: the commit-point latch in
+/// `finalize_cast_with_phyrexian_choices_inner` marks it performed once the
+/// spell is cast (CR 601.2i), and a cast that is undone (CR 733.1) or rejected
+/// never reaches it. Consumed cast riders
+/// before it (enters-with-counter, gains-modifications, the "exile it instead"
+/// graveyard redirect) are skipped: they are cast metadata, not instructions.
+/// Returns true when one was stashed; any other next node ("If you don't …" or
+/// an independent instruction) is left as before, and so is a pick that grants
+/// a later-window permission instead of casting.
+pub(crate) fn stash_accepted_cast_if_you_do(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    if !matches!(
+        &ability.effect,
+        Effect::CastFromZone { driver, .. } if driver.is_during_resolution()
+    ) {
+        return false;
+    }
+    let Some(first) = ability.sub_ability.as_ref() else {
+        return false;
+    };
+    let Some(mut next) = cast_metadata_continuation(ability, first) else {
+        return false;
+    };
+    while graveyard_destination_rider(&next.effect, next.condition.as_ref()).is_some() {
+        let Some(after) = next.sub_ability.as_ref() else {
+            return false;
+        };
+        next = after;
+    }
+    if next.condition != Some(AbilityCondition::effect_performed()) {
+        return false;
+    }
+    let mut tail = next.as_ref().clone();
+    super::apply_parent_chain_context(&mut tail, ability, None, state);
+    tail.set_optional_effect_performed_recursive(false);
+    crate::game::effects::append_to_pending_continuation(state, Some(Box::new(tail)));
+    true
+}
+
+/// CR 608.2g: the exact free spell-cast shape — free, no alternative cost, no
+/// duration, a cast rather than a play — is cast while the granting ability
+/// resolves. A paid, durational, alternate-cost or play grant is a
+/// later-window permission instead.
+fn is_free_immediate_cast(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CastFromZone {
+            without_paying_mana_cost: true,
+            alt_ability_cost: None,
+            duration: None,
+            mode: crate::types::ability::CardPlayMode::Cast,
+            ..
+        }
+    )
+}
+
+/// CR 608.2g + CR 115.1: an untargeted free cast from a graveyard ("you may
+/// cast an instant or sorcery spell from your graveyard without paying its mana
+/// cost" — Diviner of Mist; "… from that player's graveyard" — Sorcerous Squall)
+/// names no card, so the card is chosen and cast while the ability resolves.
+/// The parser marks the untargeted shape (`TargetChoiceTiming::Resolution`); a
+/// "target … card" cast (Diluvian Primordial's "up to one target") is chosen on
+/// the stack, and choosing none of it casts nothing.
+fn is_free_immediate_graveyard_pick(ability: &ResolvedAbility) -> bool {
+    ability.target_choice_timing == crate::types::ability::TargetChoiceTiming::Resolution
+        && is_free_immediate_cast(&ability.effect)
+        && matches!(
+            &ability.effect,
+            Effect::CastFromZone { target, .. } if target.extract_in_zone() == Some(Zone::Graveyard)
+        )
+}
+
+/// CR 608.2d: A player can't choose an impossible option. An optional
+/// untargeted free graveyard pick ([`is_free_immediate_graveyard_pick`]) with
+/// nothing castable can't cast, so the "you may" is declined: accepting it would
+/// record a performed cast and run an "If you do" rider anyway (Jarsyl, Dark
+/// Age Scion intensifying with no spell of its intensity in the graveyard).
+/// Unlike a subless hand pick, which stays offerable, this declines whatever
+/// follows: graveyards are public zones (CR 400.2), so declining reveals
+/// nothing. `None` when this ability is not such a pick.
+pub(crate) fn graveyard_pick_eligible_is_empty(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<bool> {
+    let Effect::CastFromZone { target, .. } = &ability.effect else {
+        return None;
+    };
+    if !is_free_immediate_graveyard_pick(ability)
+        || ability
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_)))
+    {
+        return None;
+    }
+    let (stash, stored_filter) = private_zone_pick_stash(state, ability, target, Zone::Graveyard);
+    Some(compute_hand_pick_eligible(state, &stash, &stored_filter, Zone::Graveyard).is_empty())
+}
+
 /// CR 115.1 + CR 601.2c: "You may cast a spell ... from your hand without paying
 /// its mana cost" (Electrodominance, Baral's Expertise) has no "target" word —
 /// the spell is chosen at resolution from the granting player's hand via
@@ -346,51 +470,8 @@ fn open_private_zone_cast_selection(
     source_zone: Zone,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let mut stash = ability.clone();
-    // CR 202.3 + CR 608.2h: Freeze before filtering so the private prompt's
-    // eligibility test and its later cast consume the same concrete ceiling.
-    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
-    // CR 608.2h: a private-zone choice resumes after the resolving ability's
-    // trigger/event context has expired. Persist the complete cast policy now,
-    // while that context is still live, rather than retaining a live anaphor on
-    // the stashed ability. A look-then-cast chain keeps its cards in the
-    // library, so its parser-provided `ExiledBySource` anaphor must become the
-    // published `LastRevealed` window before it is frozen. On selection,
-    // `freeze_resolution_cast_filter(..., Some(card))` binds that window to the
-    // selected `SpecificObject` while retaining every other filter leg.
-    let stored_filter = if source_zone == Zone::Library {
-        crate::game::filter::remap_exiled_by_source_for_looked_cards(target_filter)
-    } else {
-        target_filter.clone()
-    };
-    let stored_filter =
-        freeze_resolution_cast_filter(state, ability, stored_filter, None).normalized();
-    if let Effect::CastFromZone {
-        target,
-        without_paying_mana_cost,
-        alt_ability_cost,
-        duration,
-        mode,
-        driver,
-        ..
-    } = &mut stash.effect
-    {
-        *target = stored_filter.clone();
-        // A hand selection is normally a lingering permission (including a
-        // play, durational, or alternate-cost grant). The exact free spell-cast
-        // shape is the one exception: it must be offered and cast while this
-        // ability resolves. Store that mechanism on the continuation, rather
-        // than inferring it later from the target zone.
-        if source_zone == Zone::Hand
-            && *without_paying_mana_cost
-            && alt_ability_cost.is_none()
-            && duration.is_none()
-            && *mode == crate::types::ability::CardPlayMode::Cast
-        {
-            *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
-        }
-    }
-    stash.clear_targets();
+    let (stash, stored_filter) =
+        private_zone_pick_stash(state, ability, target_filter, source_zone);
     let eligible = compute_hand_pick_eligible(state, &stash, &stored_filter, source_zone);
 
     if eligible.is_empty() {
@@ -450,6 +531,51 @@ fn open_private_zone_cast_selection(
         duration: None,
     };
     Ok(())
+}
+
+/// The continuation a private-zone pick stashes, and the frozen filter it
+/// offers cards under. Shared by the opener and the CR 608.2d feasibility
+/// predicate, so both read the same pool.
+fn private_zone_pick_stash(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    source_zone: Zone,
+) -> (ResolvedAbility, TargetFilter) {
+    let mut stash = ability.clone();
+    // CR 202.3 + CR 608.2h: Freeze before filtering so the private prompt's
+    // eligibility test and its later cast consume the same concrete ceiling.
+    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
+    // CR 608.2h: a private-zone choice resumes after the resolving ability's
+    // trigger/event context has expired. Persist the complete cast policy now,
+    // while that context is still live, rather than retaining a live anaphor on
+    // the stashed ability. A look-then-cast chain keeps its cards in the
+    // library, so its parser-provided `ExiledBySource` anaphor must become the
+    // published `LastRevealed` window before it is frozen. On selection,
+    // `freeze_resolution_cast_filter(..., Some(card))` binds that window to the
+    // selected `SpecificObject` while retaining every other filter leg.
+    let stored_filter = if source_zone == Zone::Library {
+        crate::game::filter::remap_exiled_by_source_for_looked_cards(target_filter)
+    } else {
+        target_filter.clone()
+    };
+    let stored_filter =
+        freeze_resolution_cast_filter(state, ability, stored_filter, None).normalized();
+    // A hand selection is normally a lingering permission (including a play,
+    // durational, or alternate-cost grant). The exact free spell-cast shape is
+    // the one exception: it must be offered and cast while this ability
+    // resolves. Store that mechanism on the continuation, rather than inferring
+    // it later from the target zone.
+    let during_resolution = matches!(source_zone, Zone::Hand | Zone::Graveyard)
+        && is_free_immediate_cast(&stash.effect);
+    if let Effect::CastFromZone { target, driver, .. } = &mut stash.effect {
+        *target = stored_filter.clone();
+        if during_resolution {
+            *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
+        }
+    }
+    stash.clear_targets();
+    (stash, stored_filter)
 }
 
 /// CR 608.2d: whether `card` could be cast right now by the immediate
@@ -925,7 +1051,9 @@ pub fn resolve(
 
     if target_ids.is_empty() {
         if let Some(source_zone) = target_filter.extract_in_zone() {
-            if source_zone == Zone::Hand {
+            // CR 608.2g: an untargeted free graveyard cast is picked while this
+            // ability resolves, the way a free cast "from your hand" is.
+            if source_zone == Zone::Hand || is_free_immediate_graveyard_pick(ability) {
                 return open_private_zone_cast_selection(
                     state,
                     ability,
@@ -1869,6 +1997,13 @@ fn freeze_resolution_filter_prop(
         FilterProp::Not { prop } => FilterProp::Not {
             prop: Box::new(freeze_resolution_filter_prop(state, ability, *prop)),
         },
+        // CR 400.3 + CR 608.2h: the owner leg names whose graveyard the pick
+        // reads ("from that player's graveyard"). Like the controller leg it is
+        // made concrete while this ability's targets are still live; the
+        // stashed continuation no longer carries them.
+        FilterProp::Owned { controller } => FilterProp::Owned {
+            controller: freeze_resolution_controller_ref(state, ability, controller),
+        },
         prop => prop,
     }
 }
@@ -2352,8 +2487,10 @@ pub(crate) fn is_enters_with_modifications_rider_subability(ability: &ResolvedAb
 /// instruction as a `SequentialSibling` ("… it gains haste. Draw a card."), so
 /// the walk splices the whole metadata run out and continues at the first
 /// non-metadata node: accepted and declined cast paths share this authority,
-/// so neither drops a later independent instruction. `None` when the remaining
-/// chain is entirely consumed metadata.
+/// so neither drops a later independent instruction (a resolution-time pick's
+/// accepted path continues only with an "If you do" node —
+/// `stash_accepted_cast_if_you_do`). `None` when the remaining chain is entirely
+/// consumed metadata.
 ///
 /// The chain storage is `Option<Box<ResolvedAbility>>` and the walker binds
 /// `sub` through that exact type (`sub.as_ref().clone()` clones the node), so
@@ -2821,8 +2958,8 @@ mod tests {
     use crate::types::ability::{
         CardPlayMode, CastFromZoneDriver, CastPermissionConstraint, Comparator, ControllerRef,
         Effect, EffectOutcomeSignal, FilterProp, LibraryPosition, ObjectScope, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, ResolutionCastWindow, TargetFilter, ThisWayCause,
-        TypeFilter, TypedFilter,
+        PtValueScope, QuantityExpr, QuantityRef, ResolutionCastWindow, TargetChoiceTiming,
+        TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -3961,6 +4098,60 @@ mod tests {
             }),
             "Memory Plunder must not fake an exile origin before casting"
         );
+    }
+
+    /// CR 115.1 + CR 608.2g: only the untargeted shape the parser marks
+    /// (`TargetChoiceTiming::Resolution`) opens the resolution-time graveyard
+    /// pick. The same free graveyard cast announced as a target that arrives
+    /// with no target names no card and casts nothing.
+    #[test]
+    fn graveyard_pick_opens_only_for_the_untargeted_shape() {
+        for timing in [TargetChoiceTiming::Resolution, TargetChoiceTiming::Stack] {
+            let mut state = make_test_state();
+            let card = add_card_to_graveyard(&mut state, PlayerId(0), CardId(9334));
+            state
+                .objects
+                .get_mut(&card)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Instant);
+            let mut ability = ResolvedAbility::new(
+                Effect::CastFromZone {
+                    target: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Instant)
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::InZone {
+                                zone: Zone::Graveyard,
+                            }]),
+                    ),
+                    without_paying_mana_cost: true,
+                    mode: CardPlayMode::Cast,
+                    cast_transformed: false,
+                    alt_ability_cost: None,
+                    constraint: None,
+                    duration: None,
+                    driver: CastFromZoneDriver::LingeringPermission,
+                    mana_spend_permission: None,
+                    additional_cost: None,
+                    cast_cost_modifier: None,
+                },
+                vec![],
+                ObjectId(999),
+                PlayerId(0),
+            );
+            ability.target_choice_timing = timing;
+
+            resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+            let picked = match &state.waiting_for {
+                WaitingFor::EffectZoneChoice { cards, .. } => Some(cards.clone()),
+                _ => None,
+            };
+            let expected = (timing == TargetChoiceTiming::Resolution).then(|| vec![card]);
+            assert_eq!(picked, expected, "{timing:?}");
+            assert_eq!(state.objects[&card].zone, Zone::Graveyard, "{timing:?}");
+        }
     }
 
     #[test]

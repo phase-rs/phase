@@ -395,6 +395,24 @@ local_resource('prelowered-ratchet',
     labels = ['lint'],
 )
 
+# Gate H's full shell seams are local Tilt checks, not a separate CI suite.
+# Fixtures use the real gate/detector and the shared scanner's import dependency.
+local_resource('residue-ratchet',
+    cmd = '/bin/bash scripts/lib/residue_ratchet_tests.sh',
+    deps = ['scripts/check-parser-combinators.sh',
+            'scripts/lib/detect-cross-product-alts.py',
+            'scripts/lib/detect-residue-discards.py',
+            'scripts/lib/detect_cross_product_alts_tests.py',
+            'scripts/lib/detect_residue_discards_tests.py',
+            'scripts/lib/residue_ratchet_tests.sh',
+            'scripts/zone_authority_census.py',
+            'crates/engine/src/game/mod.rs'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # ---------------------------------------------------------------------------
 # Data (manual trigger — click in UI to run)
 # ---------------------------------------------------------------------------

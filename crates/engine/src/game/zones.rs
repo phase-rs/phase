@@ -307,6 +307,9 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // "isn't prepared" intervening-if recheck (CR 603.4) reads
                 // this exit value, not the trigger-time appearance.
                 was_prepared: obj.prepared.is_some(),
+                // CR 608.2h: intensity at zone exit, for a departed source's
+                // "its intensity" read.
+                intensity: obj.intensity,
                 // CR 608.2h: The attachment set as it stood BEFORE the departure
                 // sever (CR 701.3d) cleared it, so a source-referential intervening-if
                 // re-checked at resolution ("if this creature is enchanted" — Dreampod

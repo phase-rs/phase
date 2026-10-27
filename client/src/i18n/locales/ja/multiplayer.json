@@ -352,5 +352,10 @@
   "deepLink": {
     "gameInProgressTitle": "ゲーム進行中",
     "gameInProgressBody": "現在のゲームを終了するか退出してから、もう一度リンクを開いてください。"
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "投了により Full の終了状態に達しましたが、ネイティブの最終ビューを公開できませんでした。",
+    "concedeUnreconciled": "投了の結果を照合できませんでした。この席はロックされたままです。",
+    "receiptUnsent": "最終結果の永続的な受領確認を送信できませんでした。再配信を待っています"
   }
 }

@@ -2293,15 +2293,22 @@ pub(super) fn handle_resolution_choice(
                 .ok_or_else(|| {
                     EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
                 })?;
+            let events_before_resume = events.len();
             let next =
                 crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events)
                     .map_err(|error| EngineError::InvalidAction(format!("{error}")))?;
-            // CR 608.2c: re-suspended for another interactive choice, else the
-            // whole flip effect completed — drain back to Priority.
+            // CR 608.2c: resume the parent only after the coin run completes.
             let wf = match next {
                 Some(wf) => wf,
                 None => finish_with_continuation(state, player, events),
             };
+            // CR 603.2 + CR 603.3b: the coin branch or a later parent instruction
+            // can pause; preserve observers until priority returns.
+            crate::game::triggers::park_observer_triggers_if_paused(
+                state,
+                events,
+                events_before_resume,
+            );
             ResolutionChoiceOutcome::WaitingFor(wf)
         }
         (
@@ -7356,6 +7363,14 @@ pub(super) fn handle_resolution_choice(
                     };
                     let ability = *frame.pending.chain;
                     if chosen.len() == 1 {
+                        // CR 118.12 + CR 608.2c + CR 608.2g: the ability's "If you
+                        // do" instruction follows the cast as the ability
+                        // continues to resolve, before the cast spell does. It is
+                        // parked unperformed before the cast starts; the cast's
+                        // commit point marks it performed (CR 601.2i), so a cast
+                        // that is undone (CR 733.1) leaves it declined.
+                        let if_you_do =
+                            effects::cast_from_zone::stash_accepted_cast_if_you_do(state, &ability);
                         let used_during_resolution =
                             effects::cast_from_zone::complete_hand_pick_cast_from_zone(
                                 &mut *state,
@@ -7365,6 +7380,9 @@ pub(super) fn handle_resolution_choice(
                             )
                             .map_err(|e| EngineError::InvalidAction(e.to_string()))?;
                         if used_during_resolution {
+                            if if_you_do {
+                                resume_with_error_propagation(state, events)?;
+                            }
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
                                 state.waiting_for.clone(),
                             ));
@@ -7883,6 +7901,19 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
 
+            // CR 608.2d: a chosen card name is public information; surface it for
+            // every naming (resolving instruction or as-enters choice) so the log
+            // shows what was named.
+            if matches!(choice_type, ChoiceType::CardName) {
+                events.push(GameEvent::CardNamed {
+                    player_id: player,
+                    source_id: source
+                        .as_ref()
+                        .map(|source| source.prompt.identity.reference.object_id),
+                    name: choice.clone(),
+                });
+            }
+
             // CR 614.12a: a pre-entry as-enters choice answers the parked
             // battlefield entry, not a resolving ability — no object binding and
             // no continuation.
@@ -7920,10 +7951,17 @@ pub(super) fn handle_resolution_choice(
             effects::choose::record_player_chosen_number(state, player, &choice_type, &choice);
             if let Some(context) = updated_context {
                 if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame
-                        .pending
-                        .chain
-                        .update_trigger_source_context_in_resolution_segment(context);
+                    if matches!(choice_type, ChoiceType::CardName) {
+                        frame
+                            .pending
+                            .chain
+                            .update_trigger_source_context_through_chain(context);
+                    } else {
+                        frame
+                            .pending
+                            .chain
+                            .update_trigger_source_context_in_resolution_segment(context);
+                    }
                 }
             }
             if choice_type.is_card_predicate_guess() {

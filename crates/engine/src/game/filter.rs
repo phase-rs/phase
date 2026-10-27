@@ -5985,6 +5985,29 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
             TypeFilter::Instant | TypeFilter::Sorcery | TypeFilter::Card | TypeFilter::Any => false,
         }
     }
+    // CR 109.2: Descriptions that include the word "card" do not denote
+    // permanents on the battlefield. Reject any filter that contains Card.
+    fn type_includes_card(t: &TypeFilter) -> bool {
+        match t {
+            TypeFilter::Card => true,
+            TypeFilter::Non(inner) => type_includes_card(inner),
+            TypeFilter::AnyOf(inners) => inners.iter().any(type_includes_card),
+            _ => false,
+        }
+    }
+    fn filter_includes_card(f: &TargetFilter) -> bool {
+        match f {
+            TargetFilter::Typed(tf) => tf.type_filters.iter().any(type_includes_card),
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_includes_card)
+            }
+            TargetFilter::Not { filter } => filter_includes_card(filter),
+            _ => false,
+        }
+    }
+    if filter_includes_card(filter) {
+        return false;
+    }
     match filter {
         // The terms of one `Typed` filter are conjunctive ("artifact creature"),
         // so one battlefield-only term settles it.
@@ -5995,6 +6018,24 @@ pub(crate) fn filter_implies_battlefield_permanent(filter: &TargetFilter) -> boo
         }
         _ => false,
     }
+}
+
+/// CR 109.2: does `filter` denote ONLY permanents on the battlefield? True
+/// when it describes its object by a permanent card type or subtype
+/// ([`filter_implies_battlefield_permanent`]) and names no zone of its own
+/// (`population_zones`, the union of both zone readers, so a stack or
+/// graveyard reference counts as one). "A creature" is such a description; "a
+/// creature card in a graveyard", "a creature spell", `SelfRef`, and a plain
+/// "card" filter are not.
+///
+/// Event-subject matchers pair this with a zone read on the event's object:
+/// the type reading alone cannot exclude a card in another zone, since a
+/// creature card in a graveyard still has the creature card type (CR 205.2a).
+/// Callers: `replacement::replacement_valid_card_matches` (counter
+/// replacements) and `trigger_matchers::match_becomes_target` (Horobi,
+/// Death's Wail's "Whenever a creature becomes the target...").
+pub(crate) fn filter_denotes_battlefield_permanent(filter: &TargetFilter) -> bool {
+    filter.population_zones().is_empty() && filter_implies_battlefield_permanent(filter)
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -7660,7 +7701,7 @@ pub(crate) fn source_subject_matches_filter(
 /// transitions, so a missing entry means no record survives — never that a
 /// later object at the same storage id may answer in the captured
 /// incarnation's place.
-fn exit_lki_for_incarnation(
+pub(crate) fn exit_lki_for_incarnation(
     state: &GameState,
     object_id: ObjectId,
     incarnation: u64,
@@ -8796,12 +8837,14 @@ fn filter_inner_for_object(
         // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
         // before runtime — never object-matched here.
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,
-        // CR 201.2 + CR 602.5: "card with the chosen name" — match against source's
-        // ChosenAttribute::CardName. The chosen name comes from a player UI prompt;
-        // the comparison must mirror the spell-cast prohibition path
-        // (`cant_cast_filter_matches`) which uses `eq_ignore_ascii_case`. Without
-        // parity, Pithing Needle's activation-prohibition leg would silently miss
-        // names that differ only by casing from the player's typed input.
+        // CR 201.2a + CR 602.5: "card with the chosen name" — match against source's
+        // ChosenAttribute::CardName. The chosen name comes from a player UI prompt
+        // that accepts any casing (Unicode-aware), so compare via
+        // `card_names_match` — the same comparison the spell-cast prohibition
+        // path (`cant_cast_filter_matches`) uses. Without parity, Pithing
+        // Needle's activation-prohibition leg or Brain Pry's discard would
+        // silently miss names that differ only by casing ("éowyn" / "Éowyn")
+        // from the player's typed input.
         TargetFilter::HasChosenName => {
             let source_ctx = source_context_from_filter(
                 state,
@@ -8817,7 +8860,7 @@ fn filter_inner_for_object(
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
                 _ => None,
             });
-            chosen_name.is_some_and(|name| obj.name.eq_ignore_ascii_case(name))
+            chosen_name.is_some_and(|name| card_names_match(&obj.name, name))
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
@@ -9123,7 +9166,7 @@ fn zone_change_filter_inner(
                     ChosenAttribute::CardName(n) => Some(n.as_str()),
                     _ => None,
             });
-            chosen_name.is_some_and(|name| record.name.eq_ignore_ascii_case(name))
+            chosen_name.is_some_and(|name| card_names_match(&record.name, name))
         }
         // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
         // leaves-the-battlefield look-back path. The candidate occurrence is the
@@ -10523,6 +10566,7 @@ fn source_context_from_filter<'a>(
                     is_suspected: false,
                     was_prepared: false,
                     attachments: Vec::new(),
+                    intensity: 0,
                 });
             (
                 lki,
@@ -12963,6 +13007,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         });
     SourceContext {
         id: context.source_id,
@@ -16149,6 +16194,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -23052,6 +23098,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let filter =
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
@@ -23101,6 +23148,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let entrant = ObjectId(700);
         let filter = TargetFilter::Typed(
@@ -23240,6 +23288,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let filter =
             TargetFilter::Typed(
@@ -23387,6 +23436,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
 
         // Left the battlefield TAPPED.
@@ -24377,6 +24427,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let land_lki = LKISnapshot {
             name: "Test Land".to_string(),
@@ -24399,6 +24450,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
 
         let filter =
@@ -24516,6 +24568,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let filter = TargetFilter::Typed(
             TypedFilter::default().properties(vec![FilterProp::SameNameAsParentTarget]),
@@ -24660,6 +24713,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -24732,6 +24786,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -27506,6 +27561,42 @@ mod entry_projection_tests {
         unrelated.inherit_delivery_boundary(&original);
         assert!(!unrelated.parks_delivery(&original));
     }
+
+    #[test]
+    fn filter_denotes_battlefield_permanent_respects_cr_109_2() {
+        // "a creature" -> battlefield permanent
+        assert!(filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter::creature()
+        )));
+
+        // "a creature card in a graveyard" -> has zone, not battlefield-only
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard
+            }])
+        )));
+
+        // Filter containing Card (e.g. [Creature, Card]) -> includes word "card", not battlefield-only (CR 109.2)
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter {
+                type_filters: vec![TypeFilter::Creature, TypeFilter::Card],
+                ..Default::default()
+            }
+        )));
+
+        // Bare Card -> not battlefield-only
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Card)
+        )));
+
+        // Conjunction containing Card -> not battlefield-only
+        assert!(!filter_denotes_battlefield_permanent(&TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Card)),
+            ],
+        }));
+    }
 }
 
 #[cfg(test)]
@@ -27981,6 +28072,7 @@ mod attached_set_host_filter_tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         }
     }
 
@@ -28082,6 +28174,7 @@ mod attached_set_host_filter_tests {
                     controller: PlayerId(1),
                     kind: crate::types::ability::AttachmentKind::Aura,
                 }],
+                intensity: 0,
             },
         );
         state.objects.remove(&host);

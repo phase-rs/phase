@@ -847,6 +847,42 @@ fn answered_choice(replay: &GameState, action: &GameAction) -> Option<PinnedDeci
     }
 }
 
+/// The objects of `state` the period's plays cast: each cast card, and for a prepared copy cast,
+/// the copy linked to its prepared permanent and the copy it cast, if that is still on the stack.
+///
+/// CR 722.3c + CR 400.7: each time the permanent becomes prepared its controller creates a new
+/// copy of its prepare spell in exile, so a period that casts one and re-prepares the permanent
+/// holds a different copy in each frame. The exiled copy is stripped only while its permanent is
+/// prepared on the battlefield, since only then does CR 722.3c make it a function of that
+/// permanent, which the frames still compare. CR 601.2a: the cast moves the copy to the stack,
+/// where a frame taken before it resolves still holds it.
+fn period_casts(state: &GameState, items: &[PeriodItem]) -> Vec<ObjectId> {
+    use crate::game::effects::prepare::{
+        is_retained_linked_prepared_copy, linked_prepared_copy_source,
+    };
+    let mut casts = Vec::new();
+    for item in items {
+        match item.action {
+            GameAction::CastSpell { object_id, .. } => casts.push(object_id),
+            GameAction::CastPreparedCopy { source } => casts.extend(
+                state
+                    .objects
+                    .values()
+                    .filter(|object| {
+                        let linked = linked_prepared_copy_source(object) == Some(source)
+                            && is_retained_linked_prepared_copy(state, object);
+                        let cast = object.zone == crate::types::zones::Zone::Stack
+                            && object.prepared_copy_source == Some(source);
+                        linked || cast
+                    })
+                    .map(|object| object.id),
+            ),
+            _ => {}
+        }
+    }
+    casts
+}
+
 /// The frame with every object the period cast removed, since a cast card returns where it
 /// came from (CR 400.7), and its churning bookkeeping cleared.
 pub(crate) fn normalize_cast_frame(state: &GameState, casts: &[ObjectId]) -> GameState {
@@ -906,16 +942,9 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         Ok(_) => (&s_n1, &replay),
         Err(_) => (&s_n, &s_n1),
     };
-    let casts: Vec<ObjectId> = items
-        .iter()
-        .filter_map(|item| match item.action {
-            GameAction::CastSpell { object_id, .. } => Some(object_id),
-            _ => None,
-        })
-        .collect();
     let (verdict, growth) = certify_object_growth_frames(
         [&s_n, &s_n1, current],
-        |state| normalize_cast_frame(state, &casts),
+        |state| normalize_cast_frame(state, &period_casts(state, &items)),
         holder,
     );
     // CR 732.2a: one count per offer. Something of its proposer's own falling makes the period

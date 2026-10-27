@@ -1967,6 +1967,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -2062,6 +2063,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -2152,6 +2154,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 

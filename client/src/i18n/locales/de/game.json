@@ -1329,7 +1329,8 @@
     "passwordPrompt": "Dieser Raum erfordert ein Passwort:",
     "toasts": {
       "connectionFailed": "Verbindung fehlgeschlagen. Versuche es erneut oder ändere den Server in den Einstellungen.",
-      "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu."
+      "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu.",
+      "retainedTerminalUnreadable": "Die gespeicherte Zustellung des Endergebnisses konnte nicht gelesen werden"
     },
     "resumeReset": {
       "appUpdated": "Die App wurde aktualisiert und dein gespeichertes Spiel ist mit der neuen Version inkompatibel.",

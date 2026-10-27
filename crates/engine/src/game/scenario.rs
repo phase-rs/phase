@@ -3028,6 +3028,11 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Engine events emitted while committing this cast to the stack.
+    pub fn events(&self) -> &[GameEvent] {
+        &self.events
+    }
+
     /// Submit an action while this cast remains committed on the stack.
     ///
     /// This keeps response tests on the same `apply()` pipeline as the live
