@@ -40,8 +40,7 @@ set -euo pipefail
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 
 # Test code lives both inline (`#[cfg(test)]` in crates/engine/src) and in
-# crates/engine/tests. src/bin/* are CLI tools that load the real export by
-# design and are allow-listed below (SCOPE_EXCLUDES), not left out of SCOPE.
+# crates/engine/tests.
 SCOPE=(crates/engine)
 # The canonical loader (support.rs) names the path on purpose; the CLI bins load
 # the real export by design. These files are outside the gate's view, so a line
