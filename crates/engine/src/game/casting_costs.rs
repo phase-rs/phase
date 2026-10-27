@@ -3688,6 +3688,26 @@ fn auto_activate_spell_mana_abilities_before_deferred_sacrifice(
         &mut simulated_events,
         events_before,
     );
+    // CR 601.2g-h + CR 605.4a + CR 608.2d: a skipped multi-type mana echo owes
+    // exactly one chosen bonus BEFORE the spend, even on this deferred route.
+    // The same shared authority every other spell/activation/effect root uses
+    // settles it here, rooting the suspension in this cast's own pending mana
+    // payment. Without it the preview admits a bonus-dependent cast that the
+    // live spend then rejects as "Cannot pay mana cost". A pause must keep the
+    // simulated state so the finalizer can surface the choice and retain the
+    // outer cast for its exact resume.
+    if let Err(err) = super::casting::settle_pre_spend_echoes(
+        &mut simulated,
+        player,
+        &simulated_events,
+        events_before,
+        resume,
+        None,
+    ) {
+        *state = simulated;
+        *events = simulated_events;
+        return Err(err);
+    }
     validate_deferred_spell_sacrifices_at_commit(&simulated, player, pending)?;
     simulated.pending_cast = previous_pending;
     *state = simulated;
@@ -17341,6 +17361,17 @@ fn finalize_mana_payment_with_resume(
             }
             Ok(state.waiting_for.clone())
         }
+        // CR 605.4a + CR 608.2d + CR 601.2g-h: an auto-tapped multi-type
+        // mana-echo pauses for its SingleColor choice BEFORE the spend, with
+        // this exact outer payment as its typed continuation. Retain the outer
+        // cast so answering resumes this same finalizer with the bonus in the
+        // pool, rather than reporting "Cannot pay mana cost".
+        Err(_) if state.pending_triggered_mana_resume.is_some() => {
+            if state.pending_cast.is_none() {
+                state.pending_cast = Some(pending_for_restore);
+            }
+            Ok(state.waiting_for.clone())
+        }
         Err(err) => {
             if matches!(
                 &err,
@@ -17765,6 +17796,15 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // CR 601.2h + CR 605.3b + CR 616.1: See the ordinary payment resume
         // above. A Phyrexian choice does not change the cursor ownership.
         Err(_) if super::casting::mana_ability_cost_payment_is_paused(state) => {
+            if state.pending_cast.is_none() {
+                state.pending_cast = Some(pending_for_restore);
+            }
+            Ok(state.waiting_for.clone())
+        }
+        // CR 605.4a + CR 608.2d + CR 601.2g-h: same echo-choice suspension as
+        // the ordinary finalizer above — retain the cast so answering resumes
+        // this same payment with the bonus in the pool.
+        Err(_) if state.pending_triggered_mana_resume.is_some() => {
             if state.pending_cast.is_none() {
                 state.pending_cast = Some(pending_for_restore);
             }

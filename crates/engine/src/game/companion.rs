@@ -518,6 +518,8 @@ pub fn can_activate_companion(state: &GameState, player: PlayerId) -> bool {
             None,
             &companion_to_hand_cost(state, player),
             SpecialAction::CompanionToHand,
+            // Live payment carries `ManaAbilityResume::CompanionToHand`.
+            casting::PausedManaPayment::Resumable,
         )
 }
 
@@ -604,6 +606,8 @@ pub fn handle_companion_to_hand(
         None,
         &cost,
         SpecialAction::CompanionToHand,
+        // Live payment carries `ManaAbilityResume::CompanionToHand`.
+        casting::PausedManaPayment::Resumable,
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Cannot pay companion cost".to_string(),

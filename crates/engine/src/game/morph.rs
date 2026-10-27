@@ -85,6 +85,8 @@ pub(crate) fn turn_face_up_offer(
                 Some(object_id),
                 &cost,
                 crate::types::mana::SpecialAction::TurnFaceUp,
+                // Live payment carries `ManaAbilityResume::TurnFaceUp`.
+                super::casting::PausedManaPayment::Resumable,
             )
             .then_some(())?;
             Some(if super::casting_costs::cost_has_x(&cost) {
@@ -425,8 +427,9 @@ pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id:
 ///
 /// Kept separate from the commit half so the paid `GameAction::TurnFaceUp`
 /// special-action handler can charge the returned cost through
-/// `pay_special_action_mana_cost` before `turn_face_up` flips the permanent,
-/// while the free direct callers (grant path, tests) reuse the same guards.
+/// `pay_special_action_mana_cost_with_resume` before `turn_face_up` flips the
+/// permanent, while the free direct callers (grant path, tests) reuse the same
+/// guards.
 use crate::types::ability::TurnUpCostSource;
 
 pub(crate) fn turn_face_up_prepare(
@@ -558,10 +561,9 @@ pub(crate) fn turn_face_up_prepare(
 /// A paused payment is a real outcome, not an error:
 /// `pay_special_action_mana_cost_with_resume` returns `Paused` when an
 /// auto-tapped mana source's own cost surfaces a replacement choice
-/// (CR 605.3b + CR 616.1). The permanent stays face down and the prompt is
-/// returned; [`resume_turn_face_up_payment`] finishes the action once the choice
-/// is answered. The compatibility wrapper `pay_special_action_mana_cost` turns
-/// that state into an error, which is why this action may not use it.
+/// (CR 605.3b + CR 616.1) or a pre-spend echo choice. The permanent stays face
+/// down and the prompt is returned; [`resume_turn_face_up_payment`] finishes the
+/// action once the choice is answered.
 pub(crate) fn handle_turn_face_up(
     state: &mut GameState,
     player: PlayerId,

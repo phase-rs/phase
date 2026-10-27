@@ -10005,6 +10005,15 @@ pub enum ManaAbilityResume {
         player: PlayerId,
         cost: ManaCost,
     },
+    /// CR 116.2i + CR 605.3b + CR 616.1: A planar-die special action whose
+    /// auto-tapped mana source paused on a replacement-aware cost move or a
+    /// pre-spend echo choice. `cost` is the escalating cost locked at action
+    /// initiation, so resumption cannot re-derive it after the action counter
+    /// changes.
+    PlanarDieRoll {
+        player: PlayerId,
+        cost: ManaCost,
+    },
     /// CR 116.2b + CR 702.37e / CR 702.168d / CR 701.40b + CR 605.3b + CR 616.1:
     /// A turn-face-up special action whose auto-tapped mana source paused on a
     /// replacement-aware cost move. `cost` is the final cost locked at action
@@ -10040,6 +10049,34 @@ pub enum ManaAbilityResume {
         player: PlayerId,
         group: EndEffectGroupId,
         cost: ManaCost,
+    },
+    /// CR 116.2m + CR 709.5e + CR 605.3b + CR 616.1: A Room-door unlock whose
+    /// auto-tapped mana source paused on a replacement-aware cost move or a
+    /// pre-spend echo choice. `object_id`, `door`, and `cost` are the exact
+    /// action latched at announcement (the cost is the locked half's effective
+    /// print after special-action reductions), so resumption cannot re-derive
+    /// them against a board that changed while the prompt was pending. The door
+    /// stays locked and no mana is spent until the continuation completes.
+    RoomUnlock {
+        player: PlayerId,
+        object_id: ObjectId,
+        door: crate::game::game_object::RoomDoor,
+        cost: ManaCost,
+    },
+    /// CR 116.2h + CR 702.143a + CR 605.3b + CR 616.1: A foretell special
+    /// action whose auto-tapped mana source paused on a replacement-aware cost
+    /// move or a pre-spend echo choice. The payment is `{2}` (after CR 118.7a
+    /// special-action reductions) and the card stays in hand, unspent and not
+    /// yet foretold, until the continuation completes. `cost` is the card's
+    /// effective foretell cast cost and `turn_foretold` the turn the action was
+    /// announced, both latched at announcement so a prompt that outlives the
+    /// turn cannot drift the permission the card receives when it is exiled.
+    Foretell {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: ManaCost,
+        payment_cost: ManaCost,
+        turn_foretold: u32,
     },
     ManaPayment {
         /// The payer of the outer spell/ability cost. This is intentionally
@@ -10083,6 +10120,19 @@ pub enum ManaAbilityResume {
         /// mana ability mid-payment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+    },
+    /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d + CR 605.4a: A combat
+    /// declaration whose locked-in tax payment suspended before spending on a
+    /// pre-spend mana choice. The proposal, its price, and the defending seat
+    /// are frozen at announcement; resumption must re-enter this exact accept
+    /// path and commit the declaration only after the triggered mana has
+    /// resolved into the payer's pool (CR 508.1i–j, CR 509.1e–f).
+    CombatTaxPayment {
+        player: PlayerId,
+        context: CombatTaxContext,
+        total_cost: ManaCost,
+        per_creature: Vec<(ObjectId, ManaCost)>,
+        pending: CombatTaxPending,
     },
     /// CR 118.12 + CR 605.3b + CR 616.1: A resolving `Effect::PayCost` whose
     /// auto-tapped mana source paused on a replaceable cost move. The exact
@@ -10208,10 +10258,14 @@ fn visit_mana_ability_resume_events(
         } => visit_pending_mana_ability_events(pending_mana_ability, f),
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. }
         | ManaAbilityResume::EffectPayCost { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
@@ -10229,9 +10283,13 @@ impl ManaAbilityResume {
             // The outer cost authority retries the same automatic payment after
             // an auto-tapped source's paused cost move completed.
             ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::EffectPayCost { .. }
+            | ManaAbilityResume::CombatTaxPayment { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
             // CR 605.3a + CR 602.2b: a mana ability activated by hand retries
@@ -10246,6 +10304,61 @@ impl ManaAbilityResume {
         }
     }
 
+    /// CR 116.2: Whether this root is a special action taken at priority that
+    /// completes by returning priority once its mana cost is paid. Unlike a
+    /// cast, activation, or resolution-time payment, no enclosing owner remains
+    /// to run the post-action pass, so a resumed handler that bypasses the
+    /// ordinary reducer epilogue must converge this root's own events at the
+    /// settled priority. Exhaustive so a new root has to be classified.
+    pub fn is_top_level_special_action(&self) -> bool {
+        match self {
+            // CR 116.2g: companion to hand.
+            ManaAbilityResume::CompanionToHand { .. }
+            // CR 116.2i: rolling the planar die.
+            | ManaAbilityResume::PlanarDieRoll { .. }
+            // CR 116.2b: turning a face-down permanent face up.
+            | ManaAbilityResume::TurnFaceUp { .. }
+            // CR 116.2c: paying to end a continuous effect.
+            | ManaAbilityResume::EndContinuousEffect { .. }
+            // CR 116.2m: paying a Room's unlock cost.
+            | ManaAbilityResume::RoomUnlock { .. }
+            // CR 116.2h: paying {2} to foretell a card from hand.
+            | ManaAbilityResume::Foretell { .. } => true,
+            ManaAbilityResume::Priority
+            | ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::ManaAbilityManaPayment { .. }
+            | ManaAbilityResume::UnlessPayment { .. }
+            | ManaAbilityResume::CombatTaxPayment { .. }
+            | ManaAbilityResume::EffectPayCost { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => false,
+        }
+    }
+
+    /// CR 117.3c + CR 117.5: Whether this resume chain terminates at a root
+    /// that returns priority with no enclosing owner left to scan its own
+    /// events — `Priority` itself, a CR 116.2 special action, or a combat
+    /// declaration whose locked tax payment is the declaration's own last step
+    /// (CR 508.1i-k, CR 509.1e-g). Such a root must run settled-Priority
+    /// convergence, or the frame's deferred ordinary observers would still be
+    /// waiting when priority is handed out (CR 603.3b). A nested
+    /// `ManaAbilityManaPayment` carries the enclosing activation's root, so a
+    /// parent settling through one is still a direct priority root.
+    pub fn reaches_direct_priority_root(&self) -> bool {
+        match self {
+            ManaAbilityResume::Priority => true,
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } => pending_mana_ability.resume.reaches_direct_priority_root(),
+            // CR 508.1k + CR 509.1g: the declaration commits and hands priority
+            // to the active player; no cast or activation encloses it, so its
+            // committed batch is the last thing this resume owns.
+            ManaAbilityResume::CombatTaxPayment { .. } => true,
+            resume => resume.is_top_level_special_action(),
+        }
+    }
+
     /// CR 601.2h + CR 602.2b + CR 116.2: Whether the outer payment root this
     /// resumes is a cast, activation or special action (no priority until it
     /// completes) rather than a resolution. Exhaustive so a new root has to be
@@ -10257,13 +10370,21 @@ impl ManaAbilityResume {
             | ManaAbilityResume::ManaSourceSelection { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 508.1i-j + CR 509.1e-f: the declaration has not committed while
+            // its tax is unpaid, so no player receives priority before it does.
+            ManaAbilityResume::CombatTaxPayment { .. } => true,
             // CR 602.2b: the outer mana ability's cost is still being paid.
             ManaAbilityResume::ManaAbilityManaPayment { .. } => true,
-            // CR 116.2g / 116.2b / 116.2c: companion to hand, turning a
-            // permanent face up, and paying to end an effect are special actions.
+            // CR 116.2g / 116.2i / 116.2b / 116.2c / 116.2m / 116.2h: companion
+            // to hand, rolling the planar die, turning a permanent face up,
+            // paying to end an effect, paying a Room's unlock cost, and
+            // foretelling a card from hand are special actions.
             ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
-            | ManaAbilityResume::EndContinuousEffect { .. } => true,
+            | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Foretell { .. } => true,
             // CR 118.12 / CR 608.2: payments made while an ability resolves.
             ManaAbilityResume::UnlessPayment { .. } | ManaAbilityResume::EffectPayCost { .. } => {
                 false
@@ -10561,11 +10682,15 @@ impl PendingManaAbility {
             } => Some(pending_mana_ability.as_ref()),
             ManaAbilityResume::Priority
             | ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::ManaPayment { .. }
             | ManaAbilityResume::ManaSourceSelection { .. }
             | ManaAbilityResume::UnlessPayment { .. }
+            | ManaAbilityResume::CombatTaxPayment { .. }
             | ManaAbilityResume::EffectPayCost { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => None,
@@ -25856,10 +25981,14 @@ fn visit_mana_ability_resume_chains<'a>(
         } => visit_pending_mana_ability_chains(pending_mana_ability, f),
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. } => Ok(()),
     }

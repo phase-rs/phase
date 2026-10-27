@@ -839,94 +839,6 @@ fn ensure_assist_cancellation_is_allowed(state: &GameState) -> Result<(), Engine
     Ok(())
 }
 
-fn handle_unlock_room_door(
-    state: &mut GameState,
-    player: PlayerId,
-    object_id: ObjectId,
-    door: crate::game::game_object::RoomDoor,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    if state.active_player != player
-        || !matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)
-        || !state.stack.is_empty()
-    {
-        return Err(EngineError::ActionNotAllowed(
-            "Room doors can be unlocked only as a main-phase special action with an empty stack"
-                .to_string(),
-        ));
-    }
-
-    let cost = {
-        let obj = state
-            .objects
-            .get(&object_id)
-            .ok_or_else(|| EngineError::InvalidAction("Room not found".to_string()))?;
-        if obj.controller != player || obj.zone != Zone::Battlefield {
-            return Err(EngineError::ActionNotAllowed(
-                "Only the controller of a battlefield Room can unlock it".to_string(),
-            ));
-        }
-        if !obj
-            .card_types
-            .subtypes
-            .iter()
-            .any(|subtype| subtype == "Room")
-        {
-            return Err(EngineError::ActionNotAllowed(
-                "Object is not a Room".to_string(),
-            ));
-        }
-        if obj.room_unlocks.unwrap_or_default().is_unlocked(door) {
-            return Err(EngineError::ActionNotAllowed(
-                "That door is already unlocked".to_string(),
-            ));
-        }
-        // CR 709.5e + CR 707.2: the unlock cost is the locked HALF's mana cost,
-        // read from the EFFECTIVE halves (printed order) — the copied snapshot
-        // when a copy effect applies, else the object's own printed halves
-        // (whose orientation `room::own_room_halves` resolves through
-        // `live_face_door`, the same CR 709.5d mapping as before).
-        let halves = super::room::effective_room_halves(obj);
-        match door {
-            crate::game::game_object::RoomDoor::Left => halves.left.mana_cost.clone(),
-            crate::game::game_object::RoomDoor::Right => halves
-                .right
-                .as_ref()
-                .map(|half| half.mana_cost.clone())
-                .ok_or_else(|| {
-                    EngineError::ActionNotAllowed("Room has no second door face".to_string())
-                })?,
-        }
-    };
-
-    // CR 116.2m + CR 118.7a: Reduce the door's generic unlock cost by the
-    // player's active `ReduceActionCost { action: UnlockDoor }` statics
-    // (Inquisitive Glimmer — "Unlock costs you pay cost {1} less") before
-    // payment. Single authority shared with the plot path.
-    let cost = casting::apply_special_action_cost_reduction(
-        state,
-        player,
-        crate::types::mana::SpecialAction::UnlockDoor,
-        cost,
-    );
-
-    // CR 116.2m + CR 709.5e + CR 106.6: The unlock cost is a special action's
-    // mana cost. Route payment through `PaymentContext::SpecialAction(UnlockDoor)`
-    // so spend-restricted mana ("only to … unlock doors", Smoky Lounge) is
-    // eligible here and spell/activation-restricted mana is correctly rejected.
-    casting::pay_special_action_mana_cost(
-        state,
-        player,
-        Some(object_id),
-        &cost,
-        crate::types::mana::SpecialAction::UnlockDoor,
-        events,
-    )?;
-
-    super::room::unlock_door_designation(state, object_id, player, door, events);
-    Ok(WaitingFor::Priority { player })
-}
-
 /// Public engine entrypoint. Every caller must supply the `actor` — the
 /// `PlayerId` whose authenticated identity is making this action. The engine
 /// rejects any action whose `actor` does not match `authorized_submitter(state)`
@@ -12840,7 +12752,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+            super::room::handle_unlock_room_door(state, *player, object_id, door, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
             if state.priority_player
@@ -12851,8 +12763,16 @@ fn apply_non_priority_pass_action(
             // CR 901.9 / CR 116.2i: Rolling the planar die as a special action
             // does not use the stack; the escalating cost is charged before the
             // roll and effect-caused rolls do not increment the counter.
-            crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?;
-            WaitingFor::Priority { player: *player }
+            // CR 605.3b + CR 616.1: a paused cost move or pre-spend echo choice
+            // leaves the action uncommitted; the typed planar-die root returns
+            // its prompt and finishes the locked-cost roll once answered.
+            match crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?
+            {
+                crate::game::planechase::PaidPlanarDieAction::Rolled(_) => {
+                    WaitingFor::Priority { player: *player }
+                }
+                crate::game::planechase::PaidPlanarDieAction::Paused => state.waiting_for.clone(),
+            }
         }
         // CR 715.3a: Player chooses creature or Adventure face.
         (
@@ -14103,7 +14023,9 @@ fn apply_non_priority_pass_action(
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
         (
             WaitingFor::ChooseManaColor {
-                choice, context, ..
+                player: prompt_player,
+                choice,
+                context,
             },
             GameAction::ChooseManaColor {
                 choice: chosen,
@@ -14158,13 +14080,58 @@ fn apply_non_priority_pass_action(
                     wf
                 }
                 crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                    effects::mana::handle_choose_mana_effect(
+                    // CR 605.4a: a choice answered inside a paused accepted
+                    // triggered-mana occurrence resumes that fixed point (same
+                    // wrap the optional/opponent-may answers use). With no live
+                    // carrier both hooks are exact no-ops and this is the
+                    // historical immediate completion. The latched prompt
+                    // player travels as the recipient backstop so suspension
+                    // cannot misroute the deposit.
+                    let wf = super::triggers::with_accepted_triggered_mana_action_scope(
                         state,
-                        pending_effect,
-                        choice,
-                        chosen.clone(),
+                        |state| {
+                            effects::mana::handle_choose_mana_effect(
+                                state,
+                                pending_effect,
+                                *prompt_player,
+                                choice,
+                                chosen.clone(),
+                                &mut events,
+                            )
+                        },
+                    )?;
+                    if let super::triggers::TriggeredManaReadiness::Resumed {
+                        wait,
+                        settled_direct_priority_root,
+                    } = super::triggers::finish_accepted_triggered_mana_action(
+                        state,
                         &mut events,
-                    )?
+                        events_before,
+                    )? {
+                        // CR 117.5 + CR 605.4a (mirrors the opponent-may arm):
+                        // this reducer arm returns its `ActionResult` directly,
+                        // so the ordinary epilogue never runs. A resumed
+                        // direct `Priority` root with no live owner must
+                        // converge here, or ordinary deferred triggers from
+                        // its own settled batch (e.g. a Manabarbs observer on
+                        // the same tap) would sit undrained when priority
+                        // returns. Every other owner keeps its queue and
+                        // returns the frame's wait unchanged.
+                        let wait = *wait;
+                        let wait = if settled_direct_priority_root {
+                            engine_priority::run_post_action_pipeline_from_settled_priority(
+                                state,
+                                &mut events,
+                                events_before,
+                                &wait,
+                            )?
+                        } else {
+                            wait
+                        };
+                        state.waiting_for = wait.clone();
+                        return Ok(ActionResult::applied(events, wait));
+                    }
+                    wf
                 }
             };
             // CR 603.2c + CR 605.4a: A NON-mana `ResolvingEffect` colour choice
@@ -15587,7 +15554,10 @@ fn apply_non_priority_pass_action(
             {
                 waiting_for
             } else {
-                engine_combat::finish_declare_attackers(state, &mut events, false)?
+                // CR 508.1g + CR 701.43d: this action carries only the exert
+                // decision and the buffered declaration batch owns the events;
+                // the declaration span starts at this action's beginning.
+                engine_combat::finish_declare_attackers(state, &mut events, 0, false)?
             }
         }
         // CR 508.1g + CR 702.154a: the active player may tap up to one eligible
@@ -15622,7 +15592,10 @@ fn apply_non_priority_pass_action(
             {
                 waiting_for
             } else {
-                engine_combat::finish_declare_attackers(state, &mut events, false)?
+                // CR 508.1g + CR 702.154a: this action carries only the enlist
+                // decision and the buffered declaration batch owns the events;
+                // the declaration span starts at this action's beginning.
+                engine_combat::finish_declare_attackers(state, &mut events, 0, false)?
             }
         }
         (

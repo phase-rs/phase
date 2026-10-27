@@ -24957,6 +24957,15 @@ fn resolve_chain_body(
             state.pending_cost_move_resume.as_ref(),
             Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. })
                 if matches!(&pending.resume, ManaAbilityResume::EffectPayCost { .. })
+        ) || matches!(
+            state
+                .pending_triggered_mana_resume
+                .as_deref()
+                .map(|resume| &resume.outer_resume),
+            Some(crate::types::game_state::ManaTriggerFixedPointResume::Root {
+                resume,
+                ..
+            }) if matches!(resume.as_ref(), ManaAbilityResume::EffectPayCost { .. })
         );
         if matches!(ability.effect, Effect::PayCost { .. })
             && typed_effect_pay_cost_root

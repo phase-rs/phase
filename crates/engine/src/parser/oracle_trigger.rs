@@ -15122,6 +15122,10 @@ fn parse_taps_for_mana_actor_line(
         alt((
             value(Some(ControllerRef::Opponent), tag("an opponent taps ")),
             value(None, tag("a player taps ")),
+            // CR 603.2 + CR 106.12a: "you tap … for mana" taps-for-mana actor —
+            // the trigger event is a tap for mana performed by the trigger
+            // source's controller (Molten Tide class).
+            value(Some(ControllerRef::You), tag("you tap ")),
         )),
     )
     .parse(i)?;
@@ -20215,7 +20219,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             let (mut filter, sub_rem) =
                 parse_trigger_subject(&subject_text, &mut ParseContext::default());
             if sub_rem.trim().is_empty() {
-                if let Some(c) = actor_controller {
+                if let Some(c) = actor_controller.clone() {
                     // Constrain subject to opponent-controlled permanents via the
                     // single `add_controller` authority (shared with the "you tap"
                     // arm above).
@@ -20224,6 +20228,17 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 let mut def = make_base();
                 def.mode = TriggerMode::TapsForMana;
                 def.valid_card = Some(filter);
+                // CR 603.2 + CR 106.12a: the "you tap …" actor binds the tapper
+                // to the trigger source's controller. Keyworded printed
+                // "whenever/when you tap …" still hits the :19178 loop first
+                // (left byte-identical); keyword-stripped delayed conditions
+                // reach this site; both produce identical
+                // `valid_card = add_controller(filter, You)` +
+                // `valid_target = Controller` + `taps_for_mana_produced`
+                // passthrough.
+                if actor_controller == Some(ControllerRef::You) {
+                    def.valid_target = Some(TargetFilter::Controller);
+                }
                 def.taps_for_mana_produced = produced_filter;
                 return Some((TriggerMode::TapsForMana, def));
             }

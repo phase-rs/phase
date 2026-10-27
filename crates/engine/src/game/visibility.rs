@@ -4087,14 +4087,26 @@ fn redact_mana_ability_resume_payment(
         ManaAbilityResume::ManaAbilityManaPayment {
             pending_mana_ability,
         } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        // CR 400.2 + CR 702.143a: a foretell card in hand is in a hidden zone,
+        // and its effective foretell cast cost is not public information. Zero
+        // it for viewers who cannot see the card; the {2} payment cost is public.
+        ManaAbilityResume::Foretell {
+            object_id, cost, ..
+        } if hidden_ids.contains(object_id) => {
+            *cost = crate::types::mana::ManaCost::generic(0);
+        }
         // Keep this complete rather than using a catch-all: a new resume must decide
         // whether it retains an ability. None of these holds one.
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
     }

@@ -5324,6 +5324,7 @@ fn interaction_mana_special_action(action: SpecialAction) -> InteractionManaSpec
         SpecialAction::TurnFaceUp => InteractionManaSpecialAction::TurnFaceUp,
         SpecialAction::RollPlanarDie => InteractionManaSpecialAction::RollPlanarDie,
         SpecialAction::EndContinuousEffect => InteractionManaSpecialAction::EndContinuousEffect,
+        SpecialAction::Foretell => InteractionManaSpecialAction::Foretell,
     }
 }
 

@@ -956,7 +956,9 @@ export type SpecialAction =
   | "TurnFaceUp"
   | "RollPlanarDie"
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
-  | "EndContinuousEffect";
+  | "EndContinuousEffect"
+  // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
+  | "Foretell";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
