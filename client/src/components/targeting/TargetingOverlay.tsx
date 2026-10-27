@@ -14,6 +14,7 @@ import {
   buildBoardChoiceAction,
   canConfirmBoardChoice,
   getBoardChoiceView,
+  getWaitingForPlayerChoiceIds,
   isBoardChoiceImmediate,
   type BoardChoiceView,
 } from "../../viewmodel/gameStateView.ts";
@@ -153,6 +154,14 @@ export function TargetingOverlay() {
   // CR 115.7: Single-target retargets (Bolt Bend, Misdirection) are picked on the
   // board through this overlay; multi-target retargets keep the dialog.
   const isRetargetChoice = waitingFor?.type === "RetargetChoice" && waitingFor.data.scope.type === "Single";
+  // CR 608.2d + CR 115.10a: a single-pick resolution choice picked on the board. It is a
+  // CHOICE made while the ability resolves, not a target — so no target wording, and no
+  // Cancel: the spell or ability is already resolving (CR 608.2d), so nothing is left to
+  // reverse; `CancelCast` backs out of an incomplete cast or activation (CR 733.1).
+  // Highlights come from the engine's `eligible` via the shared click authorities.
+  const isChooseObjectsSinglePick = waitingFor?.type === "ChooseObjectsSelection" && waitingFor.data.max === 1;
+  // Skip (choose nothing) only when the engine-published `min` admits an empty selection.
+  const canSkipObjectChoice = isChooseObjectsSinglePick && waitingFor.data.min === 0;
   // CR 115.7: Name the spell/ability being retargeted (the entry the redirect
   // resolved onto), so the player knows what they are choosing a new target for.
   const retargetSpellName = isRetargetChoice
@@ -199,10 +208,12 @@ export function TargetingOverlay() {
   // clickable object for a player, so the overlay lists every legal player
   // target as its own control instead of relying on the seat chrome alone.
   const legalPlayerTargets = useMemo(
-    () => (selection?.current_legal_targets ?? []).flatMap((target) =>
-      "Player" in target ? [target.Player] : [],
-    ),
-    [selection],
+    () => isChooseObjectsSinglePick
+      ? getWaitingForPlayerChoiceIds(waitingFor)
+      : (selection?.current_legal_targets ?? []).flatMap((target) =>
+        "Player" in target ? [target.Player] : [],
+      ),
+    [isChooseObjectsSinglePick, selection, waitingFor],
   );
   const sourceId = boardChoice?.sourceId ?? (
     waitingFor?.type === "TriggerTargetSelection"
@@ -306,6 +317,10 @@ export function TargetingOverlay() {
             ? t("targeting.chooseReturnAsAuraTarget")
             : isChooseTokenHost
               ? t("targeting.chooseTokenHost")
+            : isChooseObjectsSinglePick
+              ? (waitingFor.data.min === 0
+                  ? t("targeting.chooseUpToOneHighlighted")
+                  : t("targeting.chooseOneHighlighted"))
             : isRetargetChoice
               ? (retargetSpellName
                   ? t("targeting.chooseNewTargetForSpell", { spell: retargetSpellName })
@@ -379,7 +394,7 @@ export function TargetingOverlay() {
     return () => clearSelectedCards();
   }, [clearSelectedCards, isBoardChoice, waitingFor]);
 
-  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isChooseTokenHost && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
+  if (!isTargetSelection && !isCopyTargetChoice && !isCopyRetarget && !isExploreChoice && !isEquipTarget && !isPopulateChoice && !isReturnAsAuraTarget && !isChooseTokenHost && !isChooseObjectsSinglePick && !isRetargetChoice && !isTapCreatureChoice && !isBoardChoice) return null;
 
   // Only show targeting UI for the human player
   if (!canActForWaitingState) return null;
@@ -771,7 +786,7 @@ export function TargetingOverlay() {
               {t("targeting.keepCurrentTarget")}
             </button>
           )}
-          {isOptionalCurrentSlot && (
+          {(isOptionalCurrentSlot || canSkipObjectChoice) && (
             <button
               onClick={handleSkip}
               className="pointer-events-auto rounded-lg bg-amber-700 px-6 py-2 font-semibold text-white shadow-lg transition hover:bg-amber-600"

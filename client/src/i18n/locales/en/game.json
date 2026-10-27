@@ -908,6 +908,8 @@
     "chooseCreatureTokenToPopulate": "Choose a creature token to populate",
     "chooseReturnAsAuraTarget": "Choose a permanent to enchant",
     "chooseTokenHost": "Choose a host for the token",
+    "chooseOneHighlighted": "Choose one of the highlighted options",
+    "chooseUpToOneHighlighted": "Choose up to one of the highlighted options",
     "tapUntappedCreatures_one": "Tap {{count}} untapped creature",
     "tapUntappedCreatures_other": "Tap {{count}} untapped creatures",
     "sacrificeExact_one": "Sacrifice {{count}} permanent",

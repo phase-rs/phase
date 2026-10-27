@@ -16647,16 +16647,8 @@ fn apply_non_priority_pass_action(
                 state.waiting_for.clone()
             }
         }
-        // CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
-        // battlefield-permanent selection. Publish a fresh tracked set so the
-        // downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
-        // resolve against exactly this selection, then resume the chain.
-        //
-        // CR 115.10a + CR 608.2d: the same prompt also carries a described
-        // damage recipient ("a creature or player", no "target") — see
-        // `effects::deal_damage::parked_recipient_pool`. That pick is bound to
-        // the parked damage instruction instead of being published, and may be a
-        // player.
+        // CR 608.2c + CR 608.2d: the published answer to an object selection —
+        // see `apply_choose_objects_selection`.
         (
             WaitingFor::ChooseObjectsSelection {
                 player,
@@ -16666,98 +16658,44 @@ fn apply_non_priority_pass_action(
                 trigger_event,
             },
             GameAction::SelectTargets { targets },
-        ) => {
-            let p = *player;
-            let eligible_set = eligible.clone();
-            let pending_event = trigger_event.clone();
-            let selected_count = targets.len();
-            if selected_count < *min as usize
-                || max.is_some_and(|maximum| selected_count > maximum as usize)
-            {
-                return Err(EngineError::InvalidAction(format!(
-                    "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
-                    max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
-                )));
-            }
-            // The prompt belongs to a parked described damage instruction only when
-            // the active continuation is that instruction, still holding exactly
-            // the pool this prompt offers. A tracked-set producer's prompt never
-            // matches: its parked continuation is some other instruction, even one
-            // whose own candidate set would be identical.
-            let recipient_pool = state
-                .active_ability_continuation()
-                .and_then(|continuation| {
-                    effects::deal_damage::parked_recipient_pool(&continuation.chain)
-                })
-                .filter(|pool| *pool == eligible_set);
-            // Validate all selected targets are distinct members of the eligible set;
-            // a player is a legal pick only for a damage recipient.
-            let mut selected: HashSet<TargetRef> = HashSet::with_capacity(selected_count);
-            for t in &targets {
-                if !eligible_set.contains(t) {
-                    return Err(EngineError::InvalidAction(
-                        "Selected target not eligible for object selection".to_string(),
-                    ));
-                }
-                if recipient_pool.is_none() && matches!(t, TargetRef::Player(_)) {
-                    return Err(EngineError::InvalidAction(
-                        "Object selection accepts battlefield objects only".to_string(),
-                    ));
-                }
-                if !selected.insert(t.clone()) {
-                    return Err(EngineError::InvalidAction(
-                        "Duplicate object in object selection".to_string(),
-                    ));
-                }
-            }
-            if recipient_pool.is_some() {
-                // CR 608.2d: the pick is chosen while the instruction is applied, so
-                // it is bound unpinned (never announced as a target) as the parked
-                // damage node's recipient. Nothing is published: this is not a
-                // tracked-set selection.
-                if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                    frame.pending.chain.set_unpinned_targets(targets);
-                }
-            } else {
-                let ids: Vec<ObjectId> = targets
-                    .iter()
-                    .map(|target| match target {
-                        TargetRef::Object(id) => *id,
-                        TargetRef::Player(_) => unreachable!("validated as objects above"),
-                    })
-                    .collect();
-                // CR 608.2c: Always allocate a fresh tracked set — a player-chosen
-                // "those creatures" set is a new resolution scope. An empty
-                // selection yields an empty fresh set (size 0).
-                effects::publish_fresh_tracked_set(state, ids);
-                events.push(GameEvent::EffectResolved {
-                    kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
-                    source_id: ObjectId(0), // Source not tracked through choice state
-                    subject: None,
-                });
-            }
-            state.waiting_for = WaitingFor::Priority { player: p };
-            state.priority_player = p;
-            // CR 608.2: restore the triggering event so the stashed
-            // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
-            // resolves the payer correctly — the trigger's resolution is still
-            // in flight.
-            // CR 603.2c + CR 608.2: the batched-trigger subject count is also
-            // part of the trigger's resolution scope — mirror its save/restore
-            // so an `EventContextAmount` inside the resumed continuation reads
-            // the original "that many" instead of `None`.
-            let previous_trigger_event = state.current_trigger_event.clone();
-            let previous_trigger_match_count = state.current_trigger_match_count;
-            state.current_trigger_event = pending_event;
-            state.current_trigger_match_count = state
-                .active_ability_continuation()
-                .and_then(|continuation| continuation.trigger_context.as_ref())
-                .and_then(|context| context.match_count);
-            resume_pending_continuation_if_priority(state, &mut events)?;
-            state.current_trigger_event = previous_trigger_event;
-            state.current_trigger_match_count = previous_trigger_match_count;
-            state.waiting_for.clone()
-        }
+        ) => apply_choose_objects_selection(
+            state,
+            &mut events,
+            ChooseObjectsSubmission {
+                player: *player,
+                eligible,
+                min: *min,
+                max: *max,
+                trigger_event: trigger_event.clone(),
+                targets,
+            },
+        )?,
+        // CR 608.2d + CR 115.10a: a single-pick resolution choice (`max == Some(1)`) may be
+        // answered by one board/HUD click. The pick is chosen while the effect is applied and is
+        // not a target, so it forwards to the same authority as `SelectTargets` — never to target
+        // legality — and announces nothing a ward or becomes-target trigger could see. `None` is
+        // an empty selection, legal only when `min == 0`. Other cardinalities keep `SelectTargets`.
+        (
+            WaitingFor::ChooseObjectsSelection {
+                player,
+                eligible,
+                min,
+                max: max @ Some(1),
+                trigger_event,
+            },
+            GameAction::ChooseTarget { target },
+        ) => apply_choose_objects_selection(
+            state,
+            &mut events,
+            ChooseObjectsSubmission {
+                player: *player,
+                eligible,
+                min: *min,
+                max: *max,
+                trigger_event: trigger_event.clone(),
+                targets: target.into_iter().collect(),
+            },
+        )?,
         // CR 707.10c / CR 601.2c: one position of the copy target walk. The
         // pick is answerable only when the engine-derived walk admits it (a
         // keep only where keeping completes; a choice only where it has a
@@ -17560,6 +17498,131 @@ fn apply_retarget(
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
     resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+struct ChooseObjectsSubmission<'a> {
+    player: PlayerId,
+    eligible: &'a [TargetRef],
+    min: u32,
+    max: Option<u32>,
+    trigger_event: Option<GameEvent>,
+    targets: Vec<TargetRef>,
+}
+
+/// CR 608.2c + CR 608.2d: apply a player's answer to a
+/// `WaitingFor::ChooseObjectsSelection` prompt, then resume the parked chain.
+/// Single authority for both `ChooseObjectsSelection` entry points — the
+/// published `SelectTargets` answer and the single-pick board-click
+/// `ChooseTarget` (`max == Some(1)`) — so eligibility, cardinality and recipient
+/// binding can never drift apart.
+///
+/// CR 608.2c: ChooseObjectsIntoTrackedSet — player submitted their
+/// battlefield-permanent selection. Publish a fresh tracked set so the
+/// downstream `PayCost { ScaledMana }` and the `IfYouDo`/`Untap` tail
+/// resolve against exactly this selection, then resume the chain.
+///
+/// CR 115.10a + CR 608.2d: the same prompt also carries a described
+/// damage recipient ("a creature or player", no "target") — see
+/// `effects::deal_damage::parked_recipient_pool`. That pick is bound to
+/// the parked damage instruction instead of being published, and may be a
+/// player.
+fn apply_choose_objects_selection(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    submission: ChooseObjectsSubmission<'_>,
+) -> Result<WaitingFor, EngineError> {
+    let ChooseObjectsSubmission {
+        player: p,
+        eligible: eligible_set,
+        min,
+        max,
+        trigger_event: pending_event,
+        targets,
+    } = submission;
+    let selected_count = targets.len();
+    if selected_count < min as usize || max.is_some_and(|maximum| selected_count > maximum as usize)
+    {
+        return Err(EngineError::InvalidAction(format!(
+            "Object selection must choose at least {min}{} distinct objects, got {selected_count}",
+            max.map_or(String::new(), |maximum| format!(" and at most {maximum}"))
+        )));
+    }
+    // The prompt belongs to a parked described damage instruction only when
+    // the active continuation is that instruction, still holding exactly
+    // the pool this prompt offers. A tracked-set producer's prompt never
+    // matches: its parked continuation is some other instruction, even one
+    // whose own candidate set would be identical.
+    let recipient_pool = state
+        .active_ability_continuation()
+        .and_then(|continuation| effects::deal_damage::parked_recipient_pool(&continuation.chain))
+        .filter(|pool| pool.as_slice() == eligible_set);
+    // Validate all selected targets are distinct members of the eligible set;
+    // a player is a legal pick only for a damage recipient.
+    let mut selected: HashSet<TargetRef> = HashSet::with_capacity(selected_count);
+    for t in &targets {
+        if !eligible_set.contains(t) {
+            return Err(EngineError::InvalidAction(
+                "Selected target not eligible for object selection".to_string(),
+            ));
+        }
+        if recipient_pool.is_none() && matches!(t, TargetRef::Player(_)) {
+            return Err(EngineError::InvalidAction(
+                "Object selection accepts battlefield objects only".to_string(),
+            ));
+        }
+        if !selected.insert(t.clone()) {
+            return Err(EngineError::InvalidAction(
+                "Duplicate object in object selection".to_string(),
+            ));
+        }
+    }
+    if recipient_pool.is_some() {
+        // CR 608.2d: the pick is chosen while the instruction is applied, so
+        // it is bound unpinned (never announced as a target) as the parked
+        // damage node's recipient. Nothing is published: this is not a
+        // tracked-set selection.
+        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+            frame.pending.chain.set_unpinned_targets(targets);
+        }
+    } else {
+        let ids: Vec<ObjectId> = targets
+            .iter()
+            .map(|target| match target {
+                TargetRef::Object(id) => *id,
+                TargetRef::Player(_) => unreachable!("validated as objects above"),
+            })
+            .collect();
+        // CR 608.2c: Always allocate a fresh tracked set — a player-chosen
+        // "those creatures" set is a new resolution scope. An empty
+        // selection yields an empty fresh set (size 0).
+        effects::publish_fresh_tracked_set(state, ids);
+        events.push(GameEvent::EffectResolved {
+            kind: crate::types::ability::EffectKind::ChooseObjectsIntoTrackedSet,
+            source_id: ObjectId(0), // Source not tracked through choice state
+            subject: None,
+        });
+    }
+    state.waiting_for = WaitingFor::Priority { player: p };
+    state.priority_player = p;
+    // CR 608.2: restore the triggering event so the stashed
+    // `PayCost { ScaledMana, payer: TriggeringPlayer }` continuation
+    // resolves the payer correctly — the trigger's resolution is still
+    // in flight.
+    // CR 603.2c + CR 608.2: the batched-trigger subject count is also
+    // part of the trigger's resolution scope — mirror its save/restore
+    // so an `EventContextAmount` inside the resumed continuation reads
+    // the original "that many" instead of `None`.
+    let previous_trigger_event = state.current_trigger_event.clone();
+    let previous_trigger_match_count = state.current_trigger_match_count;
+    state.current_trigger_event = pending_event;
+    state.current_trigger_match_count = state
+        .active_ability_continuation()
+        .and_then(|continuation| continuation.trigger_context.as_ref())
+        .and_then(|context| context.match_count);
+    resume_pending_continuation_if_priority(state, events)?;
+    state.current_trigger_event = previous_trigger_event;
+    state.current_trigger_match_count = previous_trigger_match_count;
     Ok(state.waiting_for.clone())
 }
 

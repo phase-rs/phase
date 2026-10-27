@@ -875,6 +875,8 @@
     "chooseCreatureTokenToPopulate": "Wybierz żeton stwora do populacji",
     "chooseReturnAsAuraTarget": "Wybierz permanent do zaczarowania",
     "chooseTokenHost": "Wybierz gospodarza dla żetonu",
+    "chooseOneHighlighted": "Wybierz jedną z podświetlonych opcji",
+    "chooseUpToOneHighlighted": "Wybierz maksymalnie jedną z podświetlonych opcji",
     "tapUntappedCreatures_one": "Obróć {{count}} nieobróconego stwora",
     "tapUntappedCreatures_other": "Obróć {{count}} nieobróconych stworów",
     "chooseTargetOf": "Wybierz cel {{current}} z {{total}}",

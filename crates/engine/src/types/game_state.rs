@@ -18092,6 +18092,10 @@ pub enum WaitingFor {
     /// binds to the parked damage instruction and no tracked set is published.
     /// Hexproof, shroud and protection do not restrict `eligible`: it is a
     /// choice, not a target.
+    ///
+    /// Answered by `GameAction::SelectTargets`; when `max == Some(1)` a single
+    /// `GameAction::ChooseTarget` (a board/HUD click, `None` = choose nothing)
+    /// is accepted as the same answer — it is never a target.
     ChooseObjectsSelection {
         player: PlayerId,
         /// Eligible battlefield permanents matching the effect's filter, and, for

@@ -191,6 +191,34 @@ describe("PlayerHud", () => {
       });
     });
 
+    // CR 608.2d + CR 115.10a: a single-pick resolution choice ("a creature or
+    // player", no "target") is answered by a HUD click; the identical payload as a
+    // multi-pick selection (no `max`) keeps its modal, so the seat stays inert.
+    it("offers the seat for a single-pick ChooseObjectsSelection", () => {
+      const { dispatch } = mount({
+        type: "ChooseObjectsSelection",
+        data: { player: 0, eligible: legal([0]), min: 1, max: 1 },
+      });
+
+      expect(plateTag()).toBe("BUTTON");
+      fireEvent.click(document.querySelector("[data-hud-plate]")!);
+      expect(dispatch).toHaveBeenCalledWith({
+        type: "ChooseTarget",
+        data: { target: { Player: 0 } },
+      });
+    });
+
+    it("does not offer the seat for a multi-pick ChooseObjectsSelection", () => {
+      const { dispatch } = mount({
+        type: "ChooseObjectsSelection",
+        data: { player: 0, eligible: legal([0]), min: 1 },
+      });
+
+      expect(plateTag()).toBe("DIV");
+      fireEvent.click(document.querySelector("[data-hud-plate]")!);
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
     // The negative sibling of the shared TargetSelection arm: the engine offers a
     // DIFFERENT seat, so this HUD stays inert.
     it("does not offer the seat when the engine names a different player", () => {
