@@ -614,6 +614,7 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         // No creating ability: a directly pushed frame has no chain-root
         // target list for counter-gated branch readers.
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: None,
@@ -717,6 +718,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         // The carrier stamped slot 0 illegal as the chain began to resolve;
         // indexing still counts it (no renumbering).
         illegal_target_slots: vec![0],
@@ -782,6 +784,7 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![0],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -873,6 +876,7 @@ fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -963,6 +967,7 @@ fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![Some(ghost_pin)],
         declared_capture: None,
@@ -1021,6 +1026,7 @@ fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        trigger_context: None,
         illegal_target_slots: vec![0],
         chain_root_target_pins: vec![None, None],
         declared_capture: None,
@@ -1084,6 +1090,7 @@ fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Object(condemned), TargetRef::Object(brute)],
+        trigger_context: None,
         illegal_target_slots: vec![0],
         chain_root_target_pins: vec![None, None],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -1176,6 +1183,7 @@ fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -1277,6 +1285,7 @@ fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Object(brute)],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: None,
@@ -1337,6 +1346,7 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -1424,6 +1434,7 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -1479,6 +1490,7 @@ fn parked_declared_player_prefers_local_over_root() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Player(P0)],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![None],
         // Pre-field frame: no captured verdict, so the legacy path
@@ -1532,6 +1544,7 @@ fn parked_declared_player_honors_chain_illegal_stamp() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Object(foe), TargetRef::Player(P0)],
+        trigger_context: None,
         illegal_target_slots: vec![0],
         chain_root_target_pins: vec![None, None],
         // Pre-field frame: no captured verdict, so the legacy path
@@ -1591,6 +1604,7 @@ fn parked_declared_player_recorded_illegal_ignores_lists() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Player(P1)],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![None],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -1640,6 +1654,7 @@ fn parked_declared_player_ignores_root_numbered_stamp_on_local() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![0],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -1688,6 +1703,7 @@ fn parked_declared_player_absent_matches_nothing() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: Some(CapturedDeclarationPayload {
@@ -2492,6 +2508,7 @@ fn legacy_frame_without_capture_still_falls_back_to_local() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![],
+        trigger_context: None,
         illegal_target_slots: vec![],
         chain_root_target_pins: vec![],
         declared_capture: None,
@@ -2924,6 +2941,7 @@ fn snapshot_pause_illegal_player_contributes_nothing() {
         rolled_any: false,
         forced_ignored: vec![],
         chain_root_targets: vec![TargetRef::Player(P1)],
+        trigger_context: None,
         illegal_target_slots: vec![0],
         chain_root_target_pins: vec![None],
         declared_capture: Some(CapturedDeclarationPayload {

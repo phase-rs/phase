@@ -10032,6 +10032,7 @@ mod tests {
                         source_id: ObjectId(7),
                         controller: PlayerId(0),
                         roller: PlayerId(0),
+                        quantity_controller: None,
                         targets: vec![],
                         sides: 1,
                         results: vec![1, 1],
@@ -10045,6 +10046,12 @@ mod tests {
                         forced_ignored: vec![],
                         chain_root_targets: vec![],
                         trigger_context: context.clone(),
+                        illegal_target_slots: vec![],
+                        chain_root_target_pins: vec![],
+                        declared_capture: None,
+                        local_target_pins: vec![],
+                        keyed_target_incarnations: vec![],
+                        declared_player: None,
                     });
                     state.waiting_for = WaitingFor::DieKeepChoice {
                         player: PlayerId(0),

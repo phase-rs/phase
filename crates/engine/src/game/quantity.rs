@@ -21901,6 +21901,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         state
             .lki_by_incarnation
@@ -22502,6 +22503,7 @@ mod tests {
             rolled_any: false,
             forced_ignored: vec![],
             chain_root_targets,
+            trigger_context: None,
             illegal_target_slots: illegal,
             chain_root_target_pins,
             declared_capture: Some((&captured).into()),
@@ -22692,6 +22694,7 @@ mod tests {
             rolled_any: false,
             forced_ignored: vec![],
             chain_root_targets,
+            trigger_context: None,
             illegal_target_slots: illegal,
             chain_root_target_pins,
             declared_capture: Some((&captured).into()),
@@ -22846,6 +22849,7 @@ mod tests {
                 rolled_any: false,
                 forced_ignored: vec![],
                 chain_root_targets: ability.context.chain_root_targets.clone(),
+                trigger_context: None,
                 illegal_target_slots: illegal.clone(),
                 chain_root_target_pins: vec![],
                 declared_capture: Some((&captured).into()),
@@ -22956,6 +22960,7 @@ mod tests {
                 rolled_any: false,
                 forced_ignored: vec![],
                 chain_root_targets: ability.context.chain_root_targets.clone(),
+                trigger_context: None,
                 illegal_target_slots: illegal.clone(),
                 chain_root_target_pins: vec![],
                 declared_capture: Some((&captured).into()),
@@ -23126,6 +23131,7 @@ mod tests {
             rolled_any: false,
             forced_ignored: vec![],
             chain_root_targets: ability.context.chain_root_targets.clone(),
+            trigger_context: None,
             illegal_target_slots: illegal,
             chain_root_target_pins: vec![],
             declared_capture: Some((&captured).into()),

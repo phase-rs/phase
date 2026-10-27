@@ -2245,7 +2245,7 @@ mod preroll_tests {
         install(&mut state, &foreign);
         let mut events = vec![];
         assert_eq!(
-            resume_after_ignore(&mut state, pending, vec![0, 1], &mut events).unwrap(),
+            resume_after_ignore(&mut state, pending, vec![0, 1], &mut events, None).unwrap(),
             ResolutionProgress::Complete
         );
         assert_eq!(state.objects[&source].zone, Zone::Battlefield);

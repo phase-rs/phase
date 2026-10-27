@@ -40256,6 +40256,7 @@ mod tests {
                     source_id: ObjectId(9_801),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
+                    quantity_controller: None,
                     targets: vec![],
                     results_table: vec![],
                     modifier: None,
@@ -40268,6 +40269,12 @@ mod tests {
                     }),
                     continuation: crate::types::resolution::DieRollContinuation::Resolution,
                     chain_root_targets: vec![],
+                    illegal_target_slots: vec![],
+                    chain_root_target_pins: vec![],
+                    declared_capture: None,
+                    local_target_pins: vec![],
+                    keyed_target_incarnations: vec![],
+                    declared_player: None,
                 }));
                 let wire = serde_json::to_value(if trusted {
                     PersistedGameState::capture(state)
@@ -45397,6 +45404,7 @@ mod tests {
                     source_id: ObjectId(5),
                     controller: PlayerId(0),
                     roller: PlayerId(0),
+                    quantity_controller: None,
                     targets: vec![],
                     results_table: vec![],
                     modifier: None,
@@ -45404,6 +45412,12 @@ mod tests {
                     trigger_context: Some(context),
                     continuation: crate::types::resolution::DieRollContinuation::Resolution,
                     chain_root_targets: vec![],
+                    illegal_target_slots: vec![],
+                    chain_root_target_pins: vec![],
+                    declared_capture: None,
+                    local_target_pins: vec![],
+                    keyed_target_incarnations: vec![],
+                    declared_player: None,
                 }));
             } else {
                 state.resolution_stack.push_inner(match kind {
@@ -45425,6 +45439,7 @@ mod tests {
                         source_id: ObjectId(5),
                         controller: PlayerId(0),
                         roller: PlayerId(0),
+                        quantity_controller: None,
                         targets: vec![],
                         sides: 6,
                         results: vec![1, 2],
@@ -45438,6 +45453,12 @@ mod tests {
                         forced_ignored: vec![],
                         chain_root_targets: vec![],
                         trigger_context: Some(context),
+                        illegal_target_slots: vec![],
+                        chain_root_target_pins: vec![],
+                        declared_capture: None,
+                        local_target_pins: vec![],
+                        keyed_target_incarnations: vec![],
+                        declared_player: None,
                     })),
                     _ => unreachable!(),
                 });

@@ -15752,7 +15752,7 @@ mod random_result_resolution_context_tests {
                             let pending = exact.take_active_die_roll_frame().unwrap().unwrap();
                             let ignored = pending.forced_ignored.clone();
                             crate::game::triggers::push_resolving_trigger_context(&mut exact, pending.trigger_context.as_ref().unwrap());
-                            assert_eq!(effects::roll_die::resume_after_ignore(&mut exact, pending, ignored, &mut vec![]), Err(EffectError::ChainTooDeep));
+                            assert_eq!(effects::roll_die::resume_after_ignore(&mut exact, pending, ignored, &mut vec![], None), Err(EffectError::ChainTooDeep));
                         }
                         let mut events = vec![];
                         let result = resume(&mut state, boundary, &mut events);
