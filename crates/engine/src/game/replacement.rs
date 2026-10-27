@@ -10892,6 +10892,53 @@ fn apply_single_replacement_and_dirty(
     result
 }
 
+pub(crate) fn noncombat_opportunity_rider(definition: &ReplacementDefinition) -> bool {
+    matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
+        && definition.runtime_execute.as_deref().is_some_and(|rider| {
+            rider.repeat_for.is_none()
+                && !rider_reflects_per_event_damage_source(rider)
+                && matches!(rider.effect, Effect::GainLife { .. })
+        })
+}
+
+/// CR 615.5 + CR 615.8 + CR 119.9: one gain for the complete prevented instance.
+/// Convert the owned total into the rider's existing quantity before parking it,
+/// so an interactive gain and independent following instructions cannot reread a
+/// later event's count. Definitions and amounts never enter ordinary children.
+pub(crate) fn take_noncombat_opportunity_riders(
+    state: &mut GameState,
+    opportunity: &mut crate::types::ability::DamageOpportunity,
+) -> Option<ResolvedAbility> {
+    let mut chain: Option<ResolvedAbility> = None;
+    for (key, total) in opportunity.prevention_tally.take().unwrap_or_default() {
+        let definition = opportunity
+            .iter()
+            .find(|(used, _)| *used == key)
+            .expect("an owned prevention total retains its complete definition")
+            .1
+            .clone();
+        let mut rider = *definition
+            .runtime_execute
+            .expect("an owned prevention total retains its rider");
+        state.last_effect_count = Some(total);
+        if let Effect::GainLife { amount, .. } = &rider.effect {
+            let value = crate::game::quantity::resolve_quantity_with_targets_and_event_amount(
+                state, amount, &rider, total,
+            );
+            if let Effect::GainLife { amount, .. } = &mut rider.effect {
+                *amount = crate::types::ability::QuantityExpr::Fixed { value };
+            }
+        }
+        rider.context.damage_opportunity = None;
+        if let Some(head) = chain.as_mut() {
+            crate::game::ability_utils::append_to_sub_chain(head, rider);
+        } else {
+            chain = Some(rider);
+        }
+    }
+    chain
+}
+
 fn apply_single_replacement_and_record_opportunity(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -10920,6 +10967,29 @@ fn apply_single_replacement_and_record_opportunity(
         })
         .cloned();
     let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
+    // CR 615.5 + CR 615.8: this rider belongs to the complete noncombat
+    // instance. Keep its actual definition in the opportunity; the individual
+    // recipient applies prevention without stashing the same rider again.
+    let aggregate_amount = match &proposed {
+        ProposedEvent::Damage {
+            amount,
+            is_combat: false,
+            ..
+        } if opportunity.prevention_tally.is_some()
+            && matches!(branch, ReplacementBranch::Execute)
+            && before.as_ref().is_some_and(noncombat_opportunity_rider) =>
+        {
+            Some(*amount)
+        }
+        _ => None,
+    };
+    let mut individual = captured.clone();
+    if aggregate_amount.is_some() {
+        individual = before.clone();
+        if let Some(definition) = individual.as_mut() {
+            definition.runtime_execute = None;
+        }
+    }
     let result = apply_single_replacement_and_dirty(
         state,
         proposed,
@@ -10927,8 +10997,21 @@ fn apply_single_replacement_and_record_opportunity(
         branch,
         registry,
         events,
-        captured.as_ref(),
+        individual.as_ref(),
     );
+    if let Some(amount) = aggregate_amount.filter(|_| matches!(result, Err(ApplyResult::Prevented)))
+    {
+        let tally = opportunity
+            .prevention_tally
+            .as_mut()
+            .expect("owned noncombat tally");
+        if let Some((_, total)) = tally.iter_mut().find(|(used, _)| *used == key) {
+            *total += amount as i32;
+        } else {
+            tally.push((key, amount as i32));
+            tally.sort_by_key(|(key, _)| *key);
+        }
+    }
     let whole_opportunity = before.as_ref().is_some_and(|definition| {
         matches!(
             definition.shield_kind,
@@ -10954,8 +11037,8 @@ fn apply_single_replacement_and_record_opportunity(
         if consumed {
             if let Some(mut definition) = before {
                 definition.is_consumed = false;
-                opportunity.push((key, definition));
-                opportunity.sort_by_key(|(key, _)| *key);
+                opportunity.definitions.push((key, definition));
+                opportunity.definitions.sort_by_key(|(key, _)| *key);
             }
         }
     }
@@ -11786,7 +11869,7 @@ fn park_entry_controller_choice(
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
-        damage_opportunity: Vec::new(),
+        damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
         sacrifice_provenance: None,
@@ -11961,7 +12044,7 @@ fn park_as_enters_named_choice(
 ) -> ReplacementResult {
     let object_id = rid.source;
     state.pending_replacement = Some(PendingReplacement {
-        damage_opportunity: Vec::new(),
+        damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
         sacrifice_provenance: None,
@@ -12469,7 +12552,7 @@ fn pipeline_loop(
         registry,
         damage_source_context,
         events,
-        &mut Vec::new(),
+        &mut Default::default(),
     )
 }
 
@@ -12500,7 +12583,7 @@ fn pipeline_loop_in_opportunity(
             &proposed,
             registry,
             damage_source_context.as_ref(),
-            opportunity,
+            &opportunity.definitions,
         );
 
         if candidates.is_empty() {
@@ -12926,6 +13009,7 @@ fn continue_replacement_impl(
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    let child_boundary = state.resolution_stack.capture_child_boundary();
     let continuation_before = state.active_ability_continuation_frame().cloned();
     let combat_event = state.pending_replacement.as_ref().is_some_and(|pending| {
         matches!(
@@ -12975,6 +13059,17 @@ fn continue_replacement_impl(
             }
             current.context.damage_opportunity = Some(opportunity.clone());
             node = current.sub_ability.as_deref_mut();
+        }
+    }
+    if !combat_event && !owns_remainder && !matches!(result, ReplacementResult::NeedsChoice(_)) {
+        if let Some(rider) = take_noncombat_opportunity_riders(state, &mut opportunity) {
+            if state.resolution_stack.capture_child_boundary() > child_boundary {
+                let pending = PendingContinuation::new(Box::new(rider), state);
+                state.insert_ability_continuation_parent_at_child_boundary(pending, child_boundary)
+                    .expect("the completed damage opportunity retains its rider below its replacing child");
+            } else {
+                crate::game::effects::prepend_to_pending_continuation(state, rider);
+            }
         }
     }
     result
@@ -13190,7 +13285,7 @@ fn continue_replacement_in_opportunity(
                 // `Execute` payload is inert — the flag short-circuits the caller
                 // before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
-                    damage_opportunity: Vec::new(),
+                    damage_opportunity: Default::default(),
                     damage_source_context: None,
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
@@ -17090,7 +17185,7 @@ mod tests {
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
@@ -17154,7 +17249,7 @@ mod tests {
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
             state.pending_replacement = Some(PendingReplacement {
-                damage_opportunity: Vec::new(),
+                damage_opportunity: Default::default(),
                 damage_source_context: None,
                 proposed: ProposedEvent::zone_change(
                     commander,
@@ -17237,7 +17332,7 @@ mod tests {
                 description: "Retain green mana".to_string(),
             }];
         state.pending_replacement = Some(PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::EmptyManaPool {
                 player_id: PlayerId(0),
@@ -22079,7 +22174,7 @@ mod tests {
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,

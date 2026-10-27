@@ -4203,7 +4203,7 @@ pub(crate) fn active_player_action_completion_requires(
     })
 }
 
-fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
+pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
     prepend_to_pending_continuation_with_producer(state, head, None);
 }
 
@@ -13247,6 +13247,7 @@ pub(crate) struct EffectStep {
     pub progress: ResolutionProgress,
     result: Option<EffectResolutionResult>,
     tail: TailOwnership,
+    damage_opportunity: Option<crate::types::ability::DamageOpportunity>,
 }
 
 /// Snapshot at the declared boundary to an unmigrated producer.
@@ -13348,6 +13349,7 @@ pub(crate) fn finish_clash_resolution(
             progress: clash.progress,
             result: None,
             tail: TailOwnership::Transferred,
+            damage_opportunity: None,
         };
     }
     let progress = if let Some(sub) = ability.sub_ability.as_deref() {
@@ -13382,6 +13384,7 @@ pub(crate) fn finish_clash_resolution(
         progress,
         result: None,
         tail: TailOwnership::Transferred,
+        damage_opportunity: None,
     }
 }
 
@@ -13404,15 +13407,31 @@ fn resolve_effect_step(
             progress: roll_die::resolve_step(state, ability, events)?,
             result: None,
             tail: TailOwnership::Caller,
+            damage_opportunity: None,
         }),
         Effect::Clash => {
             let clash = clash::resolve(state, ability, events)?;
             Ok(finish_clash_resolution(state, ability, clash))
         }
         _ => {
+            let mut damage_opportunity = None;
             let (result, progress) =
                 LegacyEffectBoundary::run(state, ability, |state, boundary| {
-                    let result = resolve_legacy_effect(state, ability, events)?;
+                    let result = if matches!(
+                        ability.effect,
+                        Effect::DealDamage { .. }
+                            | Effect::ApplyPostReplacementDamage { .. }
+                            | Effect::DamageAll { .. }
+                            | Effect::DamageEachPlayer { .. }
+                            | Effect::EachDealsDamageEqualToPower { .. }
+                            | Effect::EachSourceDealsDamage { .. }
+                    ) {
+                        damage_opportunity =
+                            Some(deal_damage::resolve_owned(state, ability, events)?);
+                        None
+                    } else {
+                        resolve_legacy_effect(state, ability, events)?
+                    };
                     // CR 608.2c: an exhausted replacement bookkeeping frame is not
                     // unfinished child work. Retire only new active empty frames;
                     // populated residents and frames predating this effect keep ownership.
@@ -13434,6 +13453,7 @@ fn resolve_effect_step(
                 progress,
                 result,
                 tail: TailOwnership::Caller,
+                damage_opportunity,
             })
         }
     }
@@ -23982,6 +24002,7 @@ fn resolve_chain_body(
         begin_seat_created_tokens(created, seat);
     }
     let mut immediate_effect_result = None;
+    let mut completed_damage_opportunity = None;
     let mut creation_tail_owned = false;
     // CR 610.3a / CR 610.3b + CR 118.12: per-call verdicts for this node's bounded zone
     // move. Each `resolve_effect` call (one per repeat iteration) is judged on
@@ -24457,6 +24478,7 @@ fn resolve_chain_body(
                     match resolved {
                         Ok(step) => {
                             progress = step.progress;
+                            completed_damage_opportunity = step.damage_opportunity;
                             if tail_ownership == TailOwnership::Caller {
                                 tail_ownership = step.tail;
                             }
@@ -24657,6 +24679,17 @@ fn resolve_chain_body(
         }
         linked_batch_owned = owned;
         &linked_batch_owned
+    };
+    // The existing effect step returns only this damage owner's bounded work.
+    // Explicit remainder nodes inherit it; ordinary independent children do not.
+    let damage_context_owned;
+    let ability = if let Some(opportunity) = completed_damage_opportunity {
+        let mut owned = ability.clone();
+        owned.context.damage_opportunity = Some(opportunity);
+        damage_context_owned = owned;
+        &damage_context_owned
+    } else {
+        ability
     };
     let result_context_owned;
     // A completed ChangeZone publishes its own result even when settlement

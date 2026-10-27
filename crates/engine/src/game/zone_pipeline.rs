@@ -1899,7 +1899,7 @@ mod paused_search_audience_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         state.pending_replacement = Some(PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: original.clone(),
             sacrifice_provenance: None,

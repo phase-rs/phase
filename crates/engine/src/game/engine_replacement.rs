@@ -4456,7 +4456,7 @@ mod tests {
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Connive {
                 object_id: conniver,
@@ -5135,7 +5135,7 @@ mod tests {
             .description("Regenerate".to_string())]
         .into();
         state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,

@@ -163,7 +163,9 @@ fn harms_way_redirects_two_of_the_chosen_attackers_damage_to_the_chosen_player()
         );
     };
     assert!(
-        options.contains(&other),
+        options
+            .iter()
+            .any(|option| option.identity.reference.object_id == other),
         "every source is offered: {options:?}"
     );
     choose_source(&mut runner, cast.final_waiting_for(), chosen);

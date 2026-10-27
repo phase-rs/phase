@@ -10068,7 +10068,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {
                 object_id: bear,

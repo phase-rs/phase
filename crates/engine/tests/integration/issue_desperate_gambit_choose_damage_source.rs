@@ -1543,6 +1543,48 @@ fn countered_selected_permanent_spell_never_acquires_a_later_recast_successor_in
     }
 }
 
+fn restore_installed_legacy_with_retained_original(
+    runner: &mut engine::game::scenario::GameRunner,
+    wire: bool,
+) {
+    use engine::types::resolution::ResolutionStateWire;
+    let expected = runner.state().pending_damage_replacements[0].clone();
+    let mut installed = if wire {
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap()
+    } else {
+        serde_json::to_value(runner.state()).unwrap()
+    };
+    assert!(
+        installed["resolved_rules_journal"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry
+                .pointer("/command/StackRemoval/entry/kind/data/ability")
+                .is_some()),
+        "the actual finalized original program remains on its owning stack-removal command"
+    );
+    installed["pending_damage_replacements"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("selected_damage_source");
+    assert!(
+        installed["pending_damage_replacements"][0]
+            .get("selected_damage_source")
+            .is_none(),
+        "this restore reaches installed old-definition admission after real materialization"
+    );
+    *runner.state_mut() = if wire {
+        serde_json::from_value::<ResolutionStateWire>(installed)
+            .unwrap()
+            .into_game_state()
+    } else {
+        serde_json::from_value(installed).unwrap()
+    };
+    assert_eq!(runner.state().pending_damage_replacements[0], expected,
+        "the retained exact original/declared-target owner preserves the complete installed typed program");
+}
+
 #[test]
 fn authentic_direct_typed_program_restores_continuous_native_id_predicate_without_birth_repinning()
 {
@@ -1637,6 +1679,7 @@ fn authentic_direct_typed_program_restores_continuous_native_id_predicate_withou
         assert!(runner.state().pending_damage_replacements[0]
             .selected_damage_source
             .is_none());
+        restore_installed_legacy_with_retained_original(&mut runner, wire);
         let original_birth = runner.state().objects[&source].incarnation;
         runner.cast(blink).target_object(source).resolve();
         assert_ne!(runner.state().objects[&source].incarnation, original_birth);
@@ -1800,7 +1843,19 @@ fn authentic_targeted_awe_program_keeps_its_source_pin_rider_and_genuine_one_opp
                 .is_none(),
             "a declared source target retains its determinate native target role"
         );
-        runner.activate(source, 0).resolve();
+        restore_installed_legacy_with_retained_original(&mut runner, wire);
+        let first = runner.activate(source, 0).resolve();
+        let gains: Vec<_> = first
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged {
+                    player_id, amount, ..
+                } if *player_id == P0 && *amount > 0 => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(gains, vec![3], "the full paid Wumpus instance produces one aggregate Awe gain, not three one-life events");
         assert_eq!(
             (
                 runner.state().players[0].life,
@@ -1915,6 +1970,333 @@ fn offered_departed_birth_survives_prompt_restore_and_never_authorizes_the_retur
             19,
             "the new birth deals ordinary damage after accepting only the offered old occurrence"
         );
+        assert_source_program_complete(&runner);
+    }
+}
+
+#[test]
+fn paid_awe_whole_noncombat_gain_survives_first_later_and_final_recipient_and_gain_pauses() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::*;
+    use engine::types::game_state::GameState;
+    use engine::types::proposed_event::ProposedEvent;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionStateWire;
+    fn restored(state: &GameState, wire: bool) -> GameState {
+        if wire {
+            serde_json::from_value::<ResolutionStateWire>(
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state()
+        } else {
+            serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap()
+        }
+    }
+    for recipient_index in 0..3 {
+        for wire in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Thrashing Wumpus",
+                    3,
+                    3,
+                    "{B}: This creature deals 1 damage to each creature and each player.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                    generic: 3,
+                })
+                .id();
+            let awe = scenario.add_spell_to_hand_from_oracle(P0, "Awe Strike", true,
+                "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+                .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 0 }).id();
+            let mut runner = scenario.build();
+            add_mana(
+                &mut runner,
+                &[ManaType::White, ManaType::Black, ManaType::Black],
+            );
+            runner.cast(awe).target_object(source).resolve();
+            assert!(runner.state().pending_damage_replacements[0]
+                .runtime_execute
+                .is_some());
+            let mut optional = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                .damage_modification(DamageModification::Double)
+                .mode(ReplacementMode::Optional { decline: None });
+            if recipient_index == 0 {
+                optional.valid_card = Some(TargetFilter::SpecificObject { id: source });
+            } else {
+                optional.damage_target_filter = Some(DamageTargetFilter::Player {
+                    player: DamageTargetPlayerScope::Specific(if recipient_index == 1 {
+                        P0
+                    } else {
+                        P1
+                    }),
+                });
+            }
+            optional.source_controller = Some(P0);
+            runner
+                .state_mut()
+                .pending_damage_replacements
+                .push(optional);
+            runner.state_mut().pending_damage_replacements.push(
+                ReplacementDefinition::new(ReplacementEvent::GainLife)
+                    .mode(ReplacementMode::Optional { decline: None }),
+            );
+            runner.activate(source, 0).resolve();
+            let pending = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .expect("actual recipient ordering pause");
+            assert!(matches!(pending.proposed, ProposedEvent::Damage { .. }));
+            assert_eq!(
+                runner.life(P0),
+                20,
+                "no partial gain may run before all recipients settle"
+            );
+            let total: i32 = pending
+                .damage_opportunity
+                .prevention_tally
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|(_, total)| *total)
+                .sum();
+            assert_eq!(
+                total, recipient_index,
+                "the actual pause retains exactly the earlier prevented legs"
+            );
+            if recipient_index == 2 {
+                assert!(runner.state().active_ability_continuation().is_none(),
+                    "the final recipient retains its tally on the actual event, with no dummy remainder");
+            }
+            let ordering = restored(runner.state(), wire);
+            runner = GameRunner::from_state(ordering);
+            let index = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .candidates
+                .iter()
+                .position(|id| id.source == ObjectId(0) && id.index == 1)
+                .unwrap();
+            assert!(
+                index > 0,
+                "choose the nondefault modifier before the shield"
+            );
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            assert!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .is_optional
+            );
+            *runner.state_mut() = restored(runner.state(), wire);
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            let gain = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .expect("one complete gain is itself interactive");
+            assert!(
+                matches!(gain.proposed, ProposedEvent::LifeGain { amount: 4, .. }),
+                "the aggregate four-life event is offered only after the complete source instance"
+            );
+            assert!(
+                gain.damage_opportunity.is_empty(),
+                "gain replacement is an independent nested event"
+            );
+            assert_eq!(runner.life(P0), 20);
+            *runner.state_mut() = restored(runner.state(), wire);
+            let answer = runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+            let gains: Vec<_> = answer
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    } if *player_id == P0 && *amount > 0 => Some(*amount),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(gains, vec![4]);
+            runner.advance_until_stack_empty();
+            assert_eq!((runner.life(P0), runner.life(P1)), (24, 20));
+            assert_eq!(runner.state().objects[&source].damage_marked, 0);
+            assert_source_program_complete(&runner);
+            runner.activate(source, 0).resolve();
+            assert!(
+                runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .is_optional
+            );
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!((runner.life(P0), runner.life(P1)), (23, 19));
+            assert_eq!(runner.state().objects[&source].damage_marked, 1);
+            assert_source_program_complete(&runner);
+        }
+    }
+}
+
+#[test]
+fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip_owner() {
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::*;
+    use engine::types::game_state::RandomDraw;
+    use engine::types::resolution::ResolutionStateWire;
+    use engine::types::zones::Zone;
+    use rand::Rng;
+    for wire in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Thrashing Wumpus",
+                3,
+                3,
+                "{B}: This creature deals 1 damage to each creature and each player.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                generic: 3,
+            })
+            .id();
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Krark's Thumb",
+            "If you would flip a coin, instead flip two coins and ignore one.",
+        );
+        // A typed activated composition exercises the existing installer anchor.
+        // The complete actual DG program supplies the lexical producer/branches;
+        // this is a building-block fixture, not a claim about a printed artifact.
+        let mut program = parse_oracle_text(DESPERATE_GAMBIT).abilities[0].clone();
+        program.kind = AbilityKind::Activated;
+        program.cost = Some(AbilityCost::Mana {
+            cost: ManaCost::generic(1),
+        });
+        let installer = scenario
+            .add_artifact_from_oracle(P0, "Typed chosen-source branch witness", "")
+            .with_ability_definition(program)
+            .id();
+        let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+            "Exile target creature you control, then return that card to the battlefield under your control.")
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 0 }).id();
+        let mut runner = scenario.build();
+        add_mana(
+            &mut runner,
+            &[ManaType::Colorless, ManaType::White, ManaType::Black],
+        );
+        let seed = (0..256)
+            .find(|seed| {
+                let mut rng = GameRng::seed_from_u64(*seed);
+                let first = rng.draw(RandomDraw::Outcome).random_bool(0.5);
+                let second = rng.draw(RandomDraw::Outcome).random_bool(0.5);
+                first != second
+            })
+            .unwrap();
+        runner.state_mut().rng_seed = seed;
+        runner.state_mut().rng_word_pos = 0;
+        runner.state_mut().rng = GameRng::seed_from_u64(seed);
+        runner.activate(installer, 0).resolve();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("the real activated producer asks once");
+        };
+        let reference = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == source)
+            .unwrap()
+            .identity
+            .reference;
+        runner
+            .act(GameAction::ChooseDamageSource { source: reference })
+            .unwrap();
+        let WaitingFor::CoinFlipKeepChoice { results, .. } = &runner.state().waiting_for else {
+            panic!("the actual Thumb replacement retains the selected branch owner");
+        };
+        // Pick a seed-independent outcome: both branches materialize a source
+        // replacement, but only a loss installs the floating prevention below.
+        let keep = results
+            .iter()
+            .position(|won| !won)
+            .expect("fixture seed has a losing coin");
+        runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![keep],
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+        let expected = runner.state().pending_damage_replacements[0].clone();
+        assert_eq!(expected.source_object, Some(installer));
+        assert_eq!(
+            expected
+                .selected_damage_source
+                .as_ref()
+                .unwrap()
+                .identity
+                .reference,
+            reference
+        );
+        let mut old = if wire {
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap()
+        } else {
+            serde_json::to_value(runner.state()).unwrap()
+        };
+        old["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
+        assert!(
+            old["resolved_rules_journal"]["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry
+                    .pointer("/command/FrameTransition/transition/Push/frame/type")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("CoinFlip")),
+            "the exact actual flip frame, not an arbitrary selected payload, is retained"
+        );
+        *runner.state_mut() = if wire {
+            serde_json::from_value::<ResolutionStateWire>(old)
+                .unwrap()
+                .into_game_state()
+        } else {
+            serde_json::from_value(old).unwrap()
+        };
+        assert_eq!(runner.state().pending_damage_replacements[0], expected);
+        let mut matching = GameRunner::from_state(runner.state().clone());
+        matching.activate(source, 0).resolve();
+        assert_eq!((matching.life(P0), matching.life(P1)), (20, 20));
+        assert_eq!(matching.state().objects[&source].damage_marked, 0);
+        assert_source_program_complete(&matching);
+        runner.cast(blink).target_object(source).resolve();
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_ne!(
+            runner.state().objects[&source].incarnation,
+            reference.incarnation
+        );
+        runner.activate(source, 0).resolve();
+        assert_eq!((runner.life(P0), runner.life(P1)), (19, 19));
+        assert!(!runner.state().pending_damage_replacements[0].is_consumed);
         assert_source_program_complete(&runner);
     }
 }

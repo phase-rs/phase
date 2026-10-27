@@ -28474,7 +28474,7 @@ mod entry_projection_tests {
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
         let record = |proposed: ProposedEvent| PendingReplacement {
-            damage_opportunity: Vec::new(),
+            damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed,
             sacrifice_provenance: None,

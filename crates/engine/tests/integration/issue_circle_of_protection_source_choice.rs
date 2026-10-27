@@ -350,7 +350,7 @@ fn final_wumpus_recipient_pause_retains_consumed_definition_without_a_dummy_rema
         };
         for hostile in 0..3 {
             let mut invalid = raw.clone();
-            let map = invalid["pending_replacement"]["damage_opportunity"]
+            let map = invalid["pending_replacement"]["damage_opportunity"]["definitions"]
                 .as_array_mut()
                 .unwrap();
             assert_eq!(

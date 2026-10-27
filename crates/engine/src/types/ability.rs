@@ -35380,8 +35380,33 @@ pub struct PendingForwardedZoneResult {
     pub group: Option<crate::types::identifiers::LogicalZoneChangeGroupId>,
 }
 
-/// Bounded definitions consumed within one damage operation and its exact parks.
-pub type DamageOpportunity = Vec<(AppliedReplacementKey, ReplacementDefinition)>;
+/// Bounded work belonging to one damage operation and its exact parks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DamageOpportunity {
+    pub definitions: Vec<(AppliedReplacementKey, ReplacementDefinition)>,
+    /// CR 615.5 + CR 615.8: settle a next-instance rider after all recipients.
+    #[serde(default)]
+    pub prevention_tally: Option<Vec<(AppliedReplacementKey, i32)>>,
+}
+
+impl DamageOpportunity {
+    pub fn is_empty(&self) -> bool {
+        self.definitions.is_empty() && self.prevention_tally.as_ref().is_none_or(Vec::is_empty)
+    }
+
+    pub fn len(&self) -> usize {
+        self.definitions.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.definitions.clear();
+        self.prevention_tally = None;
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, (AppliedReplacementKey, ReplacementDefinition)> {
+        self.definitions.iter()
+    }
+}
 
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.

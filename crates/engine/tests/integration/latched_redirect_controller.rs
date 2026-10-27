@@ -219,11 +219,15 @@ fn source_prompt(b: &mut Board) {
     // CR 109.5 + CR 609.7a: the activator chooses a source, including nondamaging permanents.
     assert_eq!(*player, P0);
     for source in [b.sources[0], b.sources[1], b.rock] {
-        assert!(options.contains(&source));
+        assert!(options
+            .iter()
+            .any(|option| option.identity.reference.object_id == source));
     }
     assert_ne!(
-        options.first(),
-        Some(&b.sources[1]),
+        options
+            .first()
+            .map(|option| option.identity.reference.object_id),
+        Some(b.sources[1]),
         "select a non-first source"
     );
     let continuation = b

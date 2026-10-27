@@ -429,7 +429,9 @@ fn reflect_damage_choice_redirects_only_the_chosen_sources_next_event() {
     assert!(options
         .iter()
         .any(|option| option.identity.reference.object_id == chosen));
-    assert!(options.contains(&other));
+    assert!(options
+        .iter()
+        .any(|option| option.identity.reference.object_id == other));
     runner
         .act(GameAction::ChooseDamageSource {
             source: engine::types::identifiers::ObjectIncarnationRef::of(

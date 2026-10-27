@@ -4303,6 +4303,34 @@ pub fn resolve_quantity_with_targets(
     }
 }
 
+/// Resolve an immediate prevention rider against its whole-opportunity total,
+/// preserving the ordinary target, chosen-X, and controller bindings.
+pub(crate) fn resolve_quantity_with_targets_and_event_amount(
+    state: &GameState,
+    expr: &QuantityExpr,
+    ability: &ResolvedAbility,
+    event_amount: i32,
+) -> i32 {
+    match expr {
+        QuantityExpr::Fixed { value } => *value,
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            ability.original_controller.unwrap_or(ability.controller),
+            QuantityContext {
+                event_amount: Some(event_amount),
+                ..ability_quantity_context(ability)
+            },
+            &ability.targets,
+            ability.chosen_x,
+            Some(ability),
+        ),
+        other => fold_compose(other, |inner| {
+            resolve_quantity_with_targets_and_event_amount(state, inner, ability, event_amount)
+        }),
+    }
+}
+
 /// The quantity context `resolve_quantity_with_targets` resolves `ability`'s
 /// quantities in.
 fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
