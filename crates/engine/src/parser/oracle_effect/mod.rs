@@ -5714,7 +5714,7 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         let (input, _) =
             tag::<_, _, OracleError<'_>>("spells you cast this turn that are ").parse(input)?;
         let (input, descriptor) = terminated(take_until(" cost"), tag(" cost")).parse(input)?;
-        Ok((input, descriptor))
+        Ok((input, descriptor.to_owned()))
     })
     .map(|(descriptor, predicate)| format!("{descriptor} spells you cast cost{predicate}"));
     let static_def =
