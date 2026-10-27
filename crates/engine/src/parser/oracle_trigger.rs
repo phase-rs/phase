@@ -12719,6 +12719,14 @@ fn continues_spell_quality_disjunction(after_comma: &str) -> bool {
             tag::<_, _, OracleError<'_>>("or toughness "),
             spell_quality_equal_to_chosen_number_tail,
         ),
+        preceded(
+            tag::<_, _, OracleError<'_>>("toughness, or loyalty "),
+            spell_quality_equal_to_chosen_number_tail,
+        ),
+        preceded(
+            tag::<_, _, OracleError<'_>>("or loyalty "),
+            spell_quality_equal_to_chosen_number_tail,
+        ),
     ))
     .parse(trimmed)
     .map(|(rest, _)| rest.is_empty() || tag::<_, _, OracleError<'_>>(", ").parse(rest).is_ok())

@@ -43,8 +43,8 @@ use super::super::oracle_static::{
     classify_block_exception, parse_additive_type_clause_modifications,
     parse_cant_attack_defended_scope_nom, parse_cant_be_activated_exemption_in_text,
     parse_chosen_qualifier_subject, parse_continuous_modifications,
-    parse_continuous_subject_filter, parse_static_line, parse_static_line_multi,
-    parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
+    parse_continuous_subject_filter, parse_static_line, parse_targeting_bypass_tail,
+    peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
     parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
@@ -5960,28 +5960,13 @@ fn build_continuous_clause(
     }
 
     let affected = static_affected_for_application(&application);
-    let mut static_abilities =
-        if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
-            let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));
-            let mut split_defs = parse_static_line_multi(&synthetic_line);
-            if split_defs.len() > 1 {
-                for def in &mut split_defs {
-                    def.affected = Some(affected.clone());
-                    def.description = Some(predicate_text.to_string());
-                }
-                split_defs
-            } else {
-                vec![StaticDefinition::continuous()
-                    .affected(affected)
-                    .modifications(modifications)
-                    .description(predicate_text.to_string())]
-            }
-        } else {
-            vec![StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(modifications)
-                .description(predicate_text.to_string())]
-        };
+    // Keep the complete predicate's typed modifications, including embedded
+    // static modes. A resolving grant snapshots modifications; reparsing it as
+    // a standing line would discard the mode of a bare split definition.
+    let mut static_abilities = vec![StaticDefinition::continuous()
+        .affected(affected)
+        .modifications(modifications)
+        .description(predicate_text.to_string())];
 
     for definition in &mut static_abilities {
         crate::parser::oracle_static::bind_counter_anaphor_to_recipient(definition);

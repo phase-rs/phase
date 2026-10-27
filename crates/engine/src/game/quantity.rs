@@ -274,12 +274,19 @@ enum CharacteristicView<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CharacteristicMember {
-    Object(ObjectId),
+    Object(ObjectIncarnationRef),
     Cast(CastOccurrence),
     AttackDeclaration {
         event_index: usize,
         record_index: usize,
     },
+}
+
+fn characteristic_member_for_object(state: &GameState, id: ObjectId) -> CharacteristicMember {
+    CharacteristicMember::Object(state.objects.get(&id).map_or_else(
+        || ObjectIncarnationRef::of(id, crate::types::identifiers::LEGACY_INCARNATION),
+        ObjectIncarnationRef::from_object,
+    ))
 }
 
 impl<'a> CharacteristicView<'a> {
@@ -377,6 +384,60 @@ fn characteristic_view_for_object(
     }
 }
 
+/// CR 400.7j + CR 608.2h: an explicitly cost-moved source reads the public
+/// arrival the cost produced, then that exact arrival's LKI after it departs.
+/// Its pre-cost snapshot and later same-id objects are different referents.
+fn cost_paid_source_characteristic_view<'s>(
+    state: &'s GameState,
+    ability: &ResolvedAbility,
+) -> Option<(ObjectIncarnationRef, CharacteristicView<'s>)> {
+    ability
+        .settled_cost_paid_source_snapshots()
+        .find_map(|snapshot| {
+            let reference = ObjectIncarnationRef::of(snapshot.object_id, snapshot.incarnation);
+            if reference.incarnation == crate::types::identifiers::LEGACY_INCARNATION
+                || Some(reference.incarnation) == ability.source_incarnation
+            {
+                return None;
+            }
+            let view = if reference.is_current(state) {
+                (ability.cost_paid_source_binding(state) == Some(reference))
+                    .then(|| CharacteristicView::Object(&state.objects[&reference.object_id]))
+            } else {
+                state
+                    .lki_by_incarnation
+                    .get(&reference.object_id)
+                    .and_then(|history| history.get(&reference.incarnation))
+                    .map(CharacteristicView::Lki)
+            }?;
+            Some((reference, view))
+        })
+}
+
+/// The same authenticated characteristic authority used by scalar evaluation;
+/// missing information is unavailable, including beneath a negated comparison.
+pub(crate) fn cost_paid_source_property_is_available(
+    state: &GameState,
+    ability: Option<&ResolvedAbility>,
+    filter: &TargetFilter,
+    property: ObjectProperty,
+) -> bool {
+    ability
+        .and_then(|ability| cost_paid_source_characteristic_view(state, ability))
+        .filter(|(reference, _)| {
+            // Only the explicit singleton leaf imports historical information.
+            // Compound object filters retain their live-membership semantics.
+            matches!(
+                filter,
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Source,
+                }
+            ) || reference.is_current(state)
+        })
+        .and_then(|(_, view)| view.property_value(property))
+        .is_some()
+}
+
 /// CR 109.2 + CR 400.1: Walk the population a [`CardTypeSetSource`] names,
 /// yielding one [`CharacteristicView`] per member.
 ///
@@ -448,7 +509,7 @@ fn visit_characteristic_leaf<'s>(
                             );
                         if owner_matches {
                             if let Some(view) = characteristic_view_for_object(state, obj_id) {
-                                visit(CharacteristicMember::Object(obj_id), view, false);
+                                visit(characteristic_member_for_object(state, obj_id), view, false);
                             }
                         }
                     }
@@ -458,7 +519,7 @@ fn visit_characteristic_leaf<'s>(
                 for player in scoped_zone_holders(state, zone, scope, ctx, controller) {
                     for &obj_id in zone_container(state, zone, player) {
                         if let Some(view) = characteristic_view_for_object(state, obj_id) {
-                            visit(CharacteristicMember::Object(obj_id), view, false);
+                            visit(characteristic_member_for_object(state, obj_id), view, false);
                         }
                     }
                 }
@@ -467,7 +528,11 @@ fn visit_characteristic_leaf<'s>(
         CardTypeSetSource::ExiledBySource => {
             for linked in linked_exile_for_context(state, &ctx) {
                 if let Some(view) = characteristic_view_for_object(state, linked.exiled_id) {
-                    visit(CharacteristicMember::Object(linked.exiled_id), view, false);
+                    visit(
+                        characteristic_member_for_object(state, linked.exiled_id),
+                        view,
+                        false,
+                    );
                 }
             }
         }
@@ -475,11 +540,24 @@ fn visit_characteristic_leaf<'s>(
         // boolean branch defaults, LastZoneChanged/TrackedSet populations, and
         // the triggering-object exclusion. Property aggregates must enumerate
         // the exact same members as object-count quantities.
+        CardTypeSetSource::Objects {
+            filter:
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Source,
+                },
+        } => {
+            if let Some((reference, view)) = filter_ctx
+                .ability
+                .and_then(|ability| cost_paid_source_characteristic_view(state, ability))
+            {
+                visit(CharacteristicMember::Object(reference), view, false);
+            }
+        }
         CardTypeSetSource::Objects { filter } => {
             for obj_id in object_count_matching_ids(state, filter, filter_ctx, ctx.source) {
                 let view = characteristic_view_for_object(state, obj_id);
                 if let Some(view) = view {
-                    visit(CharacteristicMember::Object(obj_id), view, false);
+                    visit(characteristic_member_for_object(state, obj_id), view, false);
                 }
             }
         }
@@ -528,7 +606,11 @@ fn visit_characteristic_leaf<'s>(
                 for object_id in crate::game::targeting::extract_sources_from_event(event) {
                     let view = characteristic_view_for_object(state, object_id);
                     if let Some(view) = view {
-                        visit(CharacteristicMember::Object(object_id), view, false);
+                        visit(
+                            characteristic_member_for_object(state, object_id),
+                            view,
+                            false,
+                        );
                     }
                 }
             }
@@ -561,7 +643,7 @@ fn visit_characteristic_leaf<'s>(
                 if cause_ok {
                     let view = characteristic_view_for_object(state, oid);
                     if let Some(view) = view {
-                        visit(CharacteristicMember::Object(oid), view, false);
+                        visit(characteristic_member_for_object(state, oid), view, false);
                     }
                 }
             }
@@ -782,11 +864,10 @@ pub(crate) fn instruction_zone_change_records(
     result: crate::types::ability::ReturnResultId,
     expected: Option<crate::types::game_state::ReturnResultProcessId>,
 ) -> Option<&[crate::types::game_state::ZoneChangeRecord]> {
-    let frame = crate::types::game_state::checked_return_result_frame(
+    let frame = crate::types::game_state::checked_owned_return_result_frame(
         state,
         state.active_return_result_occurrence,
         expected,
-        true,
     )
     .ok()?;
     let crate::types::game_state::InstructionResult::ZoneChanges(records) =
@@ -814,11 +895,10 @@ pub(crate) fn validate_addressed_quantity_ref(
     expected: Option<crate::types::game_state::ReturnResultProcessId>,
 ) -> Result<(), crate::types::ability::EffectError> {
     if let Some(result) = reference.instruction_result_id() {
-        crate::types::game_state::checked_return_result_frame(
+        crate::types::game_state::checked_owned_return_result_frame(
             state,
             state.active_return_result_occurrence,
             expected,
-            true,
         )
         .map_err(crate::types::ability::EffectError::InvalidParam)?;
         if instruction_zone_change_records(state, result, expected).is_none() {
@@ -27653,6 +27733,222 @@ mod cost_source_bridge_tests {
         Comparator, CostMoveOutcome, CostPaidObjectRef, CostPaidObjectSnapshot, PropertyAggregate,
     };
     use crate::types::identifiers::CardId;
+
+    #[test]
+    fn cost_source_power_uses_current_arrival_then_exact_lki_in_scalars_and_unions() {
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Cost source".into(),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&id).unwrap().power = Some(4);
+        let origin = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        let selected = create_object(
+            &mut state,
+            CardId(2),
+            p0,
+            "Selected decoy".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&selected).unwrap().power = Some(19);
+        let mut ability =
+            ResolvedAbility::new(Effect::NoOp, vec![TargetRef::Object(selected)], id, p0);
+        ability.set_source_incarnation_recursive(Some(origin.incarnation));
+        let selected_snapshot = CostPaidObjectSnapshot::capture(
+            &state.objects[&selected],
+            state.objects[&selected].snapshot_public_characteristics(),
+        );
+        ability.set_cost_paid_object_recursive(selected_snapshot.clone());
+        ability.add_cost_paid_objects_recursive(&[selected_snapshot]);
+        ability.add_cost_paid_objects_recursive(&[CostPaidObjectSnapshot::capture(
+            &state.objects[&id],
+            state.objects[&id].snapshot_public_characteristics(),
+        )]);
+        move_to_zone(&mut state, id, Zone::Exile, &mut vec![]);
+        ability.settle_cost_paid_provenance_recursive(&state, &[id], CostMoveOutcome::Relocation);
+        let arrival = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        state.objects.get_mut(&id).unwrap().power = Some(3);
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(6);
+        let source = CardTypeSetSource::Objects {
+            filter: TargetFilter::CostPaidObject {
+                reference: CostPaidObjectRef::Source,
+            },
+        };
+        let aggregate = |property, source| QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(AggregateFunction::Sum, property, source).unwrap(),
+            ),
+        };
+        let power = aggregate(ObjectProperty::Power, source.clone());
+        let mana_value = aggregate(ObjectProperty::ManaValue, source.clone());
+        assert_eq!(resolve_quantity_with_targets(&state, &power, &ability), 3);
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Source
+                    },
+                },
+                &ability
+            ),
+            4,
+            "ordinary Source retains its announced incarnation"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::CostPaidObject
+                    },
+                },
+                &ability
+            ),
+            19,
+            "the independently selected cost operand stays distinct"
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &mana_value, &ability),
+            6
+        );
+        state.objects.get_mut(&id).unwrap().power = Some(7);
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &power, &ability),
+            7,
+            "current arrival characteristics are not frozen at settlement"
+        );
+        state.objects.get_mut(&id).unwrap().power = Some(3);
+        let current = CardTypeSetSource::Objects {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::SpecificObject { id },
+                    TargetFilter::Typed(
+                        TypedFilter::card()
+                            .properties(vec![FilterProp::InZone { zone: Zone::Exile }]),
+                    ),
+                ],
+            },
+        };
+        let union = aggregate(
+            ObjectProperty::Power,
+            CardTypeSetSource::any_of(vec![source, current]).unwrap(),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &union, &ability),
+            3,
+            "the same live incarnation contributes once"
+        );
+        move_to_zone(&mut state, id, Zone::Hand, &mut vec![]);
+        assert_eq!(
+            state.lki_by_incarnation[&id][&arrival.incarnation].power,
+            Some(3)
+        );
+        move_to_zone(&mut state, id, Zone::Exile, &mut vec![]);
+        state.objects.get_mut(&id).unwrap().power = Some(11);
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::generic(13);
+        state
+            .lki_cache
+            .insert(id, state.objects[&id].snapshot_public_characteristics());
+        let saved = serde_json::to_string(&(state, ability)).unwrap();
+        let (mut state, ability): (GameState, ResolvedAbility) =
+            serde_json::from_str(&saved).unwrap();
+        assert_eq!(resolve_quantity_with_targets(&state, &power, &ability), 3);
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &mana_value, &ability),
+            6
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &union, &ability),
+            14,
+            "an historical arrival and a later live incarnation are distinct members"
+        );
+        assert!(
+            ability.cost_paid_source_binding(&state).is_none(),
+            "target membership stays live-only"
+        );
+        assert!(crate::game::targeting::resolved_object_ids_for_filter(
+            &state,
+            &ability,
+            &TargetFilter::CostPaidObject {
+                reference: CostPaidObjectRef::Source
+            }
+        )
+        .is_empty());
+        let candidate = create_object(
+            &mut state,
+            CardId(3),
+            p0,
+            "Candidate MV3".into(),
+            Zone::Library,
+        );
+        state.objects.get_mut(&candidate).unwrap().mana_cost = ManaCost::generic(3);
+        let scalar = FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value: power.clone(),
+        };
+        let positive = TargetFilter::Typed(TypedFilter::card().properties(vec![scalar.clone()]));
+        let opposite = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
+            comparator: Comparator::NE,
+            value: power,
+        }]));
+        let negated = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Not {
+            prop: Box::new(scalar.clone()),
+        }]));
+        let any_of = TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::AnyOf {
+            props: vec![scalar],
+        }]));
+        let matches = |state: &GameState, ability: &ResolvedAbility, filter: &TargetFilter| {
+            matches_target_filter(
+                state,
+                candidate,
+                filter,
+                &FilterContext::from_ability(ability),
+            )
+        };
+        assert!(matches(&state, &ability, &positive));
+        assert!(matches(&state, &ability, &any_of));
+        assert!(!matches(&state, &ability, &opposite));
+        assert!(!matches(&state, &ability, &negated));
+        let mut missing = ability.clone();
+        missing.cost_paid_objects.clear();
+        let mut forged = ability.clone();
+        forged.cost_paid_objects[1].snapshot_mut().unwrap().binding =
+            Some(crate::types::ability::CostPaidObjectBinding::Settled {
+                origin: ObjectIncarnationRef::of(id, origin.incarnation + 100),
+            });
+        let mut no_characteristic = state.clone();
+        no_characteristic
+            .lki_by_incarnation
+            .get_mut(&id)
+            .unwrap()
+            .get_mut(&arrival.incarnation)
+            .unwrap()
+            .power = None;
+        let mut no_lki = state.clone();
+        no_lki
+            .lki_by_incarnation
+            .get_mut(&id)
+            .unwrap()
+            .remove(&arrival.incarnation);
+        for (state, ability) in [
+            (&state, &missing),
+            (&state, &forged),
+            (&no_lki, &ability),
+            (&no_characteristic, &ability),
+        ] {
+            for filter in [&positive, &opposite, &negated, &any_of] {
+                assert!(
+                    !matches(state, ability, filter),
+                    "unavailable is not a negatable value"
+                );
+            }
+        }
+    }
 
     #[test]
     fn cost_source_singleton_bridge_preserves_selected_decoy_and_refuses_missing_zero() {

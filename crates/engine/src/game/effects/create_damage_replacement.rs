@@ -78,6 +78,10 @@ pub fn resolve(
         }
     };
 
+    if let Some(TargetFilter::ChosenDamageSource { chooser, .. }) = &source_filter {
+        choose_damage_source::validate_inline_chooser(chooser.as_ref())?;
+    }
+
     // CR 608.2b + CR 614.9: a spell with some remaining legal targets resolves
     // normally, but a damage replacement needs every one of its declared roles
     // to define a single replacement event. Do not install a partial shield or

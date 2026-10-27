@@ -43492,8 +43492,30 @@ impl ResolvedAbility {
         ))
     }
 
+    /// CR 400.7j: authenticate the settled cost records whose announced origin
+    /// is this ability's source, independently of whether their arrivals remain live.
+    pub(crate) fn settled_cost_paid_source_snapshots(
+        &self,
+    ) -> impl Iterator<Item = &CostPaidObjectSnapshot> {
+        let origin = self
+            .source_incarnation
+            .filter(|_| self.trigger_source.is_none())
+            .map(|captured| {
+                crate::types::identifiers::ObjectIncarnationRef::of(self.source_id, captured)
+            });
+        self.cost_paid_objects
+            .iter()
+            .filter_map(CostPaidObjectRecord::snapshot)
+            .filter(move |snapshot| {
+                snapshot.object_id == self.source_id
+                    && origin.is_some_and(|origin| {
+                        snapshot.binding == Some(CostPaidObjectBinding::Settled { origin })
+                    })
+            })
+    }
+
     /// CR 400.7j + CR 608.2k: authenticate the explicitly cost-moved source
-    /// card, independently of ordinary SelfRef and numeric Source identity.
+    /// card for live targeting and membership, independently of numeric reads.
     pub fn cost_paid_source_binding(
         &self,
         state: &crate::types::game_state::GameState,
@@ -43502,7 +43524,6 @@ impl ResolvedAbility {
         if self.trigger_source.is_some() {
             return None;
         }
-        let origin = crate::types::identifiers::ObjectIncarnationRef::of(self.source_id, captured);
         let live = state.objects.get(&self.source_id)?;
         if !live.zone.is_public() {
             return None;
@@ -43516,15 +43537,8 @@ impl ResolvedAbility {
         if !represented {
             return None;
         }
-        self.cost_paid_objects
-            .iter()
-            .filter_map(CostPaidObjectRecord::snapshot)
+        self.settled_cost_paid_source_snapshots()
             .find_map(|snapshot| {
-                if snapshot.object_id != self.source_id
-                    || snapshot.binding != Some(CostPaidObjectBinding::Settled { origin })
-                {
-                    return None;
-                }
                 let relatches = matches!(state.resolution_source_relatch, Some(relatch)
                 if relatch.object_id == self.source_id
                     && relatch.original_stamp == captured
@@ -55020,6 +55034,55 @@ mod cost_source_binding_tests {
     use crate::game::zones::{add_to_zone, create_object, move_to_zone, remove_from_zone};
     use crate::types::game_state::{CastingVariant, GameState, StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+
+    #[test]
+    fn settled_cost_source_authentication_preserves_arrival_after_departure() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source fixture".into(),
+            Zone::Graveyard,
+        );
+        let origin = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        ability.set_source_incarnation_recursive(Some(origin.incarnation));
+        ability.add_cost_paid_objects_recursive(&[CostPaidObjectSnapshot::capture(
+            &state.objects[&id],
+            state.objects[&id].snapshot_public_characteristics(),
+        )]);
+        assert_eq!(ability.settled_cost_paid_source_snapshots().count(), 0);
+        move_to_zone(&mut state, id, Zone::Exile, &mut vec![]);
+        ability.settle_cost_paid_provenance_recursive(&state, &[id], CostMoveOutcome::Relocation);
+        let arrival = ObjectIncarnationRef::from_object(&state.objects[&id]);
+        assert_ne!(arrival, origin);
+        assert_eq!(ability.cost_paid_source_binding(&state), Some(arrival));
+        move_to_zone(&mut state, id, Zone::Hand, &mut vec![]);
+        assert!(ability.cost_paid_source_binding(&state).is_none());
+        let snapshots: Vec<_> = ability.settled_cost_paid_source_snapshots().collect();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].incarnation, arrival.incarnation);
+        assert_eq!(
+            snapshots[0].binding,
+            Some(CostPaidObjectBinding::Settled { origin })
+        );
+        let mut forged = ability.clone();
+        forged.cost_paid_objects[0].snapshot_mut().unwrap().binding =
+            Some(CostPaidObjectBinding::Settled {
+                origin: ObjectIncarnationRef::of(id, origin.incarnation + 100),
+            });
+        assert_eq!(forged.settled_cost_paid_source_snapshots().count(), 0);
+        forged = ability.clone();
+        forged.cost_paid_objects[0]
+            .snapshot_mut()
+            .unwrap()
+            .object_id = ObjectId(id.0 + 1);
+        assert_eq!(forged.settled_cost_paid_source_snapshots().count(), 0);
+        forged = ability.clone();
+        forged.source_incarnation = None;
+        assert_eq!(forged.settled_cost_paid_source_snapshots().count(), 0);
+    }
 
     #[test]
     fn cost_source_selectors_and_binding_states_are_legacy_canonical_and_strict() {

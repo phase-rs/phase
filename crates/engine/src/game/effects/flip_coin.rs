@@ -70,12 +70,21 @@ fn retained_flip_occurrence(
                     addressed.push(result);
                 }
             });
-            let frame = crate::types::game_state::checked_return_result_frame(
-                state,
-                occurrence,
-                expected_return_result_process,
-                !addressed.is_empty(),
-            )
+            let frame = (if !addressed.is_empty() {
+                crate::types::game_state::checked_owned_return_result_frame(
+                    state,
+                    occurrence,
+                    expected_return_result_process,
+                )
+            } else {
+                crate::types::game_state::checked_return_result_frame(
+                    state,
+                    occurrence,
+                    crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+                        expected_return_result_process,
+                    ),
+                )
+            })
             .map_err(EffectError::InvalidParam)?;
             for result in addressed {
                 if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records))

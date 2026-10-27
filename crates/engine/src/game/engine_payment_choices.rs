@@ -135,11 +135,10 @@ pub(crate) fn validate_payment_result_owner(
         return Err(error);
     }
     if !addressed.is_empty() {
-        let frame = crate::types::game_state::checked_return_result_frame(
+        let frame = crate::types::game_state::checked_owned_return_result_frame(
             state,
             occurrence,
             body.return_result_process,
-            true,
         )
         .map_err(EffectError::InvalidParam)?;
         for result in addressed {

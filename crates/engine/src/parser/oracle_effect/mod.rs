@@ -984,6 +984,16 @@ fn if_you_do_object_anchor(
             } => Some(TargetFilter::CostPaidObject {
                 reference: crate::types::ability::CostPaidObjectRef::Selected,
             }),
+            // A result-gated continuation of a delayed instruction reads that
+            // payload's bound object, rather than the installing trigger's
+            // source. Placement into the delayed body is finalized below.
+            Effect::CreateDelayedTrigger { effect, .. } => effect
+                .effect
+                .target_filter()
+                .filter(|target| {
+                    matches!(target, TargetFilter::ParentTarget | TargetFilter::Typed(_))
+                })
+                .cloned(),
             _ => None,
         })
 }
@@ -28401,6 +28411,9 @@ fn declared_player_reference(
                 .declares_chosen_group
                 .unwrap_or(ChosenGroupId(id.0)),
         });
+    }
+    if let Some(group) = clauses[index].declared_player_group {
+        return Some(TargetFilter::DeclaredPlayer { group });
     }
     Some(reference_to_declaration(declarations, groups, index))
 }

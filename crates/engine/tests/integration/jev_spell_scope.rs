@@ -1685,11 +1685,25 @@ fn diplomacy_paid_spell_keeps_the_revealed_opponent_as_the_life_loss_recipient()
         let land = scenario.add_land_to_hand(P1, "Opposing land decoy").id();
         let spell = scenario.add_real_card(P0, "Diplomacy of the Wastes", Zone::Hand, &db);
         let mut runner = scenario.build();
+        runner.cast(spell).target_player(P1).resolve();
+        let cards = match &runner.state().waiting_for {
+            WaitingFor::ChooseFromZoneChoice { player, cards, .. }
+            | WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, P0);
+                cards
+            }
+            other => panic!(
+                "the revealed opponent hand requires the controller's real selection: {other:?}"
+            ),
+        };
+        assert!(cards.contains(&selected) && cards.contains(&other));
+        assert!(!cards.contains(&own) && !cards.contains(&land));
         runner
-            .cast(spell)
-            .target_player(P1)
-            .effect_zone(&[selected])
-            .resolve();
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
         assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
         for id in [own, other, land] {
             assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
@@ -1748,6 +1762,23 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
     runner.choose_first_legal_target().unwrap();
     runner.advance_until_stack_empty();
     let object = &runner.state().objects[&swamp];
@@ -1761,7 +1792,11 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
         .card_types
         .core_types
         .contains(&CoreType::Creature));
-    assert_spell_complete(runner.state());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. } | WaitingFor::DeclareAttackers { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
 }
 
 #[test]
@@ -1822,6 +1857,9 @@ fn wrenn_paid_loyalty_emblem_grants_retrace_after_its_source_leaves() {
         .id();
     let land = scenario.add_land_to_hand(P0, "Retrace land payment").id();
     let mut runner = scenario.build();
+    // Fixture counters and the planeswalker characteristic must describe the
+    // same seven-loyalty starting permanent before public activation.
+    runner.state_mut().objects.get_mut(&wrenn).unwrap().loyalty = Some(7);
     assert_eq!(
         runner.state().objects[&wrenn]
             .counters
@@ -1927,6 +1965,17 @@ fn per_player_graveyard_choices_reanimate_the_complete_selected_set() {
         let mut picks = 0;
         for _ in 0..16 {
             let cards = match &runner.state().waiting_for {
+                WaitingFor::ChooseFromZoneOpponentChooser {
+                    player, candidates, ..
+                } => {
+                    assert_eq!(*player, P0);
+                    let opponent = [P0, P1][picks];
+                    assert!(candidates.contains(&opponent));
+                    runner
+                        .act(GameAction::ChooseZoneOpponentChooser { opponent })
+                        .unwrap();
+                    continue;
+                }
                 WaitingFor::ChooseFromZoneChoice { cards, .. }
                 | WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
                 WaitingFor::Priority { .. }

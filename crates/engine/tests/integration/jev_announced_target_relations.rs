@@ -1039,8 +1039,22 @@ fn combat_step_head_fires_before_declaration_only_on_its_own_turn() {
     let foreign = scenario
         .add_land_from_oracle(P1, "Aggressive Crag", oracle)
         .id();
+    scenario.add_creature(P0, "Actual declaration reach guard", 2, 2);
     let mut runner = scenario.build();
     runner.advance_to_combat();
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::DeclareAttackers { player: P0, .. }

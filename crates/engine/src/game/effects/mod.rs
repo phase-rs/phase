@@ -9,6 +9,37 @@ mod prior_controller_chain_tests {
     use crate::types::identifiers::ObjectIncarnationRef;
 
     #[test]
+    fn created_referent_does_not_inherit_creation_input() {
+        let parent = ResolvedAbility::new(
+            Effect::NoOp,
+            vec![TargetRef::Object(ObjectId(42))],
+            ObjectId(7),
+            P0,
+        );
+        let mut child = ResolvedAbility::new(
+            serde_json::from_value(serde_json::json!({
+                "type":"Sacrifice", "target":{"type":"LastCreated"},
+                "count":{"type":"Fixed", "value":1}
+            }))
+            .unwrap(),
+            vec![],
+            ObjectId(7),
+            P0,
+        );
+        assert!(!should_propagate_parent_targets(&parent, &child));
+        assert!(inherited_parent_occurrences(&parent, &child).is_empty());
+        let Effect::Sacrifice { target, .. } = &mut child.effect else {
+            unreachable!()
+        };
+        *target = TargetFilter::ParentTarget;
+        assert!(should_propagate_parent_targets(&parent, &child));
+        assert_eq!(
+            inherited_parent_occurrences(&parent, &child),
+            parent.target_occurrences()
+        );
+    }
+
+    #[test]
     fn prior_controller_child_keeps_original_occurrence_after_move() {
         let mut scenario = GameScenario::new();
         let b = scenario.add_creature(P1, "B", 2, 8).id();
@@ -2229,12 +2260,21 @@ pub(crate) fn validate_selected_instruction_result_owner(
                 addressed.push(result);
             }
         });
-        let frame = crate::types::game_state::checked_return_result_frame(
-            state,
-            occurrence,
-            ability.return_result_process,
-            !addressed.is_empty(),
-        )
+        let frame = (if !addressed.is_empty() {
+            crate::types::game_state::checked_owned_return_result_frame(
+                state,
+                occurrence,
+                ability.return_result_process,
+            )
+        } else {
+            crate::types::game_state::checked_return_result_frame(
+                state,
+                occurrence,
+                crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+                    ability.return_result_process,
+                ),
+            )
+        })
         .map_err(EffectError::InvalidParam)?;
         for result in addressed {
             if !matches!(frame.results.get(&result), Some(crate::types::game_state::InstructionResult::ZoneChanges(records))
@@ -2422,12 +2462,21 @@ pub(crate) fn retained_return_result_occurrence(
     match classify_instruction_result_invocation(ability, InstructionResultEntry::ResumeOwned)? {
         InstructionResultProcess::Unused => Ok(None),
         InstructionResultProcess::Local { .. } => {
-            crate::types::game_state::checked_return_result_frame(
-                state,
-                state.active_return_result_occurrence,
-                ability.return_result_process,
-                ability.has_addressed_zone_result_read(),
-            )
+            (if ability.has_addressed_zone_result_read() {
+                crate::types::game_state::checked_owned_return_result_frame(
+                    state,
+                    state.active_return_result_occurrence,
+                    ability.return_result_process,
+                )
+            } else {
+                crate::types::game_state::checked_return_result_frame(
+                    state,
+                    state.active_return_result_occurrence,
+                    crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+                        ability.return_result_process,
+                    ),
+                )
+            })
             .map_err(EffectError::InvalidParam)?;
             Ok(state.active_return_result_occurrence)
         }
@@ -2507,8 +2556,7 @@ fn publish_instruction_result(
     crate::types::game_state::checked_return_result_frame(
         state,
         Some(occurrence_id),
-        expected,
-        false,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(expected),
     )
     .map_err(EffectError::InvalidParam)?;
     let frame = state
@@ -2597,7 +2645,7 @@ pub(crate) fn counter_removal_binding_is_valid(
     state: &GameState,
     binding: &crate::types::game_state::CounterRemovalResultBinding,
 ) -> bool {
-    matches!(crate::types::game_state::checked_return_result_frame(state, Some(binding.occurrence), binding.process, false)
+    matches!(crate::types::game_state::checked_return_result_frame(state, Some(binding.occurrence), crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(binding.process))
         .ok().and_then(|frame| frame.results.get(&binding.result)),
         Some(crate::types::game_state::InstructionResult::CounterRemovals(result))
             if result.source == binding.source && result.recipient == binding.recipient && result.counters == binding.counters)
@@ -2631,8 +2679,9 @@ pub(crate) fn counter_reflexive_occurrences_for_occurrence(
     let frame = crate::types::game_state::checked_return_result_frame(
         state,
         Some(occurrence),
-        ability.return_result_process,
-        false,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+            ability.return_result_process,
+        ),
     )
     .map_err(EffectError::InvalidParam)?;
     let Some(crate::types::game_state::InstructionResult::CounterRemovals(result)) =
@@ -2789,8 +2838,9 @@ pub(crate) fn named_revealed_members_for_occurrence<'a>(
     let frame = crate::types::game_state::checked_return_result_frame(
         state,
         Some(occurrence),
-        ability.return_result_process,
-        false,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+            ability.return_result_process,
+        ),
     )
     .map_err(EffectError::InvalidParam)?;
     let members = frame
@@ -3753,8 +3803,9 @@ fn drain_pending_change_zone_iteration_in_occurrence(
             && crate::types::game_state::checked_return_result_frame(
                 state,
                 return_result_occurrence,
-                return_result_process,
-                false,
+                crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+                    return_result_process,
+                ),
             )
             .is_err()
         {
@@ -6250,6 +6301,9 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
         && sub.illegal_local_target_slots.is_empty()
         && sub.declares_chosen_group.is_none()
         && sub.reads_chosen_group.is_none()
+        // CR 608.2c: the created cohort belongs to its publisher, not to the
+        // object's target used as input to that publisher (for example a copy).
+        && sub.effect.target_filter() != Some(&TargetFilter::LastCreated)
         && !has_resolution_owned_zone_choice(sub)
         && (sub.target_choice_timing != TargetChoiceTiming::Resolution
             // CR 608.2c: a resolution-time instruction can still consume an
@@ -6300,7 +6354,9 @@ fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
 /// unless that choice reads only parent metadata
 /// (`effect_refs_parent_target_metadata`).
 fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
-    (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+    // CR 608.2c: a created-result reader never imports an earlier input object.
+    sub.effect.target_filter() == Some(&TargetFilter::LastCreated)
+        || (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
         && !effect_requires_parent_target_object(&sub.effect)
         && !sub_ability_target_belongs_to_reflexive_context(sub))
         || (sub

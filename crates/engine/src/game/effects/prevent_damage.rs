@@ -340,6 +340,10 @@ pub fn resolve(
         }
     };
 
+    if let Some(TargetFilter::ChosenDamageSource { chooser, .. }) = &effect_source_filter {
+        choose_damage_source::validate_inline_chooser(chooser.as_ref())?;
+    }
+
     // CR 115.1 + CR 601.2c / CR 602.2b: a declared recipient is exactly the
     // objects/players chosen when the spell was cast or the ability activated.
     // The single authority on whether an effect declares a slot is

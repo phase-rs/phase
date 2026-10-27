@@ -2106,8 +2106,9 @@ fn handle_resolution_choice_with_result_occurrence(
                 crate::types::game_state::checked_return_result_frame(
                     state,
                     Some(occurrence),
-                    pending.chain.return_result_process,
-                    false,
+                    crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+                        pending.chain.return_result_process,
+                    ),
                 )
                 .map_err(EngineError::InvalidAction)?;
                 if return_result_process.is_some()

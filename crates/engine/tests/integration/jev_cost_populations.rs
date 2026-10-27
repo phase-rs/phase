@@ -7621,7 +7621,15 @@ fn replacement_priority_preserves_all_39_complete_pinned_faces_through_normal_lo
                 "{name}"
             );
             assert_eq!(
-                face.replacements.len(),
+                face.replacements.len()
+                    + face
+                        .static_abilities
+                        .iter()
+                        .filter(|definition| matches!(
+                            definition.mode,
+                            engine::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+                        ))
+                        .count(),
                 expected_replacements,
                 "complete replacement route: {name}: {face:#?}"
             );
@@ -7702,7 +7710,7 @@ fn replacement_priority_preserves_all_39_complete_pinned_faces_through_normal_lo
 }
 
 #[test]
-fn all_17_printed_bounded_grants_keep_their_windows_in_normal_export() {
+fn all_17_printed_bounded_grants_keep_their_windows_or_explicit_gaps_in_normal_export() {
     fn inspect(value: &Value, expected: &Value, seen: &mut usize) {
         match value {
             Value::Object(object) => {
@@ -7761,6 +7769,32 @@ fn all_17_printed_bounded_grants_keep_their_windows_in_normal_export() {
         "World War Hulk",
     ] {
         let face = db.get_face_by_name(name).unwrap();
+        if name == "Giant Slug" {
+            let value = serde_json::to_value(face).unwrap();
+            let mut nodes = vec![&value];
+            let mut gap = false;
+            while let Some(node) = nodes.pop() {
+                match node {
+                    Value::Object(object) => {
+                        gap |= object.get("type").and_then(Value::as_str) == Some("Unimplemented")
+                            && object.get("name").and_then(Value::as_str)
+                                == Some("chosen_landwalk");
+                        assert!(
+                            !object.contains_key("Landwalk"),
+                            "an unbound chosen subtype cannot become a fabricated landwalk keyword"
+                        );
+                        nodes.extend(object.values());
+                    }
+                    Value::Array(children) => nodes.extend(children),
+                    _ => {}
+                }
+            }
+            assert!(
+                gap,
+                "the unimplemented chosen-land-type grant must remain an explicit gap"
+            );
+            continue;
+        }
         let mut seen = 0;
         let expected = if matches!(name, "Perch Protection" | "Teferi's Protection") {
             serde_json::json!({"UntilNextTurnOf": {"player": {"type": "Controller"}}})

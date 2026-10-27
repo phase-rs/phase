@@ -227,6 +227,17 @@ fn unsavory_kitchen_empty_hand_cannot_replace_the_selected_card_with_the_damage_
             })
             .id();
         let mut runner = scenario.build();
+        // CR 709.5 + CR 709.5c: this fixture represents an already-unlocked Room
+        // half; a locked half has no rules text and could not produce the choice.
+        let door = engine::game::room::live_face_door(&runner.state().objects[&kitchen]);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&kitchen)
+            .unwrap()
+            .room_unlocks
+            .get_or_insert_with(Default::default)
+            .unlock(door);
         runner.cast(shock).target_object(victim).resolve();
         assert_eq!(
             runner.state().objects[&victim].damage_marked,
@@ -234,17 +245,23 @@ fn unsavory_kitchen_empty_hand_cannot_replace_the_selected_card_with_the_damage_
             "trigger event reach guard"
         );
         if let Some(selected) = selected {
-            if matches!(
-                runner.state().waiting_for,
-                WaitingFor::ChooseFromZoneChoice { .. }
-            ) {
-                runner
-                    .act(GameAction::SelectCards {
-                        cards: vec![selected],
-                    })
-                    .unwrap();
-                runner.advance_until_stack_empty();
-            }
+            let cards = match &runner.state().waiting_for {
+                WaitingFor::ChooseFromZoneChoice { player, cards, .. }
+                | WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                    assert_eq!(*player, P0);
+                    cards
+                }
+                other => {
+                    panic!("the damage trigger must offer its hand creature choice: {other:?}")
+                }
+            };
+            assert_eq!(cards, &[selected]);
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![selected],
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
             assert!(
                 !runner.state().objects[&selected].perpetual_mods.is_empty(),
                 "positive chosen-card producer guard"

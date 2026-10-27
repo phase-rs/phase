@@ -364,8 +364,9 @@ pub fn resolve(
         let frame = crate::types::game_state::checked_return_result_frame(
             state,
             Some(occurrence),
-            ability.return_result_process,
-            false,
+            crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+                ability.return_result_process,
+            ),
         )
         .map_err(EffectError::InvalidParam)?;
         let records = frame

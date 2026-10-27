@@ -2193,14 +2193,12 @@ fn transmute_same_mana_value_filter() -> TargetFilter {
 ///
 /// Scavenge is an activated ability that functions only while the card with scavenge is
 /// in a graveyard. "Scavenge [cost]" means "[Cost], Exile this card from your graveyard:
-/// Put a number of +1/+1 counters equal to this card's power on target creature. Activate
+/// Put a number of +1/+1 counters equal to the power of the card you exiled on target creature. Activate
 /// only as a sorcery."
 ///
-/// CR 608.2h + CR 702.97a: announcement captures the source incarnation before
-/// paying the self-exile cost. `Power { scope: ObjectScope::Source }` therefore
-/// reads that graveyard incarnation's versioned last known information at
-/// resolution, including its numeric CDA. The new exile object's current power
-/// may differ; it does not replace the pre-cost source.
+/// CR 400.7j + CR 608.2h + CR 702.97a: the explicit cost-source singleton
+/// finds the card the self-exile cost produced and reads its current power,
+/// including its numeric CDA, or that exact exile incarnation's LKI if it left.
 pub fn synthesize_scavenge(face: &mut CardFace) {
     let scavenge_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -2236,15 +2234,23 @@ pub(crate) fn scavenge_ability_for_keyword(keyword: &Keyword) -> Option<AbilityD
             },
         ],
     };
-    // CR 702.97a: "Put a number of +1/+1 counters equal to this card's power on
-    // target creature." SelfPower is resolved via LKI at resolution time so the
-    // power read is the card's last known power before it was exiled.
+    // CR 702.97a + CR 400.7j: read "the card you exiled", rather than the
+    // announced graveyard source or an independently selected cost object.
     let effect = Effect::PutCounter {
         counter_type: CounterType::Plus1Plus1,
         count: QuantityExpr::Ref {
-            qty: QuantityRef::Power {
-                scope: crate::types::ability::ObjectScope::Source,
-            },
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    crate::types::ability::ObjectProperty::Power,
+                    crate::types::ability::CardTypeSetSource::Objects {
+                        filter: TargetFilter::CostPaidObject {
+                            reference: crate::types::ability::CostPaidObjectRef::Source,
+                        },
+                    },
+                )
+                .expect("power sum over an object singleton is valid"),
+            ),
         },
         target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
     };
@@ -17392,7 +17398,7 @@ mod scavenge_synthesis_tests {
             other => panic!("expected Composite cost, got {:?}", other),
         }
 
-        // CR 702.97a: Effect is +1/+1 counters equal to SelfPower on target creature.
+        // CR 702.97a: counters use the power of the card the cost exiled.
         match def.effect.as_ref() {
             Effect::PutCounter {
                 counter_type,
@@ -17402,11 +17408,14 @@ mod scavenge_synthesis_tests {
                 assert_eq!(counter_type, &CounterType::Plus1Plus1);
                 assert!(matches!(
                     count,
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Power {
-                            scope: crate::types::ability::ObjectScope::Source
-                        }
-                    }
+                    QuantityExpr::Ref { qty: QuantityRef::PropertyAggregate(aggregate) }
+                    if aggregate.function() == AggregateFunction::Sum
+                        && aggregate.property() == crate::types::ability::ObjectProperty::Power
+                        && matches!(aggregate.source(), crate::types::ability::CardTypeSetSource::Objects {
+                            filter: TargetFilter::CostPaidObject {
+                                reference: crate::types::ability::CostPaidObjectRef::Source
+                            }
+                        })
                 ));
                 assert!(
                     matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature))

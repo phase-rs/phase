@@ -3,11 +3,11 @@
 use std::borrow::Cow;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
+use nom::bytes::complete::{tag, take_till1, take_until, take_while, take_while_m_n};
 use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
 use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value, verify};
 use nom::multi::{many0, many1};
-use nom::sequence::{delimited, preceded, terminated};
+use nom::sequence::{delimited, preceded, separated_pair, terminated};
 use nom::Parser;
 
 use super::error::{OracleError, OracleResult};
@@ -749,36 +749,39 @@ fn loyalty_symbol_magnitude(input: &str) -> OracleResult<'_, i32> {
 /// `*` (CDA-defined). Returns the pair as `(PtValue, PtValue)`.
 ///
 /// This is the shared building block for token description and animation spec
-/// parsing — both need the same P/T tokenization.
+/// parsing — both need the same P/T tokenization. Leave a following comma for
+/// the enclosing predicate's keyword-list grammar; reject attached garbage.
 pub fn parse_pt_value(input: &str) -> OracleResult<'_, (PtValue, PtValue)> {
-    let input = input.trim_start();
-    let word_end = input.find(char::is_whitespace).unwrap_or(input.len());
-    let token = &input[..word_end];
-    let Some(slash) = token.find('/') else {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    };
-    let power_str = token[..slash].trim();
-    let toughness_str = token[slash + 1..].trim();
-    let power = parse_pt_component(power_str).ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
-    })?;
-    let toughness = parse_pt_component(toughness_str).ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail))
-    })?;
-    Ok((&input[word_end..], (power, toughness)))
+    preceded(
+        take_while(char::is_whitespace),
+        terminated(
+            separated_pair(parse_pt_component, char('/'), parse_pt_component),
+            peek(alt((
+                value((), eof),
+                value((), satisfy(char::is_whitespace)),
+                value((), char(',')),
+            ))),
+        ),
+    )
+    .parse(input)
 }
 
-fn parse_pt_component(text: &str) -> Option<PtValue> {
-    if text.eq_ignore_ascii_case("x") {
-        return Some(PtValue::Variable("X".to_string()));
-    }
-    if text == "*" {
-        return Some(PtValue::Variable("*".to_string()));
-    }
-    text.parse::<i32>().ok().map(PtValue::Fixed)
+fn parse_pt_component(input: &str) -> OracleResult<'_, PtValue> {
+    alt((
+        value(
+            PtValue::Variable("X".to_owned()),
+            alt((char('x'), char('X'))),
+        ),
+        value(PtValue::Variable("*".to_owned()), char('*')),
+        map(
+            map_res(
+                recognize((opt(alt((char('+'), char('-')))), digit1)),
+                str::parse::<i32>,
+            ),
+            PtValue::Fixed,
+        ),
+    ))
+    .parse(input)
 }
 
 /// Parse a roman numeral (I through XX) from Oracle text.
@@ -2449,6 +2452,68 @@ mod tests {
     #[test]
     fn test_parse_pt_modifier_failure() {
         assert!(parse_pt_modifier("3/2").is_err());
+    }
+
+    #[test]
+    fn pt_value_leaves_complete_predicate_separators() {
+        for (input, tail, expected) in [
+            (
+                "8/8, flying, and first strike",
+                ", flying, and first strike",
+                (PtValue::Fixed(8), PtValue::Fixed(8)),
+            ),
+            (
+                " 3/4 creature",
+                " creature",
+                (PtValue::Fixed(3), PtValue::Fixed(4)),
+            ),
+            (
+                "\u{2003}-2147483648/+2147483647",
+                "",
+                (PtValue::Fixed(i32::MIN), PtValue::Fixed(i32::MAX)),
+            ),
+            (
+                "x/X, haste",
+                ", haste",
+                (PtValue::Variable("X".into()), PtValue::Variable("X".into())),
+            ),
+            (
+                "*/*",
+                "",
+                (PtValue::Variable("*".into()), PtValue::Variable("*".into())),
+            ),
+            (
+                "0/-1\nnext",
+                "\nnext",
+                (PtValue::Fixed(0), PtValue::Fixed(-1)),
+            ),
+        ] {
+            assert_eq!(parse_pt_value(input), Ok((tail, expected)), "{input}");
+        }
+    }
+
+    #[test]
+    fn pt_value_refuses_partial_components_and_attached_garbage() {
+        assert!(
+            parse_pt_value("8/8, flying").is_ok(),
+            "complete comma-bound pair reaches the parser"
+        );
+        for input in [
+            "8/8garbage",
+            "X/XX",
+            "*/*+1",
+            "3/4/5",
+            "3 /4",
+            "3/ 4",
+            "3/4.",
+            "2147483648/1",
+            "1/-2147483649",
+            "1/",
+            "/1",
+            "3",
+        ] {
+            assert!(parse_pt_value(input).is_err(), "must refuse {input}");
+        }
     }
 
     #[test]

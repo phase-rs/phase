@@ -6863,6 +6863,10 @@ pub(crate) fn canonicalize_legacy_resolution_state(
     state: &GameState,
 ) -> Result<ResolutionStack, String> {
     let mut frames = ResolutionStack::default();
+    // Canonicalization is a projection of the live stack, not a restore that
+    // may infer an allocator from its residents. Preserve the exact authority,
+    // including a corrupt value that the validator must reject.
+    frames.last_token_creation_frame_id = state.resolution_stack.last_token_creation_frame_id;
     frames
         .restore_next_draw_sequence_frame_id(state.resolution_stack.next_draw_sequence_frame_id());
     frames.restore_next_discard_frame_id(state.resolution_stack.next_discard_frame_id());
@@ -6893,6 +6897,7 @@ fn project_frames_into_legacy_state(
 ) -> Result<GameState, String> {
     let mut projected = state.clone();
     clear_legacy_resolution_slots(&mut projected);
+    projected.resolution_stack.last_token_creation_frame_id = frames.last_token_creation_frame_id;
     projected
         .resolution_stack
         .restore_next_draw_sequence_frame_id(frames.next_draw_sequence_frame_id());

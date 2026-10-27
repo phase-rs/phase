@@ -429,11 +429,10 @@ pub(crate) fn validate_mana_choice_response(
     let mut invalid = None;
     for_each_mana_choice_response_quantity(ability, prompt, &mut |reference| {
         if let Some(result) = reference.instruction_result_id() {
-            if let Err(error) = crate::types::game_state::checked_return_result_frame(
+            if let Err(error) = crate::types::game_state::checked_owned_return_result_frame(
                 state,
                 occurrence,
                 ability.return_result_process,
-                true,
             ) {
                 failure.get_or_insert(error);
             }

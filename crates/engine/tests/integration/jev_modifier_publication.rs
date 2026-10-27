@@ -37,6 +37,21 @@ fn pt(runner: &mut GameRunner, id: ObjectId) -> (i32, i32) {
     (object.power.unwrap(), object.toughness.unwrap())
 }
 
+fn finish_to_next_upkeep(runner: &mut GameRunner) {
+    let turn = runner.state().turn_number;
+    for _ in 0..160 {
+        if runner.state().turn_number > turn && runner.state().phase == Phase::Upkeep {
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            return;
+        }
+        super::jev_token_followup::pass_creation_window(runner);
+    }
+    panic!("the public turn actions must reach the next upkeep");
+}
+
 #[test]
 fn mystic_decree_paid_cast_removes_only_flying_and_islandwalk_until_source_leaves() {
     let mut scenario = GameScenario::new();
@@ -330,12 +345,14 @@ fn agrus_red_white_and_dual_attackers_keep_independent_pumps() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
-    runner.declare_attackers(&[
-        (source, AttackTarget::Player(P1)),
-        (red, AttackTarget::Player(P1)),
-        (white, AttackTarget::Player(P1)),
-        (blue, AttackTarget::Player(P1)),
-    ]);
+    runner
+        .declare_attackers(&[
+            (source, AttackTarget::Player(P1)),
+            (red, AttackTarget::Player(P1)),
+            (white, AttackTarget::Player(P1)),
+            (blue, AttackTarget::Player(P1)),
+        ])
+        .unwrap();
     runner.advance_until_stack_empty();
     assert_eq!(pt(&mut runner, source), (5, 5));
     assert_eq!(pt(&mut runner, red), (4, 2));
@@ -1138,7 +1155,9 @@ fn explore_full_compass_activation_and_lantern_granted_attack_are_actions() {
         runner.activate(source, 0).target_object(target).resolve();
         if equipment {
             runner.advance_to_combat();
-            runner.declare_attackers(&[(target, AttackTarget::Player(P1))]);
+            runner
+                .declare_attackers(&[(target, AttackTarget::Player(P1))])
+                .unwrap();
             runner.advance_until_stack_empty();
         }
         let WaitingFor::DigChoice { player, cards, .. } = &runner.state().waiting_for else {
@@ -1465,11 +1484,13 @@ fn strength_snapshots_three_attackers_and_preserves_trample_until_cleanup() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
-    runner.declare_attackers(&[
-        (target, AttackTarget::Player(P1)),
-        (first, AttackTarget::Player(P1)),
-        (second, AttackTarget::Player(P1)),
-    ]);
+    runner
+        .declare_attackers(&[
+            (target, AttackTarget::Player(P1)),
+            (first, AttackTarget::Player(P1)),
+            (second, AttackTarget::Player(P1)),
+        ])
+        .unwrap();
     fund(&mut runner, 1, &[ManaType::Green]);
     runner.cast(spell).target_object(target).resolve();
     assert_eq!(pt(&mut runner, target), (5, 7));
@@ -1999,7 +2020,7 @@ fn static_preservation_den_paid_animation_publishes_real_attack_trigger_and_reta
         .attackers
         .iter()
         .any(|attacker| attacker.object_id == goblins[0].id));
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
     let object = &runner.state().objects[&den];
     assert!(object.card_types.core_types.contains(&CoreType::Artifact));
     assert!(object.card_types.core_types.contains(&CoreType::Land));
@@ -2090,9 +2111,10 @@ fn static_preservation_basic_land_addition_and_setting_have_different_printed_ab
             .id();
         scenario.add_card_to_library_top(P0, "Actual Aura entry draw");
         let aura = scenario
-            .add_spell_to_hand_from_oracle(P0, name, false, atomic.text.as_deref().unwrap())
+            .add_spell_to_hand(P0, name, false)
             .as_enchantment()
             .with_subtypes(vec!["Aura"])
+            .from_oracle_text(atomic.text.as_deref().unwrap())
             .with_mana_cost(cost(atomic.mana_cost.as_deref().unwrap()))
             .id();
         let bounce = scenario
@@ -2174,9 +2196,10 @@ fn static_preservation_aspect_paid_aura_recomputes_distinct_rounded_axes() {
         scenario.add_basic_land(P1, ManaColor::Green);
     }
     let aura = scenario
-        .add_spell_to_hand_from_oracle(P0, "Aspect of Wolf", false, atomic.text.as_deref().unwrap())
+        .add_spell_to_hand(P0, "Aspect of Wolf", false)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
+        .from_oracle_text(atomic.text.as_deref().unwrap())
         .with_mana_cost(cost("{1}{G}"))
         .id();
     let bounce = scenario
@@ -2260,7 +2283,27 @@ fn static_preservation_icingdeath_real_death_token_keeps_quoted_pump_and_paid_eq
             target_id: target,
         })
         .unwrap();
+    let WaitingFor::EquipTarget {
+        player,
+        equipment_id,
+        valid_targets,
+    } = &runner.state().waiting_for
+    else {
+        panic!("the actual equip activation must announce its chosen creature");
+    };
+    assert_eq!((*player, *equipment_id), (P0, equipment));
+    assert!(valid_targets.contains(&target) && valid_targets.contains(&decoy));
+    runner
+        .act(GameAction::Equip {
+            equipment_id: equipment,
+            target_id: target,
+        })
+        .unwrap();
     runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(target))
+    );
     assert_eq!(pt(&mut runner, target), (4, 4));
     assert_eq!(pt(&mut runner, decoy), (6, 6));
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
@@ -2383,7 +2426,7 @@ fn static_preservation_math_paid_mass_grant_keeps_keywords_requirement_and_clean
     runner
         .declare_attackers(&[(own, AttackTarget::Player(P1))])
         .unwrap();
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
     assert!(!runner.state().objects[&own]
         .keywords
         .contains(&Keyword::DoubleStrike));
@@ -2553,6 +2596,7 @@ fn static_preservation_ghostfire_paid_damage_retains_colorless_cda() {
         .with_mana_cost(cost("{2}{R}"))
         .id();
     let mut runner = scenario.build();
+    engine::game::layers::evaluate_layers(runner.state_mut());
     assert!(
         engine::game::functioning_abilities::active_static_definitions(
             runner.state(),
@@ -2631,8 +2675,12 @@ fn static_preservation_swamp_kitten_real_combat_animation_retains_artifact_and_c
         .card_types
         .core_types
         .contains(&CoreType::Creature));
-    settled(&runner);
-    runner.advance_to_upkeep();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { .. } | WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    finish_to_next_upkeep(&mut runner);
     assert_eq!(
         pt(&mut runner, swamp),
         (2, 2),
@@ -2681,7 +2729,7 @@ fn static_preservation_cavernous_maw_paid_animation_retains_cave_artifact_land_u
     assert!(!runner.state().objects[&maw].abilities.is_empty());
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     settled(&runner);
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
     let object = &runner.state().objects[&maw];
     assert!(object.card_types.core_types.contains(&CoreType::Artifact));
     assert!(object.card_types.core_types.contains(&CoreType::Land));
@@ -2829,7 +2877,7 @@ fn modifier_owner_full_faces_keep_retention_and_each_registered_child_window_in_
                         &["Bird"],
                         &["Flying", "Haste"],
                         None,
-                        Some("HandSize"),
+                        Some("ZoneCardCount"),
                         serde_json::json!("UntilEndOfTurn"),
                     ),
                     "Obuun, Mul Daya Ancestor" => (
@@ -2875,7 +2923,10 @@ fn modifier_owner_full_faces_keep_retention_and_each_registered_child_window_in_
                         assert!(
                             tagged(tag)
                                 .iter()
-                                .any(|node| node["value"]["qty"]["type"] == quantity),
+                                .any(|node| node["value"]["qty"]["type"] == quantity
+                                    && (name != "Jolrael, Voice of Zhalfir"
+                                        || (node["value"]["qty"]["zone"] == "Hand"
+                                            && node["value"]["qty"]["scope"] == "Controller"))),
                             "{name}: the printed X authority survives: {value}"
                         );
                     }
@@ -3096,7 +3147,7 @@ fn modifier_owner_goddric_two_real_paid_entries_keep_dragon_and_its_own_granted_
             3,
             atomic.text.as_deref().unwrap(),
         )
-        .with_subtypes(vec!["Human", "Peasant"])
+        .with_subtypes(vec!["Human", "Noble"])
         .id();
     let other = scenario
         .add_creature(P1, "Opponent Dragon", 2, 2)
@@ -3112,6 +3163,9 @@ fn modifier_owner_goddric_two_real_paid_entries_keep_dragon_and_its_own_granted_
     scenario.with_library_top(P0, &["draw buffer"]);
     scenario.with_library_top(P1, &["draw buffer"]);
     let mut runner = scenario.build();
+    // The normal deck loader supplies the creature-type catalog. This finite
+    // scenario supplies every creature type used by its printed participants.
+    runner.state_mut().all_creature_types = vec!["Dragon".into(), "Human".into(), "Noble".into()];
     assert_eq!(pt(&mut runner, goddric), (3, 3));
     for (index, arrival) in arrivals.into_iter().enumerate() {
         fund(&mut runner, 1, &[]);
@@ -3184,7 +3238,7 @@ fn modifier_owner_awakening_paid_cast_names_and_retains_the_same_countered_land(
     assert!(object.keywords.contains(&Keyword::Haste));
     assert!(!object.abilities.is_empty());
     settled(&runner);
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
     assert_eq!(pt(&mut runner, land), (9, 9));
     assert_eq!(runner.state().objects[&land].name, "Vitu-Ghazi");
     settled(&runner);
@@ -3209,9 +3263,10 @@ fn modifier_owner_giant_slug_paid_delayed_choice_keeps_the_unbound_grant_honest(
     runner.activate(slug, 0).resolve();
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     settled(&runner);
-    runner.advance_to_upkeep();
-    runner.advance_to_phase(Phase::PreCombatMain);
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
+    assert_eq!(runner.state().active_player, P1);
+    finish_to_next_upkeep(&mut runner);
+    assert_eq!(runner.state().active_player, P0);
     runner.advance_until_stack_empty();
     let WaitingFor::NamedChoice {
         player, options, ..

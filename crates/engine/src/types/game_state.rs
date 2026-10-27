@@ -2998,22 +2998,56 @@ impl ReturnResultFrame {
     }
 }
 
+/// Independently retained execution authority required by a result reader.
+#[derive(Clone, Copy)]
+pub(crate) enum ReturnResultFrameAccess {
+    LegacyCompatible(Option<ReturnResultProcessId>),
+    Owned(ReturnResultProcessId),
+}
+
+fn selected_return_result_frame(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+) -> Result<&ReturnResultFrame, String> {
+    let occurrence = occurrence.ok_or("missing selected instruction-result occurrence")?;
+    state
+        .return_result_frames
+        .get(&occurrence)
+        .ok_or_else(|| "missing selected instruction-result frame".into())
+}
+
+fn authenticate_return_result_frame(
+    frame: &ReturnResultFrame,
+    access: ReturnResultFrameAccess,
+) -> Result<&ReturnResultFrame, String> {
+    let expected = match access {
+        ReturnResultFrameAccess::LegacyCompatible(expected) => expected,
+        ReturnResultFrameAccess::Owned(expected) => Some(expected),
+    };
+    if !frame.has_process(expected) {
+        return Err("instruction-result process owner mismatch".into());
+    }
+    Ok(frame)
+}
+
 /// Authenticate independently retained execution authority before looking at result data.
 pub(crate) fn checked_return_result_frame(
     state: &GameState,
     occurrence: Option<ReturnResultOccurrenceId>,
-    expected: Option<ReturnResultProcessId>,
-    requires_owned_process: bool,
+    access: ReturnResultFrameAccess,
 ) -> Result<&ReturnResultFrame, String> {
-    let occurrence = occurrence.ok_or("missing selected instruction-result occurrence")?;
-    let frame = state
-        .return_result_frames
-        .get(&occurrence)
-        .ok_or("missing selected instruction-result frame")?;
-    if !frame.has_process(expected) || (requires_owned_process && expected.is_none()) {
-        return Err("instruction-result process owner mismatch".into());
-    }
-    Ok(frame)
+    authenticate_return_result_frame(selected_return_result_frame(state, occurrence)?, access)
+}
+
+/// Optional execution carriers preserve lookup errors before reporting a missing owner.
+pub(crate) fn checked_owned_return_result_frame(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    expected: Option<ReturnResultProcessId>,
+) -> Result<&ReturnResultFrame, String> {
+    let frame = selected_return_result_frame(state, occurrence)?;
+    let process = expected.ok_or("instruction-result process owner mismatch")?;
+    authenticate_return_result_frame(frame, ReturnResultFrameAccess::Owned(process))
 }
 
 /// Current stripped entry work shares one dependency walk with capture and liveness.
@@ -3033,7 +3067,7 @@ pub(crate) fn validate_zone_entry_result_owner(
     if reads.is_empty() {
         return Ok(false);
     }
-    let frame = checked_return_result_frame(state, occurrence, expected, true)?;
+    let frame = checked_owned_return_result_frame(state, occurrence, expected)?;
     for result in reads {
         if !matches!(frame.results.get(&result), Some(InstructionResult::ZoneChanges(records))
             if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
@@ -13873,7 +13907,7 @@ fn validate_retained_payment_result_owner(
         cost.for_each_predicate_quantity_ref(&mut read);
         if !results.is_empty() {
             let frame =
-                checked_return_result_frame(state, occurrence, body.return_result_process, true)?;
+                checked_owned_return_result_frame(state, occurrence, body.return_result_process)?;
             for result in results {
                 if !matches!(frame.results.get(&result), Some(InstructionResult::ZoneChanges(records)) if records.iter().all(crate::game::filter::departure_record_has_coherent_snapshot))
                 {
@@ -13900,12 +13934,15 @@ fn retained_ability_result_owner_is_live(
     body: &ResolvedAbility,
 ) -> bool {
     occurrence.is_some()
-        && checked_return_result_frame(
-            state,
-            occurrence,
-            body.return_result_process,
-            body.has_addressed_zone_result_read(),
-        )
+        && (if body.has_addressed_zone_result_read() {
+            checked_owned_return_result_frame(state, occurrence, body.return_result_process)
+        } else {
+            checked_return_result_frame(
+                state,
+                occurrence,
+                ReturnResultFrameAccess::LegacyCompatible(body.return_result_process),
+            )
+        })
         .is_ok()
         && crate::game::effects::validate_selected_instruction_result_owner(state, body, occurrence)
             .is_ok()
@@ -14000,8 +14037,7 @@ pub(crate) fn live_return_result_occurrences(
             if checked_return_result_frame(
                 state,
                 *return_result_occurrence,
-                body.return_result_process,
-                false,
+                ReturnResultFrameAccess::LegacyCompatible(body.return_result_process),
             )
             .is_ok()
                 && crate::game::effects::mana::validate_mana_choice_response(
@@ -14173,8 +14209,9 @@ pub(crate) fn live_return_result_occurrences(
                         && checked_return_result_frame(
                             state,
                             Some(id),
-                            frame.pending.chain.return_result_process,
-                            false,
+                            ReturnResultFrameAccess::LegacyCompatible(
+                                frame.pending.chain.return_result_process,
+                            ),
                         )
                         .is_ok()
                     {
@@ -14187,8 +14224,7 @@ pub(crate) fn live_return_result_occurrences(
                     if checked_return_result_frame(
                         state,
                         pending.return_result_occurrence,
-                        pending.return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(pending.return_result_process),
                     )
                     .is_ok()
                     {
@@ -14199,8 +14235,9 @@ pub(crate) fn live_return_result_occurrences(
                             && checked_return_result_frame(
                                 state,
                                 Some(id),
-                                pending.return_result_process,
-                                false,
+                                ReturnResultFrameAccess::LegacyCompatible(
+                                    pending.return_result_process,
+                                ),
                             )
                             .is_ok()
                         {
@@ -14251,8 +14288,7 @@ pub(crate) fn live_return_result_occurrences(
                     if checked_return_result_frame(
                         state,
                         Some(*occurrence_id),
-                        *return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(*return_result_process),
                     )
                     .is_ok()
                     {
@@ -14424,7 +14460,7 @@ fn validate_retained_result_readers(
         has_direct_addressed_read |= reference.instruction_result_id().is_some();
     });
     if has_direct_addressed_read {
-        checked_return_result_frame(state, occurrence, root.return_result_process, true)?;
+        checked_owned_return_result_frame(state, occurrence, root.return_result_process)?;
     }
     let mut invalid_quantity = None;
     let mut check = |reference: &crate::types::ability::QuantityRef| {
@@ -14572,16 +14608,14 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                     checked_return_result_frame(
                         state,
                         pending.return_result_occurrence,
-                        pending.return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(pending.return_result_process),
                     )?;
                 }
                 if let Some((occurrence, _)) = pending.pending_return_result_producer {
                     checked_return_result_frame(
                         state,
                         Some(occurrence),
-                        pending.return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(pending.return_result_process),
                     )?;
                 }
             }
@@ -14617,12 +14651,21 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                 if frame.pending.return_result_occurrence.is_some()
                     && has_return_result_metadata(&frame.pending.chain)
                 {
-                    checked_return_result_frame(
-                        state,
-                        frame.pending.return_result_occurrence,
-                        frame.pending.chain.return_result_process,
-                        frame.pending.chain.has_addressed_zone_result_read(),
-                    )?;
+                    (if frame.pending.chain.has_addressed_zone_result_read() {
+                        checked_owned_return_result_frame(
+                            state,
+                            frame.pending.return_result_occurrence,
+                            frame.pending.chain.return_result_process,
+                        )
+                    } else {
+                        checked_return_result_frame(
+                            state,
+                            frame.pending.return_result_occurrence,
+                            ReturnResultFrameAccess::LegacyCompatible(
+                                frame.pending.chain.return_result_process,
+                            ),
+                        )
+                    })?;
                 }
                 validate_retained_result_readers(
                     state,
@@ -14639,8 +14682,9 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                     checked_return_result_frame(
                         state,
                         Some(occurrence),
-                        frame.pending.chain.return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(
+                            frame.pending.chain.return_result_process,
+                        ),
                     )?;
                 }
             }
@@ -14687,8 +14731,7 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                     checked_return_result_frame(
                         state,
                         Some(*occurrence_id),
-                        *return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(*return_result_process),
                     )?;
                 }
             }
@@ -15016,12 +15059,19 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         if let Some(ability) = ability {
             crate::game::ability_utils::validate_coin_target_authority(ability)?;
             if occurrence.is_some() && has_return_result_metadata(ability) {
-                checked_return_result_frame(
-                    state,
-                    occurrence,
-                    ability.return_result_process,
-                    ability.has_addressed_zone_result_read(),
-                )?;
+                (if ability.has_addressed_zone_result_read() {
+                    checked_owned_return_result_frame(
+                        state,
+                        occurrence,
+                        ability.return_result_process,
+                    )
+                } else {
+                    checked_return_result_frame(
+                        state,
+                        occurrence,
+                        ReturnResultFrameAccess::LegacyCompatible(ability.return_result_process),
+                    )
+                })?;
             }
             let summary = crate::types::ability::classify_instruction_result_invocation(
                 ability,
@@ -15315,8 +15365,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                     checked_return_result_frame(
                         state,
                         Some(*occurrence_id),
-                        *return_result_process,
-                        false,
+                        ReturnResultFrameAccess::LegacyCompatible(*return_result_process),
                     )?;
                     validate_parked_publisher((*occurrence_id, *result_id), "batch")?;
                     if settled_records.is_some() {
@@ -29183,14 +29232,20 @@ fn validate_damage_source_authority(state: &GameState) -> Result<(), String> {
             }
             crate::types::ability::Effect::PreventDamage {
                 damage_source_filter:
-                    Some(crate::types::ability::TargetFilter::ChosenDamageSource { filter, .. }),
+                    Some(crate::types::ability::TargetFilter::ChosenDamageSource { chooser, filter }),
                 ..
             }
             | crate::types::ability::Effect::CreateDamageReplacement {
                 source_filter:
-                    Some(crate::types::ability::TargetFilter::ChosenDamageSource { filter, .. }),
+                    Some(crate::types::ability::TargetFilter::ChosenDamageSource { chooser, filter }),
                 ..
-            } => filter.as_deref(),
+            } => {
+                crate::game::effects::choose_damage_source::validate_inline_chooser(
+                    chooser.as_ref(),
+                )
+                .map_err(|error| error.to_string())?;
+                filter.as_deref()
+            }
             _ => return Err("damage source prompt has no source-producing instruction".into()),
         };
         if expected_filter.unwrap_or(&crate::types::ability::TargetFilter::Any) != source_filter {
@@ -59050,37 +59105,116 @@ mod departure_process_saved_authority_tests {
         assert_eq!(legacy.results[&result], records);
         assert_ne!(legacy, owned);
         let mut state = GameState::new_two_player(42);
+        for expected in [None, Some(ReturnResultProcessId(5))] {
+            assert_eq!(
+                checked_owned_return_result_frame(&state, None, expected).unwrap_err(),
+                "missing selected instruction-result occurrence"
+            );
+            assert_eq!(
+                checked_owned_return_result_frame(
+                    &state,
+                    Some(ReturnResultOccurrenceId(1)),
+                    expected
+                )
+                .unwrap_err(),
+                "missing selected instruction-result frame"
+            );
+            assert_eq!(
+                checked_return_result_frame(
+                    &state,
+                    None,
+                    ReturnResultFrameAccess::LegacyCompatible(expected),
+                )
+                .unwrap_err(),
+                "missing selected instruction-result occurrence"
+            );
+            assert_eq!(
+                checked_return_result_frame(
+                    &state,
+                    Some(ReturnResultOccurrenceId(1)),
+                    ReturnResultFrameAccess::LegacyCompatible(expected),
+                )
+                .unwrap_err(),
+                "missing selected instruction-result frame"
+            );
+        }
         state.next_return_result_occurrence_id = 2;
         state.next_return_result_process_id = 6;
         state
             .return_result_frames
             .insert(ReturnResultOccurrenceId(1), legacy);
         assert!(
-            checked_return_result_frame(&state, Some(ReturnResultOccurrenceId(1)), None, false)
-                .is_ok(),
+            checked_return_result_frame(
+                &state,
+                Some(ReturnResultOccurrenceId(1)),
+                ReturnResultFrameAccess::LegacyCompatible(None)
+            )
+            .is_ok(),
             "ordinary legacy named results retain their established no-P semantics"
         );
         assert_eq!(
-            checked_return_result_frame(&state, Some(ReturnResultOccurrenceId(1)), None, true)
+            checked_return_result_frame(
+                &state,
+                Some(ReturnResultOccurrenceId(1)),
+                ReturnResultFrameAccess::Owned(ReturnResultProcessId(5)),
+            )
+            .unwrap_err(),
+            "instruction-result process owner mismatch"
+        );
+        assert_eq!(
+            checked_return_result_frame(
+                &state,
+                Some(ReturnResultOccurrenceId(1)),
+                ReturnResultFrameAccess::LegacyCompatible(Some(ReturnResultProcessId(5))),
+            )
+            .unwrap_err(),
+            "instruction-result process owner mismatch"
+        );
+        assert_eq!(
+            checked_owned_return_result_frame(&state, Some(ReturnResultOccurrenceId(1)), None)
                 .unwrap_err(),
             "instruction-result process owner mismatch"
         );
         state
             .return_result_frames
             .insert(ReturnResultOccurrenceId(1), owned);
-        assert!(checked_return_result_frame(
-            &state,
-            Some(ReturnResultOccurrenceId(1)),
-            Some(ReturnResultProcessId(5)),
-            true
-        )
-        .is_ok());
+        assert_eq!(
+            checked_owned_return_result_frame(&state, Some(ReturnResultOccurrenceId(1)), None)
+                .unwrap_err(),
+            "instruction-result process owner mismatch"
+        );
         assert_eq!(
             checked_return_result_frame(
                 &state,
                 Some(ReturnResultOccurrenceId(1)),
-                Some(ReturnResultProcessId(7)),
-                true
+                ReturnResultFrameAccess::LegacyCompatible(None),
+            )
+            .unwrap_err(),
+            "instruction-result process owner mismatch"
+        );
+        assert!(checked_return_result_frame(
+            &state,
+            Some(ReturnResultOccurrenceId(1)),
+            ReturnResultFrameAccess::Owned(ReturnResultProcessId(5)),
+        )
+        .is_ok());
+        assert!(checked_return_result_frame(
+            &state,
+            Some(ReturnResultOccurrenceId(1)),
+            ReturnResultFrameAccess::LegacyCompatible(Some(ReturnResultProcessId(5))),
+        )
+        .is_ok());
+        assert!(checked_owned_return_result_frame(
+            &state,
+            Some(ReturnResultOccurrenceId(1)),
+            Some(ReturnResultProcessId(5))
+        )
+        .is_ok());
+        assert_eq!(
+            checked_owned_return_result_frame(
+                &state,
+                Some(ReturnResultOccurrenceId(1)),
+                Some(ReturnResultProcessId(7))
             )
             .unwrap_err(),
             "instruction-result process owner mismatch"

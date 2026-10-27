@@ -12075,8 +12075,10 @@ fn filter_prop_verdict(
         FilterProp::Cmc { value, .. } if value.any_ref(&mut |reference| {
             matches!(reference, QuantityRef::PropertyAggregate(aggregate)
                 if matches!(aggregate.source(), crate::types::ability::CardTypeSetSource::Objects { filter }
-                    if filter_contains(filter, &|filter| matches!(filter, TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Source }))))
-        }) && source.ability.and_then(|ability| ability.cost_paid_source_binding(state)).is_none() => None,
+                    if filter_contains(filter, &|filter| matches!(filter, TargetFilter::CostPaidObject { reference: crate::types::ability::CostPaidObjectRef::Source }))
+                        && !crate::game::quantity::cost_paid_source_property_is_available(
+                            state, source.ability, filter, aggregate.property())))
+        }) => None,
         FilterProp::ManaValueParity { parity } => parity_from_source(
             parity,
             state.last_named_choice.as_ref(),

@@ -189,7 +189,8 @@ fn delayed_local_and_conditional_creation_keep_result_ownership_across_restore()
                     "the false branch must execute the imported-A cleanup"
                 );
             } else {
-                assert_eq!(runner.state().objects[&outer].zone, Zone::Battlefield);
+                assert_eq!(runner.state().objects.get(&outer).map(|object| object.zone), Some(Zone::Battlefield),
+                    "local creation must not sacrifice outer A: kind={local_kind}, restore={restore}");
             }
             let unrelated = runner
                 .state()

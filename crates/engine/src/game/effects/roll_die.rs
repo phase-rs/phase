@@ -69,8 +69,8 @@ fn validate_die_result_owner(
         });
     }
     if !addressed.is_empty() {
-        let frame = crate::types::game_state::checked_return_result_frame(
-            state, occurrence, expected, true,
+        let frame = crate::types::game_state::checked_owned_return_result_frame(
+            state, occurrence, expected,
         )
         .map_err(EffectError::InvalidParam)?;
         for result in addressed {

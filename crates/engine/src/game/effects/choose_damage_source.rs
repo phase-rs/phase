@@ -1,9 +1,24 @@
 use crate::game::filter::FilterContext;
 use crate::game::targeting;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{
+    Chooser, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::zones::Zone;
+
+/// CR 608.2c + CR 608.2e + CR 609.7a: unsupported actors must not become controller choices.
+pub(crate) fn validate_inline_chooser(chooser: Option<&Chooser>) -> Result<(), EffectError> {
+    match chooser {
+        None | Some(Chooser::Controller) => Ok(()),
+        Some(Chooser::Opponent) => Err(EffectError::InvalidParam(
+            "unsupported inline damage-source chooser: Opponent".into(),
+        )),
+        Some(Chooser::OwningPlayer) => Err(EffectError::InvalidParam(
+            "unsupported inline damage-source chooser: OwningPlayer".into(),
+        )),
+    }
+}
 
 /// CR 609.7a: choose from the complete typed, exact Source domain.
 pub fn resolve(
@@ -272,6 +287,17 @@ pub(crate) fn open_source_choice(
     _events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     use crate::types::game_state::{ChosenDamageSource, PendingContinuation, PromptSourceBinding};
+    match &ability.effect {
+        Effect::PreventDamage {
+            damage_source_filter: Some(TargetFilter::ChosenDamageSource { chooser, .. }),
+            ..
+        }
+        | Effect::CreateDamageReplacement {
+            source_filter: Some(TargetFilter::ChosenDamageSource { chooser, .. }),
+            ..
+        } => validate_inline_chooser(chooser.as_ref())?,
+        _ => {}
+    }
     let candidates = damage_source_options(state, ability, source_filter);
     let mut resumed = ability.clone();
     if candidates.is_empty() {

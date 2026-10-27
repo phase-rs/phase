@@ -3813,3 +3813,377 @@ fn actual_recast_and_other_caster_coordinates_preserve_each_definition_owned_spe
         assert_source_origin_refusal_preserves_input(&runner, missing, wire, 0);
     }
 }
+
+// Native typed compositions test the supported actor boundary. These are reusable
+// shield building blocks, not claims that the unsupported actor text is printed.
+fn inline_actor_effect(
+    prevention: bool,
+    chooser: Option<engine::types::ability::Chooser>,
+    filter: TargetFilter,
+) -> Effect {
+    use engine::types::ability::*;
+    let chosen = Some(TargetFilter::ChosenDamageSource {
+        chooser,
+        filter: Some(Box::new(filter)),
+    });
+    if prevention {
+        Effect::PreventDamage {
+            lifetime: RedirectionLifetime::OneOpportunity,
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Any,
+            recipient_scope: EffectScope::All,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: chosen,
+            prevention_duration: Some(Duration::UntilEndOfTurn),
+        }
+    } else {
+        Effect::CreateDamageReplacement {
+            source_filter: chosen,
+            combat_scope: None,
+            target_filter: None,
+            modification: Some(DamageModification::Double),
+            redirect_to: None,
+            redirect_amount: None,
+            redirect_object_filter: None,
+            recipient_object_filter: None,
+            redirect_lifetime: RedirectionLifetime::OneOpportunity,
+        }
+    }
+}
+
+fn assert_inline_actor_shield(
+    runner: &engine::game::scenario::GameRunner,
+    source: ObjectId,
+    expect_double: bool,
+) {
+    let shields: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .flat_map(|object| object.replacement_definitions.iter_unchecked())
+        .chain(runner.state().pending_damage_replacements.iter())
+        .filter(|shield| shield_targets_chosen_source(shield, source))
+        .collect();
+    assert_eq!(
+        shields.len(),
+        1,
+        "the actual inline activation installs exactly one shield"
+    );
+    let shield = shields[0];
+    if expect_double {
+        assert_eq!(shield.shield_kind, ShieldKind::DamageReplacementOneShot);
+        assert_eq!(shield.damage_modification, Some(DamageModification::Double));
+    } else {
+        assert_eq!(shield.shield_kind, ShieldKind::PreventionOneShot);
+        assert_eq!(shield.damage_modification, None);
+    }
+}
+
+fn inline_actor_fixture(
+    prevention: bool,
+    chooser: Option<engine::types::ability::Chooser>,
+    empty: bool,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    use engine::types::ability::*;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature(P0, "Typed damage-source witness", 2, 2)
+        .id();
+    let predicate = if empty {
+        TargetFilter::None
+    } else {
+        TargetFilter::SpecificObject { id: source }
+    };
+    let installer = scenario
+        .add_artifact_from_oracle(P0, "Typed inline actor witness", "")
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                inline_actor_effect(prevention, chooser, predicate),
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }),
+        )
+        .id();
+    let mut runner = scenario.build();
+    add_mana(&mut runner, &[ManaType::Colorless]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: installer,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("native actor fixture must actually activate");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "paid public activation reaches the stack"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "public activation pays its cost"
+    );
+    (runner, installer, source)
+}
+
+fn advance_inline_actor(runner: &mut engine::game::scenario::GameRunner) -> Result<(), String> {
+    for _ in 0..32 {
+        match &runner.state().waiting_for {
+            WaitingFor::DamageSourceChoice { .. } => return Ok(()),
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return Ok(()),
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .map_err(|error| error.to_string())?;
+            }
+            other => panic!("unexpected inline actor prompt: {other:?}"),
+        }
+    }
+    panic!("inline actor activation did not reach a terminal prompt");
+}
+
+#[test]
+fn inline_source_controller_public_activation_choice_restore_and_shield_application() {
+    use engine::types::ability::Chooser;
+    use engine::types::resolution::ResolutionStateWire;
+    for prevention in [false, true] {
+        for wire in [false, true] {
+            let (mut runner, _, source) =
+                inline_actor_fixture(prevention, Some(Chooser::Controller), false);
+            advance_inline_actor(&mut runner).expect("supported actor reaches the choice");
+            let WaitingFor::DamageSourceChoice {
+                player, options, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("Controller must open its real public prompt");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(
+                options.len(),
+                1,
+                "the qualifier retains its candidate domain"
+            );
+            let reference = options[0].identity.reference;
+            assert_eq!(reference.object_id, source);
+            *runner.state_mut() = if wire {
+                serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(
+                        runner.state().clone(),
+                    ))
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state()
+            } else {
+                serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap()
+            };
+            runner
+                .act(GameAction::ChooseDamageSource { source: reference })
+                .expect("public answer resumes the shield");
+            runner.advance_until_stack_empty();
+            assert_source_program_complete(&runner);
+            assert_inline_actor_shield(&runner, source, !prevention);
+            assert_damage_outcome(&mut runner, source, !prevention);
+        }
+    }
+}
+
+#[test]
+fn inline_source_unsupported_actors_refuse_before_prompt_or_shield_even_when_bound() {
+    use engine::types::ability::Chooser;
+    use engine::types::game_state::ChosenDamageSource;
+    for prevention in [false, true] {
+        let (mut positive, _, source) =
+            inline_actor_fixture(prevention, Some(Chooser::Controller), false);
+        advance_inline_actor(&mut positive).unwrap();
+        let WaitingFor::DamageSourceChoice { options, .. } = &positive.state().waiting_for else {
+            panic!("paired Controller activation must reach the same choice owner");
+        };
+        let reference = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == source)
+            .unwrap()
+            .identity
+            .reference;
+        positive
+            .act(GameAction::ChooseDamageSource { source: reference })
+            .unwrap();
+        positive.advance_until_stack_empty();
+        assert_source_program_complete(&positive);
+        assert_inline_actor_shield(&positive, source, !prevention);
+        assert_damage_outcome(&mut positive, source, !prevention);
+
+        for chooser in [Chooser::Opponent, Chooser::OwningPlayer] {
+            for bound in [false, true] {
+                let (mut runner, _, source) =
+                    inline_actor_fixture(prevention, Some(chooser), false);
+                if bound {
+                    let selected = engine::game::triggers::trigger_source_context_for_latch(
+                        runner.state(),
+                        &runner.state().objects[&source],
+                    );
+                    runner
+                        .state_mut()
+                        .stack
+                        .last_mut()
+                        .unwrap()
+                        .ability_mut()
+                        .unwrap()
+                        .context
+                        .damage_source_choice = Some(Box::new(ChosenDamageSource {
+                        source: Some(selected),
+                        candidate_filter: TargetFilter::SpecificObject { id: source },
+                    }));
+                }
+                let error = advance_inline_actor(&mut runner)
+                    .expect_err("unsupported actor must not become Controller");
+                assert!(
+                    error.contains("unsupported inline damage-source chooser"),
+                    "{error}"
+                );
+                assert!(!matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::DamageSourceChoice { .. }
+                ));
+                assert!(
+                    runner.state().active_ability_continuation().is_none(),
+                    "refusal must not park a source-choice continuation"
+                );
+                assert!(
+                    shields_for_chosen_source(&runner, source).is_empty(),
+                    "refusal must not publish a shield"
+                );
+                assert!(runner.state().pending_damage_replacements.is_empty());
+                assert!(
+                    runner.state().objects.values().all(|object| object
+                        .replacement_definitions
+                        .iter_unchecked()
+                        .next()
+                        .is_none()),
+                    "unsupported actors must not publish a differently scoped shield either"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn inline_source_lexical_none_and_empty_controller_keep_their_existing_meanings() {
+    use engine::types::ability::Chooser;
+    use engine::types::game_state::ChosenDamageSource;
+    for prevention in [false, true] {
+        for bound in [false, true] {
+            let (mut runner, _, source) = inline_actor_fixture(prevention, None, false);
+            if bound {
+                let selected = engine::game::triggers::trigger_source_context_for_latch(
+                    runner.state(),
+                    &runner.state().objects[&source],
+                );
+                runner
+                    .state_mut()
+                    .stack
+                    .last_mut()
+                    .unwrap()
+                    .ability_mut()
+                    .unwrap()
+                    .context
+                    .damage_source_choice = Some(Box::new(ChosenDamageSource {
+                    source: Some(selected),
+                    candidate_filter: TargetFilter::SpecificObject { id: source },
+                }));
+            }
+            advance_inline_actor(&mut runner).expect("a lexical reader retains its meaning");
+            assert!(
+                !matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::DamageSourceChoice { .. }
+                ),
+                "None must never reselect"
+            );
+            assert_source_program_complete(&runner);
+            if bound {
+                assert_inline_actor_shield(&runner, source, !prevention);
+                assert_damage_outcome(&mut runner, source, !prevention);
+            } else {
+                assert!(shields_for_chosen_source(&runner, source).is_empty());
+            }
+        }
+        let (mut runner, _, source) =
+            inline_actor_fixture(prevention, Some(Chooser::Controller), true);
+        advance_inline_actor(&mut runner).expect("empty supported domain completes");
+        assert!(!matches!(
+            runner.state().waiting_for,
+            WaitingFor::DamageSourceChoice { .. }
+        ));
+        assert_source_program_complete(&runner);
+        assert!(shields_for_chosen_source(&runner, source).is_empty());
+    }
+}
+
+#[test]
+fn inline_source_active_prompt_restore_refuses_unsupported_actor_without_mutating_input() {
+    use engine::types::ability::Chooser;
+    use engine::types::game_state::GameState;
+    use engine::types::resolution::ResolutionStateWire;
+    for prevention in [false, true] {
+        let (mut runner, _, _) = inline_actor_fixture(prevention, Some(Chooser::Controller), false);
+        advance_inline_actor(&mut runner).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DamageSourceChoice { .. }
+        ));
+        let current = serde_json::to_value(runner.state()).unwrap();
+        assert!(
+            serde_json::from_value::<GameState>(current).is_ok(),
+            "paired supported prompt restores"
+        );
+        for chooser in [Chooser::Opponent, Chooser::OwningPlayer] {
+            let mut hostile = runner.state().clone();
+            let effect = &mut hostile
+                .active_ability_continuation_frame_mut()
+                .unwrap()
+                .pending
+                .chain
+                .effect;
+            match effect {
+                Effect::PreventDamage {
+                    damage_source_filter:
+                        Some(TargetFilter::ChosenDamageSource { chooser: slot, .. }),
+                    ..
+                }
+                | Effect::CreateDamageReplacement {
+                    source_filter: Some(TargetFilter::ChosenDamageSource { chooser: slot, .. }),
+                    ..
+                } => *slot = Some(chooser),
+                other => panic!("expected inline owning producer, got {other:?}"),
+            }
+            for wire in [false, true] {
+                let input = if wire {
+                    serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone()))
+                        .unwrap()
+                } else {
+                    serde_json::to_value(&hostile).unwrap()
+                };
+                let before = serde_json::to_vec(&input).unwrap();
+                let error = if wire {
+                    serde_json::from_value::<ResolutionStateWire>(input.clone())
+                        .unwrap_err()
+                        .to_string()
+                } else {
+                    serde_json::from_value::<GameState>(input.clone())
+                        .unwrap_err()
+                        .to_string()
+                };
+                assert!(
+                    error.contains("unsupported inline damage-source chooser"),
+                    "{error}"
+                );
+                assert_eq!(serde_json::to_vec(&input).unwrap(), before);
+            }
+        }
+    }
+}

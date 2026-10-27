@@ -2225,7 +2225,7 @@ fn cda_morbid_bloom_uses_last_graveyard_toughness() {
 }
 
 #[test]
-fn cda_scavenge_uses_last_graveyard_source_incarnation() {
+fn cda_scavenge_uses_the_current_cost_produced_exile_incarnation() {
     let (mut runner, lord, _, recipient, _) = cda_last_graveyard_fixture(false);
     // Off-zone storage may retain a prior controller; the owner still
     // announces and pays this graveyard activation.
@@ -2337,9 +2337,9 @@ fn cda_scavenge_uses_last_graveyard_source_incarnation() {
         runner.state().objects[&recipient]
             .counters
             .get(&CounterType::Plus1Plus1),
-        Some(&4)
+        Some(&3)
     );
-    assert_eq!(runner.state().objects[&recipient].power, Some(6));
+    assert_eq!(runner.state().objects[&recipient].power, Some(5));
     cda_pt(runner.state(), lord, 3);
     cda_complete(runner.state());
     let after = runner.state().objects[&lord].incarnation;
@@ -2355,7 +2355,7 @@ fn cda_scavenge_uses_last_graveyard_source_incarnation() {
         runner.state().objects[&recipient]
             .counters
             .get(&CounterType::Plus1Plus1),
-        Some(&4)
+        Some(&3)
     );
     cda_complete(runner.state());
 }
@@ -3024,7 +3024,7 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
             positive.state().objects[&recipient]
                 .counters
                 .get(&CounterType::Plus1Plus1),
-            Some(&4)
+            Some(&3)
         );
         assert_eq!(positive.state().players[0].mana_pool.total(), 0);
         cda_pt(positive.state(), lord, 3);
@@ -3033,7 +3033,7 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
 }
 
 #[test]
-fn cda_scavenge_cost_replacement_reload_and_same_id_reentry_preserve_the_old_source() {
+fn cda_scavenge_cost_replacement_reload_and_same_id_reentry_preserve_exile_lki() {
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
     };
@@ -3133,34 +3133,68 @@ fn cda_scavenge_cost_replacement_reload_and_same_id_reentry_preserve_the_old_sou
             Some(4)
         );
         cda_pt(runner.state(), lord, 3);
+        let arrival = runner.state().objects[&lord].incarnation;
+        let paid_source = runner
+            .state()
+            .stack
+            .last()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .cost_paid_source_binding(runner.state())
+            .expect("settled public cost arrival");
+        assert_eq!(paid_source.incarnation, arrival);
+        assert_eq!(paid_source.object_id, lord);
         engine::game::zones::move_to_zone(runner.state_mut(), lord, return_zone, &mut vec![]);
-        // A later same-id object has a different current value (GY4 or BF3).
-        // Remove a foreign member so the newer graveyard object is3 as well.
-        if return_zone == Zone::Graveyard {
-            let witness = runner.state().players[1].graveyard[0];
-            engine::game::zones::move_to_zone(runner.state_mut(), witness, Zone::Hand, &mut vec![]);
-        }
-        let saved = serde_json::to_string(runner.state()).unwrap();
-        *runner.state_mut() = serde_json::from_str(&saved).unwrap();
-        for _ in 0..8 {
-            if runner.state().stack.is_empty() {
-                break;
-            }
-            assert!(matches!(
-                runner.state().waiting_for,
-                WaitingFor::Priority { .. }
-            ));
-            runner.act(GameAction::PassPriority).unwrap();
-        }
-        assert_ne!(runner.state().objects[&lord].incarnation, before);
-        assert_eq!(runner.state().objects[&lord].power, Some(3));
         assert_eq!(
-            runner.state().objects[&recipient]
-                .counters
-                .get(&CounterType::Plus1Plus1),
-            Some(&4)
+            runner.state().lki_by_incarnation[&lord][&arrival].power,
+            Some(3)
         );
-        cda_complete(runner.state());
+        // Change the CDA population only after the exile incarnation departs:
+        // both later incarnations differ from pre-cost 4 and exile LKI 3.
+        add_graveyard_card(runner.state_mut(), P1, 10001, &[]);
+        add_graveyard_card(runner.state_mut(), P1, 10002, &[]);
+        recompute(runner.state_mut());
+        let later_power = if return_zone == Zone::Graveyard { 6 } else { 5 };
+        assert_eq!(runner.state().objects[&lord].power, Some(later_power));
+        for restored in relative_saved_states(runner.state()) {
+            let mut resumed = GameRunner::from_state(restored);
+            assert_eq!(
+                resumed.state().lki_by_incarnation[&lord][&arrival].power,
+                Some(3)
+            );
+            assert!(
+                resumed
+                    .state()
+                    .stack
+                    .last()
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .cost_paid_source_binding(resumed.state())
+                    .is_none(),
+                "targeting stays live-only"
+            );
+            for _ in 0..8 {
+                if resumed.state().stack.is_empty() {
+                    break;
+                }
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                resumed.act(GameAction::PassPriority).unwrap();
+            }
+            assert_ne!(resumed.state().objects[&lord].incarnation, arrival);
+            assert_eq!(resumed.state().objects[&lord].power, Some(later_power));
+            assert_eq!(
+                resumed.state().objects[&recipient]
+                    .counters
+                    .get(&CounterType::Plus1Plus1),
+                Some(&3)
+            );
+            cda_complete(resumed.state());
+        }
     }
 }
 
@@ -3249,12 +3283,16 @@ fn cda_two_real_varolz_grants_follow_each_source_lifetime() {
         .activate(lord, index)
         .target_object(recipient)
         .resolve();
+    assert_eq!(runner.state().objects[&lord].zone, Zone::Exile);
+    cda_pt(runner.state(), lord, 4);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     assert_eq!(
         runner.state().objects[&recipient]
             .counters
             .get(&CounterType::Plus1Plus1),
-        Some(&5)
+        Some(&4)
     );
+    assert_eq!(runner.state().objects[&recipient].power, Some(6));
     cda_complete(runner.state());
     assert!(!engine::game::casting::activated_ability_definitions(runner.state(), maro).is_empty());
     cda_fund(&mut runner, P0, &[ManaType::White]);
@@ -3265,7 +3303,7 @@ fn cda_two_real_varolz_grants_follow_each_source_lifetime() {
         runner.state().objects[&recipient]
             .counters
             .get(&CounterType::Plus1Plus1),
-        Some(&5)
+        Some(&4)
     );
     cda_complete(runner.state());
 }
