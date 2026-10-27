@@ -1891,7 +1891,21 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         // ("Whenever you cast a spell, if ~ is in your graveyard, ... return it")
         // is the card that discriminates them — the spell-cast axis would
         // otherwise bind "return it" to the cast spell instead of the Phoenix.
-        object_pronoun_ref: if_pronoun_ref.clone().or(anaphors.object_pronoun_ref),
+        object_pronoun_ref: if_pronoun_ref
+            .clone()
+            .or(anaphors.object_pronoun_ref)
+            .or_else(|| {
+                // CR 603.6 + CR 608.2k: this single library-to-hand event
+                // introduces the moved card as the body's untargeted "it".
+                // Use the parsed event authority, never this enchantment or a
+                // newly chosen target as a fallback for its perpetual change.
+                (partial_def.mode == TriggerMode::ChangesZone
+                    && partial_def.zone_change_clauses.is_empty()
+                    && partial_def.origin == Some(Zone::Library)
+                    && partial_def.destination == Some(Zone::Hand)
+                    && matches!(&partial_def.valid_card, Some(TargetFilter::Typed(_))))
+                .then_some(TargetFilter::TriggeringSource)
+            }),
         condition_object_antecedent: if_pronoun_ref
             .is_none()
             .then_some(anaphors.condition_object_antecedent)
@@ -5134,6 +5148,40 @@ fn split_reflexive_optional_payment_with_context<'a>(
     let cost_text = effect_text.get(cost_start..cost_start + cost_len)?.trim();
     let body_text = effect_text.get(body_start..)?.trim();
     let cost = super::oracle_cost::parse_oracle_cost(cost_text);
+    // CR 603.6c: the card of a death event is not the enchantment paying this
+    // cost. Refuse the complete dependency before either singleton adapter can
+    // publish a SelfRef return with the wrong event-card authority.
+    let unbound_event_card_return = tag::<_, _, OracleError<'_>>("return that card ")
+        .parse(body_lower)
+        .is_ok()
+        && matches!(
+            super::oracle_effect::imperative::parse_targeted_action_ast(
+                cost_text,
+                cost_lower,
+                &mut ctx.clone(),
+            ),
+            Some(
+                crate::parser::oracle_ir::ast::TargetedImperativeAst::Sacrifice {
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            )
+        )
+        && parse_effect_chain_ir(body_text, AbilityKind::Spell, &mut ctx.clone())
+            .clauses
+            .first()
+            .is_some_and(|clause| {
+                matches!(
+                    clause.parsed.effect,
+                    Effect::ChangeZone {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            });
+    if unbound_event_card_return {
+        return Some(Err(effect_text));
+    }
     // Select the old genuine alternatives/composites/tap family first, including
     // sacrifice-first alternatives. Singleton interception is ROOT-only.
     if !conditional && reflexive_optional_cost_payable_by_resolution_prompt(&cost) {
@@ -5187,31 +5235,36 @@ fn split_reflexive_optional_payment_with_context<'a>(
                         qty: QuantityRef::Variable { .. }
                     }
                 );
-            // A source sacrifice cannot bind "that card" to the creature card
-            // of an earlier death event through SelfRef. Keep this dependent
-            // return atomic until it has its own event-card authority.
-            let unbound_return = matches!(&target, TargetFilter::SelfRef)
-                && tag::<_, _, OracleError<'_>>("return that card ")
-                    .parse(body_lower)
-                    .is_ok()
-                && parse_effect_chain_ir(body_text, AbilityKind::Spell, &mut ctx.clone())
-                    .clauses
-                    .first()
-                    .is_some_and(|clause| {
-                        matches!(
-                            clause.parsed.effect,
-                            Effect::ChangeZone {
-                                target: TargetFilter::SelfRef,
-                                ..
-                            }
-                        )
-                    });
-            if has_population && has_count && !unbound_return {
+            if has_population && has_count {
                 return None;
             }
         }
     }
     Some(Err(effect_text))
+}
+
+#[cfg(test)]
+#[test]
+fn optional_source_sacrifice_cannot_return_an_unbound_death_event_card() {
+    for source in ["this enchantment", "~"] {
+        let body =
+            format!("you may sacrifice {source}. If you do, return that card to the battlefield.");
+        assert_eq!(
+            split_reflexive_optional_payment(&body),
+            Some(Err(body.as_str()))
+        );
+    }
+    let paid_source = parse_trigger_line(
+        "At the beginning of your upkeep, you may sacrifice this enchantment. If you do, draw a card.",
+        "Grammar Control",
+    );
+    assert!(
+        !matches!(
+            paid_source.execute.as_deref().unwrap().effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ),
+        "the complete source-payment family must still reach its existing owner"
+    );
 }
 
 #[cfg(test)]

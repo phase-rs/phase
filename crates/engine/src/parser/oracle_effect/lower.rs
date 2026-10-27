@@ -11226,6 +11226,18 @@ pub(super) fn compute_sentence_leading_duration(chunks: &[ClauseChunk]) -> Vec<O
 }
 
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
+    // CR 106.6 + CR 603.7a: a spend-trigger body's X belongs to the
+    // registered later ability. Keep its entire defining clause together so
+    // the spend-trigger owner can bind it or refuse it atomically.
+    if alt((
+        tag::<_, _, OracleError<'_>>("when you spend this mana to cast "),
+        tag("when that mana is spent to cast "),
+    ))
+    .parse(tp.lower.trim_start())
+    .is_ok()
+    {
+        return (tp, None);
+    }
     for needle in [", where x is ", " where x is "] {
         if let Some((before, after)) = tp.split_around_outside_quotes(needle) {
             // CR 608.2c: A where-X binding can precede further instructions in

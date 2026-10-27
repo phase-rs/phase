@@ -225,6 +225,7 @@
 //! present or future — can read prose as evidence.
 
 use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::parser::oracle::ParsedAbilities;
@@ -662,6 +663,40 @@ impl UnitEvidence {
         pred: impl Fn(&crate::types::statics::StaticMode) -> bool,
     ) -> bool {
         self.any_at(STATIC_MODE_KEYS, pred)
+    }
+
+    /// A spell-keyword gate folded into this unit's own cost filter.
+    /// Registered/granted child statics cannot answer their parent's condition.
+    pub(super) fn cost_filter_requires_keyword(
+        &self,
+        keyword: crate::types::keywords::KeywordKind,
+    ) -> bool {
+        use crate::types::ability::{FilterProp, TargetFilter};
+        use crate::types::statics::StaticMode;
+
+        fn requires(filter: &TargetFilter, keyword: crate::types::keywords::KeywordKind) -> bool {
+            match filter {
+                TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
+                    matches!(property, FilterProp::HasKeywordKind { value } if *value == keyword)
+                }),
+                TargetFilter::And { filters } => filters.iter().any(|f| requires(f, keyword)),
+                TargetFilter::Or { filters } => {
+                    !filters.is_empty() && filters.iter().all(|f| requires(f, keyword))
+                }
+                _ => false,
+            }
+        }
+
+        self.root
+            .get("statics")
+            .and_then(|value| Vec::<StaticDefinition>::deserialize(value).ok())
+            .is_some_and(|definitions| {
+                definitions.iter().any(|definition| {
+                    matches!(&definition.mode,
+                        StaticMode::ModifyCost { spell_filter: Some(filter), .. }
+                        if requires(filter, keyword))
+                })
+            })
     }
 
     /// Every node stored at one of `keys` that deserializes as `T`, in walk order.

@@ -9,11 +9,12 @@ use engine::types::phase::Phase;
 
 #[test]
 fn study_hall_keeps_mana_but_refuses_the_complete_spell_specific_count() {
-    use engine::parser::parse_oracle_text;
     use engine::types::ability::Effect;
     const ORACLE: &str = "{T}: Add {C}.\n{1}, {T}: Add one mana of any color. When you spend this mana to cast your commander, scry X, where X is the number of times it's been cast from the command zone this game.";
     const CLAUSE: &str = "When you spend this mana to cast your commander, scry X, where X is the number of times it's been cast from the command zone this game.";
-    let parsed = parse_oracle_text(ORACLE, "Study Hall", &[], &["Land".into()], &[]);
+    let db = super::jev_cost_populations::export_route_repair_db();
+    let parsed = db.get_face_by_name("Study Hall").unwrap();
+    assert_eq!(parsed.oracle_text.as_deref(), Some(ORACLE));
     assert_eq!(parsed.abilities.len(), 2, "{parsed:#?}");
     for ability in &parsed.abilities {
         assert!(

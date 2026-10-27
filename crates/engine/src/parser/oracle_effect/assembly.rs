@@ -2401,6 +2401,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // subject anaphor binds against the previous clause's defs only.
     let mut previous_clause_start = 0usize;
     let mut this_clause_start = 0usize;
+    let mut unbound_search_cohort = false;
     for clause_ir in &ir.clauses {
         let _clause = tracing::debug_span!(target: "engine::parser::binding", "clause", clause_id = ?clause_ir.id, fragment = ?clause_ir.source.fragment(), source_span = ?clause_ir.source.span()).entered();
         if defs.len() > this_clause_start {
@@ -3799,6 +3800,23 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         });
         let effective_condition = converted_condition.as_ref().or(effective_condition);
         if let Some(cond) = effective_condition {
+            // CR 608.2c: an explicit otherwise belongs to this resolving
+            // instruction's gate. Pushing that gate into its continuous
+            // modification erases the branch owner before Otherwise can bind.
+            let owns_otherwise = ir
+                .clauses
+                .iter()
+                .skip_while(|candidate| candidate.id != clause_ir.id)
+                .skip(1)
+                .take_while(|candidate| {
+                    candidate.condition.is_none() && candidate.parsed.condition.is_none()
+                })
+                .any(|candidate| {
+                    matches!(
+                        candidate.disposition,
+                        ClauseDisposition::BranchOtherwise { .. }
+                    )
+                });
             // CR 603.4 + CR 608.2h: An in-effect `if` on a continuous
             // keyword-grant clause (Odric, Lunarch Marshal) must gate each
             // `StaticDefinition` individually, NOT the whole ability — the
@@ -3809,7 +3827,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // `AbilityDefinition.condition`. Falls back to the ability-level
             // condition when the effect is not a `GenericEffect` or the
             // condition is not invertible to a `StaticCondition`.
-            let pushed_down = if clause_ir.parsed.condition.as_ref() == Some(cond) {
+            let pushed_down = if owns_otherwise || clause_ir.parsed.condition.as_ref() == Some(cond)
+            {
                 // Complete resolving members already own their resolution gate.
                 // Keep it on that member rather than reinstalling a live static gate.
                 None
@@ -4392,6 +4411,29 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                         stamp_delayed_returns(&mut current.effect, zone);
                     }
                 }
+            }
+        }
+
+        // CR 608.2c + CR 400.7: a searched-and-placed cohort is the exact
+        // result of that move, not every permanent matching its printed type.
+        // This owner has no instruction-result selector for that population;
+        // refuse its dependent block, including its following plural anaphor,
+        // while keeping the independent search and shuffle instructions.
+        let fragment = clause_ir.source.fragment().unwrap_or_default();
+        let lower_fragment = fragment.to_lowercase();
+        let names_search_cohort = crate::parser::oracle_nom::primitives::scan_contains(
+            &lower_fragment,
+            "put onto the battlefield this way",
+        );
+        let continues_unbound_cohort =
+            unbound_search_cohort && starts_with_plural_subject_anaphor(&lower_fragment);
+        unbound_search_cohort = names_search_cohort || continues_unbound_cohort;
+        if unbound_search_cohort {
+            current_defs.truncate(1);
+            if let Some(current) = current_defs.first_mut() {
+                *current.effect = Effect::unimplemented("search_destination_cohort", fragment);
+                current.sub_ability = None;
+                current.else_ability = None;
             }
         }
 

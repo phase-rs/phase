@@ -6576,6 +6576,17 @@ fn parse_normalized_oracle_ir(
             }
         }
 
+        // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
+        if let Some(mut ability) = try_parse_loyalty_line(&line, &mut ctx) {
+            i += 1;
+            // CR 706.3b: a loyalty ability that rolls a die owns the results table
+            // that follows it, exactly as any other activated ability does
+            // (Comet, Stellar Pup's "[0]: Roll a six-sided die.").
+            i = attach_following_die_result_table(&mut ability, &lines, i);
+            emitter.ability_ir_at_route(item_line, ability, OuterRoute::Activated);
+            continue;
+        }
+
         // Normalize card self-references for static parsing (replace card name with ~).
         let static_line = normalize_self_refs_for_static(&line, card_name);
         let static_line_lower = static_line.to_lowercase();
@@ -6668,11 +6679,7 @@ fn parse_normalized_oracle_ir(
         // Intercept only that narrow class so we do not steal ordinary spell
         // instruction lines that happen to have static-like phrasing.
         if is_spell {
-            let defs = parse_static_line_with_graveyard_keyword_continuation(
-                &static_line,
-                Some(raw_line),
-                Some(card_name),
-            );
+            let defs: Vec<_> = parse_static_line(&static_line).into_iter().collect();
             let is_self_color_cda = defs.len() == 1
                 && defs[0].characteristic_defining
                 && defs[0].affected == Some(TargetFilter::SelfRef)
@@ -6748,16 +6755,6 @@ fn parse_normalized_oracle_ir(
                 i += 1;
                 continue;
             }
-        }
-        // Priority 11: Planeswalker loyalty abilities: +N:, −N:, 0:, [+N]:, [−N]:, [0]:
-        if let Some(mut ability) = try_parse_loyalty_line(&line, &mut ctx) {
-            i += 1;
-            // CR 706.3b: a loyalty ability that rolls a die owns the results table
-            // that follows it, exactly as any other activated ability does
-            // (Comet, Stellar Pup's "[0]: Roll a six-sided die.").
-            i = attach_following_die_result_table(&mut ability, &lines, i);
-            emitter.ability_ir_at_route(item_line, ability, OuterRoute::Activated);
-            continue;
         }
 
         if is_granted_static_line(&lower) {
@@ -7656,7 +7653,10 @@ fn parse_normalized_oracle_ir(
         // original text to its semantic owner (including loyalty/emblem grants).
         let static_classify_view =
             crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower);
-        if !defer_to_effect_parser && is_static_pattern(&static_classify_view) {
+        if !defer_to_effect_parser
+            && (is_static_pattern(&static_classify_view)
+                || (!is_spell && parse_static_line(&static_line).is_some()))
+        {
             if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
                 i += 1;
                 continue;
@@ -7876,6 +7876,32 @@ fn parse_normalized_oracle_ir(
                     Some(card_name),
                 );
                 if !defs.is_empty() {
+                    // CR 611.3a + CR 702.95a: retain the unconditional paired
+                    // grant while refusing an unrepresented partner-only gate.
+                    if defs
+                        .iter()
+                        .any(|definition| definition.affected == Some(TargetFilter::SourceOrPaired))
+                    {
+                        if let Some((_, tail)) =
+                            TextPair::new(&static_line, &static_line.to_lowercase())
+                                .split_around(". ")
+                        {
+                            if tag::<_, _, OracleError<'_>>("if that creature ")
+                                .parse(tail.lower)
+                                .is_ok()
+                            {
+                                emitter.unsupported_ir_at(
+                                    item_line,
+                                    UnsupportedAbilityIr::new(
+                                        UnsupportedAbilityCategory::StaticStructure,
+                                        "Paired grant has an unsupported partner condition",
+                                        tail.original,
+                                    ),
+                                    min_x_value,
+                                );
+                            }
+                        }
+                    }
                     for __item in defs {
                         emitter.static_ir_at(
                             item_line,
@@ -7912,11 +7938,7 @@ fn parse_normalized_oracle_ir(
             // becomes a Moved replacement) and silently drops the permission's unmodeled
             // prefix, so emit the same typed `static_structure` residual the generic
             // unsupported dispatch would.
-            if is_graveyard_cast_permission_lead(&lower)
-                || (!is_spell
-                    && !has_trigger_prefix(&static_classify_view)
-                    && find_activated_colon(&line).is_none())
-            {
+            if is_graveyard_cast_permission_lead(&lower) {
                 // A permanent's recognized standing ability cannot become a
                 // resolving Spell effect merely because its static owner refused
                 // a condition or population. Preserve the whole source as a gap.
@@ -8267,6 +8289,28 @@ fn parse_normalized_oracle_ir(
                 i += 1;
                 continue;
             }
+        }
+
+        // CR 604.1 + CR 611.3a: a declined standing ability cannot become
+        // a resolving spell effect. CR 614.1c: successful replacement owners
+        // above retain their definitions before this last-resort refusal.
+        if !defer_to_effect_parser
+            && !is_spell
+            && is_static_pattern(&static_classify_view)
+            && !has_trigger_prefix(&static_classify_view)
+            && find_activated_colon(&line).is_none()
+        {
+            emitter.unsupported_ir_at(
+                item_line,
+                UnsupportedAbilityIr::new(
+                    UnsupportedAbilityCategory::StaticStructure,
+                    format!("Static pattern matched but line failed static parser: {line}"),
+                    line,
+                ),
+                min_x_value,
+            );
+            i += 1;
+            continue;
         }
 
         // CR 614.1c: replacement-tier last resort for "As ~ enters, <one-shot>"

@@ -7428,3 +7428,456 @@ fn pending_population_reader_authorities() {
     assert_eq!(count(runner.state(), spell, artifact_in(Zone::Stack)), 0);
     assert_eq!(count(runner.state(), spell, artifact_in(Zone::Hand)), 1);
 }
+
+// Exact Oracle and face metadata from AtomicCards 2026-10-04, SHA256
+// EE8B89375A0328A534153B1121E4272050AEF69CD49C58387AEF0877D34E4F8E.
+const EXPORT_ROUTE_PRINTED: &[&str] = &[
+    r###"{"name":"Abandoned Campground","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["U","W"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {W} or {U}.","identifiers":{"scryfallOracleId":"0eec9984-cd11-4a52-9234-469c6a5fb9aa"}}"###,
+    r###"{"name":"Arlinn, Voice of the Pack","manaCost":"{4}{G}{G}","manaValue":6.0,"type":"Legendary Planeswalker — Arlinn","types":["Planeswalker"],"subtypes":["Arlinn"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"loyalty":"7","layout":"normal","text":"Each creature you control that's a Wolf or a Werewolf enters with an additional +1/+1 counter on it.\n[−2]: Create a 2/2 green Wolf creature token.","identifiers":{"scryfallOracleId":"a15b83df-91b7-49f0-9bec-5776a3dac8bd"}}"###,
+    r###"{"name":"Ashling's Prerogative","manaCost":"{1}{R}","manaValue":2.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","text":"As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.","identifiers":{"scryfallOracleId":"b68bc097-482a-4fe5-9fca-df5941f3dc5c"}}"###,
+    r###"{"name":"Bleeding Woods","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["G","R"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {R} or {G}.","identifiers":{"scryfallOracleId":"47b6d2ae-d3d7-41eb-9172-2076eb8d028d"}}"###,
+    r###"{"name":"Bloatfly Swarm","manaCost":"{3}{B}","manaValue":4.0,"type":"Creature — Insect Mutant","types":["Creature"],"subtypes":["Insect","Mutant"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"0","toughness":"0","layout":"normal","text":"Flying\nThis creature enters with five +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage, remove that many +1/+1 counters from it, then give each player a rad counter for each +1/+1 counter removed this way.","keywords":["Flying"],"identifiers":{"scryfallOracleId":"fc50e254-71bc-46b3-93e6-c6eb820a3473"}}"###,
+    r###"{"name":"Blood Scrivener","manaCost":"{1}{B}","manaValue":2.0,"type":"Creature — Zombie Wizard","types":["Creature"],"subtypes":["Zombie","Wizard"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"2","toughness":"1","layout":"normal","text":"If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.","identifiers":{"scryfallOracleId":"af66da4b-2f36-4dd2-a5c6-18e6023c5aba"}}"###,
+    r###"{"name":"Bountiful Promenade","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["G","W"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {G} or {W}.","identifiers":{"scryfallOracleId":"761cb262-f83b-4a99-9345-b773182a7671"}}"###,
+    r###"{"name":"Buzzing Whack-a-Doodle","manaCost":"{4}","manaValue":4.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"As this artifact enters, you and an opponent each secretly choose Whack or Doodle. Then those choices are revealed. If the choices match, this artifact has that ability. Otherwise, it has Buzz.\n• Whack — {T}: Target player loses 2 life.\n• Doodle — {T}: You gain 3 life.\n• Buzz — {2}, {T}: Draw a card.","identifiers":{"scryfallOracleId":"de13c8ab-295c-4561-830e-b5235a164c92"}}"###,
+    r###"{"name":"Camato Scout","manaCost":"{1}{U}{U}","manaValue":3.0,"type":"Creature — Merfolk","types":["Creature"],"subtypes":["Merfolk"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"2","toughness":"3","layout":"normal","text":"As Camato Scout enters, choose a basic land type at random. Camato Scout has landwalk of the chosen type.","identifiers":{"scryfallOracleId":"2f05cfc0-6029-4618-8d79-39cd0a6a3b5f"}}"###,
+    r###"{"name":"Etched Cornfield","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["G","W"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {G} or {W}.","identifiers":{"scryfallOracleId":"6ccca5c2-66c3-495a-8d9e-1a9805569e52"}}"###,
+    r###"{"name":"Jace, Wielder of Mysteries","manaCost":"{1}{U}{U}{U}","manaValue":4.0,"type":"Legendary Planeswalker — Jace","types":["Planeswalker"],"subtypes":["Jace"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"loyalty":"4","layout":"normal","text":"If you would draw a card while your library has no cards in it, you win the game instead.\n[+1]: Target player mills two cards. Draw a card.\n[−8]: Draw seven cards. Then if your library has no cards in it, you win the game.","keywords":["Mill"],"identifiers":{"scryfallOracleId":"5277a68e-1ceb-4b40-8e10-3d0564f5d7be"}}"###,
+    r###"{"name":"Laboratory Maniac","manaCost":"{2}{U}","manaValue":3.0,"type":"Creature — Human Wizard","types":["Creature"],"subtypes":["Human","Wizard"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"2","toughness":"2","layout":"normal","text":"If you would draw a card while your library has no cards in it, you win the game instead.","identifiers":{"scryfallOracleId":"aa286dd5-aa19-446d-9003-684d81eb57ca"}}"###,
+    r###"{"name":"Lakeside Shack","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["G","U"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {G} or {U}.","identifiers":{"scryfallOracleId":"c56cd2ec-5907-4282-9162-d93b7dfd63b5"}}"###,
+    r###"{"name":"Living Conundrum","manaCost":"{4}{U}","manaValue":5.0,"type":"Creature — Elemental","types":["Creature"],"subtypes":["Elemental"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"2","toughness":"5","layout":"normal","text":"Hexproof\nIf you would draw a card while your library has no cards in it, skip that draw instead.\nAs long as there are no cards in your library, this creature has base power and toughness 10/10 and has flying and vigilance.","keywords":["Hexproof"],"identifiers":{"scryfallOracleId":"378ae023-04d3-44cc-9248-3d787796ed6c"}}"###,
+    r###"{"name":"Luxury Suite","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","R"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {B} or {R}.","identifiers":{"scryfallOracleId":"819e1765-8325-4e6f-89c1-63ea86de369f"}}"###,
+    r###"{"name":"Melira's Keepers","manaCost":"{4}{G}","manaValue":5.0,"type":"Creature — Human Warrior","types":["Creature"],"subtypes":["Human","Warrior"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"4","toughness":"4","layout":"normal","text":"This creature can't have counters put on it.","identifiers":{"scryfallOracleId":"6f2f4c31-74dc-4a52-96ad-94c3d51398d1"}}"###,
+    r###"{"name":"Morphic Pool","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","U"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {U} or {B}.","identifiers":{"scryfallOracleId":"bd004c9d-771e-4e63-a97d-a2259c096af8"}}"###,
+    r###"{"name":"Murky Sewer","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","U"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {U} or {B}.","identifiers":{"scryfallOracleId":"c2cdefeb-3176-4faf-be54-a62d31f777a5"}}"###,
+    r###"{"name":"Neglected Manor","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","W"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {W} or {B}.","identifiers":{"scryfallOracleId":"c8c632ab-14ec-44e1-ac00-81d48336320d"}}"###,
+    r###"{"name":"Oathsworn Knight","manaCost":"{1}{B}{B}","manaValue":3.0,"type":"Creature — Human Knight","types":["Creature"],"subtypes":["Human","Knight"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"0","toughness":"0","layout":"normal","text":"This creature enters with four +1/+1 counters on it.\nThis creature attacks each combat if able.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from it.","identifiers":{"scryfallOracleId":"16c293c8-bd1d-4db9-b197-da14f2f37cb1"}}"###,
+    r###"{"name":"Ormos, Archive Keeper","manaCost":"{4}{U}{U}","manaValue":6.0,"type":"Legendary Creature — Sphinx","types":["Creature"],"subtypes":["Sphinx"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"5","toughness":"5","layout":"normal","text":"Flying\nIf you would draw a card while your library has no cards in it, instead put five +1/+1 counters on Ormos.\n{1}{U}{U}, Discard three cards with different names: Draw five cards.","keywords":["Flying"],"identifiers":{"scryfallOracleId":"06d60b71-a9f9-4a7f-ad69-15d760b6e5c3"}}"###,
+    r###"{"name":"Out of the Tombs","manaCost":"{2}{B}","manaValue":3.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"At the beginning of your upkeep, put two eon counters on this enchantment, then mill cards equal to the number of eon counters on it.\nIf you would draw a card while your library has no cards in it, instead return a creature card from your graveyard to the battlefield. If you can't, you lose the game.","keywords":["Mill"],"identifiers":{"scryfallOracleId":"473a7998-669d-4181-83fe-f178a2e781f0"}}"###,
+    r###"{"name":"Peculiar Lighthouse","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["R","U"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {U} or {R}.","identifiers":{"scryfallOracleId":"d55f7e20-11c6-44e2-8a21-dca67d3dbc68"}}"###,
+    r###"{"name":"Phial of Galadriel","manaCost":"{3}","manaValue":3.0,"type":"Legendary Artifact","types":["Artifact"],"subtypes":[],"supertypes":["Legendary"],"colors":[],"colorIdentity":[],"layout":"normal","text":"If you would draw a card while you have no cards in hand, draw two cards instead.\nIf you would gain life while you have 5 or less life, you gain twice that much life instead.\n{T}: Add one mana of any color.","identifiers":{"scryfallOracleId":"08f17ebc-c0fd-493f-84b3-e9250694543e"}}"###,
+    r###"{"name":"Polukranos, Unchained","manaCost":"{2}{B}{G}","manaValue":4.0,"type":"Legendary Creature — Zombie Hydra","types":["Creature"],"subtypes":["Zombie","Hydra"],"supertypes":["Legendary"],"colors":["B","G"],"colorIdentity":["B","G"],"power":"0","toughness":"0","layout":"normal","text":"Polukranos enters with six +1/+1 counters on it. It escapes with twelve +1/+1 counters on it instead.\nIf damage would be dealt to Polukranos while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from it.\n{1}{B}{G}: Polukranos fights another target creature.\nEscape—{4}{B}{G}, Exile six other cards from your graveyard.","keywords":["Escape","Fight"],"identifiers":{"scryfallOracleId":"649e7237-b38b-43e9-83f4-763751fb1bea"}}"###,
+    r###"{"name":"Raucous Carnival","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["R","W"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {R} or {W}.","identifiers":{"scryfallOracleId":"24a97436-ba61-4ebc-a560-a6c027ccfdf3"}}"###,
+    r###"{"name":"Razortrap Gorge","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","R"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {B} or {R}.","identifiers":{"scryfallOracleId":"8f69bd3a-244e-42d8-bfac-5a426f4b54b4"}}"###,
+    r###"{"name":"Rejuvenating Springs","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["G","U"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {G} or {U}.","identifiers":{"scryfallOracleId":"d1620449-930a-4895-a143-fd2a0a3c8b17"}}"###,
+    r###"{"name":"Sea of Clouds","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["U","W"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {W} or {U}.","identifiers":{"scryfallOracleId":"672e190d-8ea0-4a2e-b74f-5d35304631e4"}}"###,
+    r###"{"name":"Spectator Seating","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["R","W"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {R} or {W}.","identifiers":{"scryfallOracleId":"cf6d10ed-85c3-48f2-8ba0-2960e03b408b"}}"###,
+    r###"{"name":"Spire Garden","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["G","R"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {R} or {G}.","identifiers":{"scryfallOracleId":"45fe016e-1a09-410c-bbe3-4663ba06c5b7"}}"###,
+    r###"{"name":"Strangled Cemetery","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","G"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {B} or {G}.","identifiers":{"scryfallOracleId":"3a5b3405-a1e3-4aad-ab4e-1b8db2d1f3a8"}}"###,
+    r###"{"name":"Tatterkite","manaCost":"{3}","manaValue":3.0,"type":"Artifact Creature — Scarecrow","types":["Artifact","Creature"],"subtypes":["Scarecrow"],"supertypes":[],"colors":[],"colorIdentity":[],"power":"2","toughness":"1","layout":"normal","text":"Flying\nThis creature can't have counters put on it.","keywords":["Flying"],"identifiers":{"scryfallOracleId":"9505f124-f152-48ce-b0d3-097abdda8e3e"}}"###,
+    r###"{"name":"Thought Sponge","manaCost":"{3}{U}","manaValue":4.0,"type":"Creature — Sponge","types":["Creature"],"subtypes":["Sponge"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"1","toughness":"1","layout":"normal","text":"Flash\nThis creature enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.\nWhen this creature dies, draw cards equal to its power.","keywords":["Flash"],"identifiers":{"scryfallOracleId":"256e094a-a9e8-42d9-90e2-7a24ed85e426"}}"###,
+    r###"{"name":"Training Center","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["R","U"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {U} or {R}.","identifiers":{"scryfallOracleId":"e3570ac7-c593-40e3-bbd6-ec3da6d8158d"}}"###,
+    r###"{"name":"Ugin's Conjurant","manaCost":"{X}","manaValue":0.0,"type":"Creature — Spirit Monk","types":["Creature"],"subtypes":["Spirit","Monk"],"supertypes":[],"colors":[],"colorIdentity":[],"power":"0","toughness":"0","layout":"normal","text":"This creature enters with X +1/+1 counters on it.\nIf damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove that many +1/+1 counters from this creature.","identifiers":{"scryfallOracleId":"787055e6-5d65-458e-a56e-66ef0574d2ca"}}"###,
+    r###"{"name":"Undergrowth Champion","manaCost":"{1}{G}{G}","manaValue":3.0,"type":"Creature — Elemental","types":["Creature"],"subtypes":["Elemental"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"2","layout":"normal","text":"If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from this creature.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on this creature.","keywords":["Landfall"],"identifiers":{"scryfallOracleId":"cb0eb84d-b41b-4147-aa7c-089b7fabd835"}}"###,
+    r###"{"name":"Undergrowth Stadium","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","G"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {B} or {G}.","identifiers":{"scryfallOracleId":"7c69f718-acc8-4851-8e5d-0cbaaa86192c"}}"###,
+    r###"{"name":"Vault of Champions","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["B","W"],"layout":"normal","text":"This land enters tapped unless you have two or more opponents.\n{T}: Add {W} or {B}.","identifiers":{"scryfallOracleId":"ebc5ac83-08d4-4d6b-b840-0c4ba71a38ab"}}"###,
+    r###"{"name":"Besmirch","manaCost":"{1}{R}{R}","manaValue":3.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","text":"Until end of turn, gain control of target creature and it gains haste. Untap and goad that creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)","keywords":["Goad"],"identifiers":{"scryfallOracleId":"fc80380c-7d75-4556-aaf2-bf7b2c757e75"}}"###,
+    r###"{"name":"Blufferfish","manaCost":"{4}{U}{U}","manaValue":6.0,"type":"Creature — Fish","types":["Creature"],"subtypes":["Fish"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"power":"3","toughness":"6","layout":"normal","text":"{3}{U}: An opponent tells you a statement about themselves and secretly notes whether it's true or false. You guess which it is. If you guessed correctly, this creature gets +2/+0 and can't be blocked this turn.","identifiers":{"scryfallOracleId":"6ca06048-7c84-49a0-95db-dca4ce4cb95c"}}"###,
+    r###"{"name":"Garruk, Curse Breaker","manaCost":"{3}{G}{G}","manaValue":5.0,"type":"Legendary Planeswalker — Garruk","types":["Planeswalker"],"subtypes":["Garruk"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"loyalty":"5","layout":"normal","text":"Whenever a creature you control with power 4 or greater enters, draw a card.\n[+2]: Untap up to two target lands.\n[−3]: Create a 4/4 green Beast creature token with trample.\n[−4]: Until your next turn, whenever one or more creatures attack one of your opponents, those creatures get +2/+2 and gain trample until end of turn.","identifiers":{"scryfallOracleId":"184d4672-05a9-4182-8b3f-3561fb33ed62"}}"###,
+    r###"{"name":"Giant Slug","manaCost":"{1}{B}","manaValue":2.0,"type":"Creature — Slug","types":["Creature"],"subtypes":["Slug"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"1","toughness":"1","layout":"normal","text":"{5}: At the beginning of your next upkeep, choose a basic land type. This creature gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)","identifiers":{"scryfallOracleId":"1ce7f356-1f9b-44dc-9b05-f7b1ecc5d755"}}"###,
+    r###"{"name":"Grab the Reins","manaCost":"{3}{R}","manaValue":4.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","text":"Choose one —\n• Until end of turn, you gain control of target creature and it gains haste.\n• Sacrifice a creature. Grab the Reins deals damage equal to that creature's power to any target.\nEntwine {2}{R} (Choose both if you pay the entwine cost.)","keywords":["Entwine"],"identifiers":{"scryfallOracleId":"3ceda405-8175-416a-beda-9a95f5acc60c"}}"###,
+    r###"{"name":"Haunted One","manaCost":"{2}{B}","manaValue":3.0,"type":"Legendary Enchantment — Background","types":["Enchantment"],"subtypes":["Background"],"supertypes":["Legendary"],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Commander creatures you own have \"Whenever this creature becomes tapped, it and other creatures you control that share a creature type with it each get +2/+0 and gain undying until end of turn.\" (When a creature with undying dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)","identifiers":{"scryfallOracleId":"689cd6a8-8be0-49a6-9758-a81cc9f55cc8"}}"###,
+    r###"{"name":"Invisible Woman","manaCost":"{2}{W}","manaValue":3.0,"type":"Legendary Creature — Human Hero","types":["Creature"],"subtypes":["Human","Hero"],"supertypes":["Legendary"],"colors":["W"],"colorIdentity":["G","R","U","W"],"power":"3","toughness":"3","layout":"normal","text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a 0/3 colorless Wall creature token with defender and reach.\nWhenever you attack, you may pay {R}{G}{W}{U}. When you do, target creature gets +1/+0 until end of turn for each creature you control and can't be blocked this turn.","identifiers":{"scryfallOracleId":"085016ee-4429-453f-b7f3-d61065f1214e"}}"###,
+    r###"{"name":"Kang Dynasty","manaCost":"{3}{U}","manaValue":4.0,"type":"Enchantment — Saga","types":["Enchantment"],"subtypes":["Saga"],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"saga","text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — For each opponent, tap up to one target creature that player controls. Goad those creatures. Until your next turn, whenever any of those creatures deals combat damage to a player, draw a card.\nIII — Target creature you control gets +1/+1 until end of turn for each card in your hand and can't be blocked this turn.","keywords":["Goad"],"identifiers":{"scryfallOracleId":"4e420f43-a4a3-44bb-9a4e-a943f93a3534"}}"###,
+    r###"{"name":"Legion Leadership // Legion Stronghold","faceName":"Legion Leadership","side":"a","manaCost":"{1}{R/W}","manaValue":2.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["R","W"],"colorIdentity":["R","W"],"layout":"modal_dfc","text":"Until end of turn, double target creature's power and it gains first strike.","keywords":["Double"],"identifiers":{"scryfallOracleId":"ad225ec2-ff3a-48f6-81a7-dfdd1b75e1f7"}}"###,
+    r###"{"name":"Okoye, Mighty and Adored","manaCost":"{2}{G}{W}","manaValue":4.0,"type":"Legendary Creature — Human Warrior Hero","types":["Creature"],"subtypes":["Human","Warrior","Hero"],"supertypes":["Legendary"],"colors":["G","W"],"colorIdentity":["G","W"],"power":"3","toughness":"3","layout":"normal","text":"When Okoye enters, you become the monarch.\nAt the beginning of combat on your turn, put a +1/+1 counter on target creature. Whenever that creature attacks the monarch this turn, it gains double strike and trample until end of turn.","identifiers":{"scryfallOracleId":"8fbfc5b1-2146-4d07-a5fe-5f025da31bd6"}}"###,
+    r###"{"name":"Perch Protection","manaCost":"{4}{W}{W}","manaValue":6.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"layout":"normal","text":"Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.","keywords":["Gift"],"identifiers":{"scryfallOracleId":"295fe873-ecb5-4d5e-a73c-3af6c478afc5"}}"###,
+    r###"{"name":"Rediscover the Way","manaCost":"{U}{R}{W}","manaValue":3.0,"type":"Enchantment — Saga","types":["Enchantment"],"subtypes":["Saga"],"supertypes":[],"colors":["R","U","W"],"colorIdentity":["R","U","W"],"layout":"saga","text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.\nIII — Whenever you cast a noncreature spell this turn, target creature you control gains double strike until end of turn.","identifiers":{"scryfallOracleId":"680a8e14-053f-4cde-a060-e1b36873cf14"}}"###,
+    r###"{"name":"Summon: Brynhildr","manaCost":"{1}{R}","manaValue":2.0,"type":"Enchantment Creature — Saga Knight","types":["Enchantment","Creature"],"subtypes":["Saga","Knight"],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"power":"2","toughness":"1","layout":"saga","text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Chain — Exile the top card of your library. During any turn you put a lore counter on this Saga, you may play that card.\nII, III — Gestalt Mode — When you next cast a creature spell this turn, it gains haste until end of turn.","identifiers":{"scryfallOracleId":"bab5e9ce-6d55-4d1e-a9ac-c2b954191be9"}}"###,
+    r###"{"name":"Teferi's Protection","manaCost":"{2}{W}","manaValue":3.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"layout":"normal","text":"Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.","identifiers":{"scryfallOracleId":"0d4ecdb1-ec90-497f-a7a4-1c68092b8757"}}"###,
+    r###"{"name":"The Last Ronin","manaCost":"{4}{B}{G}","manaValue":6.0,"type":"Enchantment — Saga","types":["Enchantment"],"subtypes":["Saga"],"supertypes":[],"colors":["B","G"],"colorIdentity":["B","G"],"layout":"saga","text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Destroy all creatures.\nII — Mill four cards. When you do, return target creature card from your graveyard to your hand.\nIII — Whenever a creature you control attacks alone this turn, put three +1/+1 counters on it. It gains trample, lifelink, and indestructible until end of turn.","keywords":["Mill"],"identifiers":{"scryfallOracleId":"e1865bec-1744-40c2-9031-7d6363be5333"}}"###,
+    r###"{"name":"Traitor's Clutch","manaCost":"{4}{B}","manaValue":5.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Target creature gets +1/+0, becomes black, and gains shadow until end of turn. (It can block or be blocked by only creatures with shadow.)\nFlashback {1}{B} (You may cast this card from your graveyard for its flashback cost. Then exile it.)","keywords":["Flashback"],"identifiers":{"scryfallOracleId":"64296644-70f3-4698-923f-0794fe5d0d2b"}}"###,
+    r###"{"name":"World War Hulk","manaCost":"{3}{G}{G}","manaValue":5.0,"type":"Enchantment — Saga","types":["Enchantment"],"subtypes":["Saga"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"saga","text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — The next red or green creature spell you cast this turn can be cast without paying its mana cost.\nII — Put three +1/+1 counters on target creature you control.\nIII — Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.","keywords":["Double"],"identifiers":{"scryfallOracleId":"8c4da760-8913-46ca-b00c-bba6d877d482"}}"###,
+    r###"{"name":"Cycle of Life","manaCost":"{1}{G}{G}","manaValue":3.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"Return this enchantment to its owner's hand: Target creature you cast this turn has base power and toughness 0/1 until your next upkeep. At the beginning of your next upkeep, put a +1/+1 counter on that creature.","identifiers":{"scryfallOracleId":"5941374b-eeb8-4d0e-9367-f7f0f8b79739"}}"###,
+    r###"{"name":"Divine Sacrament","manaCost":"{1}{W}{W}","manaValue":3.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"layout":"normal","text":"White creatures get +1/+1.\nThreshold — White creatures get an additional +1/+1 as long as there are seven or more cards in your graveyard.","keywords":["Threshold"],"identifiers":{"scryfallOracleId":"92bd7fe2-bb70-40fb-984b-26e461347c56"}}"###,
+    r###"{"name":"Study Hall","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"{T}: Add {C}.\n{1}, {T}: Add one mana of any color. When you spend this mana to cast your commander, scry X, where X is the number of times it's been cast from the command zone this game.","keywords":["Scry"],"identifiers":{"scryfallOracleId":"eb735501-19e7-4910-aa6a-6667fff6f4e5"}}"###,
+    r###"{"name":"Sap Vitality","manaCost":"{B}{B}","manaValue":2.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Sap Vitality deals 3 damage to target creature or planeswalker. Choose a creature card in your hand. It perpetually gets +3/+0.","identifiers":{"scryfallOracleId":"b4cfcb3e-6f62-424f-b7c5-f9ba456e47c5"}}"###,
+    r###"{"name":"Prairie Survivalist","manaCost":"{1}{W}","manaValue":2.0,"type":"Creature — Human Scout","types":["Creature"],"subtypes":["Human","Scout"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"0","toughness":"1","layout":"normal","text":"Flying\nAt the beginning of combat on your turn, target creature you control perpetually gets +1/+0. Then choose a creature card in your hand. It perpetually gets +1/+0.","keywords":["Flying"],"identifiers":{"scryfallOracleId":"e5991685-3bf0-48d4-9f11-8a21f2914c4f"}}"###,
+    r###"{"name":"Veteran Charger","manaCost":"{2}{G}","manaValue":3.0,"type":"Creature — Centaur Soldier","types":["Creature"],"subtypes":["Centaur","Soldier"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"2","layout":"normal","text":"When Veteran Charger enters the battlefield, choose a creature card in your hand. It perpetually gets +2/+2.","identifiers":{"scryfallOracleId":"28a92014-c911-4e64-9072-7f7d9c3d7544"}}"###,
+    r###"{"name":"Perennial Gravewarden","manaCost":"{B}{G}","manaValue":2.0,"type":"Creature — Elf Warlock","types":["Creature"],"subtypes":["Elf","Warlock"],"supertypes":[],"colors":["B","G"],"colorIdentity":["B","G"],"power":"1","toughness":"1","layout":"normal","text":"Menace\nWhen this creature enters, it perpetually gets +1/+1.\nAt the beginning of your end step, if a creature entered and a creature died this turn, return this card from your graveyard to the battlefield tapped.","keywords":["Menace"],"identifiers":{"scryfallOracleId":"fc8c4819-5cec-4dab-ae2d-90964ec71ac9"}}"###,
+    r###"{"name":"Tomakul Phoenix","manaCost":"{1}{R}{R}","manaValue":3.0,"type":"Creature — Phoenix","types":["Creature"],"subtypes":["Phoenix"],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"power":"2","toughness":"2","layout":"normal","text":"Flying, haste\nWhen Tomakul Phoenix dies, it perpetually gets +2/+2.\nAt the beginning of combat on your turn, you may pay {X}{R}, where X is Tomakul Phoenix's power. If you do, return it from your graveyard to the battlefield.","keywords":["Flying","Haste"],"identifiers":{"scryfallOracleId":"ee853994-e3e6-4b9c-84fd-7c5cb9a8db88"}}"###,
+    r###"{"name":"Hook Horror","manaCost":"{4}{B}","manaValue":5.0,"type":"Creature — Horror","types":["Creature"],"subtypes":["Horror"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"3","toughness":"3","layout":"normal","text":"Molting Exoskeleton — When Hook Horror dies, it perpetually gets -1/-1. Then if that card's toughness is 1 or greater, return it to the battlefield under its owner's control.","keywords":["Molting Exoskeleton"],"identifiers":{"scryfallOracleId":"ac81863b-10fe-44cb-bcd8-d704f89ff836"}}"###,
+    r###"{"name":"Alora, Cheerful Scout","manaCost":"{3}{G}{U}","manaValue":5.0,"type":"Legendary Creature — Halfling Rogue Scout","types":["Creature"],"subtypes":["Halfling","Rogue","Scout"],"supertypes":["Legendary"],"colors":["G","U"],"colorIdentity":["G","U"],"power":"4","toughness":"4","layout":"normal","text":"Whenever you attack, up to one target attacking creature can't be blocked this turn. At the beginning of the next end step, return that creature to its owner's hand. If you do, it perpetually gets +1/+1.","identifiers":{"scryfallOracleId":"73a2ed6f-6506-4287-9eb0-62269f5b2166"}}"###,
+    r###"{"name":"Angel of Unity","manaCost":"{1}{W}","manaValue":2.0,"type":"Creature — Angel Cleric","types":["Creature"],"subtypes":["Angel","Cleric"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"1","toughness":"3","layout":"normal","text":"Flying, lifelink\nWhenever this creature enters and whenever you cast a party spell, choose a party creature card in your hand. It perpetually gets +1/+1. (A party card or spell is a Cleric, Rogue, Warrior, or Wizard.)","keywords":["Flying","Lifelink"],"identifiers":{"scryfallOracleId":"b7416785-651a-403b-ae64-8bc7251b5d3a"}}"###,
+    r###"{"name":"Darigaaz's Whelp","manaCost":"{1}{B}","manaValue":2.0,"type":"Creature — Dragon","types":["Creature"],"subtypes":["Dragon"],"supertypes":[],"colors":["B"],"colorIdentity":["B","R"],"power":"2","toughness":"1","layout":"normal","text":"Kicker {1}{R}\nFlying\nWhenever you draw a Dragon card, it perpetually gets +1/+1.\nWhen Darigaaz's Whelp enters, if it was kicked, seek a Dragon card. Darigaaz's Whelp and that Dragon card each perpetually get +1/+1.","keywords":["Flying","Kicker","Seek"],"identifiers":{"scryfallOracleId":"84aefd30-87fd-4b33-8192-5eb8bc0ada08"}}"###,
+    r###"{"name":"Penregon Besieged","manaCost":"{1}{B}","manaValue":2.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"At the beginning of your end step, choose a creature with the least toughness among creatures your opponents control. It perpetually gets -1/-1.\nWhen your opponents control no creatures, sacrifice Penregon Besieged.","identifiers":{"scryfallOracleId":"2c483e01-7e07-46f3-be41-0dd987b76b5b"}}"###,
+    r###"{"name":"Scour the Scene","manaCost":"{W}{U}","manaValue":2.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["U","W"],"colorIdentity":["U","W"],"layout":"normal","text":"When Scour the Scene enters, create a 2/2 white and blue Detective creature token.\nWhenever you sacrifice an artifact, choose a creature card in your hand or a creature you control. It perpetually gets +1/+0.","identifiers":{"scryfallOracleId":"6c7d857c-25cc-4970-9cbc-c05f5e40a35a"}}"###,
+    r###"{"name":"Skyline Savior","manaCost":"{1}{W}{W}","manaValue":3.0,"type":"Creature — Angel","types":["Creature"],"subtypes":["Angel"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"3","toughness":"4","layout":"normal","text":"Flying\nWhen this creature enters, return a permanent you control to its owner's hand. If it's a non-Angel creature card, it perpetually gets +1/+1, gains flying, and becomes an Angel in addition to its other types.","keywords":["Flying"],"identifiers":{"scryfallOracleId":"7a10f50a-69dc-48a6-96c0-da4172eb8b81"}}"###,
+    r###"{"name":"Ghostfire","manaCost":"{2}{R}","manaValue":3.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["R"],"layout":"normal","text":"Ghostfire is colorless.\nGhostfire deals 3 damage to any target.","identifiers":{"scryfallOracleId":"3479a4e6-c67d-4958-8a47-43d3a2f69bb1"}}"###,
+    r###"{"name":"The Swamp Kitten","manaCost":"{3}{B}","manaValue":4.0,"type":"Legendary Creature — Cat","types":["Creature"],"subtypes":["Cat"],"supertypes":["Legendary"],"colors":["B"],"colorIdentity":["B"],"power":"2","toughness":"2","layout":"normal","text":"Land creatures and/or creatures you control with menace get +1/+1.\nAt the beginning of combat on your turn, target Swamp you control becomes a 0/0 black land creature and gains menace. It's still a land. Put a +1/+1 counter on it. (It can't be blocked except by two or more creatures. It's dark and scary.)","identifiers":{"scryfallOracleId":"eba38613-bb48-4d96-b1c8-c87f1a1f9446"}}"###,
+    r###"{"name":"Sword of the Meek","manaCost":"{2}","manaValue":2.0,"type":"Artifact — Equipment","types":["Artifact"],"subtypes":["Equipment"],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"Equipped creature gets +1/+2.\nEquip {2}\nWhenever a 1/1 creature you control enters, you may return this card from your graveyard to the battlefield, then attach it to that creature.","keywords":["Equip"],"identifiers":{"scryfallOracleId":"215c287d-56a5-46da-b49e-8524b6d320a4"}}"###,
+    r###"{"name":"Check for Traps","manaCost":"{1}{B}","manaValue":2.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Target opponent reveals their hand. You choose a nonland card from it. Exile that card. If an instant card or a card with flash is exiled this way, they lose 1 life. Otherwise, you lose 1 life.","identifiers":{"scryfallOracleId":"41b2ea88-b3b9-44f0-8886-7b2f37b22ebf"}}"###,
+    r###"{"name":"Diplomacy of the Wastes","manaCost":"{2}{B}","manaValue":3.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Target opponent reveals their hand. You choose a nonland card from it. That player discards that card. If you control a Warrior, that player loses 2 life.","identifiers":{"scryfallOracleId":"8b4670b9-6701-4ca6-afd7-256742267e86"}}"###,
+    r###"{"name":"Down for Repairs","manaCost":"{2}{B}","manaValue":3.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Target opponent reveals their hand. You choose a nonland card from it. That player discards that card. Destroy up to one target Attraction that player controls. (It's put into their junkyard.)","identifiers":{"scryfallOracleId":"455dc001-3f6d-4d44-afa7-0f83a2520baf"}}"###,
+    r###"{"name":"Oildeep Gearhulk","manaCost":"{U}{U}{B}{B}","manaValue":4.0,"type":"Artifact Creature — Construct","types":["Artifact","Creature"],"subtypes":["Construct"],"supertypes":[],"colors":["B","U"],"colorIdentity":["B","U"],"power":"4","toughness":"4","layout":"normal","text":"Lifelink, ward {1}\nWhen this creature enters, look at target player's hand. You may choose a card from it. If you do, that player discards that card, then draws a card.","keywords":["Lifelink","Ward"],"identifiers":{"scryfallOracleId":"aff0740f-51d5-41c7-ac13-97c298cfd743"}}"###,
+    r###"{"name":"Concealing Curtains // Revealing Eye","faceName":"Revealing Eye","side":"b","manaValue":1.0,"type":"Creature — Eye Horror","types":["Creature"],"subtypes":["Eye","Horror"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"3","toughness":"4","layout":"transform","text":"Menace\nWhen this creature transforms into Revealing Eye, target opponent reveals their hand. You may choose a nonland card from it. If you do, that player discards that card, then draws a card.","keywords":["Defender","Menace","Transform"],"identifiers":{"scryfallOracleId":"a3a56b02-7290-4352-a862-f2de608f2a86"}}"###,
+    r###"{"name":"Salt Vampire","manaCost":"{1}{B}","manaValue":2.0,"type":"Creature — Vampire Shapeshifter","types":["Creature"],"subtypes":["Vampire","Shapeshifter"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"2","toughness":"2","layout":"normal","text":"Lifelink\nWhen this creature enters, look at target opponent's hand. You may choose a nonland card from it. If you do, that player exiles that card, then draws a card.","keywords":["Lifelink"],"identifiers":{"scryfallOracleId":"31c7453e-33b8-4eb6-abac-28cdb35fb993"}}"###,
+    r###"{"name":"Tourach's Canticle","manaCost":"{3}{B}","manaValue":4.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"layout":"normal","text":"Target opponent reveals their hand. You choose a card from it. That player discards that card, then discards a card at random.","identifiers":{"scryfallOracleId":"738d2be9-c40b-4a9b-95ed-18d659080918"}}"###,
+    r###"{"name":"Vendilion Clique","manaCost":"{1}{U}{U}","manaValue":3.0,"type":"Legendary Creature — Faerie Wizard","types":["Creature"],"subtypes":["Faerie","Wizard"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"3","toughness":"1","layout":"normal","text":"Flash\nFlying\nWhen Vendilion Clique enters, look at target player's hand. You may choose a nonland card from it. If you do, that player reveals the chosen card, puts it on the bottom of their library, then draws a card.","keywords":["Flash","Flying"],"identifiers":{"scryfallOracleId":"244d4807-0802-41bc-9460-55ac38a28a72"}}"###,
+    r###"{"name":"Crude Abattoir // Unsavory Kitchen","faceName":"Unsavory Kitchen","side":"b","manaCost":"{2}{R}","manaValue":4.0,"type":"Enchantment — Room","types":["Enchantment"],"subtypes":["Room"],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"split","text":"Whenever a source you control deals noncombat damage to a creature, choose a creature card in your hand. It perpetually gets +2/+0 and gains haste.","identifiers":{"scryfallOracleId":"52963d93-a90c-41a6-984d-fbc49ebfb20a"}}"###,
+    r###"{"name":"Rowan, Scion of War","manaCost":"{1}{B}{R}","manaValue":3.0,"type":"Legendary Creature — Human Wizard","types":["Creature"],"subtypes":["Human","Wizard"],"supertypes":["Legendary"],"colors":["B","R"],"colorIdentity":["B","R"],"power":"4","toughness":"2","layout":"normal","text":"Menace\n{T}: Spells you cast this turn that are black and/or red cost {X} less to cast, where X is the amount of life you lost this turn. Activate only as a sorcery.","keywords":["Menace"],"identifiers":{"scryfallOracleId":"333c15c6-c8fd-4cdd-89d2-06b921edeb8b"}}"###,
+    r###"{"name":"Will, Scion of Peace","manaCost":"{1}{W}{U}","manaValue":3.0,"type":"Legendary Creature — Human Wizard","types":["Creature"],"subtypes":["Human","Wizard"],"supertypes":["Legendary"],"colors":["U","W"],"colorIdentity":["U","W"],"power":"2","toughness":"4","layout":"normal","text":"Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.","keywords":["Vigilance"],"identifiers":{"scryfallOracleId":"4ecb8653-db8c-468a-853d-420ff62a7a8a"}}"###,
+    r###"{"name":"Scavenging Ooze","manaCost":"{1}{G}","manaValue":2.0,"type":"Creature — Ooze","types":["Creature"],"subtypes":["Ooze"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"2","layout":"normal","text":"{G}: Exile target card from a graveyard. If it was a creature card, put a +1/+1 counter on this creature and you gain 1 life.","identifiers":{"scryfallOracleId":"1ff25f67-36a7-4cfa-a2b1-2135b5b6fb67"}}"###,
+    r###"{"name":"Mishra's Bauble","manaCost":"{0}","manaValue":0.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"{T}, Sacrifice this artifact: Look at the top card of target player's library. Draw a card at the beginning of the next turn's upkeep.","identifiers":{"scryfallOracleId":"63afc3d1-7653-476e-838f-fc18d4a62a21"}}"###,
+    r###"{"name":"Wrenn and Six","manaCost":"{R}{G}","manaValue":2.0,"type":"Legendary Planeswalker — Wrenn","types":["Planeswalker"],"subtypes":["Wrenn"],"supertypes":["Legendary"],"colors":["G","R"],"colorIdentity":["G","R"],"loyalty":"3","layout":"normal","text":"[+1]: Return up to one target land card from your graveyard to your hand.\n[−1]: Wrenn and Six deals 1 damage to any target.\n[−7]: You get an emblem with \"Instant and sorcery cards in your graveyard have retrace.\" (You may cast instant and sorcery cards from your graveyard by discarding a land card in addition to paying their other costs.)","identifiers":{"scryfallOracleId":"108ae90a-50fa-4cfd-b751-d630e41425fe"}}"###,
+];
+
+pub(super) fn export_route_repair_atomic(name: &str) -> engine::database::mtgjson::AtomicCard {
+    EXPORT_ROUTE_PRINTED
+        .iter()
+        .map(|record| {
+            serde_json::from_str::<engine::database::mtgjson::AtomicCard>(record).unwrap()
+        })
+        .find(|card| card.face_name.as_deref().unwrap_or(&card.name) == name)
+        .unwrap_or_else(|| panic!("missing pinned route fixture: {name}"))
+}
+
+fn export_route_repair_json() -> String {
+    use engine::database::synthesis::{build_oracle_face, build_oracle_face_multi};
+    let mut export = Map::new();
+    for record in EXPORT_ROUTE_PRINTED {
+        let card: engine::database::mtgjson::AtomicCard = serde_json::from_str(record).unwrap();
+        let face = if card.face_name.is_some() {
+            build_oracle_face_multi(&card, card.identifiers.scryfall_oracle_id.clone())
+        } else {
+            build_oracle_face(&card, card.identifiers.scryfall_oracle_id.clone())
+        };
+        let mut value = serde_json::to_value(&face).unwrap();
+        value["layout"] = serde_json::json!(card.layout);
+        value["face_index"] = serde_json::json!(usize::from(card.side.as_deref() == Some("b")));
+        export.insert(face.name.to_lowercase(), value);
+    }
+    serde_json::to_string(&export).unwrap()
+}
+
+pub(super) fn export_route_repair_db() -> CardDatabase {
+    CardDatabase::from_json_str(&export_route_repair_json()).unwrap()
+}
+
+#[test]
+fn replacement_priority_preserves_all_39_complete_pinned_faces_through_normal_loaders() {
+    let serialized = export_route_repair_json();
+    let from_string = CardDatabase::from_json_str(&serialized).unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "phase-replacement-routes-{}.json",
+        std::process::id()
+    ));
+    std::fs::write(&path, &serialized).unwrap();
+    let from_file = CardDatabase::from_export(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    for db in [&from_string, &from_file] {
+        for (name, expected_replacements) in [
+            ("Abandoned Campground", 1),
+            ("Arlinn, Voice of the Pack", 1),
+            ("Ashling's Prerogative", 2),
+            ("Bleeding Woods", 1),
+            ("Bloatfly Swarm", 2),
+            ("Blood Scrivener", 1),
+            ("Bountiful Promenade", 1),
+            ("Buzzing Whack-a-Doodle", 1),
+            ("Camato Scout", 1),
+            ("Etched Cornfield", 1),
+            ("Jace, Wielder of Mysteries", 1),
+            ("Laboratory Maniac", 1),
+            ("Lakeside Shack", 1),
+            ("Living Conundrum", 1),
+            ("Luxury Suite", 1),
+            ("Melira's Keepers", 1),
+            ("Morphic Pool", 1),
+            ("Murky Sewer", 1),
+            ("Neglected Manor", 1),
+            ("Oathsworn Knight", 2),
+            ("Ormos, Archive Keeper", 1),
+            ("Out of the Tombs", 1),
+            ("Peculiar Lighthouse", 1),
+            ("Phial of Galadriel", 2),
+            ("Polukranos, Unchained", 3),
+            ("Raucous Carnival", 1),
+            ("Razortrap Gorge", 1),
+            ("Rejuvenating Springs", 1),
+            ("Sea of Clouds", 1),
+            ("Spectator Seating", 1),
+            ("Spire Garden", 1),
+            ("Strangled Cemetery", 1),
+            ("Tatterkite", 1),
+            ("Thought Sponge", 1),
+            ("Training Center", 1),
+            ("Ugin's Conjurant", 2),
+            ("Undergrowth Champion", 1),
+            ("Undergrowth Stadium", 1),
+            ("Vault of Champions", 1),
+        ] {
+            let atomic = export_route_repair_atomic(name);
+            let face = db.get_face_by_name(name).unwrap();
+            assert_eq!(
+                face.oracle_text.as_deref(),
+                atomic.text.as_deref(),
+                "{name}"
+            );
+            assert_eq!(
+                face.replacements.len(),
+                expected_replacements,
+                "complete replacement route: {name}: {face:#?}"
+            );
+        }
+        let ashling = db.get_face_by_name("Ashling's Prerogative").unwrap();
+        assert_eq!(ashling.static_abilities.len(), 1);
+        assert!(
+            ashling.abilities.is_empty(),
+            "all enters/parity clauses must have their standing owners"
+        );
+        let cycle = db.get_face_by_name("Cycle of Life").unwrap();
+        assert_eq!(cycle.abilities.len(), 1);
+        assert!(matches!(
+            cycle.abilities[0].effect.as_ref(),
+            Effect::Unimplemented { .. }
+        ));
+        assert!(
+            cycle.abilities[0].sub_ability.is_none(),
+            "a delayed rider cannot survive its unrepresented target restriction"
+        );
+        assert!(cycle.abilities[0]
+            .effect
+            .unimplemented_description()
+            .unwrap()
+            .contains("you cast this turn"));
+        let divine = db.get_face_by_name("Divine Sacrament").unwrap();
+        assert_eq!(
+            divine.static_abilities.len(),
+            2,
+            "both standing bonuses survive"
+        );
+        assert!(
+            divine.abilities.is_empty(),
+            "threshold is a live standing predicate"
+        );
+        assert!(divine
+            .static_abilities
+            .iter()
+            .any(|definition| definition.condition.is_some()));
+        let ghostfire = db.get_face_by_name("Ghostfire").unwrap();
+        assert!(ghostfire
+            .static_abilities
+            .iter()
+            .any(|definition| definition.characteristic_defining
+                && definition.affected == Some(TargetFilter::SelfRef)));
+        assert!(matches!(
+            ghostfire.abilities[0].effect.as_ref(),
+            Effect::DealDamage { .. }
+        ));
+        for name in ["Rowan, Scion of War", "Will, Scion of Peace"] {
+            let face = db.get_face_by_name(name).unwrap();
+            assert_eq!(face.abilities.len(), 1);
+            assert!(
+                matches!(
+                    face.abilities[0].effect.as_ref(),
+                    Effect::GenericEffect {
+                        duration: Some(Duration::UntilEndOfTurn),
+                        ..
+                    }
+                ),
+                "the complete temporary reducer must reach its resolving owner: {name}"
+            );
+        }
+        let wrenn = db.get_face_by_name("Wrenn and Six").unwrap();
+        assert_eq!(wrenn.abilities.len(), 3);
+        assert!(wrenn
+            .abilities
+            .iter()
+            .all(|ability| ability.kind == engine::types::ability::AbilityKind::Activated));
+        assert!(
+            matches!(
+                wrenn.abilities[2].effect.as_ref(),
+                Effect::CreateEmblem { .. }
+            ),
+            "the quoted graveyard keyword belongs to an emblem created by the loyalty ability"
+        );
+    }
+}
+
+#[test]
+fn all_17_printed_bounded_grants_keep_their_windows_in_normal_export() {
+    fn inspect(value: &Value, expected: &Value, seen: &mut usize) {
+        match value {
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("GenericEffect") {
+                    let relevant =
+                        object["static_abilities"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|definition| {
+                                definition["mode"] == "CantBeBlocked"
+                                    || definition["modifications"]
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .any(|modification| modification["type"] == "AddKeyword")
+                            });
+                    if relevant {
+                        *seen += 1;
+                        assert_eq!(
+                            &object["duration"], expected,
+                            "the grant has its own printed window: {value}"
+                        );
+                    }
+                }
+                for child in object.values() {
+                    inspect(child, expected, seen);
+                }
+            }
+            Value::Array(children) => {
+                for child in children {
+                    inspect(child, expected, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+    let db = export_route_repair_db();
+    for name in [
+        "Besmirch",
+        "Blufferfish",
+        "Garruk, Curse Breaker",
+        "Giant Slug",
+        "Grab the Reins",
+        "Haunted One",
+        "Invisible Woman",
+        "Kang Dynasty",
+        "Legion Leadership",
+        "Okoye, Mighty and Adored",
+        "Perch Protection",
+        "Rediscover the Way",
+        "Summon: Brynhildr",
+        "Teferi's Protection",
+        "The Last Ronin",
+        "Traitor's Clutch",
+        "World War Hulk",
+    ] {
+        let face = db.get_face_by_name(name).unwrap();
+        let mut seen = 0;
+        let expected = if matches!(name, "Perch Protection" | "Teferi's Protection") {
+            serde_json::json!({"UntilNextTurnOf": {"player": {"type": "Controller"}}})
+        } else {
+            serde_json::json!("UntilEndOfTurn")
+        };
+        inspect(&serde_json::to_value(face).unwrap(), &expected, &mut seen);
+        assert!(seen > 0, "positive bounded-grant owner reach guard: {name}");
+    }
+}
+
+#[test]
+fn hand_reveal_player_references_keep_their_declared_identity_in_normal_export() {
+    fn inspect(
+        value: &Value,
+        declarations: &mut std::collections::BTreeSet<u64>,
+        references: &mut Vec<u64>,
+    ) {
+        match value {
+            Value::Object(object) => {
+                if let Some(group) = object.get("declares_chosen_group").and_then(Value::as_u64) {
+                    declarations.insert(group);
+                }
+                if object.get("type").and_then(Value::as_str) == Some("DeclaredPlayer") {
+                    references.push(object["group"].as_u64().unwrap());
+                }
+                for child in object.values() {
+                    inspect(child, declarations, references);
+                }
+            }
+            Value::Array(children) => {
+                for child in children {
+                    inspect(child, declarations, references);
+                }
+            }
+            _ => {}
+        }
+    }
+    let db = export_route_repair_db();
+    for name in [
+        "Check for Traps",
+        "Diplomacy of the Wastes",
+        "Down for Repairs",
+        "Oildeep Gearhulk",
+        "Revealing Eye",
+        "Salt Vampire",
+        "Tourach's Canticle",
+        "Vendilion Clique",
+    ] {
+        let face = db.get_face_by_name(name).unwrap();
+        let mut declarations = std::collections::BTreeSet::new();
+        let mut references = Vec::new();
+        inspect(
+            &serde_json::to_value(face).unwrap(),
+            &mut declarations,
+            &mut references,
+        );
+        assert!(
+            !declarations.is_empty() && !references.is_empty(),
+            "positive player-binding reach guard: {name}"
+        );
+        assert!(
+            references.iter().all(|group| declarations.contains(group)),
+            "orphan player binding on {name}: {declarations:?}/{references:?}"
+        );
+    }
+}
+
+#[test]
+fn complete_selected_and_self_perpetual_subjects_survive_normal_export() {
+    fn inspect(value: &Value, edits: &mut usize, choices: &mut usize) {
+        match value {
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("ApplyPerpetual") {
+                    *edits += 1;
+                    assert_ne!(
+                        object["target"]["type"], "Any",
+                        "a selected edit cannot become a broadcast"
+                    );
+                }
+                if object.get("type").and_then(Value::as_str) == Some("ChooseFromZone") {
+                    *choices += 1;
+                }
+                for child in object.values() {
+                    inspect(child, edits, choices);
+                }
+            }
+            Value::Array(children) => {
+                for child in children {
+                    inspect(child, edits, choices);
+                }
+            }
+            _ => {}
+        }
+    }
+    let db = export_route_repair_db();
+    for name in [
+        "Sap Vitality",
+        "Prairie Survivalist",
+        "Veteran Charger",
+        "Perennial Gravewarden",
+        "Tomakul Phoenix",
+        "Hook Horror",
+        "Alora, Cheerful Scout",
+        "Unsavory Kitchen",
+    ] {
+        let face = db.get_face_by_name(name).unwrap();
+        let mut edits = 0;
+        let mut choices = 0;
+        inspect(
+            &serde_json::to_value(face).unwrap(),
+            &mut edits,
+            &mut choices,
+        );
+        assert!(edits > 0, "positive complete edit owner: {name}");
+        if matches!(
+            name,
+            "Sap Vitality" | "Prairie Survivalist" | "Veteran Charger" | "Unsavory Kitchen"
+        ) {
+            assert!(
+                choices > 0,
+                "the selected hand authority must survive: {name}"
+            );
+        }
+    }
+}

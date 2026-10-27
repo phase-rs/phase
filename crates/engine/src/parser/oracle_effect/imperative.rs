@@ -4150,8 +4150,9 @@ fn parse_hand_reveal_target_and_card_filter<'a>(
             let mut hand_ctx = ctx.clone();
             hand_ctx.chain_prior_hand_reveal_target = Some(target.clone());
             let choice_filter = super::parse_hand_choice_filter(choice, &mut hand_ctx)?;
-            hand_ctx.chain_prior_hand_reveal_target = ctx.chain_prior_hand_reveal_target.clone();
-            *ctx = hand_ctx;
+            // CR 608.2c: this is a filter-validation probe, not a second
+            // hand-choice producer. Its speculative player-group allocation
+            // must not replace the enclosing reveal's declared identity.
             match choice_filter {
                 Some(Some(filter)) => return Ok((target, filter)),
                 Some(None) => return Ok((target, TargetFilter::Typed(TypedFilter::card()))),
@@ -7828,6 +7829,18 @@ fn parse_attach_recipient<'a>(
     // Equipment to it"). Pre-existing "her" / "him" → SelfRef carve-out is
     // preserved for legacy attach-to-self phrasings (e.g. "attach to her").
     let (target, rest) = parse_target_with_ctx(text, ctx);
+    // CR 608.2k + CR 301.5c: a self-returned attachment and the creature
+    // named by its trigger are separate objects. A demonstrative host must
+    // retain the event/parent host authority rather than inherit the moved
+    // attachment's bare-pronoun binding.
+    if target == TargetFilter::SelfRef
+        && attachment == Some(&TargetFilter::SelfRef)
+        && ctx.in_trigger
+        && super::validated_that_subject_rest(&text.to_lowercase())
+            .is_some_and(|rest| rest.trim().is_empty())
+    {
+        return parse_target_with_ctx(text, &mut ctx.clone_player_antecedents());
+    }
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();
         let lower = trimmed.to_ascii_lowercase();

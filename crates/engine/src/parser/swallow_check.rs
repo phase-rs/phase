@@ -4655,6 +4655,30 @@ fn distributed_x_cost_if_is_only_if_marker(stripped: &str, evidence: &UnitEviden
     !has_other_if
 }
 
+/// CR 601.2f: a spell's own keyword restriction can live in its cost filter
+/// instead of a static condition slot. Remove only that complete represented
+/// clause, so another condition in the unit remains visible.
+fn cost_filter_keyword_if_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    let Some((before, keyword, after)) = scan_preceded(stripped, |input| {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("if it has "),
+            tag("if this spell has "),
+        ))
+        .parse(input)?;
+        let (input, keyword) =
+            super::oracle_nom::primitives::parse_alt_cost_keyword_name_to_kind(input)?;
+        nom::combinator::peek(alt((value((), tag(".")), value((), eof)))).parse(input)?;
+        Ok((input, keyword))
+    }) else {
+        return false;
+    };
+    if !evidence.cost_filter_requires_keyword(keyword) {
+        return false;
+    }
+    let residual = format!("{before}{after}");
+    !scan_contains(&residual, "if ")
+}
+
 // ── Detector G: Condition_If ────────────────────────────────────────────
 
 /// CR 608.2c: "if [condition], [effect]" — conditional gate. Must be
@@ -4803,6 +4827,9 @@ fn detect_condition_if(
     // event filter. Text-scoped: suppresses only when that clause is the
     // unit's only bare " if ".
     if distributed_x_cost_if_is_only_if_marker(&stripped, evidence) {
+        return;
+    }
+    if cost_filter_keyword_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -16122,6 +16149,66 @@ mod distributed_x_cost_if_exemption_tests {
             &mut diagnostics,
         );
         has_condition_if_swallow(&diagnostics)
+    }
+
+    #[test]
+    fn folded_spell_keyword_cost_condition_is_scoped_and_exact() {
+        const ORACLE: &str = "Each creature spell you cast costs {1} less to cast if it has mutate.\nWhenever you cast a creature spell, if it has mutate, draw a card, then discard a card.";
+        const COST_LINE: &str =
+            "each creature spell you cast costs {1} less to cast if it has mutate.";
+        let parsed = parse_oracle_text(
+            ORACLE,
+            "Pollywog Symbiote",
+            &[],
+            &["Creature".into()],
+            &["Frog".into()],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach: the normal audit must run"
+        );
+        assert!(
+            !has_condition_if_swallow(&parsed.parse_warnings),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let root = serde_json::to_value(&parsed).unwrap();
+        let evidence = UnitEvidence::of(&parsed);
+        assert!(cost_filter_keyword_if_is_only_if_marker(
+            COST_LINE, &evidence
+        ));
+        assert!(!cost_filter_keyword_if_is_only_if_marker(
+            "each creature spell you cast costs {1} less to cast if it has mutate. draw a card if you control an artifact.",
+            &evidence,
+        ));
+        assert!(!cost_filter_keyword_if_is_only_if_marker(
+            "each creature spell you cast costs {1} less to cast if it has cycling.",
+            &evidence,
+        ));
+        assert!(!cost_filter_keyword_if_is_only_if_marker(
+            "each creature spell you cast costs {1} less to cast if it has mutate and flying.",
+            &evidence,
+        ));
+        let mut scoped_cost = parsed.clone();
+        scoped_cost.triggers.clear();
+        let scoped_json = serde_json::to_string(&scoped_cost).unwrap();
+        assert!(!condition_if_fires(COST_LINE, &scoped_json));
+        assert!(condition_if_fires(
+            "each creature spell you cast costs {1} less to cast if it has mutate. draw a card if you control an artifact.",
+            &scoped_json,
+        ), "the real detector must keep the independent if-clause visible in this cost unit");
+        let mut absent = root.clone();
+        absent["statics"] = serde_json::json!([]);
+        let absent = UnitEvidence::from_json_for_test(&absent.to_string());
+        assert!(!cost_filter_keyword_if_is_only_if_marker(
+            COST_LINE, &absent
+        ));
+        let child = serde_json::json!({"statics": [], "abilities": [{"effect": {"type": "GenericEffect", "static_abilities": root["statics"]}}]});
+        let child = UnitEvidence::from_json_for_test(&child.to_string());
+        assert!(
+            !cost_filter_keyword_if_is_only_if_marker(COST_LINE, &child),
+            "registered child cost filter cannot own the parent's if-clause"
+        );
     }
 
     /// CR 603.4: Unbound Flourishing's line-2 intervening-if is folded into each

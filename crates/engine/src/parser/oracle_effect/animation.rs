@@ -140,8 +140,27 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     }
 
     if let Some((descriptor, power, toughness, keywords)) = split_animation_base_pt_clause(rest) {
-        spec.power = Some(power);
-        spec.toughness = Some(toughness);
+        // CR 107.3 + CR 613.4b: the same base-P/T pair can contain a bound X.
+        // Preserve an explicit where-X authority before the cost-X fallback.
+        let bound_x = spec.dynamic_power.clone().unwrap_or(QuantityExpr::Ref {
+            qty: QuantityRef::CostXPaid,
+        });
+        for (value, fixed, dynamic) in [
+            (power, &mut spec.power, &mut spec.dynamic_power),
+            (toughness, &mut spec.toughness, &mut spec.dynamic_toughness),
+        ] {
+            match value {
+                PtValue::Fixed(value) => {
+                    *fixed = Some(value);
+                    *dynamic = None;
+                }
+                PtValue::Variable(variable) if variable.eq_ignore_ascii_case("x") => {
+                    *dynamic = Some(bound_x.clone());
+                }
+                PtValue::Quantity(value) => *dynamic = Some(value),
+                _ => return None,
+            }
+        }
         spec.keywords.extend(keywords);
         rest = descriptor;
     }
@@ -438,7 +457,7 @@ fn parse_cost_x_become_pt_prefix(text: &str) -> Option<&str> {
 /// CR 613.1d/f/g: animation clauses can simultaneously change types, grant
 /// keyword abilities, and set base P/T. Keep those written components together
 /// so later lowering emits Layer 4, Layer 6, and Layer 7 modifications.
-fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32, Vec<Keyword>)> {
+fn split_animation_base_pt_clause(text: &str) -> Option<(&str, PtValue, PtValue, Vec<Keyword>)> {
     let lower = text.to_lowercase();
     let (rest, (descriptor_lower, power, toughness, keywords)) =
         parse_animation_base_pt_clause(&lower).ok()?;
@@ -447,14 +466,12 @@ fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32, Vec<Key
     Some((descriptor, power, toughness, keywords))
 }
 
-fn parse_animation_base_pt_clause(input: &str) -> OracleResult<'_, (&str, i32, i32, Vec<Keyword>)> {
+fn parse_animation_base_pt_clause(
+    input: &str,
+) -> OracleResult<'_, (&str, PtValue, PtValue, Vec<Keyword>)> {
     let (rest, descriptor) = take_until(" with base power and toughness ").parse(input)?;
     let (rest, _) = tag(" with base power and toughness ").parse(rest)?;
     let (rest, (power, toughness)) = nom_primitives::parse_pt_value.parse(rest)?;
-    let (power, toughness) = match (power, toughness) {
-        (PtValue::Fixed(power), PtValue::Fixed(toughness)) => (power, toughness),
-        _ => return Err(oracle_err(rest)),
-    };
     let (rest, keywords) = opt(parse_base_pt_trailing_keywords).parse(rest)?;
     Ok((
         rest,
@@ -1418,6 +1435,47 @@ mod test_den_bugbear {
                 keyword: Keyword::Lifelink,
             })
         );
+    }
+
+    #[test]
+    fn animation_trailing_base_x_pair_keeps_its_chosen_number_authority() {
+        use crate::types::ability::ContinuousModification as CM;
+        let spec = parse_animation_spec(
+            "an artifact creature with base power and toughness X/X, where X is the chosen number",
+            &mut ParseContext::default(),
+        )
+        .expect("the complete bound-X animation must parse");
+        let modifications = animation_modifications(&spec);
+        for expected in [
+            CM::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ChosenNumber,
+                },
+            },
+            CM::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ChosenNumber,
+                },
+            },
+        ] {
+            assert!(modifications.contains(&expected), "{modifications:?}");
+        }
+        assert!(!modifications.iter().any(|modification| matches!(
+            modification,
+            CM::SetPowerDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            } | CM::SetToughnessDynamic {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid
+                }
+            }
+        )));
+        assert!(parse_animation_spec(
+            "an artifact creature with base power and toughness X/X, where X is an unknown quantity",
+            &mut ParseContext::default(),
+        ).is_none());
     }
 
     #[test]

@@ -3810,7 +3810,7 @@ fn parse_type_phrase_folding_core<'a>(
                 if final_rest.len() == sep_text.len() {
                     continue;
                 }
-                if *separator == "or "
+                if matches!(*separator, "or " | "and/or ")
                     && card_type.is_none()
                     && subtype.is_none()
                     && adjective_type_filters.is_empty()
@@ -3818,7 +3818,7 @@ fn parse_type_phrase_folding_core<'a>(
                     && neg_type_filters.is_empty()
                 {
                     if let Some(union) =
-                        parse_color_or_type_union(&properties, &other_filter, after_trimmed)
+                        parse_property_or_type_union(&properties, &other_filter, after_trimmed)
                     {
                         return (union, final_rest);
                     }
@@ -5563,24 +5563,24 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
     distribute_properties_to_or(combined)
 }
 
-/// CR 105.2 + CR 205.2a: "<color> or <type> <noun>" ("black or artifact
-/// creature") joins two kinds of the same noun: the noun of that color, or the
-/// noun with that type. `left_props` hold the color-only left leg, `right` is
-/// the parsed right leg and `right_text` its lowercase source. Returns `None`
-/// unless the left leg is a color and the right leg leads with a type word.
+/// CR 105.2 + CR 205.2a + CR 205.4b: "<color/supertype> or <type> <noun>"
+/// joins independent kinds of the same noun. The property-only leg receives
+/// the shared noun, while the type adjective remains local to the right leg.
 ///
 /// Skips `distribute_core_type_to_or`: backfilling the color-only leg with the
 /// right leg's whole type list would include the type adjective and make the
 /// two legs identical.
-fn parse_color_or_type_union(
+fn parse_property_or_type_union(
     left_props: &[FilterProp],
     right: &TargetFilter,
     right_text: &str,
 ) -> Option<TargetFilter> {
-    if !left_props
-        .iter()
-        .any(|prop| matches!(prop, FilterProp::HasColor { .. }))
-    {
+    if !left_props.iter().any(|prop| {
+        matches!(
+            prop,
+            FilterProp::HasColor { .. } | FilterProp::HasSupertype { .. }
+        )
+    }) {
         return None;
     }
     let TargetFilter::Typed(right_typed) = right else {
@@ -7858,23 +7858,7 @@ pub(crate) fn parse_mana_value_suffix(
             Err(nom::Err::Error(_)) => None,
             Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
         };
-        let (qty, after) = if let Some((after, mut qty)) = bounded {
-            if ctx.trigger_zone_change.as_pair()
-                == Some((
-                    crate::types::zones::Zone::Battlefield,
-                    crate::types::zones::Zone::Graveyard,
-                ))
-                && ctx.declared_target_slots.is_empty()
-                && !ctx.parent_target_available
-            {
-                if let QuantityRef::CountersOn {
-                    scope: scope @ ObjectScope::Target,
-                    ..
-                } = &mut qty
-                {
-                    *scope = ObjectScope::EventSource;
-                }
-            }
+        let (mut qty, after) = if let Some((after, qty)) = bounded {
             (qty, after)
         } else if let Ok((a2, _)) = tag::<_, _, Vbe>("that ").parse(a) {
             // CR 120.3: "that damage" — the damage amount captured by the trigger
@@ -7931,6 +7915,25 @@ pub(crate) fn parse_mana_value_suffix(
             )?;
             (qty, &a[phrase_end..])
         };
+        // CR 603.10a + CR 608.2h: every quantity-reader route shares the
+        // death-event authority. The punctuation-bounded fallback is also used
+        // by complete card bodies, so binding only the bounded reader loses LKI.
+        if ctx.trigger_zone_change.as_pair()
+            == Some((
+                crate::types::zones::Zone::Battlefield,
+                crate::types::zones::Zone::Graveyard,
+            ))
+            && ctx.declared_target_slots.is_empty()
+            && !ctx.parent_target_available
+        {
+            if let QuantityRef::CountersOn {
+                scope: scope @ ObjectScope::Target,
+                ..
+            } = &mut qty
+            {
+                *scope = ObjectScope::EventSource;
+            }
+        }
         let make_value = |off: i32| {
             if off == 0 {
                 QuantityExpr::Ref { qty }
@@ -9924,10 +9927,11 @@ pub(crate) fn parse_that_clause_suffix<'a>(
         if let Ok((mut rest, mut kinds)) = parse_attachment_kind_disjunction(after_intro) {
             let mut controller = None;
             if let Ok((after_by, _)) = tag::<_, _, OracleError<'_>>(" by ").parse(rest) {
+                let (after_by, _) = opt(nom_primitives::parse_article).parse(after_by).ok()?;
                 let (after_kinds, specified_kinds) = nom::multi::separated_list1(
                     tag::<_, _, OracleError<'_>>(" or "),
                     alt((
-                        value(AttachmentKind::Aura, tag("auras")),
+                        value(AttachmentKind::Aura, alt((tag("auras"), tag("aura")))),
                         value(AttachmentKind::Equipment, tag("equipment")),
                     )),
                 )

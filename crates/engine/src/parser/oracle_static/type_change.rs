@@ -520,16 +520,21 @@ fn animated_additive_span_pt_and_keywords(
     {
         return Vec::new();
     }
-    // This owner admits the complete additive compound. Bound its leading
-    // animated descriptor before asking the descriptor parser to consume it.
-    let descriptor = nom_primitives::scan_split_at_phrase(span_lower, |input| {
-        tag::<_, _, OracleError<'_>>("and ").parse(input)
-    })
-    .map_or(span, |(prefix, _)| span[..prefix.trim_end().len()].trim());
-    let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
-        descriptor,
-        &mut ParseContext::default(),
-    ) else {
+    let Some(spec) =
+        super::oracle_effect::animation::parse_animation_spec(span, &mut ParseContext::default())
+            .or_else(|| {
+                // Keep a complete keyword list with its animation. Only after that
+                // strict descriptor declines may the additive compound owner bound its
+                // leading animation (Life and Limb's "and Forest lands" companion).
+                let (prefix, _) = nom_primitives::scan_split_at_phrase(span_lower, |input| {
+                    tag::<_, _, OracleError<'_>>("and ").parse(input)
+                })?;
+                super::oracle_effect::animation::parse_animation_spec(
+                    span[..prefix.trim_end().len()].trim(),
+                    &mut ParseContext::default(),
+                )
+            })
+    else {
         return Vec::new();
     };
     // Keep ONLY the two axes the word-split cannot produce. Types, subtypes,

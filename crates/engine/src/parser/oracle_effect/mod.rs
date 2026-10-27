@@ -5710,7 +5710,15 @@ fn try_parse_temporary_spell_cost_modification(tp: TextPair<'_>) -> Option<Parse
         return None;
     }
 
-    let static_def = super::oracle_static::parse_static_line(tp.original)?;
+    let normalized = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) =
+            tag::<_, _, OracleError<'_>>("spells you cast this turn that are ").parse(input)?;
+        let (input, descriptor) = terminated(take_until(" cost"), tag(" cost")).parse(input)?;
+        Ok((input, descriptor))
+    })
+    .map(|(descriptor, predicate)| format!("{descriptor} spells you cast cost{predicate}"));
+    let static_def =
+        super::oracle_static::parse_static_line(normalized.as_deref().unwrap_or(tp.original))?;
     if !matches!(static_def.mode, StaticMode::ModifyCost { .. }) {
         return None;
     }
@@ -9437,6 +9445,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
                 }
             ) || ctx.object_pronoun_ref.is_some()
                 || ctx.parent_target_available
+                || (ctx.in_trigger && ctx.subject == Some(TargetFilter::SelfRef))
         })
     {
         let mut effect = effect;
@@ -9444,6 +9453,11 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             if matches!(target, TargetFilter::ParentTarget) {
                 if let Some(reference) = &ctx.object_pronoun_ref {
                     *target = reference.clone();
+                } else if !ctx.parent_target_available
+                    && ctx.in_trigger
+                    && ctx.subject == Some(TargetFilter::SelfRef)
+                {
+                    *target = TargetFilter::SelfRef;
                 }
             }
         }
@@ -13540,10 +13554,17 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Opt
 
     // Anaphoric back-reference: "it perpetually gets +1/+0".
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
-        let target = ctx.object_pronoun_ref.clone().or_else(|| {
-            ctx.parent_target_available
-                .then_some(TargetFilter::ParentTarget)
-        })?;
+        let target = ctx
+            .object_pronoun_ref
+            .clone()
+            .or_else(|| {
+                ctx.parent_target_available
+                    .then_some(TargetFilter::ParentTarget)
+            })
+            .or_else(|| {
+                (ctx.in_trigger && ctx.subject == Some(TargetFilter::SelfRef))
+                    .then_some(TargetFilter::SelfRef)
+            })?;
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gets "),
             tag::<_, _, OracleError<'_>>("get "),
@@ -27295,6 +27316,17 @@ fn clause_announces_player(effect: &Effect) -> bool {
 /// (e.g., the immediate-prior-clause anaphor rewrite) depend on the
 /// leaf-only semantics.
 fn has_typed_target_widened(effect: &Effect) -> bool {
+    // CR 608.2d + CR 608.2c: a single direct zone choice publishes the
+    // chosen card as the continuation's ParentTarget. The empty-choice
+    // runtime path explicitly clears that referent.
+    if let Effect::ChooseFromZone {
+        count: 1,
+        filter: Some(filter),
+        ..
+    } = effect
+    {
+        return filter_introduces_typed_object(filter);
+    }
     let target = match effect {
         Effect::PutCounter { target, .. }
         | Effect::Pump { target, .. }
@@ -43765,6 +43797,20 @@ fn parse_effect_chain_ir_body(
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
     let complete_lower = text.to_lowercase();
+    // CR 608.2b + CR 608.2c: an unrepresentable target-history restriction
+    // invalidates the complete dependent program, including delayed riders.
+    if subject::find_predicate_start(&complete_lower).is_some_and(|predicate_start| {
+        subject::subject_requires_unrepresented_cast_history(&complete_lower[..predicate_start])
+    }) {
+        return EffectChainIr::single_clause(
+            text,
+            kind,
+            parsed_clause(Effect::unimplemented("target_cast_history", text)),
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        );
+    }
     if let Some(mut effect) =
         try_parse_perpetual_modify_pt_dynamic(TextPair::new(text, &complete_lower))
     {
@@ -43775,6 +43821,10 @@ fn parse_effect_chain_ir_body(
                     .or_else(|| {
                         ctx.parent_target_available
                             .then_some(TargetFilter::ParentTarget)
+                    })
+                    .or_else(|| {
+                        (ctx.in_trigger && ctx.subject == Some(TargetFilter::SelfRef))
+                            .then_some(TargetFilter::SelfRef)
                     })
                     .map(|reference| *target = reference)
                     .is_some()
@@ -44160,7 +44210,14 @@ fn parse_effect_chain_ir_body(
             .leading_duration
             .as_ref()
             .map(|_| (builder.clauses().len(), chunk.text.clone()));
-        builder.set_pending_leading_duration(chunk.leading_duration.clone());
+        // CR 611.2a: a leading window governs every coordinated grant in
+        // this sentence, including fragments whose prefix stayed on the head.
+        builder.set_pending_leading_duration(
+            chunk
+                .leading_duration
+                .clone()
+                .or_else(|| sentence_leading_duration.get(chunk_idx).cloned().flatten()),
+        );
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
         // A refused qualified selection did not remove any member of its
         // immediately preceding produced cohort. Keep the actual look/reveal
@@ -44792,8 +44849,12 @@ fn parse_effect_chain_ir_body(
             // (Brilliance Unleashed) must bind the animation to the returned object's
             // lifetime, not `Permanent` (see helper doc).
             rebind_reanimate_animation_until_leaves(&mut else_def);
-            // Check whether a prior clause has a condition — lowering will attach as else_ability
-            let has_condition = builder.clauses().iter().any(|c| c.condition.is_some());
+            // CR 608.2c: either condition carrier anchors the printed alternative;
+            // lowering reads the same effective condition when attaching else_ability.
+            let has_condition = builder
+                .clauses()
+                .iter()
+                .any(|c| c.condition.is_some() || c.parsed.condition.is_some());
             // CR 608.2d + CR 101.4: a standalone "If no one does, X" reward on an
             // "any opponent/player may" head (Browbeat, Book Burning) has no
             // explicit "if a player does" condition clause, but the may-head IS a
@@ -47119,7 +47180,10 @@ fn parse_effect_chain_ir_body(
             // stated by an earlier chunk cannot promote a later capped chunk that
             // states none — the fail-open direction, pinned by
             // `a_stated_duration_does_not_leak_into_the_next_clause`.
-            stated_clause_duration: chunk.leading_duration.clone(),
+            stated_clause_duration: chunk
+                .leading_duration
+                .clone()
+                .or_else(|| sentence_leading_duration.get(chunk_idx).cloned().flatten()),
             // CR 701.42a: propagate the staged meld partner so a reflexive
             // "exile them, then meld them into R" sub-clause parsed inside this
             // chunk (Vanille's "If you do, …" body, which chunks to a single

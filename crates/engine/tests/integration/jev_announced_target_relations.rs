@@ -24,6 +24,100 @@ const COMET: &str = "Multikicker {1} (You may pay an additional {1} any number o
 const CONE: &str = "Cone of Flame deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target.";
 const LORD: &str = "Menace\nYour opponents can't gain life.\nWhenever a player casts their first spell each turn, choose another target player. The Lord of Pain deals damage equal to that spell's mana value to the chosen player.";
 
+#[test]
+fn kaima_end_step_checks_opponent_creatures_and_aura_controller_at_resolution() {
+    use engine::game::effects::attach::attach_to;
+    let database = super::search_result_conditional_destination::load_finite_printed_records(
+        EVENT_TARGET_COHORT_PRINTED,
+    );
+    let face = database
+        .get_face_by_name("Kaima, the Fractured Calm")
+        .unwrap();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    let kaima = scenario.add_creature(P0, &face.name, 3, 3).id();
+    let marked = scenario.add_creature(P1, "Marked opponent", 2, 2).id();
+    let late = scenario
+        .add_creature(P1, "Aura moved here before resolution", 2, 2)
+        .id();
+    let foreign_aura_host = scenario.add_creature(P1, "Opponent Aura only", 2, 2).id();
+    let equipment_host = scenario.add_creature(P1, "Equipment only", 2, 2).id();
+    let unmarked = scenario.add_creature(P1, "No attachment", 2, 2).id();
+    let own = scenario.add_creature(P0, "Own marked creature", 2, 2).id();
+    let own_aura = scenario
+        .add_enchantment_from_oracle(P0, "Own Aura", "Enchant creature")
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let moving_aura = scenario
+        .add_enchantment_from_oracle(P0, "Moving Aura", "Enchant creature")
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let opponent_aura = scenario
+        .add_enchantment_from_oracle(P1, "Foreign Aura", "Enchant creature")
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let own_host_aura = scenario
+        .add_enchantment_from_oracle(P0, "Own host Aura", "Enchant creature")
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let equipment = scenario
+        .add_artifact_from_oracle(P0, "Own Equipment", "Equip {1}")
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+    engine::game::printed_cards::apply_card_face_to_object(
+        runner.state_mut().objects.get_mut(&kaima).unwrap(),
+        face,
+    );
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), kaima);
+    for (attachment, host) in [
+        (own_aura, marked),
+        (moving_aura, marked),
+        (opponent_aura, foreign_aura_host),
+        (own_host_aura, own),
+        (equipment, equipment_host),
+    ] {
+        attach_to(runner.state_mut(), attachment, host);
+        assert_eq!(
+            runner.state().objects[&attachment].attached_to,
+            Some(engine::game::game_object::AttachTarget::Object(host))
+        );
+    }
+    for _ in 0..16 {
+        if !runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().phase, Phase::End);
+    assert!(
+        !runner.state().stack.is_empty(),
+        "the real end-step trigger must be pending"
+    );
+    // CR 608.2h + CR 303.4e: eligibility is live until this instruction resolves.
+    attach_to(runner.state_mut(), moving_aura, late);
+    assert_eq!(
+        runner.state().objects[&moving_aura].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(late))
+    );
+    complete(&mut runner);
+    assert!(runner.state().objects[&marked].goaded_by.contains(&P0));
+    assert!(runner.state().objects[&late].goaded_by.contains(&P0));
+    for id in [foreign_aura_host, equipment_host, unmarked, own, kaima] {
+        assert!(
+            !runner.state().objects[&id].goaded_by.contains(&P0),
+            "recipient and Aura controller restrictions: {id:?}"
+        );
+    }
+    // CR 701.15a: losing the attachment after resolution does not undo goad.
+    move_to_zone(runner.state_mut(), own_aura, Zone::Graveyard, &mut vec![]);
+    assert!(runner.state().objects[&marked].goaded_by.contains(&P0));
+}
+
 fn cost(generic: u32, shards: Vec<ManaCostShard>) -> ManaCost {
     ManaCost::Cost { generic, shards }
 }
@@ -810,6 +904,11 @@ fn lord_each_casters_first_spell_includes_its_controller_and_resets_on_real_next
 fn puca_death_counters_bound_announced_return_before_the_selected_card() {
     // CR 122.2 + CR 603.10a + CR 601.2c: announcement reads the actual departure snapshot.
     use engine::types::counter::CounterType;
+    let database = super::search_result_conditional_destination::load_finite_printed_records(
+        EVENT_TARGET_COHORT_PRINTED,
+    );
+    let printed = database.get_face_by_name("Puca's Covenant").unwrap();
+    assert!(engine::game::coverage::card_face_gaps(printed).is_empty());
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let source = scenario.add_enchantment_from_oracle(P0, "Puca's Covenant", "Whenever a creature you control with a counter on it dies, you may return another target permanent card with mana value less than or equal to the number of counters on that creature from your graveyard to your hand. Do this only once each turn.").id();
@@ -837,6 +936,11 @@ fn puca_death_counters_bound_announced_return_before_the_selected_card() {
         .id();
     scenario.with_counter(decoy, CounterType::Generic("charge".into()), 7);
     let mut runner = scenario.build();
+    engine::game::printed_cards::apply_card_face_to_object(
+        runner.state_mut().objects.get_mut(&source).unwrap(),
+        printed,
+    );
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), source);
     for id in [chosen, high] {
         move_to_zone(runner.state_mut(), id, Zone::Graveyard, &mut vec![]);
     }
@@ -938,3 +1042,9 @@ fn combat_step_head_fires_before_declaration_only_on_its_own_turn() {
     assert!(!runner.state().objects[&foreign].tapped);
     assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
 }
+
+// Complete unchanged records from pinned MTGJSON 2026-10-04, version 5.3.0+20261004.
+const EVENT_TARGET_COHORT_PRINTED: &[&str] = &[
+    r####"{"colorIdentity":["G"],"colors":["G"],"convertedManaCost":3.0,"edhrecRank":8350,"foreignData":[{"language":"French","name":"Pacte du pucca","skuIds":{"nonfoil":"d3f614c0-1bb6-53b9-8010-e30c28f17f72"},"text":"\u00c0 chaque fois qu'une cr\u00e9ature que vous contr\u00f4lez avec un marqueur sur elle meurt, vous pouvez renvoyer dans votre main une autre carte de permanent cibl\u00e9e avec une valeur de mana inf\u00e9rieure ou \u00e9gale au nombre de marqueurs sur cette cr\u00e9ature depuis votre cimeti\u00e8re. Ne faites ceci qu'une seule fois par tour."},{"language":"German","name":"Pakt mit dem Phooka","skuIds":{"nonfoil":"11424111-3f70-5093-b7ad-6b78bf7e4cca"},"text":"Immer wenn eine Kreatur, die du kontrollierst und auf der eine Marke liegt, stirbt, kannst du eine andere Permanent-Karte deiner Wahl mit Manabetrag kleiner oder gleich der Anzahl an Marken auf jener Kreatur aus deinem Friedhof auf deine Hand zur\u00fcckbringen. Tue dies nur einmal pro Zug."},{"language":"Italian","name":"Accordo del Puca","skuIds":{"nonfoil":"f282c2cb-757b-5fce-a5f7-a762304952f6"},"text":"Ogniqualvolta una creatura con un segnalino che controlli muore, puoi riprendere in mano dal tuo cimitero un'altra carta permanente bersaglio con valore di mana pari o inferiore al numero di segnalini su quella creatura. Fallo solo una volta per turno."},{"language":"Japanese","name":"\u30d7\u30fc\u30ab\u306e\u8a93\u7d04","skuIds":{"nonfoil":"5c1e1fdd-096c-5531-9280-29245673e7f8"},"text":"\u3042\u306a\u305f\u304c\u30b3\u30f3\u30c8\u30ed\u30fc\u30eb\u3057\u3066\u3044\u3066\u30ab\u30a6\u30f3\u30bf\u30fc\u304c\u7f6e\u304b\u308c\u3066\u3044\u308b\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\uff11\u4f53\u304c\u6b7b\u4ea1\u3059\u308b\u305f\u3073\u3001\u3042\u306a\u305f\u306e\u5893\u5730\u306b\u3042\u308a\u3001\u30de\u30ca\u7dcf\u91cf\u304c\u305d\u306e\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\u306e\u4e0a\u306b\u3042\u3063\u305f\u30ab\u30a6\u30f3\u30bf\u30fc\u306e\u500b\u6570\u4ee5\u4e0b\u3067\u3042\u308a\u305d\u308c\u3067\u306a\u3044\u30d1\u30fc\u30de\u30cd\u30f3\u30c8\u30fb\u30ab\u30fc\u30c9\uff11\u679a\u3092\u5bfe\u8c61\u3068\u3059\u308b\u3002\u305d\u308c\u3092\u3042\u306a\u305f\u306e\u624b\u672d\u306b\u623b\u3057\u3066\u3082\u3088\u3044\u3002\u3053\u308c\u306f\u6bce\u30bf\u30fc\u30f3\uff11\u56de\u3057\u304b\u884c\u3048\u306a\u3044\u3002"},{"language":"Spanish","name":"Pacto de puca","skuIds":{"nonfoil":"b737c275-b998-5ff4-b23c-a270c182e585"},"text":"Siempre que una criatura que controlas con un contador sobre ella muera, puedes regresar de tu cementerio a tu mano otra carta de permanente objetivo con valor de man\u00e1 menor o igual que la cantidad de contadores sobre esa criatura. Haz esto solo una vez por turno."}],"identifiers":{"scryfallOracleId":"9b832f87-0bd5-47bd-ab9c-718bd9a6c441"},"layout":"normal","legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","vintage":"Legal"},"manaCost":"{2}{G}","manaValue":3.0,"name":"Puca's Covenant","printings":["ECC"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/e44fabd2565d9bee","cardmarket":"https://mtgjson.com/links/b5e46b6a42086d96","tcgplayer":"https://mtgjson.com/links/2e47e81ad3748cbb"},"rulings":[{"date":"2025-11-17","text":"If a permanent card in a graveyard has {X} in its mana cost, X is 0 for the purpose of determining its mana value."}],"subtypes":[],"supertypes":[],"text":"Whenever a creature you control with a counter on it dies, you may return another target permanent card with mana value less than or equal to the number of counters on that creature from your graveyard to your hand. Do this only once each turn.","type":"Enchantment","types":["Enchantment"]}"####,
+    r####"{"colorIdentity":["G","R"],"colors":["G","R"],"convertedManaCost":4.0,"edhrecRank":17781,"edhrecSaltiness":0.13,"foreignData":[{"language":"Chinese Simplified","name":"\u788e\u5b81\u602a\u78e8","skuIds":{"foil":"8fd21b56-50c3-5f15-9836-3d9299c8ca61","nonfoil":"b0083cb2-88ef-520e-9964-3382c35435c5"},"text":"\u5728\u4f60\u7684\u7ed3\u675f\u6b65\u9aa4\u5f00\u59cb\u65f6\uff0c\u717d\u60d1\u6bcf\u4e2a\u7531\u5bf9\u624b\u64cd\u63a7\u4e14\u5176\u4e0a\u7ed3\u9644\u6709\u7531\u4f60\u64cd\u63a7\u4e4b\u7075\u6c14\u7684\u751f\u7269\u3002\u6bcf\u4ee5\u6b64\u6cd5\u717d\u60d1\u4e00\u4e2a\u751f\u7269\uff0c\u4fbf\u5728\u788e\u5b81\u602a\u78e8\u4e0a\u653e\u7f6e\u4e00\u4e2a+1/+1\u6307\u793a\u7269\u3002\uff08\u76f4\u5230\u4f60\u7684\u4e0b\u4e00\u4e2a\u56de\u5408\uff0c\u5df2\u717d\u60d1\u7684\u751f\u7269\u6bcf\u6b21\u6218\u6597\u82e5\u80fd\u653b\u51fb\uff0c\u5219\u5fc5\u987b\u653b\u51fb\uff0c\u4e14\u82e5\u80fd\u653b\u51fb\u9664\u4f60\u4ee5\u5916\u7684\u724c\u624b\uff0c\u5219\u5fc5\u987b\u5982\u6b64\u4f5c\u3002\uff09","type":"\u4f20\u5947\u751f\u7269 \uff5e\u7cbe\u602a"},{"language":"Chinese Traditional","name":"\u788e\u5be7\u602a\u78e8","skuIds":{"foil":"f4db3dae-9000-5f75-b4a0-445e411e5f37","nonfoil":"6f51a2d6-0e28-5acc-986c-0107f33c2d94"},"text":"\u5728\u4f60\u7684\u7d50\u675f\u6b65\u9a5f\u958b\u59cb\u6642\uff0c\u717d\u60d1\u6bcf\u500b\u7531\u5c0d\u624b\u64cd\u63a7\u4e14\u5176\u4e0a\u7d50\u9644\u6709\u7531\u4f60\u64cd\u63a7\u4e4b\u9748\u6c23\u7684\u751f\u7269\u3002\u6bcf\u4ee5\u6b64\u6cd5\u717d\u60d1\u4e00\u500b\u751f\u7269\uff0c\u4fbf\u5728\u788e\u5be7\u602a\u78e8\u4e0a\u653e\u7f6e\u4e00\u500b+1/+1\u6307\u793a\u7269\u3002\uff08\u76f4\u5230\u4f60\u7684\u4e0b\u4e00\u500b\u56de\u5408\uff0c\u6240\u717d\u60d1\u7684\u751f\u7269\u6bcf\u6b21\u6230\u9b25\u82e5\u80fd\u653b\u64ca\uff0c\u5247\u5fc5\u9808\u653b\u64ca\uff0c\u4e14\u82e5\u80fd\u653b\u64ca\u9664\u4f60\u4ee5\u5916\u7684\u73a9\u5bb6\uff0c\u5247\u5fc5\u9808\u5982\u6b64\u4f5c\u3002\uff09","type":"\u50b3\u5947\u751f\u7269 \uff5e\u7cbe\u9748"},{"language":"French","name":"Kaima, le calme fractur\u00e9","skuIds":{"foil":"2167de77-2903-5a21-a647-9d127fae0ba1","nonfoil":"ac4a4448-9643-50a1-b463-9f5ec9fe5ce0"},"text":"Au d\u00e9but de votre \u00e9tape de fin, incitez chaque cr\u00e9ature que vos adversaires contr\u00f4lent qui est enchant\u00e9e par une aura que vous contr\u00f4lez. Mettez un marqueur +1/+1 sur Kaima, le calme fractur\u00e9 pour chaque cr\u00e9ature incit\u00e9e de cette mani\u00e8re. (Jusqu'\u00e0 votre prochain tour, les cr\u00e9atures incit\u00e9es attaquent \u00e0 chaque combat si possible et attaquent un joueur autre que vous si possible.)","type":"Cr\u00e9ature l\u00e9gendaire : esprit"},{"language":"German","name":"Kaima, die zerbrochene Ruhe","skuIds":{"foil":"411ef7a5-b249-5238-8c06-2cce98d95cbd","nonfoil":"97792c5b-fd32-54db-81bf-143d9f8feaf3"},"text":"Zu Beginn deines Endsegments stachelst du jede Kreatur an, die ein Gegner kontrolliert und die von einer Aura, die du kontrollierst, verzaubert wird. Lege f\u00fcr jede Kreatur, die auf diese Weise angestachelt wurde, eine +1/+1-Marke auf Kaima, die zerbrochene Ruhe. (Bis zu deinem n\u00e4chsten Zug greifen die angestachelten Kreaturen in jedem Kampf an, falls m\u00f6glich, und greifen einen anderen Spieler als dich an, falls m\u00f6glich.)","type":"Legend\u00e4re Kreatur \u2014 Geist"},{"language":"Italian","name":"Kaima, la Calma Fratturata","skuIds":{"foil":"1ab876a6-ef0a-5530-bb12-8eb73b838247","nonfoil":"5237ecd4-c251-55eb-aaff-d45d456a782d"},"text":"All'inizio della tua sottofase finale, sprona ogni creatura controllata dai tuoi avversari che \u00e8 incantata da un'Aura che controlli. Metti un segnalino +1/+1 su Kaima, la Calma Fratturata per ogni creatura spronata in questo modo. (Fino al tuo prossimo turno, le creature spronate attaccano in ogni combattimento un giocatore diverso da te, se possono farlo.)","type":"Creatura Leggendaria \u2014 Spirito"},{"language":"Japanese","name":"\u93ae\u307e\u3089\u306c\u3082\u306e\u3001\u602a\u78e8","skuIds":{"foil":"d776093b-f284-505a-adc6-99041539fffd","nonfoil":"b01ebbe6-039b-56b7-8bbd-68b60eab79ca"},"text":"\u3042\u306a\u305f\u306e\u7d42\u4e86\u30b9\u30c6\u30c3\u30d7\u306e\u958b\u59cb\u6642\u306b\u3001\u3042\u306a\u305f\u304c\u30b3\u30f3\u30c8\u30ed\u30fc\u30eb\u3057\u3066\u3044\u308b\u30aa\u30fc\u30e9\u304c\u3064\u3044\u3066\u3044\u3066\u5bfe\u6226\u76f8\u624b\u304c\u30b3\u30f3\u30c8\u30ed\u30fc\u30eb\u3057\u3066\u3044\u308b\u3059\u3079\u3066\u306e\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\u3092\u4f7f\u55fe\u3059\u308b\u3002\u93ae\u307e\u3089\u306c\u3082\u306e\u3001\u602a\u78e8\u306e\u4e0a\u306b\u3001\u3053\u308c\u306b\u3088\u308a\u4f7f\u55fe\u3057\u305f\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\uff11\u4f53\u306b\u3064\u304d\uff11\u500b\u306e\uff0b\uff11/\uff0b\uff11\u30ab\u30a6\u30f3\u30bf\u30fc\u3092\u7f6e\u304f\u3002\uff08\u6b21\u306e\u3042\u306a\u305f\u306e\u30bf\u30fc\u30f3\u307e\u3067\u3001\u5404\u6226\u95d8\u3067\u3001\u4f7f\u55fe\u3055\u308c\u305f\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\u306f\u53ef\u80fd\u306a\u3089\u653b\u6483\u3057\u3001\u53ef\u80fd\u306a\u3089\u3042\u306a\u305f\u4ee5\u5916\u306e\u30d7\u30ec\u30a4\u30e4\u30fc\u3092\u653b\u6483\u3059\u308b\u3002\uff09","type":"\u4f1d\u8aac\u306e\u30af\u30ea\u30fc\u30c1\u30e3\u30fc \u2014 \u30b9\u30d4\u30ea\u30c3\u30c8"},{"language":"Korean","name":"\ud30c\uc5f4\ub41c \ud3c9\uc628, \uce74\uc774\ub9c8","skuIds":{"foil":"ae1ff2b7-867a-52ac-9c16-cc3dbb3fe501","nonfoil":"b6f86ae2-6139-5be8-8e18-45f64425eaf7"},"text":"\ub2f9\uc2e0\uc758 \uc885\ub8cc\ub2e8 \uc2dc\uc791\uc5d0, \ub2f9\uc2e0\uc774 \uc870\uc885\ud558\ub294 \ub9c8\ubc95\uc9c4\uc774 \ubd80\uc5ec\ub418\uc5b4 \uc788\uc73c\uba70 \ub2f9\uc2e0\uc758 \uc0c1\ub300\ub4e4\uc774 \uc870\uc885\ud558\ub294 \uac01 \uc0dd\ubb3c\uc744 \uc790\uadf9\ud55c\ub2e4. \uc774\ub7f0 \uc2dd\uc73c\ub85c \uc790\uadf9\ub41c \uac01 \uc0dd\ubb3c\ub9c8\ub2e4 \ud30c\uc5f4\ub41c \ud3c9\uc628, \uce74\uc774\ub9c8\uc5d0 +1/+1 \uce74\uc6b4\ud130\ub97c \ud55c \uac1c\uc529 \uc62c\ub824\ub193\ub294\ub2e4. (\ub2f9\uc2e0\uc758 \ub2e4\uc74c \ud134\uae4c\uc9c0, \uc790\uadf9\ub41c \uc0dd\ubb3c\ub4e4\uc740 \uac00\ub2a5\ud558\uba74 \ub9e4 \uc804\ud22c\ub9c8\ub2e4 \uacf5\uaca9\ud558\uace0 \uac00\ub2a5\ud558\uba74 \ub2f9\uc2e0\uc774 \uc544\ub2cc \ud50c\ub808\uc774\uc5b4\ub97c \uacf5\uaca9\ud55c\ub2e4.)","type":"\uc804\uc124\uc801 \uc0dd\ubb3c \u2014 \uc2e0\ub839"},{"language":"Portuguese (Brazil)","name":"Kaima, a Calma Fraturada","skuIds":{"foil":"9f6113ae-fc6b-53f5-9ca3-05b9e4fab3d3","nonfoil":"bd67c4d8-bf77-5de2-826b-a7601638492f"},"text":"No in\u00edcio de sua etapa final, atice cada criatura que seus oponentes controlam que esteja encantada por uma Aura que voc\u00ea controle. Coloque um marcador +1/+1 em Kaima, a Calma Fraturada, para cada criatura ati\u00e7ada dessa forma. (At\u00e9 seu pr\u00f3ximo turno, as criaturas ati\u00e7adas atacam a cada combate se estiverem aptas e atacam um jogador que n\u00e3o seja voc\u00ea se estiverem aptas.)","type":"Criatura Lend\u00e1ria \u2014 Esp\u00edrito"},{"language":"Russian","name":"\u041a\u0430\u0438\u043c\u0430, \u041d\u0430\u0440\u0443\u0448\u0435\u043d\u043d\u044b\u0439 \u041f\u043e\u043a\u043e\u0439","skuIds":{"foil":"795c1801-1d3b-57d6-b891-de75b0482b1a","nonfoil":"23d3fb31-ae6f-5dd2-95df-93084e52e3a7"},"text":"\u0412 \u043d\u0430\u0447\u0430\u043b\u0435 \u0432\u0430\u0448\u0435\u0433\u043e \u0437\u0430\u043a\u043b\u044e\u0447\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0433\u043e \u0448\u0430\u0433\u0430 \u0440\u0430\u0437\u044a\u044f\u0440\u0438\u0442\u0435 \u043a\u0430\u0436\u0434\u043e\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043e \u043f\u043e\u0434 \u043a\u043e\u043d\u0442\u0440\u043e\u043b\u0435\u043c \u0432\u0430\u0448\u0438\u0445 \u043e\u043f\u043f\u043e\u043d\u0435\u043d\u0442\u043e\u0432, \u043a\u043e\u0442\u043e\u0440\u043e\u0435 \u0437\u0430\u0447\u0430\u0440\u043e\u0432\u0430\u043d\u043e \u0410\u0443\u0440\u043e\u0439 \u043f\u043e\u0434 \u0432\u0430\u0448\u0438\u043c \u043a\u043e\u043d\u0442\u0440\u043e\u043b\u0435\u043c. \u041f\u043e\u043b\u043e\u0436\u0438\u0442\u0435 \u043e\u0434\u0438\u043d \u0436\u0435\u0442\u043e\u043d +1/+1 \u043d\u0430 \u041a\u0430\u0438\u043c\u0443, \u041d\u0430\u0440\u0443\u0448\u0435\u043d\u043d\u044b\u0439 \u041f\u043e\u043a\u043e\u0439 \u0437\u0430 \u043a\u0430\u0436\u0434\u043e\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u043e, \u0440\u0430\u0437\u044a\u044f\u0440\u0435\u043d\u043d\u043e\u0435 \u0442\u0430\u043a\u0438\u043c \u043e\u0431\u0440\u0430\u0437\u043e\u043c. (\u0414\u043e \u0432\u0430\u0448\u0435\u0433\u043e \u0441\u043b\u0435\u0434\u0443\u044e\u0449\u0435\u0433\u043e \u0445\u043e\u0434\u0430 \u0440\u0430\u0437\u044a\u044f\u0440\u0435\u043d\u043d\u044b\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430 \u0430\u0442\u0430\u043a\u0443\u044e\u0442 \u0432 \u043a\u0430\u0436\u0434\u043e\u043c \u0431\u043e\u044e, \u0435\u0441\u043b\u0438 \u043c\u043e\u0433\u0443\u0442, \u0438 \u0430\u0442\u0430\u043a\u0443\u044e\u0442 \u043d\u0435 \u0432\u0430\u0441, \u0430 \u0434\u0440\u0443\u0433\u043e\u0433\u043e \u0438\u0433\u0440\u043e\u043a\u0430, \u0435\u0441\u043b\u0438 \u043c\u043e\u0433\u0443\u0442.)","type":"\u041b\u0435\u0433\u0435\u043d\u0434\u0430\u0440\u043d\u043e\u0435 \u0421\u0443\u0449\u0435\u0441\u0442\u0432\u043e \u2014 \u0414\u0443\u0445"},{"language":"Spanish","name":"Kaima, la Calma Perdida","skuIds":{"foil":"2405b06f-d95d-53b4-90fb-913ec85b0a87","nonfoil":"288136a6-6623-54c5-94aa-e4da02e049a4"},"text":"Al comienzo de tu paso final, incita a cada criatura que controlan tus oponentes que est\u00e9 encantada por un Aura que controlas. Pon un contador +1/+1 sobre Kaima, la Calma Perdida por cada criatura incitada de esta manera. (Hasta tu pr\u00f3ximo turno, las criaturas incitadas atacan cada combate si pueden y atacan a un jugador que no seas t\u00fa si pueden.)","type":"Criatura legendaria \u2014 Esp\u00edritu"}],"identifiers":{"scryfallOracleId":"3d8f9b58-d011-4ed2-99ae-c626243fab26"},"keywords":["Goad"],"layout":"normal","leadershipSkills":{"brawl":false,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":false},"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","vintage":"Legal"},"manaCost":"{2}{R}{G}","manaValue":4.0,"name":"Kaima, the Fractured Calm","power":"3","printings":["NEC"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/24f58b0de127defb","cardKingdomFoil":"https://mtgjson.com/links/9cfda05d9ce94c1b","cardmarket":"https://mtgjson.com/links/f6e87c861413929d","cardmarketFoil":"https://mtgjson.com/links/2be82774078a06d5","tcgplayer":"https://mtgjson.com/links/13993f574ef2266e"},"rulings":[{"date":"2022-02-18","text":"The set of creatures that are goaded by this ability are locked in when it resolves. A creature becoming enchanted later or an Aura being removed from a creature later won't change whether it is goaded."}],"subtypes":["Spirit"],"supertypes":["Legendary"],"text":"At the beginning of your end step, goad each creature your opponents control that's enchanted by an Aura you control. Put a +1/+1 counter on Kaima for each creature goaded this way. (Until your next turn, the goaded creatures attack each combat if able and attack a player other than you if able.)","toughness":"3","type":"Legendary Creature \u2014 Spirit","types":["Creature"]}"####,
+];

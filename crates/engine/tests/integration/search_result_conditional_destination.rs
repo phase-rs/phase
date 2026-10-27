@@ -24,6 +24,374 @@ use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
 use engine::types::stickers::{AppliedSticker, StickerLocator};
 use engine::types::zones::Zone;
 
+pub(super) fn load_finite_printed_records(records: &[&str]) -> engine::database::CardDatabase {
+    use engine::database::{mtgjson::AtomicCard, synthesis::build_oracle_face, CardDatabase};
+    let mut entries = serde_json::Map::new();
+    for record in records {
+        let atomic: AtomicCard = serde_json::from_str(record).unwrap();
+        let face = build_oracle_face(&atomic, atomic.identifiers.scryfall_oracle_id.clone());
+        entries.insert(
+            face.name.to_lowercase(),
+            serde_json::to_value(face).unwrap(),
+        );
+    }
+    let serialized = serde_json::to_string(&entries).unwrap();
+    let from_string = CardDatabase::from_json_str(&serialized).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &serialized).unwrap();
+    let from_file = CardDatabase::from_export(file.path()).unwrap();
+    for record in records {
+        let atomic: AtomicCard = serde_json::from_str(record).unwrap();
+        for database in [&from_string, &from_file] {
+            let face = database.get_face_by_name(&atomic.name).unwrap();
+            assert_eq!(face.oracle_text.as_deref(), atomic.text.as_deref());
+            assert_eq!(
+                serde_json::to_value(face).unwrap(),
+                entries[&atomic.name.to_lowercase()]
+            );
+        }
+    }
+    from_string
+}
+
+#[test]
+fn nashi_milled_choice_accepts_either_legendary_or_enchantment() {
+    use engine::game::printed_cards::apply_card_face_to_object;
+    use engine::types::card_type::{CoreType, Supertype};
+    let database = load_finite_printed_records(FINITE_COHORT_PRINTED);
+    let face = database
+        .get_face_by_name("Nashi, Searcher in the Dark")
+        .unwrap();
+    assert!(engine::game::coverage::card_face_gaps(face).is_empty());
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let nashi = scenario
+        .add_creature(P0, &face.name, 2, 3)
+        .with_plus_counters(1)
+        .id();
+    scenario.with_library_top(
+        P0,
+        &[
+            "Legendary nonenchantment",
+            "Nonlegendary enchantment",
+            "Neither",
+        ],
+    );
+    let mut runner = scenario.build();
+    apply_card_face_to_object(runner.state_mut().objects.get_mut(&nashi).unwrap(), face);
+    engine::game::trigger_index::reindex_object_triggers(runner.state_mut(), nashi);
+    let library: Vec<_> = runner.state().players[0].library.iter().copied().collect();
+    for (index, id) in library.iter().enumerate() {
+        let object = runner.state_mut().objects.get_mut(id).unwrap();
+        object.card_types.core_types = vec![if index == 1 {
+            CoreType::Enchantment
+        } else {
+            CoreType::Sorcery
+        }];
+        object.card_types.supertypes = if index == 0 {
+            vec![Supertype::Legendary]
+        } else {
+            vec![]
+        };
+        object.base_card_types = object.card_types.clone();
+    }
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(nashi, super::rules::AttackTarget::Player(P1))])
+        .unwrap();
+    for _ in 0..40 {
+        match &runner.state().waiting_for {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).unwrap();
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .unwrap();
+            }
+            WaitingFor::EffectZoneChoice { .. } => break,
+            other => {
+                panic!("Nashi's real combat trigger must reach its milled-card choice: {other:?}")
+            }
+        }
+    }
+    let WaitingFor::EffectZoneChoice { cards, .. } = &runner.state().waiting_for else {
+        panic!(
+            "Nashi did not offer milled cards: {:?}",
+            runner.state().waiting_for
+        )
+    };
+    assert!(
+        cards.contains(&library[0]),
+        "legendary is an independent union leg"
+    );
+    assert!(
+        cards.contains(&library[1]),
+        "enchantment is an independent union leg"
+    );
+    assert!(!cards.contains(&library[2]));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![library[0], library[1]],
+        })
+        .unwrap();
+    pass_to_pause(&mut runner, &mut vec![]);
+    assert_settled(&runner);
+    assert_eq!(runner.state().objects[&library[0]].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&library[1]].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&library[2]].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.counters(nashi, CounterType::Plus1Plus1),
+        1,
+        "taking cards skips the no-cards counter branch"
+    );
+}
+
+#[test]
+fn finite_qualified_cohorts_survive_full_string_and_file_loaders() {
+    use engine::types::ability::DigRestOrder;
+    let database = load_finite_printed_records(FINITE_COHORT_PRINTED);
+    for name in [
+        "Kayla's Reconstruction",
+        "Genesis Wave",
+        "Saheeli's Directive",
+        "Collected Company",
+        "Pieces of the Puzzle",
+    ] {
+        let face = database.get_face_by_name(name).unwrap();
+        assert!(
+            engine::game::coverage::card_face_gaps(face).is_empty(),
+            "{name}: {:?}",
+            engine::game::coverage::card_face_gaps(face)
+        );
+        let dig = &face.abilities[0];
+        let Effect::Dig {
+            keep_count,
+            keep_count_expr,
+            up_to,
+            destination,
+            rest_destination,
+            rest_order,
+            ..
+        } = &*dig.effect
+        else {
+            panic!("{name}: {dig:#?}")
+        };
+        assert!(*up_to);
+        if name == "Kayla's Reconstruction" {
+            assert_eq!(*keep_count, None);
+            assert_eq!(
+                *keep_count_expr,
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".into() }
+                })
+            );
+            assert_eq!(*rest_order, DigRestOrder::Random);
+        }
+        if matches!(
+            name,
+            "Genesis Wave" | "Saheeli's Directive" | "Pieces of the Puzzle"
+        ) {
+            assert_eq!(*rest_destination, Some(Zone::Graveyard));
+            assert!(
+                dig.sub_ability.is_none(),
+                "the rejected reveal remainder belongs to its Dig: {dig:#?}"
+            );
+        } else {
+            assert_eq!(*rest_destination, Some(Zone::Library));
+        }
+        if name == "Collected Company" {
+            assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+            assert_eq!(*keep_count, Some(2));
+        }
+        assert_eq!(
+            *destination,
+            Some(if name == "Pieces of the Puzzle" {
+                Zone::Hand
+            } else {
+                Zone::Battlefield
+            })
+        );
+    }
+    let hunting = database.get_face_by_name("Hunting Wilds").unwrap();
+    assert!(!engine::game::coverage::card_face_gaps(hunting).is_empty());
+    let mut search = false;
+    let mut shuffle = false;
+    let mut dependent_gap = false;
+    for ability in &hunting.abilities {
+        let _ = engine::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+            search |= matches!(effect, Effect::SearchLibrary { .. });
+            shuffle |= matches!(effect, Effect::Shuffle { .. });
+            dependent_gap |= matches!(effect, Effect::Unimplemented { name, .. } if name == "search_destination_cohort");
+            assert!(
+                !matches!(
+                    effect,
+                    Effect::SetTapState {
+                        state: engine::types::ability::TapStateChange::Untap,
+                        ..
+                    } | Effect::GenericEffect { .. }
+                ),
+                "an unbound searched cohort cannot untap or animate ambient Forests"
+            );
+            std::ops::ControlFlow::<()>::Continue(())
+        });
+    }
+    assert!(
+        search && shuffle && dependent_gap,
+        "independent search survives the atomic dependent gap"
+    );
+}
+
+#[test]
+fn finite_dig_choices_use_announced_x_rejected_remainder_and_owner_order() {
+    use engine::game::printed_cards::apply_card_face_to_object;
+    use engine::types::card_type::CoreType;
+    let database = load_finite_printed_records(FINITE_COHORT_PRINTED);
+    for name in [
+        "Kayla's Reconstruction",
+        "Genesis Wave",
+        "Collected Company",
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        fund(
+            &mut scenario,
+            4,
+            &[
+                ManaType::White,
+                ManaType::White,
+                ManaType::White,
+                ManaType::Green,
+                ManaType::Green,
+                ManaType::Green,
+            ],
+        );
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, name, name == "Collected Company", "")
+            .id();
+        scenario.with_library_top(
+            P0,
+            &[
+                "Allowed one",
+                "Allowed two",
+                "Rejected high",
+                "Rejected spell",
+                "Rest one",
+                "Rest two",
+                "Rest three",
+                "Untouched",
+            ],
+        );
+        let mut runner = scenario.build();
+        apply_card_face_to_object(
+            runner.state_mut().objects.get_mut(&spell).unwrap(),
+            database.get_face_by_name(name).unwrap(),
+        );
+        let library: Vec<_> = runner.state().players[0].library.iter().copied().collect();
+        for (index, id) in library.iter().enumerate() {
+            let object = runner.state_mut().objects.get_mut(id).unwrap();
+            object.card_types.core_types = vec![if index == 3 {
+                CoreType::Sorcery
+            } else {
+                CoreType::Creature
+            }];
+            object.base_card_types = object.card_types.clone();
+            object.mana_cost = ManaCost::generic(if index == 2 { 8 } else { 1 });
+            object.base_mana_cost = object.mana_cost.clone();
+            object.power = Some(1);
+            object.base_power = Some(1);
+            object.toughness = Some(1);
+            object.base_toughness = Some(1);
+        }
+        if name == "Collected Company" {
+            runner.cast(spell).commit();
+        } else {
+            runner
+                .cast(spell)
+                .x(if name == "Genesis Wave" { 4 } else { 2 })
+                .commit();
+        }
+        pass_to_pause(&mut runner, &mut vec![]);
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+        }
+        let WaitingFor::DigChoice {
+            keep_count,
+            selectable_cards,
+            rest_destination,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("real Dig choice: {:?}", runner.state().waiting_for)
+        };
+        if name == "Genesis Wave" {
+            assert!(*keep_count >= 2);
+        } else {
+            assert_eq!(*keep_count, 2);
+        }
+        assert!(selectable_cards.contains(&library[0]) && selectable_cards.contains(&library[1]));
+        assert!(!selectable_cards.contains(&library[2]));
+        assert_eq!(
+            *rest_destination,
+            Some(if name == "Genesis Wave" {
+                Zone::Graveyard
+            } else {
+                Zone::Library
+            })
+        );
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![library[0], library[1]],
+            })
+            .unwrap();
+        if name == "Collected Company" {
+            let WaitingFor::DigRestSplitChoice {
+                cards, top_count, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "the owner must choose the four-card rest order: {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(*top_count, 0);
+            let mut order = cards.clone();
+            order.reverse();
+            runner
+                .act(GameAction::SelectCards {
+                    cards: order.clone(),
+                })
+                .unwrap();
+            let actual: Vec<_> = runner.state().players[0].library.iter().copied().collect();
+            assert_eq!(&actual[actual.len() - order.len()..], order.as_slice());
+        }
+        pass_to_pause(&mut runner, &mut vec![]);
+        assert_settled(&runner);
+        assert_eq!(runner.state().objects[&library[0]].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&library[1]].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&library[2]].zone,
+            if name == "Genesis Wave" {
+                Zone::Graveyard
+            } else {
+                Zone::Library
+            }
+        );
+        if name == "Genesis Wave" {
+            assert_eq!(runner.state().objects[&library[3]].zone, Zone::Graveyard);
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    }
+}
+
 // Complete Oracle text from MTGJSON AtomicCards.json; live parsing avoids stale fixtures.
 const NAZAHN: &str = "When Nazahn enters, search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.\nWhenever an equipped creature you control attacks, you may tap target creature defending player controls.";
 const SELFIE: &str = "Search your library for a basic land card and reveal it. If there's a tree in its art, put it onto the battlefield tapped. Otherwise, put it into your hand. Then shuffle.";
@@ -4471,3 +4839,14 @@ fn complete_search_faces_retain_count_and_independent_filter_slots() {
         );
     }
 }
+
+// Complete unchanged records from pinned MTGJSON 2026-10-04, version 5.3.0+20261004.
+const FINITE_COHORT_PRINTED: &[&str] = &[
+    r####"{"colorIdentity":["W"],"colors":["W"],"convertedManaCost":3.0,"edhrecRank":18392,"edhrecSaltiness":0.0,"foreignData":[{"language":"Chinese Simplified","name":"\u51ef\u62c9\u7684\u91cd\u7b51","skuIds":{"foil":"a0cae147-da45-593e-bace-24adcddc7937","nonfoil":"c41bdb71-1f10-5cd5-89ca-b0636e6e4512"},"text":"\u68c0\u89c6\u4f60\u724c\u5e93\u9876\u7684\u4e03\u5f20\u724c\u3002\u5c06\u5176\u4e2d\u81f3\u591aX\u5f20\u6cd5\u672f\u529b\u503c\u7b49\u4e8e\u6216\u5c0f\u4e8e3\u7684\u795e\u5668\u548c\uff0f\u6216\u751f\u7269\u724c\u653e\u8fdb\u6218\u573a\u3002\u5c06\u5176\u4f59\u7684\u724c\u4ee5\u968f\u673a\u987a\u5e8f\u7f6e\u4e8e\u4f60\u724c\u5e93\u5e95\u3002","type":"\u6cd5\u672f"},{"language":"French","name":"Reconstruction de Kayla","skuIds":{"foil":"d45b9013-5d21-5809-8fc7-2beb3735eb87","nonfoil":"7615ec72-7972-5409-a436-35caf0e73325"},"text":"Regardez les sept cartes du dessus de votre biblioth\u00e8que. Mettez sur le champ de bataille jusqu'\u00e0 X cartes d'artefact et/ou de cr\u00e9ature avec une valeur de mana inf\u00e9rieure ou \u00e9gale \u00e0 3 parmi elles. Mettez le reste au-dessous de votre biblioth\u00e8que dans un ordre al\u00e9atoire.","type":"Rituel"},{"language":"German","name":"Kaylas Wiederaufbau","skuIds":{"foil":"3bad8c9c-7cef-5901-a884-626e64673c10","nonfoil":"992d6cfa-01a3-58bb-a5ce-7c51e31aace9"},"text":"Schaue dir die obersten sieben Karten deiner Bibliothek an. Bringe davon bis zu X Artefakt- und/oder Kreaturenkarten mit Manabetrag 3 oder weniger ins Spiel. Lege den Rest in zuf\u00e4lliger Reihenfolge unter deine Bibliothek.","type":"Hexerei"},{"language":"Italian","name":"Ricostruzione di Kayla","skuIds":{"foil":"43517f9f-fedd-5cd2-8cd1-994632729823","nonfoil":"291fc4c9-9c0f-5bb5-ab85-667e532c1f83"},"text":"Guarda le prime sette carte del tuo grimorio. Metti sul campo di battaglia fino a X carte creatura e/o artefatto con valore di mana pari o inferiore a 3 scelte tra esse. Metti le altre in fondo al tuo grimorio in ordine casuale.","type":"Stregoneria"},{"language":"Japanese","name":"\u30ab\u30a4\u30e9\u306e\u518d\u5efa","skuIds":{"foil":"6473b500-5e97-50b5-b059-4617ede8626b","nonfoil":"688b4801-a1e1-523d-8baf-9f276f0f13e3"},"text":"\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0a\u306b\u3042\u308b\u30ab\u30fc\u30c9\uff17\u679a\u3092\u898b\u308b\u3002\u305d\u306e\u4e2d\u304b\u3089\u30de\u30ca\u7dcf\u91cf\u304c\uff13\u4ee5\u4e0b\u3067\u3042\u308a\u30a2\u30fc\u30c6\u30a3\u30d5\u30a1\u30af\u30c8\u3084\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\u3067\u3042\u308b\u30ab\u30fc\u30c9\u6700\u5927\uff38\u679a\u3092\u6226\u5834\u306b\u51fa\u3059\u3002\u6b8b\u308a\u3092\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0b\u306b\u7121\u4f5c\u70ba\u306e\u9806\u756a\u3067\u7f6e\u304f\u3002","type":"\u30bd\u30fc\u30b5\u30ea\u30fc"},{"language":"Portuguese (Brazil)","name":"Reconstru\u00e7\u00e3o de Kayla","skuIds":{"foil":"cfa871d9-69e7-512b-9cea-83f079ef844a","nonfoil":"b8d20f93-d78e-5d5c-9d66-60da838e45d2"},"text":"Olhe os sete cards do topo de seu grim\u00f3rio. Coloque no campo de batalha at\u00e9 X cards de criatura e/ou artefato com valor de mana igual ou inferior a 3 dentre eles. Coloque o restante no fundo de seu grim\u00f3rio em ordem aleat\u00f3ria.","type":"Feiti\u00e7o"},{"language":"Spanish","name":"Reconstrucci\u00f3n de Kayla","skuIds":{"foil":"31648920-6d6b-5374-b034-1d45bbd14aec","nonfoil":"f3a7671b-5c76-5f13-8d0d-8059788f0928"},"text":"Mira las siete primeras cartas de tu biblioteca. Pon en el campo de batalla hasta X cartas de artefacto y/o de criatura con valor de man\u00e1 de 3 o menos de entre ellas. Pon el resto en el fondo de tu biblioteca en un orden aleatorio.","type":"Conjuro"}],"identifiers":{"scryfallOracleId":"43bae4b3-57e8-4d9a-9d1b-9805b0e0fff5"},"layout":"normal","legalities":{"brawl":"Legal","commander":"Legal","duel":"Legal","gladiator":"Legal","historic":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","penny":"Legal","pioneer":"Legal","timeless":"Legal","vintage":"Legal"},"manaCost":"{X}{W}{W}{W}","manaValue":3.0,"name":"Kayla's Reconstruction","printings":["BRO","PBRO","PRM"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/e9be6f5e1f00fba0","cardKingdomFoil":"https://mtgjson.com/links/e683c48c27fa9eb1","cardmarket":"https://mtgjson.com/links/aa9cf5f44081b69d","cardmarketFoil":"https://mtgjson.com/links/485e76e0d05590e1","tcgplayer":"https://mtgjson.com/links/f902edbdbd0ea50a"},"rulings":[{"date":"2022-10-14","text":"Each of the cards needs to have mana value 3 or less. It's not the total mana value of the cards."}],"subtypes":[],"supertypes":[],"text":"Look at the top seven cards of your library. Put up to X artifact and/or creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in a random order.","type":"Sorcery","types":["Sorcery"]}"####,
+    r####"{"colorIdentity":["G"],"colors":["G"],"convertedManaCost":3.0,"edhrecRank":1364,"edhrecSaltiness":0.49,"foreignData":[{"language":"Chinese Simplified","name":"\u521b\u751f\u6d6a\u6f6e","skuIds":{"foil":"9ac32b10-5d1d-5a42-88b4-57bc34970dfb","nonfoil":"213d3a38-0c0b-59b7-855e-54323660ebdd"},"text":"\u5c55\u793a\u4f60\u724c\u5e93\u9876\u7684X\u5f20\u724c\u3002 \u4f60\u53ef\u4ee5\u5c06\u5176\u4e2d\u4efb\u610f\u6570\u91cf\u603b\u6cd5\u672f\u529b\u8d39\u7528\u5c0f\u4e8e\u6216\u7b49\u4e8eX\u7684\u6c38\u4e45\u7269\u724c\u653e\u8fdb\u6218\u573a\u3002 \u7136\u540e\u5c06\u6240\u6709\u4ee5\u6b64\u6cd5\u5c55\u793a\u3001\u4e14\u672a\u653e\u8fdb\u6218\u573a\u7684\u724c\u7f6e\u5165\u4f60\u7684\u575f\u5893\u573a\u3002","type":"\u6cd5\u672f"},{"language":"Chinese Traditional","name":"\u5275\u751f\u6d6a\u6f6e","skuIds":{"foil":"f636e410-be75-55d9-a3da-b7d465e2e266","nonfoil":"aed32f24-6674-5f1c-8a14-91057a638e13"},"text":"\u5c55\u793a\u4f60\u724c\u5eab\u9802\u7684X\u5f35\u724c\u3002 \u4f60\u53ef\u4ee5\u5c07\u5176\u4e2d\u4efb\u610f\u6578\u91cf\u7e3d\u9b54\u6cd5\u529b\u8cbb\u7528\u5c0f\u65bc\u6216\u7b49\u65bcX\u7684\u6c38\u4e45\u7269\u724c\u653e\u9032\u6230\u5834\u3002 \u7136\u5f8c\u5c07\u6240\u6709\u4ee5\u6b64\u6cd5\u5c55\u793a\u3001\u4e14\u672a\u653e\u9032\u6230\u5834\u7684\u724c\u7f6e\u5165\u4f60\u7684\u58b3\u5893\u5834\u3002","type":"\u5deb\u8853"},{"language":"French","name":"Vague de gen\u00e8se","skuIds":{"foil":"bdff8f20-038a-57a5-9daa-9aad212575db","nonfoil":"80230d25-5399-5c54-bbcb-7274f73b748c"},"text":"R\u00e9v\u00e9lez les X cartes du dessus de votre biblioth\u00e8que. Parmi elles, vous pouvez mettre sur le champ de bataille n'importe quel nombre de cartes de permanent de co\u00fbt converti de mana inf\u00e9rieur ou \u00e9gal \u00e0 X. Mettez ensuite toutes les cartes r\u00e9v\u00e9l\u00e9es de cette mani\u00e8re qui n'ont pas \u00e9t\u00e9 mises sur le champ de bataille dans votre cimeti\u00e8re.","type":"Rituel"},{"language":"German","name":"Genesiswelle","skuIds":{"foil":"32cdb55d-8c3f-58f2-9e03-32c7dbb992bd","nonfoil":"77300603-7ae2-50e6-80ce-94dc98e25e43"},"text":"Decke die obersten X Karten deiner Bibliothek auf. Du kannst davon eine beliebige Anzahl an bleibenden Karten mit umgewandelten Manakosten von X oder weniger ins Spiel bringen. Lege dann alle Karten, die auf diese Weise aufgedeckt wurden und nicht ins Spiel gebrcht wurden, auf deinen Friedhof.","type":"Hexerei"},{"language":"Italian","name":"Flusso d'Origine","skuIds":{"foil":"f031d4f5-9721-5b23-8fd3-c0e2d0da6e7e","nonfoil":"936d7ddc-5f0c-5cb3-933f-821fceaadb55"},"text":"Rivela le prime X carte del tuo grimorio. Puoi mettere sul campo di battaglia un qualsiasi numero di carte permanente con costo di mana convertito pari o inferiore a X scelte tra quelle carte rivelate. Poi metti nel tuo cimitero tutte le carte rivelate in questo modo che non sono state messe sul campo di battaglia.","type":"Stregoneria"},{"language":"Japanese","name":"\u8d77\u6e90\u306e\u6ce2","skuIds":{"foil":"76d93379-4757-5de0-bb0f-5577168bf622","nonfoil":"1525b17b-c80c-5162-bd4e-c09a3f137339"},"text":"\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0a\u304b\u3089\uff38\u679a\u306e\u30ab\u30fc\u30c9\u3092\u516c\u958b\u3059\u308b\u3002 \u3042\u306a\u305f\u306f\u305d\u306e\u4e2d\u306e\u70b9\u6570\u3067\u898b\u305f\u30de\u30ca\u30fb\u30b3\u30b9\u30c8\u304c\uff38\u4ee5\u4e0b\u3067\u3042\u308b\u30d1\u30fc\u30de\u30cd\u30f3\u30c8\u30fb\u30ab\u30fc\u30c9\u3092\u3001\u671b\u3080\u679a\u6570\u6226\u5834\u306b\u51fa\u3057\u3066\u3082\u3088\u3044\u3002 \u305d\u306e\u5f8c\u3001\u3053\u308c\u306b\u3088\u308a\u516c\u958b\u3055\u308c\u3066\u6226\u5834\u306b\u51fa\u3055\u308c\u306a\u304b\u3063\u305f\u3059\u3079\u3066\u306e\u30ab\u30fc\u30c9\u3092\u3042\u306a\u305f\u306e\u5893\u5730\u306b\u7f6e\u304f\u3002","type":"\u30bd\u30fc\u30b5\u30ea\u30fc"},{"language":"Portuguese (Brazil)","name":"Onda de G\u00eanese","skuIds":{"foil":"6c1458d4-6c5c-571e-a1fb-620877c28c69","nonfoil":"9376778f-6afb-5049-ab18-17694477ac7e"},"text":"Revele os primeiros X cards do topo de seu grim\u00f3rio. Voc\u00ea pode colocar qualquer n\u00famero de cards de permanente com custo de mana convertido menor ou igual a X dentre eles no campo de batalha. Depois, coloque no seu cemit\u00e9rio todos os cards revelados dessa maneira que n\u00e3o foram colocados no campo de batalha.","type":"Feiti\u00e7o"},{"language":"Russian","name":"\u0412\u043e\u043b\u043d\u0430 \u0417\u0430\u0440\u043e\u0436\u0434\u0435\u043d\u0438\u044f","skuIds":{"foil":"d56d6d6a-2244-5b56-9bbb-73870ee7a0f1","nonfoil":"96b0d5c1-6231-59bd-9bc4-03c842af1d3d"},"text":"\u041f\u043e\u043a\u0430\u0436\u0438\u0442\u0435 X \u0432\u0435\u0440\u0445\u043d\u0438\u0445 \u043a\u0430\u0440\u0442 \u0432\u0430\u0448\u0435\u0439 \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0438. \u0412\u044b \u043c\u043e\u0436\u0435\u0442\u0435 \u043f\u043e\u043b\u043e\u0436\u0438\u0442\u044c \u043d\u0430 \u043f\u043e\u043b\u0435 \u0431\u0438\u0442\u0432\u044b \u043b\u044e\u0431\u043e\u0435 \u043a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e \u043d\u0430\u0445\u043e\u0434\u044f\u0449\u0438\u0445\u0441\u044f \u0441\u0440\u0435\u0434\u0438 \u043d\u0438\u0445 \u043a\u0430\u0440\u0442 \u043f\u0435\u0440\u043c\u0430\u043d\u0435\u043d\u0442\u043e\u0432 \u0441 \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439 \u043c\u0430\u043d\u0430-\u0441\u0442\u043e\u0438\u043c\u043e\u0441\u0442\u044c\u044e \u043d\u0435 \u0431\u043e\u043b\u0435\u0435 X. \u0417\u0430\u0442\u0435\u043c \u043f\u043e\u043b\u043e\u0436\u0438\u0442\u0435 \u0432\u0441\u0435 \u043f\u043e\u043a\u0430\u0437\u0430\u043d\u043d\u044b\u0435 \u0442\u0430\u043a\u0438\u043c \u043e\u0431\u0440\u0430\u0437\u043e\u043c \u043a\u0430\u0440\u0442\u044b, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043d\u0435 \u0431\u044b\u043b\u0438 \u043f\u043e\u043b\u043e\u0436\u0435\u043d\u044b \u043d\u0430 \u043f\u043e\u043b\u0435 \u0431\u0438\u0442\u0432\u044b, \u043d\u0430 \u0432\u0430\u0448\u0435 \u043a\u043b\u0430\u0434\u0431\u0438\u0449\u0435.","type":"\u0412\u043e\u043b\u0448\u0435\u0431\u0441\u0442\u0432\u043e"},{"language":"Spanish","name":"Ola de g\u00e9nesis","skuIds":{"foil":"492d03e8-b33e-550d-b93c-6704265f17b9","nonfoil":"417ba390-0b4e-5358-b32d-e63cbdd965d7"},"text":"Muestra las primeras X cartas de tu biblioteca. Puedes poner en el campo de batalla cualquier cantidad de cartas de permanente con coste de man\u00e1 convertido de X o menos que se encuentren entre ellas. Luego pon en tu cementerio todas las cartas mostradas de esta manera que no fueron puestas en el campo de batalla.","type":"Conjuro"}],"identifiers":{"scryfallOracleId":"e2487868-f386-438e-a73f-b494f6d35fac"},"layout":"normal","legalities":{"alchemy":"Legal","brawl":"Legal","commander":"Legal","duel":"Legal","future":"Legal","gladiator":"Legal","historic":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","penny":"Legal","pioneer":"Legal","predh":"Legal","standard":"Legal","standardbrawl":"Legal","timeless":"Legal","vintage":"Legal"},"manaCost":"{X}{G}{G}{G}","manaValue":3.0,"name":"Genesis Wave","printings":["FDN","IMA","LTC","PFDN","SOM"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/71dbee38a67e4011","cardKingdomFoil":"https://mtgjson.com/links/8d6fa02d464cfb9b","cardmarket":"https://mtgjson.com/links/3dd97061c7753fdf","cardmarketFoil":"https://mtgjson.com/links/1b14b0eaa669d6da","tcgplayer":"https://mtgjson.com/links/6cf6fc2859f6ead5"},"rulings":[{"date":"2024-11-08","text":"A permanent card is an artifact, battle, creature, enchantment, land, or planeswalker card."},{"date":"2024-11-08","text":"All of the permanents put onto the battlefield this way enter at the same time. If any have triggered abilities that trigger on something else entering, they'll see each other."},{"date":"2024-11-08","text":"If a card in a player's library has {X} in its mana cost, X is considered to be 0."},{"date":"2024-11-08","text":"If a permanent card in your library has no mana symbols in its upper right corner (because it's a land card, for example), its mana value is 0. Such cards can always be put onto the battlefield with Genesis Wave."},{"date":"2024-11-08","text":"If you have fewer than X cards in your library, you reveal all of them."},{"date":"2024-11-08","text":"You don't have to put permanent cards revealed this way onto the battlefield if you choose not to, regardless of their mana values."}],"subtypes":[],"supertypes":[],"text":"Reveal the top X cards of your library. You may put any number of permanent cards with mana value X or less from among them onto the battlefield. Then put all cards revealed this way that weren't put onto the battlefield into your graveyard.","type":"Sorcery","types":["Sorcery"]}"####,
+    r####"{"colorIdentity":["R"],"colors":["R"],"convertedManaCost":3.0,"edhrecRank":11020,"edhrecSaltiness":0.6,"foreignData":[{"language":"French","name":"Directive de Saheeli","skuIds":{"nonfoil":"51b96994-b059-55ad-801f-4700ff758a5e"},"text":"Improvisation (Chaque artefact que vous engagez apr\u00e8s avoir activ\u00e9 des capacit\u00e9s de mana paie {1}.)\nR\u00e9v\u00e9lez les X cartes du dessus de votre biblioth\u00e8que. Parmi elles, vous pouvez mettre sur le champ de bataille n'importe quel nombre de cartes d'artefact avec un co\u00fbt converti de mana inf\u00e9rieur ou \u00e9gal \u00e0 X. Mettez ensuite dans votre cimeti\u00e8re toutes les cartes r\u00e9v\u00e9l\u00e9es de cette mani\u00e8re qui n'ont pas \u00e9t\u00e9 mises sur le champ de bataille.","type":"Rituel"},{"language":"German","name":"Saheelis Direktive","skuIds":{"nonfoil":"8be823a2-fae6-5246-b7e0-a16042dd7e02"},"text":"Improvisieren (Mit jedem Artefakt, das du tappst, nachdem du mit dem Aktivieren deiner Manaf\u00e4higkeiten fertig bist, bezahlst du {1}.)\nDecke die obersten X Karten deiner Bibliothek auf. Du kannst davon eine beliebige Anzahl an Artefaktkarten mit umgewandelten Manakosten von X oder weniger ins Spiel bringen. Lege dann alle Karten, die auf diese Weise aufgedeckt und nicht ins Spiel gebracht wurden, auf deinen Friedhof.","type":"Hexerei"},{"language":"Italian","name":"Direttiva di Saheeli","skuIds":{"nonfoil":"64526b54-86e9-5580-8364-25ae59901b13"},"text":"Improvvisare (Ogni artefatto che TAPpi dopo aver attivato le abilit\u00e0 di mana corrisponde al pagamento di {1}.)\nRivela le prime X carte del tuo grimorio. Puoi mettere sul campo di battaglia un qualsiasi numero di carte artefatto con costo di mana convertito pari o inferiore a X scelte tra esse. Poi metti nel tuo cimitero tutte le carte rivelate in questo modo che non sono state messe sul campo di battaglia.","type":"Stregoneria"},{"language":"Japanese","name":"\u30b5\u30d2\u30fc\u30ea\u306e\u6307\u4ee4","skuIds":{"nonfoil":"c2541f95-e895-5da3-9a07-38eaca0b3823"},"text":"\u5373\u5e2d\uff08\u3042\u306a\u305f\u306f\u3042\u306a\u305f\u306e\u30a2\u30fc\u30c6\u30a3\u30d5\u30a1\u30af\u30c8\u3092\u30bf\u30c3\u30d7\u3057\u3066\u3001\uff11\u500b\u3042\u305f\u308a{1}\u306e\u652f\u6255\u3044\u306b\u4ee3\u3048\u3066\u3082\u3088\u3044\u3002\uff09\n\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0a\u304b\u3089\uff38\u679a\u306e\u30ab\u30fc\u30c9\u3092\u516c\u958b\u3059\u308b\u3002\u3042\u306a\u305f\u306f\u305d\u306e\u4e2d\u304b\u3089\u3001\u70b9\u6570\u3067\u898b\u305f\u30de\u30ca\u30fb\u30b3\u30b9\u30c8\u304c\uff38\u4ee5\u4e0b\u3067\u3042\u308b\u30a2\u30fc\u30c6\u30a3\u30d5\u30a1\u30af\u30c8\u30fb\u30ab\u30fc\u30c9\u671b\u3080\u679a\u6570\u3092\u6226\u5834\u306b\u51fa\u3057\u3066\u3082\u3088\u3044\u3002\u305d\u306e\u5f8c\u3001\u3053\u308c\u306b\u3088\u308a\u516c\u958b\u3057\u6226\u5834\u306b\u51fa\u3055\u306a\u304b\u3063\u305f\u30ab\u30fc\u30c9\u3092\u3059\u3079\u3066\u3042\u306a\u305f\u306e\u5893\u5730\u306b\u7f6e\u304f\u3002","type":"\u30bd\u30fc\u30b5\u30ea\u30fc"},{"language":"Portuguese (Brazil)","name":"Diretriz de Saheeli","skuIds":{"nonfoil":"484dc66a-5264-52b8-9b85-c77087dff1b9"},"text":"Improvisar (Cada artefato que voc\u00ea vira ap\u00f3s terminar de ativar habilidades de mana paga por {1}.)\nRevele os X cards do topo de seu grim\u00f3rio. Voc\u00ea pode colocar qualquer n\u00famero de cards de artefato com custo de mana convertido igual ou inferior a X dentre eles no campo de batalha. Depois, coloque em seu cemit\u00e9rio todos os cards revelados dessa maneira que n\u00e3o foram colocados no campo de batalha.","type":"Feiti\u00e7o"},{"language":"Spanish","name":"Directiva de Saheeli","skuIds":{"nonfoil":"e06c60cc-82fb-525e-9502-1d108de17653"},"text":"Improvisar. (Cada artefacto que gires una vez que termines de activar habilidades de man\u00e1 paga {1}.)\nMuestra las X primeras cartas de tu biblioteca. Puedes poner en el campo de batalla cualquier cantidad de cartas de artefacto con coste de man\u00e1 convertido de X o menos que se encuentren entre ellas. Luego, pon en tu cementerio todas las cartas mostradas de esta manera que no fueron puestas en el campo de batalla.","type":"Conjuro"}],"identifiers":{"scryfallOracleId":"1aee3a93-d064-4d10-9fe6-879a1f342c1f"},"keywords":["Improvise"],"layout":"normal","legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","vintage":"Legal"},"manaCost":"{X}{R}{R}{R}","manaValue":3.0,"name":"Saheeli's Directive","printings":["C18","PZ2"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/c2fadb3bb3c648ae","cardmarket":"https://mtgjson.com/links/d8f0a7ab65e8f8bb","tcgplayer":"https://mtgjson.com/links/b49a31fab5cae4cc"},"rulings":[{"date":"2018-07-13","text":"All of the artifacts put onto the battlefield this way enter at the same time. If any have triggered abilities that trigger on something else entering the battlefield, they'll see each other."},{"date":"2018-07-13","text":"Equipment attached to a creature doesn't become tapped when that creature becomes tapped, and tapping that Equipment doesn't cause the creature to become tapped."},{"date":"2018-07-13","text":"If a card in your library has {X} in its mana cost, X is considered to be 0."},{"date":"2018-07-13","text":"If an artifact you control has a mana ability with {T} in the cost, activating that ability while casting a spell with improvise will result in the artifact being tapped when you pay the spell's costs. You won't be able to tap it again for improvise. Similarly, if you sacrifice an artifact to activate a mana ability while casting a spell with improvise, that artifact won't be on the battlefield when you pay the spell's costs, so you won't be able to tap it for improvise."},{"date":"2018-07-13","text":"Improvise can't be used to pay for anything other than the cost of casting the spell. For example, it can't be used during the resolution of an ability that says \"Counter target spell unless its controller pays {3}.\""},{"date":"2018-07-13","text":"Improvise can't pay for {W}, {U}, {B}, {R}, {G}, or {C} mana symbols in a spell's total cost."},{"date":"2018-07-13","text":"Improvise doesn't change a spell's mana cost or mana value."},{"date":"2018-07-13","text":"Saheeli's Directive considers the individual mana values of the artifact cards you reveal. The sum of their mana values may be greater than X."},{"date":"2018-07-13","text":"Tapping an artifact won't cause its abilities to stop applying unless those abilities say so."},{"date":"2018-07-13","text":"When calculating a spell's total cost, include any alternative costs, additional costs, or anything else that increases or reduces the cost to cast the spell. Improvise applies after the total cost is calculated."},{"date":"2018-07-13","text":"When using improvise to cast a spell with {X} in its mana cost, first choose the value for X. That choice, plus any cost increases or decreases, will determine the spell's total cost. Then you can tap artifacts you control to help pay that cost. For example, if you cast Saheeli's Directive and choose X to be 3, the total cost is {3}{R}{R}{R}. If you tap two artifacts, you'll have to pay {1}{R}{R}{R}."}],"subtypes":[],"supertypes":[],"text":"Improvise (Each artifact you tap after you're done activating mana abilities pays for {1}.)\nReveal the top X cards of your library. You may put any number of artifact cards with mana value X or less from among them onto the battlefield. Then put all cards revealed this way that weren't put onto the battlefield into your graveyard.","type":"Sorcery","types":["Sorcery"]}"####,
+    r####"{"colorIdentity":["G"],"colors":["G"],"convertedManaCost":4.0,"edhrecRank":12553,"edhrecSaltiness":0.4,"foreignData":[{"language":"Chinese Simplified","name":"\u5f81\u53ec\u519b\u4f0d","skuIds":{"foil":"1ea53a16-01a5-57f7-9bf5-b7b34879aa50","nonfoil":"62ee8324-163c-5e9d-818d-d4ae1773acf9"},"text":"\u68c0\u89c6\u4f60\u724c\u5e93\u9876\u7684\u516d\u5f20\u724c\u3002\u5c06\u5176\u4e2d\u81f3\u591a\u4e24\u5f20\u603b\u6cd5\u672f\u529b\u7b49\u4e8e\u6216\u5c0f\u4e8e3\u7684\u751f\u7269\u724c\u653e\u8fdb\u6218\u573a\u3002\u5c06\u5176\u4f59\u7684\u724c\u4ee5\u4efb\u610f\u987a\u5e8f\u7f6e\u4e8e\u4f60\u724c\u5e93\u5e95\u3002","type":"\u77ac\u95f4"},{"language":"Chinese Traditional","name":"\u5fb5\u53ec\u8ecd\u4f0d","skuIds":{"foil":"8dab4027-511a-52a2-a338-9fbdb22f5cb2","nonfoil":"55055f2a-60aa-55be-884a-b9d9f0de2490"},"text":"\u6aa2\u8996\u4f60\u724c\u5eab\u9802\u7684\u516d\u5f35\u724c\u3002\u5c07\u5176\u4e2d\u81f3\u591a\u5169\u5f35\u7e3d\u9b54\u6cd5\u529b\u7b49\u65bc\u6216\u5c0f\u65bc3\u7684\u751f\u7269\u724c\u653e\u9032\u6230\u5834\u3002\u5c07\u5176\u9918\u7684\u724c\u4ee5\u4efb\u610f\u9806\u5e8f\u7f6e\u65bc\u4f60\u724c\u5eab\u5e95\u3002","type":"\u77ac\u9593"},{"language":"French","name":"Compagnie rassembl\u00e9e","skuIds":{"foil":"6c2df602-92e0-57af-8129-df76d15da11f","nonfoil":"ea24678a-6cd7-5ae3-9125-5a43efcc0f73"},"text":"Regardez les six cartes du dessus de votre biblioth\u00e8que. Parmi elles, mettez sur le champ de bataille jusqu'\u00e0 deux cartes de cr\u00e9ature avec un co\u00fbt converti de mana inf\u00e9rieur ou \u00e9gal \u00e0 3. Mettez le reste au-dessous de votre biblioth\u00e8que, dans l'ordre de votre choix.","type":"\u00c9ph\u00e9m\u00e8re"},{"language":"German","name":"Truppensammlung","skuIds":{"foil":"cc3e8af8-9663-5593-8b6f-e8a2487f9a56","nonfoil":"9e7c36d8-5b5a-5e8a-946d-5c183513f12d"},"text":"Schaue dir die obersten sechs Karten deiner Bibliothek an. Bringe davon bis zu zwei Kreaturenkarten mit umgewandelten Manakosten von 3 oder weniger ins Spiel. Lege den Rest in beliebiger Reihenfolge unter deine Bibliothek.","type":"Spontanzauber"},{"language":"Italian","name":"Compagnia a Raccolta","skuIds":{"foil":"ad02bb09-a39e-5c5a-856a-fd125bd5b3f3","nonfoil":"048c7be7-b74e-5409-8b04-c691e7a1d642"},"text":"Guarda le prime sei carte del tuo grimorio. Metti sul campo di battaglia fino a due carte creatura con costo di mana convertito pari o inferiore a 3 scelte tra esse. Metti le altre in fondo al tuo grimorio in qualsiasi ordine.","type":"Istantaneo"},{"language":"Japanese","name":"\u96c6\u5408\u3057\u305f\u4e2d\u968a","skuIds":{"foil":"65df883f-32c0-5e74-96a5-01dba61b80db","nonfoil":"846e60fa-69a1-5f56-a7db-8c8367722931"},"text":"\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0a\u304b\u3089\uff16\u679a\u306e\u30ab\u30fc\u30c9\u3092\u898b\u308b\u3002\u305d\u306e\u4e2d\u304b\u3089\u3001\u70b9\u6570\u3067\u898b\u305f\u30de\u30ca\u30fb\u30b3\u30b9\u30c8\u304c\uff13\u4ee5\u4e0b\u306e\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\u30fb\u30ab\u30fc\u30c9\u3092\u6700\u5927\uff12\u679a\u307e\u3067\u6226\u5834\u306b\u51fa\u3059\u3002\u6b8b\u308a\u3092\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0b\u306b\u671b\u3080\u9806\u756a\u3067\u7f6e\u304f\u3002","type":"\u30a4\u30f3\u30b9\u30bf\u30f3\u30c8"},{"language":"Korean","name":"\uc120\ud0dd\ub41c \ubd80\ub300","skuIds":{"foil":"9e8f69cb-470a-5a0e-ae63-9ee877709233","nonfoil":"25bd7e2e-fa39-5984-a4b5-fa9abda85ed2"},"text":"\ub2f9\uc2e0\uc758 \uc11c\uace0 \ub9e8 \uc704\uc758 \uce74\ub4dc \uc5ec\uc12f \uc7a5\uc744 \ubcf8\ub2e4. \uadf8 \uce74\ub4dc\ub4e4 \uc911\uc5d0\uc11c \uc804\ud658\ub9c8\ub098\ube44\uc6a9\uc774 3 \uc774\ud558\uc778 \uc0dd\ubb3c \uce74\ub4dc\ub97c \ucd5c\ub300 \ub450 \uc7a5\uae4c\uc9c0 \uc804\uc7a5\uc5d0 \ub193\ub294\ub2e4. \ub098\uba38\uc9c0 \uce74\ub4dc\ub4e4\uc740 \ub2f9\uc2e0\uc774 \uc6d0\ud558\ub294 \uc21c\uc11c\ub85c \ub2f9\uc2e0\uc758 \uc11c\uace0 \ub9e8 \ubc11\uc5d0 \ub193\ub294\ub2e4.","type":"\uc21c\uac04\ub9c8\ubc95"},{"language":"Portuguese (Brazil)","name":"Companhia Agrupada","skuIds":{"foil":"42f7b3b5-2092-595a-ada9-5a7d48d863e0","nonfoil":"fb5e8e91-52ec-541b-abc3-a18583d0ebaa"},"text":"Olhe os seis cards do topo de seu grim\u00f3rio. Coloque at\u00e9 dois cards de criatura com custo de mana convertido igual ou inferior a 3 dentre eles no campo de batalha. Coloque o restante no fundo de seu grim\u00f3rio em qualquer ordem.","type":"M\u00e1gica Instant\u00e2nea"},{"language":"Russian","name":"\u0421\u0431\u043e\u0440\u043d\u0430\u044f \u0420\u043e\u0442\u0430","skuIds":{"foil":"b8b8b077-8873-561a-be2b-45de2bd4a1cc","nonfoil":"a2f941fa-3561-50ef-a3e0-ca9478471583"},"text":"\u041f\u043e\u0441\u043c\u043e\u0442\u0440\u0438\u0442\u0435 \u0448\u0435\u0441\u0442\u044c \u0432\u0435\u0440\u0445\u043d\u0438\u0445 \u043a\u0430\u0440\u0442 \u0432\u0430\u0448\u0435\u0439 \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0438. \u041f\u043e\u043b\u043e\u0436\u0438\u0442\u0435 \u0438\u0437 \u043d\u0438\u0445 \u043d\u0430 \u043f\u043e\u043b\u0435 \u0431\u0438\u0442\u0432\u044b \u043d\u0435 \u0431\u043e\u043b\u0435\u0435 \u0434\u0432\u0443\u0445 \u043a\u0430\u0440\u0442 \u0441\u0443\u0449\u0435\u0441\u0442\u0432 \u0441 \u043a\u043e\u043d\u0432\u0435\u0440\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439 \u043c\u0430\u043d\u0430-\u0441\u0442\u043e\u0438\u043c\u043e\u0441\u0442\u044c\u044e 3 \u0438\u043b\u0438 \u043c\u0435\u043d\u044c\u0448\u0435. \u041f\u043e\u043b\u043e\u0436\u0438\u0442\u0435 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043a\u0430\u0440\u0442\u044b \u0432 \u043d\u0438\u0437 \u0432\u0430\u0448\u0435\u0439 \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0438 \u0432 \u043b\u044e\u0431\u043e\u043c \u043f\u043e\u0440\u044f\u0434\u043a\u0435.","type":"\u041c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u043e\u0435 \u0437\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u0435"},{"language":"Spanish","name":"Compa\u00f1\u00eda reunida","skuIds":{"foil":"db4e0de5-bc45-5fa3-88f1-74ea28e6e1e4","nonfoil":"2ef49ac0-38ca-580f-a82a-6c0afae7ba77"},"text":"Mira las seis primeras cartas de tu biblioteca. Pon en el campo de batalla hasta dos cartas de criatura que se encuentren entre ellas con coste de man\u00e1 convertido de 3 o menos. Pon el resto en el fondo de tu biblioteca en cualquier orden.","type":"Instant\u00e1neo"}],"identifiers":{"scryfallOracleId":"0bbcb563-09b3-499d-a9cc-3a6d7501dd81"},"layout":"normal","legalities":{"brawl":"Legal","commander":"Legal","duel":"Legal","gladiator":"Legal","historic":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","pioneer":"Legal","timeless":"Legal","vintage":"Legal"},"manaCost":"{3}{G}","manaValue":4.0,"name":"Collected Company","printings":["AKR","DTK","MB2","PW21","SLD","SPG"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/487c47e535c6591a","cardKingdomFoil":"https://mtgjson.com/links/f9f23db029a4369c","cardmarket":"https://mtgjson.com/links/e85cce440c3a9296","cardmarketFoil":"https://mtgjson.com/links/efe40c4d82dc2e39","tcgplayer":"https://mtgjson.com/links/dfa72450fd314dd8"},"rulings":[{"date":"2015-02-25","text":"Each of the creature cards can have mana value 3 or less. It's not the total mana value of the two cards."}],"subtypes":[],"supertypes":[],"text":"Look at the top six cards of your library. Put up to two creature cards with mana value 3 or less from among them onto the battlefield. Put the rest on the bottom of your library in any order.","type":"Instant","types":["Instant"]}"####,
+    r####"{"colorIdentity":["B","U"],"colors":["B","U"],"convertedManaCost":2.0,"edhrecRank":9205,"edhrecSaltiness":0.26,"foreignData":[{"language":"French","name":"Nashi, chercheur de l'ombre","skuIds":{"foil":"d1b27525-5214-5ebe-8a54-da6fc4342b39","nonfoil":"b0fc52d6-6920-51bb-bcb8-6df9e573f482"},"text":"Menace\n\u00c0 chaque fois que Nashi, chercheur de l'ombre inflige des blessures de combat \u00e0 un joueur, vous meulez autant de cartes. Vous pouvez mettre n'importe quel nombre de cartes l\u00e9gendaires et/ou d'enchantement parmi elles dans votre main. Si vous n'avez pas mis de carte dans votre main de cette mani\u00e8re, mettez un marqueur +1/+1 sur Nashi.","type":"Cr\u00e9ature l\u00e9gendaire \u2014 rat et ninja et sorcier"},{"language":"German","name":"Nashi, Suchender im Dunkeln","skuIds":{"foil":"8265e257-e7c2-591a-aa56-a553146508b2","nonfoil":"6856c0cd-dd66-5d72-b86a-26634dbe9e34"},"text":"Bedrohlich\nImmer wenn Nashi, Suchender im Dunkeln, einem Spieler Kampfschaden zuf\u00fcgt, millst du entsprechend viele Karten. Du kannst davon eine beliebige Anzahl an legend\u00e4ren Karten und/oder Verzauberungskarten auf deine Hand nehmen. Falls du auf diese Weise keine Karten auf deine Hand nimmst, lege eine +1/+1-Marke auf Nashi.","type":"Legend\u00e4re Kreatur \u2014 Ratte, Ninja, Zauberer"},{"language":"Italian","name":"Nashi, Esploratore nell'Oscurit\u00e0","skuIds":{"foil":"147e7496-650e-51d3-b36a-bd6e9d71cdbb","nonfoil":"7ea64157-0233-5e92-b8ee-7e49dac2364f"},"text":"Minacciare\nOgniqualvolta Nashi, Esploratore nell'Oscurit\u00e0 infligge danno da combattimento a un giocatore, macini altrettante carte. Puoi aggiungere alla tua mano un qualsiasi numero di carte leggendarie e/o incantesimo scelte tra esse. Se non aggiungi carte alla tua mano in questo modo, metti un segnalino +1/+1 su Nashi.","type":"Creatura Leggendaria \u2014 Mago Ninja Ratto"},{"language":"Japanese","name":"\u95c7\u306e\u4e2d\u306e\u7814\u7a76\u8005\u3001\u30ca\u30b7","skuIds":{"foil":"881319d3-cfb9-56b6-b624-943e141136aa","nonfoil":"004651ea-00c7-597e-bb8a-58eec26aabf0"},"text":"\u5a01\u8feb\n\u95c7\u306e\u4e2d\u306e\u7814\u7a76\u8005\u3001\u30ca\u30b7\u304c\u30d7\u30ec\u30a4\u30e4\u30fc\uff11\u4eba\u306b\u6226\u95d8\u30c0\u30e1\u30fc\u30b8\u3092\u4e0e\u3048\u308b\u305f\u3073\u3001\u3042\u306a\u305f\u306f\u305d\u306e\u70b9\u6570\u306b\u7b49\u3057\u3044\u679a\u6570\u306e\u30ab\u30fc\u30c9\u3092\u5207\u524a\u3059\u308b\u3002\u305d\u306e\u4e2d\u304b\u3089\u3001\u4f1d\u8aac\u3084\u30a8\u30f3\u30c1\u30e3\u30f3\u30c8\u3067\u3042\u308b\u671b\u3080\u679a\u6570\u306e\u30ab\u30fc\u30c9\u3092\u3042\u306a\u305f\u306e\u624b\u672d\u306b\u52a0\u3048\u3066\u3082\u3088\u3044\u3002\u3053\u308c\u306b\u3088\u308a\u30ab\u30fc\u30c9\u3092\u3042\u306a\u305f\u306e\u624b\u672d\u306b\u52a0\u3048\u306a\u304b\u3063\u305f\u306a\u3089\u3001\u3053\u308c\u306e\u4e0a\u306b\uff0b\uff11/\uff0b\uff11\u30ab\u30a6\u30f3\u30bf\u30fc\uff11\u500b\u3092\u7f6e\u304f\u3002","type":"\u4f1d\u8aac\u306e\u30af\u30ea\u30fc\u30c1\u30e3\u30fc \u2014 \u30cd\u30ba\u30df\u30fb\u5fcd\u8005\u30fb\u30a6\u30a3\u30b6\u30fc\u30c9"},{"language":"Spanish","name":"Nashi, buscador en la oscuridad","skuIds":{"foil":"3aa62bde-2533-53fa-a145-1fac61dd0cc1","nonfoil":"a6b47b46-beca-5b70-9526-1e0db168ac3c"},"text":"Amenaza.\nSiempre que Nashi, buscador en la oscuridad haga da\u00f1o de combate a un jugador, mueles esa misma cantidad de cartas. Puedes poner en tu mano cualquier cantidad de cartas legendarias y/o de encantamiento de entre ellas. Si no pusiste cartas en tu mano de esta manera, pon un contador +1/+1 sobre Nashi.","type":"Criatura legendaria \u2014 Hechicero ninja rata"}],"identifiers":{"scryfallOracleId":"ade8fc6f-efaa-4a24-96d8-99ef5026cd74"},"keywords":["Menace","Mill"],"layout":"normal","leadershipSkills":{"brawl":true,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":false},"legalities":{"alchemy":"Legal","brawl":"Legal","commander":"Legal","duel":"Legal","future":"Legal","gladiator":"Legal","historic":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","penny":"Legal","pioneer":"Legal","standard":"Legal","standardbrawl":"Legal","timeless":"Legal","vintage":"Legal"},"manaCost":"{U}{B}","manaValue":2.0,"name":"Nashi, Searcher in the Dark","power":"2","printings":["DSK","PDSK"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/ad7ca996bc36d426","cardKingdomFoil":"https://mtgjson.com/links/b576c46e6d1b8f3c","cardmarket":"https://mtgjson.com/links/ee7ee0098d64d1c0","cardmarketFoil":"https://mtgjson.com/links/0942796f2527c558","tcgplayer":"https://mtgjson.com/links/6a7e933fc69c147e"},"subtypes":["Rat","Ninja","Wizard"],"supertypes":["Legendary"],"text":"Menace\nWhenever Nashi deals combat damage to a player, you mill that many cards. You may put any number of legendary and/or enchantment cards from among them into your hand. If you put no cards into your hand this way, put a +1/+1 counter on Nashi.","toughness":"2","type":"Legendary Creature \u2014 Rat Ninja Wizard","types":["Creature"]}"####,
+    r####"{"colorIdentity":["G"],"colors":["G"],"convertedManaCost":4.0,"edhrecRank":8766,"edhrecSaltiness":0.05,"foreignData":[{"language":"Chinese Simplified","name":"\u884c\u730e\u91ce\u5730","skuIds":{"foil":"e90073da-58f1-59f2-8edd-21c237bb2d94","nonfoil":"6d5cd8a2-e232-5589-9a12-1d849d48c84f"},"text":"\u589e\u5e45{3}{G}\uff08\u4f60\u4f7f\u7528\u6b64\u5492\u8bed\u65f6\u53ef\u4ee5\u989d\u5916\u652f\u4ed8{3}{G}\u3002)\n\u4ece\u4f60\u7684\u724c\u5e93\u4e2d\u641c\u5bfb\u81f3\u591a\u4e24\u5f20\u6811\u6797\u724c\uff0c\u5e76\u5c06\u5b83\u4eec\u6a2a\u7f6e\u8fdb\u573a\u3002 \u7136\u540e\u5c06\u4f60\u7684\u724c\u5e93\u6d17\u724c\u3002\n\u5982\u679c\u66fe\u652f\u4ed8\u5176\u589e\u5e45\u8d39\u7528\uff0c\u5219\u91cd\u7f6e\u6240\u6709\u4ee5\u6b64\u6cd5\u653e\u7f6e\u8fdb\u573a\u7684\u6811\u6797\u3002 \u5b83\u4eec\u6210\u4e3a3/3\u7eff\u8272\uff0c\u5177\u654f\u6377\u5f02\u80fd\u7684\u751f\u7269\uff0c\u5e76\u4e14\u4ecd\u7136\u662f\u5730\u3002","type":"\u6cd5\u672f"},{"language":"French","name":"\u00c9tendues de chasse","skuIds":{"foil":"e8df5ef3-9527-5efa-9a8c-ed5736230358","nonfoil":"124a9bf5-9ab8-5fa8-971b-73ff1a3b03d9"},"text":"Kick {3}{G} (Vous pouvez payer {3}{G} suppl\u00e9mentaires au moment o\u00f9 vous jouez ce sort.)\nCherchez dans votre biblioth\u00e8que jusqu'\u00e0 deux cartes de for\u00eat et mettez-les en jeu engag\u00e9es. M\u00e9langez ensuite votre biblioth\u00e8que.\nSi le co\u00fbt de kick a \u00e9t\u00e9 pay\u00e9, d\u00e9gagez toutes les for\u00eats mises en jeu de cette mani\u00e8re. Elles deviennent des cr\u00e9atures 3/3 vertes avec la c\u00e9l\u00e9rit\u00e9 qui sont toujours des terrains.","type":"Rituel"},{"language":"German","name":"Jagende Wildnis","skuIds":{"foil":"8d5cc381-2fe7-5afb-92bb-7c72e660802f","nonfoil":"3cca0176-6623-5691-8b11-6d2ccaf9669d"},"text":"Bonus {3}{G} (Du kannst zus\u00e4tzlich {3}{G} bezahlen, sowie du diesen Zauberspruch spielst.)\nDurchsuche deine Bibliothek nach bis zu zwei W\u00e4ldern und bringe sie getappt ins Spiel. Mische danach deine Bibliothek.\nWurden die Bonuskosten bezahlt, enttappe alle W\u00e4lder, die auf diese Weise ins Spiel gebracht wurden. Sie werden zu 3/3 gr\u00fcnen Kreaturen mit Eile, die auch noch L\u00e4nder sind.","type":"Hexerei"},{"language":"Italian","name":"Terreni di Caccia","skuIds":{"foil":"68b409a3-7c9f-5750-ac28-b252dd479983","nonfoil":"ffd4df08-b52d-59a4-ac8a-fc61857fa502"},"text":"Potenziamento {3}{G} (Puoi spendere {3}{G} addizionale quando giochi questa magia.)\nPassa in rassegna il tuo grimorio per trovare fino a due carte Foresta e mettile in gioco TAPpate. Poi rimescola il tuo grimorio.\nSe \u00e8 stato pagato il costo di potenziamento, STAPpa tutte le Foreste messe in gioco in questo modo. Diventano creature 3/3 verdi con rapidit\u00e0 che sono ancora terre.","type":"Stregoneria"},{"language":"Japanese","name":"\u672a\u958b\u306e\u72e9\u308a","skuIds":{"foil":"0212f71a-0d23-5b96-861f-71a3720393a6","nonfoil":"2d4e66cf-5065-5ab8-8e3b-83c17ee102a5"},"text":"\u30ad\u30c3\u30ab\u30fc {3}{G} \uff08\u3042\u306a\u305f\u306f\u3053\u306e\u546a\u6587\u3092\u30d7\u30ec\u30a4\u3059\u308b\u306b\u969b\u3057\u3001\u8ffd\u52a0\u3067{3}{G}\u3092\u652f\u6255\u3063\u3066\u3082\u3088\u3044\u3002\uff09\n\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u304b\u3089\u68ee\u30ab\u30fc\u30c9\u3092\u6700\u5927\uff12\u679a\u307e\u3067\u63a2\u3057\u3001\u305d\u308c\u3089\u3092\u30bf\u30c3\u30d7\u72b6\u614b\u3067\u5834\u306b\u51fa\u3059\u3002 \u305d\u306e\u5f8c\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u3092\u5207\u308a\u76f4\u3059\u3002\n\u30ad\u30c3\u30ab\u30fc\u30b3\u30b9\u30c8\u304c\u652f\u6255\u308f\u308c\u3066\u3044\u308b\u5834\u5408\u3001\u3053\u308c\u306b\u3088\u308a\u5834\u306b\u51fa\u305f\u3059\u3079\u3066\u306e\u68ee\u3092\u30a2\u30f3\u30bf\u30c3\u30d7\u3059\u308b\u3002 \u305d\u308c\u3089\u306f\u901f\u653b\u3092\u6301\u3064\u7dd1\u306e\uff13/\uff13\u306e\u30af\u30ea\u30fc\u30c1\u30e3\u30fc\u306b\u306a\u308b\u3002\u305d\u308c\u3089\u306f\u571f\u5730\u3067\u3082\u3042\u308b\u3002","type":"\u30bd\u30fc\u30b5\u30ea\u30fc"},{"language":"Portuguese (Brazil)","name":"Regi\u00f5es de Ca\u00e7a","skuIds":{"foil":"a072e024-394c-5578-93ce-5f67f6587472","nonfoil":"d2d34349-38bb-593d-ac28-26a829bc91db"},"text":"Refor\u00e7ar {3}{G} (Voc\u00ea pode pagar um custo adicional de {3}{G} ao jogar esta m\u00e1gica.)\nProcure em seu grim\u00f3rio por at\u00e9 dois cards de Floresta e coloque-os em jogo virados. Depois, embaralhe seu grim\u00f3rio.\nSe o custo de refor\u00e7o tiver sido pago, desvire todas as Florestas colocadas em jogo desta maneira. Elas se tornam criaturas 3/3 verdes com \u00edmpeto que ainda s\u00e3o terrenos.","type":"Feiti\u00e7o"},{"language":"Russian","name":"\u041e\u0445\u043e\u0442\u044f\u0449\u0438\u0435\u0441\u044f \u041f\u0440\u043e\u0441\u0442\u043e\u0440\u044b","skuIds":{"foil":"84fc5405-c29c-564c-8c99-2749a653e787","nonfoil":"e67efa3c-0c78-556c-bfed-78473743d491"},"text":"\u0423\u0441\u0438\u043b\u0438\u0442\u0435\u043b\u044c {3}{G} (\u0412\u044b \u043c\u043e\u0436\u0435\u0442\u0435 \u0437\u0430\u043f\u043b\u0430\u0442\u0438\u0442\u044c \u0434\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e {3}{G} \u0432\u043e \u0432\u0440\u0435\u043c\u044f \u0438\u0433\u0440\u044b \u044d\u0442\u043e\u0433\u043e \u0437\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u044f.)\n\u041f\u043e\u0438\u0449\u0438\u0442\u0435 \u0432 \u0441\u0432\u043e\u0435\u0439 \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0435 \u0434\u043e \u0434\u0432\u0443\u0445 \u043a\u0430\u0440\u0442 \u041b\u0435\u0441\u043e\u0432 \u0438 \u043f\u043e\u043b\u043e\u0436\u0438\u0442\u0435 \u0438\u0445 \u043f\u043e\u0432\u0435\u0440\u043d\u0443\u0442\u044b\u043c\u0438 \u0432 \u0438\u0433\u0440\u0443. \u0417\u0430\u0442\u0435\u043c \u043f\u0435\u0440\u0435\u0442\u0430\u0441\u0443\u0439\u0442\u0435 \u0441\u0432\u043e\u044e \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0443.\n\u0415\u0441\u043b\u0438 \u0431\u044b\u043b\u0430 \u0437\u0430\u043f\u043b\u0430\u0447\u0435\u043d\u0430 \u0441\u0442\u043e\u0438\u043c\u043e\u0441\u0442\u044c \u0443\u0441\u0438\u043b\u0438\u0442\u0435\u043b\u044f, \u0440\u0430\u0437\u0432\u0435\u0440\u043d\u0438\u0442\u0435 \u0432\u0441\u0435 \u041b\u0435\u0441\u0430, \u043f\u043e\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0435 \u0432 \u0438\u0433\u0440\u0443 \u044d\u0442\u0438\u043c \u043f\u0443\u0442\u0435\u043c \u041e\u043d\u0438 \u0441\u0442\u0430\u043d\u043e\u0432\u044f\u0442\u0441\u044f \u0437\u0435\u043b\u0435\u043d\u044b\u043c\u0438 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0430\u043c\u0438 3/3 \u0441 \u0423\u0441\u043a\u043e\u0440\u0435\u043d\u0438\u0435\u043c \u0438 \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u0437\u0435\u043c\u043b\u044f\u043c\u0438.","type":"\u0412\u043e\u043b\u0448\u0435\u0431\u0441\u0442\u0432\u043e"},{"language":"Spanish","name":"Terreno de caza","skuIds":{"foil":"bb86ddf7-01d8-5378-bc24-29a8ce41ddfd","nonfoil":"4ff2227e-87ea-5e15-a672-4475450433fe"},"text":"Est\u00edmulo {3}{G} (Puedes pagar {3}{G} adicional en cuanto juegues este hechizo.)\nBusca en tu biblioteca hasta dos cartas de bosque y ponlas en juego giradas. Luego baraja tu biblioteca.\nSi se pag\u00f3 el coste de est\u00edmulo, endereza todos los bosques puestos en juego de esta manera. Se convierten en criaturas verdes 3/3 con la habilidad de prisa que siguen siendo tierras.","type":"Conjuro"}],"identifiers":{"scryfallOracleId":"e9bc324e-c200-45ef-8b9b-52a61d0f7374"},"keywords":["Kicker"],"layout":"normal","legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","predh":"Legal","vintage":"Legal"},"manaCost":"{3}{G}","manaValue":4.0,"name":"Hunting Wilds","printings":["C18","PLC"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/f0e58a32200c1f6e","cardKingdomFoil":"https://mtgjson.com/links/e05cbf1ef38207cf","cardmarket":"https://mtgjson.com/links/b955fd83be7b02cc","cardmarketFoil":"https://mtgjson.com/links/a967543e9794b4c3","tcgplayer":"https://mtgjson.com/links/0e3b207b424b7b9b"},"rulings":[{"date":"2007-02-01","text":"If the Hunting Wilds is kicked, the Forests become creatures with haste permanently."},{"date":"2009-10-01","text":"A noncreature permanent that turns into a creature is subject to the \"summoning sickness\" rule: It can only attack, and its {T} abilities can only be activated, if its controller has continuously controlled that permanent since the beginning of their most recent turn."},{"date":"2024-11-08","text":"If a card or token enters as a copy of a permanent, the new permanent isn't kicked, even if the original was."},{"date":"2024-11-08","text":"If a spell's kicker cost was paid, the spell is \"kicked.\""},{"date":"2024-11-08","text":"If you copy a kicked spell on the stack, the copy is also kicked. If the copied spell is a permanent spell, the token the copy of that spell becomes when it enters is also kicked."},{"date":"2024-11-08","text":"If you put a permanent with a kicker ability onto the battlefield without casting it, you can't kick it."},{"date":"2024-11-08","text":"The kicker ability doesn't let you pay a kicker cost more than once."},{"date":"2024-11-08","text":"To determine a spell's total cost, start with the mana cost (or an alternative cost if another card's effect allows you to pay one instead), add any cost increases (such as kicker), then apply any cost reductions. The spell's mana value remains unchanged, no matter what the total cost to cast it was."}],"subtypes":[],"supertypes":[],"text":"Kicker {3}{G} (You may pay an additional {3}{G} as you cast this spell.)\nSearch your library for up to two Forest cards, put them onto the battlefield tapped, then shuffle.\nIf this spell was kicked, untap all Forests put onto the battlefield this way. They become 3/3 green creatures with haste that are still lands.","type":"Sorcery","types":["Sorcery"]}"####,
+    r####"{"colorIdentity":["U"],"colors":["U"],"convertedManaCost":3.0,"edhrecRank":17292,"edhrecSaltiness":0.19,"foreignData":[{"language":"Chinese Simplified","name":"\u8c1c\u9898\u62fc\u56fe","skuIds":{"foil":"df30ba4c-abce-51c5-bfa4-f10a53e24b7f","nonfoil":"b0142694-50ba-5a32-a648-6a64dc757bf1"},"text":"\u5c55\u793a\u4f60\u724c\u5e93\u9876\u7684\u4e94\u5f20\u724c\u3002\u5c06\u5176\u4e2d\u81f3\u591a\u4e24\u5f20\u77ac\u95f4\u548c\uff0f\u6216\u6cd5\u672f\u724c\u7f6e\u4e8e\u4f60\u624b\u4e0a\uff0c\u5176\u4f59\u5219\u7f6e\u5165\u4f60\u7684\u575f\u5893\u573a\u3002","type":"\u6cd5\u672f"},{"language":"Chinese Traditional","name":"\u8b0e\u984c\u62fc\u5716","skuIds":{"foil":"9df6c394-b2b3-55d8-9c41-8f7c5333e35d","nonfoil":"bdc37e8a-033d-510e-90ea-e90a676eec81"},"text":"\u5c55\u793a\u4f60\u724c\u5eab\u9802\u7684\u4e94\u5f35\u724c\u3002\u5c07\u5176\u4e2d\u81f3\u591a\u5169\u5f35\u77ac\u9593\u548c\uff0f\u6216\u5deb\u8853\u724c\u7f6e\u65bc\u4f60\u624b\u4e0a\uff0c\u5176\u9918\u5247\u7f6e\u5165\u4f60\u7684\u58b3\u5893\u5834\u3002","type":"\u5deb\u8853"},{"language":"French","name":"Composants de l'\u00e9nigme","skuIds":{"foil":"28c90208-b230-5370-8e14-0c6dbf042e50","nonfoil":"60af21b7-b612-550d-9014-029167c21f4e"},"text":"R\u00e9v\u00e9lez les cinq cartes du dessus de votre biblioth\u00e8que. Mettez jusqu'\u00e0 deux cartes d'\u00e9ph\u00e9m\u00e8re et/ou de rituel parmi elles dans votre main et le reste dans votre cimeti\u00e8re.","type":"Rituel"},{"language":"German","name":"Teile des Puzzles","skuIds":{"foil":"fbb28208-e869-5ca6-b99c-ed4a1a424f3c","nonfoil":"4630cd7a-f90c-5218-bc95-904dd5cf252f"},"text":"Decke die obersten f\u00fcnf Karten deiner Bibliothek auf. Nimm davon bis zu zwei Spontanzauber- und/oder Hexerei-Karten auf deine Hand und lege den Rest auf deinen Friedhof.","type":"Hexerei"},{"language":"Italian","name":"Pezzi dell'Enigma","skuIds":{"foil":"2fb3b66e-fbbb-5b90-b003-5ce35cb9b323","nonfoil":"1035427a-4d9c-5ecc-ba6d-f51659ef91c6"},"text":"Rivela le prime cinque carte del tuo grimorio. Aggiungi alla tua mano fino a due carte istantaneo e/o stregoneria scelte tra esse e metti le altre nel tuo cimitero.","type":"Stregoneria"},{"language":"Japanese","name":"\u30d1\u30ba\u30eb\u306e\u6b20\u7247","skuIds":{"foil":"cbe1bb6b-c6c0-5309-a4c5-a07d9c877b0a","nonfoil":"f17d3553-0468-5705-b720-bfeda665cfeb"},"text":"\u3042\u306a\u305f\u306e\u30e9\u30a4\u30d6\u30e9\u30ea\u30fc\u306e\u4e00\u756a\u4e0a\u304b\u3089\uff15\u679a\u306e\u30ab\u30fc\u30c9\u3092\u516c\u958b\u3059\u308b\u3002\u305d\u306e\u4e2d\u304b\u3089\u30a4\u30f3\u30b9\u30bf\u30f3\u30c8\u30fb\u30ab\u30fc\u30c9\u3084\u30bd\u30fc\u30b5\u30ea\u30fc\u30fb\u30ab\u30fc\u30c9\u6700\u5927\uff12\u679a\u3092\u3042\u306a\u305f\u306e\u624b\u672d\u306b\u52a0\u3048\u3001\u6b8b\u308a\u3092\u3042\u306a\u305f\u306e\u5893\u5730\u306b\u7f6e\u304f\u3002","type":"\u30bd\u30fc\u30b5\u30ea\u30fc"},{"language":"Korean","name":"\ud37c\uc990 \uc870\uac01","skuIds":{"foil":"5d5ebce9-a4d5-503e-85f0-73216d59b534","nonfoil":"5a11d3a3-e54e-533c-95c7-03fb9d6c3cdd"},"text":"\ub2f9\uc2e0\uc758 \uc11c\uace0 \ub9e8 \uc704\uc758 \uce74\ub4dc \ub2e4\uc12f \uc7a5\uc744 \uacf5\uac1c\ud55c\ub2e4. \uadf8 \uc911\uc5d0\uc11c \uc21c\uac04\ub9c8\ubc95 \ubc0f/\ub610\ub294 \uc9d1\uc911\ub9c8\ubc95 \uce74\ub4dc\ub97c \ucd5c\ub300 \ub450 \uc7a5\uae4c\uc9c0 \uc790\uc2e0\uc758 \uc190\uc73c\ub85c \uac00\uc838\uc624\uace0 \ub098\uba38\uc9c0 \uce74\ub4dc\ub294 \ubb34\ub364\uc5d0 \ub123\ub294\ub2e4.","type":"\uc9d1\uc911\ub9c8\ubc95"},{"language":"Portuguese (Brazil)","name":"Pe\u00e7as do Quebra-cabe\u00e7a","skuIds":{"foil":"6f16e5ce-f34b-5852-ab5b-22d3996da22e","nonfoil":"0ee363fb-6928-50c8-9d97-c931cfc1cbd1"},"text":"Revele os cinco cards do topo de seu grim\u00f3rio. Coloque at\u00e9 dois cards de m\u00e1gica instant\u00e2nea e/ou feiti\u00e7o dentre eles em sua m\u00e3o e o restante em seu cemit\u00e9rio.","type":"Feiti\u00e7o"},{"language":"Russian","name":"\u0424\u0440\u0430\u0433\u043c\u0435\u043d\u0442\u044b \u0413\u043e\u043b\u043e\u0432\u043e\u043b\u043e\u043c\u043a\u0438","skuIds":{"foil":"ab77da79-a308-5612-8625-687c420f77ee","nonfoil":"5a10767c-d766-53a3-8fdd-f1e7df8450d0"},"text":"\u041f\u043e\u043a\u0430\u0436\u0438\u0442\u0435 \u043f\u044f\u0442\u044c \u0432\u0435\u0440\u0445\u043d\u0438\u0445 \u043a\u0430\u0440\u0442 \u0432\u0430\u0448\u0435\u0439 \u0431\u0438\u0431\u043b\u0438\u043e\u0442\u0435\u043a\u0438. \u041f\u043e\u043b\u043e\u0436\u0438\u0442\u0435 \u043d\u0435 \u0431\u043e\u043b\u0435\u0435 \u0434\u0432\u0443\u0445 \u043d\u0430\u0445\u043e\u0434\u044f\u0449\u0438\u0445\u0441\u044f \u0441\u0440\u0435\u0434\u0438 \u043d\u0438\u0445 \u043a\u0430\u0440\u0442 \u043c\u0433\u043d\u043e\u0432\u0435\u043d\u043d\u043e\u0433\u043e \u0437\u0430\u043a\u043b\u0438\u043d\u0430\u043d\u0438\u044f \u0438 (\u0438\u043b\u0438) \u0432\u043e\u043b\u0448\u0435\u0431\u0441\u0442\u0432\u0430 \u0432 \u0432\u0430\u0448\u0443 \u0440\u0443\u043a\u0443, \u0430 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u2014 \u043d\u0430 \u0432\u0430\u0448\u0435 \u043a\u043b\u0430\u0434\u0431\u0438\u0449\u0435.","type":"\u0412\u043e\u043b\u0448\u0435\u0431\u0441\u0442\u0432\u043e"},{"language":"Spanish","name":"Piezas del rompecabezas","skuIds":{"foil":"55135a65-b13b-5685-a23b-8cde9a5ad021","nonfoil":"5caad885-b863-5d5d-874a-e6f3e7548a79"},"text":"Muestra las primeras cinco cartas de tu biblioteca. Pon en tu mano hasta dos cartas de instant\u00e1neo o de conjuro que se encuentren entre ellas y pon el resto en tu cementerio.","type":"Conjuro"}],"identifiers":{"scryfallOracleId":"7b599b4d-95bc-4ed2-a167-84a697944747"},"layout":"normal","legalities":{"brawl":"Legal","commander":"Legal","duel":"Legal","gladiator":"Legal","historic":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","pauper":"Legal","paupercommander":"Legal","penny":"Legal","pioneer":"Legal","timeless":"Legal","vintage":"Legal"},"manaCost":"{2}{U}","manaValue":3.0,"name":"Pieces of the Puzzle","printings":["SIR","SOI"],"purchaseUrls":{"cardKingdom":"https://mtgjson.com/links/bf9df3feaf1dc930","cardKingdomFoil":"https://mtgjson.com/links/660fc3bbcc2694da","cardmarket":"https://mtgjson.com/links/eba448a2eb90208a","cardmarketFoil":"https://mtgjson.com/links/63bb9755c31a2508","tcgplayer":"https://mtgjson.com/links/9151d99a6b89dd10"},"subtypes":[],"supertypes":[],"text":"Reveal the top five cards of your library. Put up to two instant and/or sorcery cards from among them into your hand and the rest into your graveyard.","type":"Sorcery","types":["Sorcery"]}"####,
+];

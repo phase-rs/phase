@@ -1548,7 +1548,7 @@ fn parse_all_land_types_modification(text: &str) -> Option<ContinuousModificatio
                 ),
                 value(
                     ContinuousModification::AddAllLandTypes,
-                    tag("all land types"),
+                    alt((tag("all land types"), tag("every land type"))),
                 ),
             )),
             opt((
@@ -2528,8 +2528,21 @@ fn complete_modification_clause(
         }
         let descriptor_lower = descriptor.to_lowercase();
         let descriptor_tp = TextPair::new(descriptor, &descriptor_lower);
+        let animation_descriptor = where_x.map(|expression| {
+            // Keep a separately owned retention sentence last: its complete
+            // parser must not inherit the quantity expression as unread tail.
+            if let Some((before, _)) = super::split_type_retention_clause(&descriptor_lower) {
+                let (before, retention) = descriptor.split_at(before.len());
+                format!(
+                    "{}, where X is {expression}. {retention}",
+                    before.trim().trim_end_matches('.').trim(),
+                )
+            } else {
+                format!("{descriptor}, where X is {expression}")
+            }
+        });
         let animation = super::oracle_effect::animation::parse_animation_spec(
-            descriptor,
+            animation_descriptor.as_deref().unwrap_or(descriptor),
             &mut ParseContext::default(),
         )
         .map(|spec| (spec, Vec::new()))
@@ -2995,35 +3008,60 @@ fn complete_modification_sequence(
         let right_offset = tp.lower.len() - after.len();
         let left = tp.original[..offset].trim();
         let right = tp.original[right_offset..].trim();
+        // CR 205.1b: a final retention sentence qualifies the animation even
+        // when a keyword member intervenes. Offer that same complete sentence
+        // to the left transaction rather than attaching it to the keyword.
+        let right_lower = right.to_lowercase();
+        let retained_left =
+            super::split_type_retention_clause(&right_lower).and_then(|(before, _)| {
+                let tail = &right[before.len()..];
+                let tail_lower = tail.to_lowercase();
+                all_consuming(terminated(
+                    super::parse_type_retention_clause,
+                    opt(tag(".")),
+                ))
+                .parse(tail_lower.as_str())
+                .ok()?;
+                Some((
+                    format!("{left}. {tail}"),
+                    right[..before.len()].trim().trim_end_matches('.').trim(),
+                ))
+            });
         // CR 613.1f: a bare keyword keeps the preceding explicit operation.
         // Carry the left transaction's final verb into the right transaction;
         // publish neither vector if the complete right clause is unsupported.
-        if let Some((mut first, left_verb)) =
-            complete_modification_clause(left, where_x, inherited_verb)
-        {
-            if let Some((mut last, final_verb)) =
-                complete_modification_clause(right, where_x, left_verb)
+        for (left, right) in std::iter::once((left, right)).chain(
+            retained_left
+                .as_ref()
+                .map(|(left, right)| (left.as_str(), *right)),
+        ) {
+            if let Some((mut first, left_verb)) =
+                complete_modification_clause(left, where_x, inherited_verb)
             {
-                // CR 613.1f: "loses all other abilities" preserves abilities
-                // granted by this same complete instruction. Remove the older
-                // abilities before publishing the instruction's own grants.
-                // The complete right transaction above still owns every tail.
-                let right_lower = right.to_lowercase();
-                if preceded(
-                    alt((tag::<_, _, OracleError<'_>>("loses "), tag("lose "))),
-                    tag("all other abilities"),
-                )
-                .parse(right_lower.as_str())
-                .is_ok()
+                if let Some((mut last, final_verb)) =
+                    complete_modification_clause(right, where_x, left_verb)
                 {
-                    if let Some(index) = last.iter().position(|modification| {
-                        matches!(modification, ContinuousModification::RemoveAllAbilities)
-                    }) {
-                        first.insert(0, last.remove(index));
+                    // CR 613.1f: "loses all other abilities" preserves abilities
+                    // granted by this same complete instruction. Remove the older
+                    // abilities before publishing the instruction's own grants.
+                    // The complete right transaction above still owns every tail.
+                    let right_lower = right.to_lowercase();
+                    if preceded(
+                        alt((tag::<_, _, OracleError<'_>>("loses "), tag("lose "))),
+                        tag("all other abilities"),
+                    )
+                    .parse(right_lower.as_str())
+                    .is_ok()
+                    {
+                        if let Some(index) = last.iter().position(|modification| {
+                            matches!(modification, ContinuousModification::RemoveAllAbilities)
+                        }) {
+                            first.insert(0, last.remove(index));
+                        }
                     }
+                    first.extend(last);
+                    return Some((first, final_verb));
                 }
-                first.extend(last);
-                return Some((first, final_verb));
             }
         }
         scan = tp.slice(right_offset, tp.len());

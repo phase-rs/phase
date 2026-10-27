@@ -857,28 +857,15 @@ pub(crate) fn parse_soulbond_paired_static(
     // Preserve the complete first grant, but do not erase the partner condition
     // or publish its grant unconditionally when that authority is unrepresented.
     // allow-noncombinator: TextPair structural sentence split preserves quoted original text
-    let (predicate, partner_tail) =
-        match predicate.split_around_outside_quotes(". if that creature ") {
-            Some((head, tail)) => (head, Some(tail)),
-            None => (predicate, None),
-        };
+    let predicate = match predicate.split_around_outside_quotes(". if that creature ") {
+        Some((head, _)) => head,
+        None => predicate,
+    };
     let mut def = parse_continuous_gets_has(
         predicate.original,
         TargetFilter::SourceOrPaired,
         description,
     )?;
-    if let Some(tail) = partner_tail {
-        def.modifications
-            .push(ContinuousModification::GrantAbility {
-                definition: Box::new(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    crate::types::ability::Effect::unimplemented(
-                        "paired_partner_conditional_grant",
-                        format!("If that creature {}", tail.original),
-                    ),
-                )),
-            });
-    }
     def.condition = Some(StaticCondition::SourceIsPaired);
     Some(def)
 }

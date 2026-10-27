@@ -3175,6 +3175,13 @@ fn parse_subject_application_for(
     }
 
     let lower = subject.to_lowercase();
+    // CR 608.2b + CR 608.2c: a cast-history qualifier restricts the
+    // announced object, not merely its type. No current object filter
+    // relates a permanent to this turn's cast records; refuse the whole
+    // subject instead of publishing an unrestricted creature target.
+    if subject_requires_unrepresented_cast_history(&lower) {
+        return None;
+    }
 
     // A definite description of one of the declared targets reads that slot;
     // it does not select every matching creature again at resolution.
@@ -5761,15 +5768,20 @@ pub(super) fn retain_fallback_grant_duration(
     let [definition] = static_abilities.as_slice() else {
         return;
     };
-    let local = super::strip_trailing_duration(original).1;
+    let local = super::strip_trailing_duration(original)
+        .1
+        .or_else(|| super::lower::strip_leading_duration(original).map(|(duration, _)| duration));
     let window = continuous_grant_duration(
         affected.unwrap_or(&TargetFilter::None),
         original,
         &definition.modifications,
         local,
-        ctx.stated_clause_duration
-            .clone()
-            .or_else(|| clause.duration.clone()),
+        ctx.stated_clause_duration.clone().or_else(|| {
+            clause
+                .duration
+                .clone()
+                .filter(|duration| *duration != Duration::Permanent)
+        }),
         clause_names_deferred_parser(original),
     );
     if let Some(window) = window {
@@ -6732,7 +6744,18 @@ fn strip_become_name_override(text: &str) -> (String, Option<String>) {
     if name.is_empty() {
         (before.original.trim().to_string(), None)
     } else {
-        (before.original.trim().to_string(), Some(name))
+        // CR 608.2c: naming the object does not consume later modifiers.
+        // Keep the connector tail for the complete modification owner.
+        (
+            format!(
+                "{} {}",
+                before.original.trim(),
+                after.original[name_len..].trim()
+            )
+            .trim()
+            .to_owned(),
+            Some(name),
+        )
     }
 }
 
@@ -9104,6 +9127,19 @@ fn is_embedded_relative_clause_verb(
 ) -> bool {
     is_embedded_who_has_the_most(prev_token, token, rest_after)
         || is_embedded_relative_copula_negation(prev_token, token)
+}
+
+pub(super) fn subject_requires_unrepresented_cast_history(subject: &str) -> bool {
+    if tag::<_, _, OracleError<'_>>("target ")
+        .parse(subject)
+        .is_err()
+    {
+        return false;
+    }
+    nom_primitives::scan_at_word_boundaries(subject, |input| {
+        (tag::<_, _, OracleError<'_>>("you cast "), tag("this turn")).parse(input)
+    })
+    .is_some()
 }
 
 pub(super) fn find_predicate_start(text: &str) -> Option<usize> {

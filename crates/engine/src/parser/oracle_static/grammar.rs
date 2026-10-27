@@ -1543,7 +1543,17 @@ pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreT
         (input, article)
     };
 
-    alt((
+    // CR 205.1b + CR 205.3: a retained core type may have its existing
+    // subtype qualifier ("a Cave land"). Reuse the shared typed vocabulary;
+    // arbitrary words and a core-type prefix of a longer word do not qualify.
+    let (input, _) = many0(terminated(
+        nom::combinator::verify(nom_target::parse_type_filter_word, |filter| {
+            matches!(filter, TypeFilter::Subtype(_))
+        }),
+        space1,
+    ))
+    .parse(input)?;
+    let (input, core_type) = alt((
         value(CoreType::Artifact, alt((tag("artifacts"), tag("artifact")))),
         value(CoreType::Battle, alt((tag("battles"), tag("battle")))),
         value(CoreType::Creature, alt((tag("creatures"), tag("creature")))),
@@ -1560,7 +1570,9 @@ pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreT
         ),
         value(CoreType::Sorcery, alt((tag("sorceries"), tag("sorcery")))),
     ))
-    .parse(input)
+    .parse(input)?;
+    peek(not(alphanumeric1::<_, OracleError<'_>>)).parse(input)?;
+    Ok((input, core_type))
 }
 
 pub(crate) fn push_base_pt_mana_value_dynamic_modifications(
@@ -2886,6 +2898,40 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
 #[cfg(test)]
 mod tests {
     use super::promote_nested_ability_quotes;
+
+    #[test]
+    fn retained_type_phrase_accepts_shared_subtype_vocabulary_without_trailing_amnesty() {
+        use super::parse_type_retention_clause;
+        use crate::types::card_type::CoreType;
+        use nom::{combinator::all_consuming, Parser};
+
+        for text in [
+            "it's still a land",
+            "it's still a cave land",
+            "they're still cave lands",
+        ] {
+            assert_eq!(
+                all_consuming(parse_type_retention_clause)
+                    .parse(text)
+                    .unwrap()
+                    .1,
+                CoreType::Land
+            );
+        }
+        for text in [
+            "it's still a mystery land",
+            "it's still a cave landwalk",
+            "it's still a cave land with flying",
+            "it's still a cave land and draws a card",
+        ] {
+            assert!(
+                all_consuming(parse_type_retention_clause)
+                    .parse(text)
+                    .is_err(),
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn promote_nested_ability_quotes_old_growth_troll_chained_grants() {

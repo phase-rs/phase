@@ -1666,6 +1666,12 @@ fn blink_natural_second_chapter_gives_the_created_token_its_own_removal_trigger(
 
 // Complete pinned MTGJSON inputs, never expected parser output.
 const STATIC_PRESERVATION_PRINTED: &[&str] = &[
+    r###"{"name":"Fluros of Myra's Marvels","manaCost":"{2}{U}{U}","manaValue":4.0,"type":"Legendary Creature — Merfolk Performer","types":["Creature"],"subtypes":["Merfolk","Performer"],"supertypes":["Legendary"],"colors":["U"],"colorIdentity":["U"],"power":"3","toughness":"4","layout":"normal","text":"As Fluros of Myra's Marvels enters, choose a number greater than 0.\nWhenever you cast a spell with power, toughness, or loyalty equal to the chosen number, target artifact or creature becomes an artifact creature with base power and toughness X/X until end of turn, where X is the chosen number.\nPartner","keywords":["Partner"],"identifiers":{"scryfallOracleId":"1862716c-02b9-4f0f-8d47-5ac8c86c32d4"}}"###,
+    r###"{"name":"The Swamp Kitten","manaCost":"{3}{B}","manaValue":4.0,"type":"Legendary Creature — Cat","types":["Creature"],"subtypes":["Cat"],"supertypes":["Legendary"],"colors":["B"],"colorIdentity":["B"],"power":"2","toughness":"2","layout":"normal","text":"Land creatures and/or creatures you control with menace get +1/+1.\nAt the beginning of combat on your turn, target Swamp you control becomes a 0/0 black land creature and gains menace. It's still a land. Put a +1/+1 counter on it. (It can't be blocked except by two or more creatures. It's dark and scary.)","identifiers":{"scryfallOracleId":"eba38613-bb48-4d96-b1c8-c87f1a1f9446"}}"###,
+    r###"{"name":"Cavernous Maw","manaValue":0.0,"type":"Land — Cave","types":["Land"],"subtypes":["Cave"],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"{T}: Add {C}.\n{2}: This land becomes a 3/3 Elemental creature until end of turn. It's still a Cave land. Activate only if the number of other Caves you control plus the number of Cave cards in your graveyard is three or greater.","identifiers":{"scryfallOracleId":"952ab8fe-f7d3-4673-89de-8c6d3f8a081f"}}"###,
+    r###"{"name":"Angelic Renewal","manaCost":"{1}{W}","manaValue":2.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"layout":"normal","text":"Whenever a creature is put into your graveyard from the battlefield, you may sacrifice this enchantment. If you do, return that card to the battlefield.","identifiers":{"scryfallOracleId":"f86bcdde-8b1f-4efa-a01d-39e09dc826d0"}}"###,
+    r###"{"name":"Omo, Queen of Vesuva","manaCost":"{2}{G/U}","manaValue":3.0,"type":"Legendary Creature — Shapeshifter Noble","types":["Creature"],"subtypes":["Shapeshifter","Noble"],"supertypes":["Legendary"],"colors":["G","U"],"colorIdentity":["G","U"],"power":"1","toughness":"5","layout":"normal","text":"Whenever Omo enters or attacks, put an everything counter on each of up to one target land and up to one target creature.\nEach land with an everything counter on it is every land type in addition to its other types.\nEach nonland creature with an everything counter on it is every creature type.","identifiers":{"scryfallOracleId":"021b91ea-18d8-4b50-97da-dd003380cd68"}}"###,
+    r###"{"name":"Ghostfire","manaCost":"{2}{R}","manaValue":3.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["R"],"layout":"normal","text":"Ghostfire is colorless.\nGhostfire deals 3 damage to any target.","identifiers":{"scryfallOracleId":"3479a4e6-c67d-4958-8a47-43d3a2f69bb1"}}"###,
     r###"{"name":"Awakener Druid","manaCost":"{2}{G}","manaValue":3.0,"type":"Creature — Human Druid","types":["Creature"],"subtypes":["Human","Druid"],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"power":"1","toughness":"1","layout":"normal","text":"When this creature enters, target Forest becomes a 4/5 green Treefolk creature for as long as this creature remains on the battlefield. It's still a land.","identifiers":{"scryfallOracleId":"7e8f5b34-fd16-4307-9104-17b584b25b14"}}"###,
     r###"{"name":"Halsin, Emerald Archdruid","manaCost":"{3}{G}","manaValue":4.0,"type":"Legendary Creature — Elf Druid","types":["Creature"],"subtypes":["Elf","Druid"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"power":"2","toughness":"4","layout":"normal","text":"{1}: Until end of turn, target token you control becomes a green Bear creature with base power and toughness 4/4 in addition to its other colors and types.\nChoose a Background (You can have a Background as a second commander.)","keywords":["Choose a background"],"identifiers":{"scryfallOracleId":"01ab3603-6c2f-4d65-9bb2-da95efdbe622"}}"###,
     r###"{"name":"Relic's Roar","manaCost":"{U}","manaValue":1.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["U"],"colorIdentity":["U"],"layout":"normal","text":"Until end of turn, target artifact or creature becomes a Dinosaur artifact creature with base power and toughness 4/3 in addition to its other types.","identifiers":{"scryfallOracleId":"7887f060-3024-4dc4-aeb5-fb5546db6b48"}}"###,
@@ -1779,7 +1785,7 @@ fn static_preservation_complete_faces_survive_both_normal_loaders() {
                 }
             }
             match name {
-                "Ensoul Ring" | "Lavinia, Azorius Renegade" => assert!(
+                "Ensoul Ring" | "Lavinia, Azorius Renegade" | "Angelic Renewal" => assert!(
                     gaps > 0,
                     "unrepresented whole instruction remains honestly unsupported: {name}"
                 ),
@@ -1793,7 +1799,7 @@ fn static_preservation_complete_faces_survive_both_normal_loaders() {
                     assert!(face.static_abilities.iter().any(|definition| {
                         matches!(
                             definition.affected,
-                            engine::types::ability::TargetFilter::SourceOrPaired
+                            Some(engine::types::ability::TargetFilter::SourceOrPaired)
                         ) && serde_json::to_string(&definition.modifications)
                             .unwrap()
                             .contains("Reach")
@@ -1803,7 +1809,29 @@ fn static_preservation_complete_faces_survive_both_normal_loaders() {
                     definition.effect.as_ref(),
                     engine::types::ability::Effect::GenericEffect { .. }
                 ))),
+                "Fluros of Myra's Marvels" => {
+                    assert!(
+                        gaps > 0,
+                        "the independent multi-comma trigger head remains honest"
+                    );
+                    let encoded = serde_json::to_string(face).unwrap();
+                    assert!(encoded.contains("SetPowerDynamic") && encoded.contains("SetToughnessDynamic") && encoded.contains("ChosenNumber"), "the complete independent animation retains its chosen-number authority: {encoded}");
+                }
+                "Case of the Gorgon's Kiss" => {
+                    // This preserves the complete animation payload only. Its
+                    // older solved/entry classification is a separate defect.
+                    assert_eq!(gaps, 0);
+                    let encoded = serde_json::to_string(face).unwrap();
+                    for keyword in ["Deathtouch", "Lifelink"] {
+                        assert!(
+                            encoded.contains(&format!("\"keyword\":\"{keyword}\"")),
+                            "the complete additive animation must retain {keyword}: {encoded}"
+                        );
+                    }
+                }
                 "Pollywog Symbiote" => {
+                    assert_eq!(gaps, 0);
+                    assert!(face.parse_warnings.is_empty(), "{:?}", face.parse_warnings);
                     assert!(face.static_abilities.iter().any(|definition| matches!(&definition.mode,
                         engine::types::statics::StaticMode::ModifyCost { spell_filter: Some(filter), .. }
                         if serde_json::to_string(filter).unwrap().contains("HasKeywordKind"))));
@@ -2362,5 +2390,299 @@ fn static_preservation_math_paid_mass_grant_keeps_keywords_requirement_and_clean
     assert!(!runner.state().objects[&own]
         .keywords
         .contains(&Keyword::Trample));
+    settled(&runner);
+}
+
+#[test]
+fn static_preservation_omo_live_counter_filter_keeps_land_types_and_printed_abilities() {
+    let atomic = static_preservation_atomic("Omo, Queen of Vesuva");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let omo = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Omo, Queen of Vesuva",
+            1,
+            5,
+            atomic.text.as_deref().unwrap(),
+        )
+        .id();
+    let marked = [P0, P1].map(|player| {
+        let land = scenario
+            .add_land_from_oracle(player, "Marked Locus", "{T}: Add {C}.")
+            .as_artifact_land()
+            .with_subtypes(vec!["Locus"])
+            .id();
+        scenario.with_counter(land, CounterType::Generic("everything".into()), 1);
+        land
+    });
+    let unmarked = scenario
+        .add_land_from_oracle(P0, "Unmarked Locus", "{T}: Add {C}.")
+        .with_subtypes(vec!["Locus"])
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    for id in marked {
+        let land = &runner.state().objects[&id];
+        for subtype in [
+            "Locus", "Cave", "Plains", "Island", "Swamp", "Mountain", "Forest",
+        ] {
+            assert!(
+                land.card_types.subtypes.contains(&subtype.to_owned()),
+                "missing {subtype}"
+            );
+        }
+        assert!(land.card_types.core_types.contains(&CoreType::Artifact));
+        assert!(land.card_types.core_types.contains(&CoreType::Land));
+        assert!(
+            !land.abilities.is_empty(),
+            "additive types retain printed mana ability"
+        );
+    }
+    assert_eq!(
+        runner.state().objects[&unmarked].card_types.subtypes,
+        vec!["Locus".to_owned()]
+    );
+    runner.activate(marked[0], 0).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    fund(&mut runner, 0, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(omo).resolve();
+    assert_eq!(runner.state().objects[&omo].zone, Zone::Hand);
+    for id in marked {
+        assert_eq!(
+            runner.state().objects[&id].card_types.subtypes,
+            vec!["Locus".to_owned()]
+        );
+        assert!(!runner.state().objects[&id].abilities.is_empty());
+    }
+    settled(&runner);
+}
+
+#[test]
+fn static_preservation_tarelily_paid_soulbond_keeps_complete_independent_reach() {
+    let atomic = static_preservation_atomic("Tarelily, Lovestruck Archer");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let partner = scenario
+        .add_creature(P0, "Non-Dwarf partner", 2, 4)
+        .with_subtypes(vec!["Human"])
+        .id();
+    let decoy = scenario
+        .add_creature(P0, "Unpaired sibling", 2, 4)
+        .with_subtypes(vec!["Dwarf"])
+        .id();
+    let tarelily = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Tarelily, Lovestruck Archer",
+            2,
+            3,
+            atomic.text.as_deref().unwrap(),
+        )
+        .from_oracle_text_with_keywords(&["Soulbond"], atomic.text.as_deref().unwrap())
+        .with_mana_cost(cost("{1}{G}{W}"))
+        .with_subtypes(vec!["Elf", "Archer"])
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    fund(&mut runner, 1, &[ManaType::Green, ManaType::White]);
+    runner.cast(tarelily).stop_at_optional().resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ));
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::PairChoice { .. }
+    ));
+    runner
+        .act(GameAction::ChoosePair {
+            partner: Some(partner),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    for id in [tarelily, partner] {
+        assert!(runner.state().objects[&id]
+            .keywords
+            .contains(&Keyword::Reach));
+        assert!(!runner.state().objects[&id]
+            .keywords
+            .contains(&Keyword::Lifelink));
+    }
+    assert!(!runner.state().objects[&decoy]
+        .keywords
+        .contains(&Keyword::Reach));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+    fund(&mut runner, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(tarelily).resolve();
+    assert_eq!(runner.state().objects[&partner].paired_with, None);
+    assert!(!runner.state().objects[&partner]
+        .keywords
+        .contains(&Keyword::Reach));
+    settled(&runner);
+}
+
+#[test]
+fn static_preservation_ghostfire_paid_damage_retains_colorless_cda() {
+    let atomic = static_preservation_atomic("Ghostfire");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostfire", true, atomic.text.as_deref().unwrap())
+        .with_mana_cost(cost("{2}{R}"))
+        .id();
+    let mut runner = scenario.build();
+    assert!(runner.state().objects[&spell]
+        .static_definitions
+        .iter()
+        .any(|definition| definition.characteristic_defining
+            && definition.active_zones.contains(&Zone::Hand)
+            && definition.active_zones.contains(&Zone::Graveyard)));
+    assert!(runner.state().objects[&spell].colors.is_empty());
+    fund(&mut runner, 2, &[ManaType::Red]);
+    runner.cast(spell).target_player(P1).resolve();
+    assert_eq!(runner.state().players[1].life, 17);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(runner.state().objects[&spell].colors.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+}
+
+#[test]
+fn static_preservation_swamp_kitten_real_combat_animation_retains_artifact_and_counter_tail() {
+    let atomic = static_preservation_atomic("The Swamp Kitten");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "The Swamp Kitten",
+        2,
+        2,
+        atomic.text.as_deref().unwrap(),
+    );
+    let swamp = scenario
+        .add_land_from_oracle(P0, "Chosen artifact Swamp", "{T}: Add {B}.")
+        .as_artifact_land()
+        .with_subtypes(vec!["Swamp"])
+        .id();
+    let decoy = scenario
+        .add_land_from_oracle(P0, "Unchosen Swamp", "{T}: Add {B}.")
+        .with_subtypes(vec!["Swamp"])
+        .id();
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TriggerTargetSelection { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(swamp)),
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(pt(&mut runner, swamp), (2, 2));
+    assert_eq!(
+        runner.state().objects[&swamp]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    for core_type in [CoreType::Artifact, CoreType::Land, CoreType::Creature] {
+        assert!(runner.state().objects[&swamp]
+            .card_types
+            .core_types
+            .contains(&core_type));
+    }
+    assert!(runner.state().objects[&swamp]
+        .card_types
+        .subtypes
+        .contains(&"Swamp".to_owned()));
+    assert!(runner.state().objects[&swamp]
+        .keywords
+        .contains(&Keyword::Menace));
+    assert!(!runner.state().objects[&decoy]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    settled(&runner);
+    runner.advance_to_upkeep();
+    assert_eq!(
+        pt(&mut runner, swamp),
+        (2, 2),
+        "the printed animation has no ending duration"
+    );
+    assert!(runner.state().objects[&swamp]
+        .card_types
+        .core_types
+        .contains(&CoreType::Artifact));
+    settled(&runner);
+}
+
+#[test]
+fn static_preservation_cavernous_maw_paid_animation_retains_cave_artifact_land_until_cleanup() {
+    let atomic = static_preservation_atomic("Cavernous Maw");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let maw = scenario
+        .add_land_from_oracle(P0, "Cavernous Maw", atomic.text.as_deref().unwrap())
+        .as_artifact_land()
+        .with_subtypes(vec!["Cave"])
+        .id();
+    for _ in 0..3 {
+        scenario
+            .add_land_from_oracle(P0, "Other Cave", "{T}: Add {C}.")
+            .with_subtypes(vec!["Cave"]);
+    }
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    fund(&mut runner, 2, &[]);
+    runner.activate(maw, 1).resolve();
+    assert_eq!(pt(&mut runner, maw), (3, 3));
+    for core_type in [CoreType::Artifact, CoreType::Land, CoreType::Creature] {
+        assert!(runner.state().objects[&maw]
+            .card_types
+            .core_types
+            .contains(&core_type));
+    }
+    for subtype in ["Cave", "Elemental"] {
+        assert!(runner.state().objects[&maw]
+            .card_types
+            .subtypes
+            .contains(&subtype.to_owned()));
+    }
+    assert!(!runner.state().objects[&maw].abilities.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+    runner.advance_to_upkeep();
+    let object = &runner.state().objects[&maw];
+    assert!(object.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(object.card_types.core_types.contains(&CoreType::Land));
+    assert!(!object.card_types.core_types.contains(&CoreType::Creature));
+    assert_eq!(object.card_types.subtypes, vec!["Cave".to_owned()]);
     settled(&runner);
 }

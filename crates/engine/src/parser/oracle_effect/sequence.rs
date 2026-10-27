@@ -825,12 +825,12 @@ fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> 
     let (input, _) = tag("put the rest on the bottom of your library").parse(input)?;
     let (input, rest_order) = opt(alt((
         value(DigRestOrder::Random, tag(" in a random order")),
-        value(DigRestOrder::Preserve, tag(" in any order")),
+        value(DigRestOrder::PlayerChoice, tag(" in any order")),
     )))
     .parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
-    Ok((input, rest_order.unwrap_or(DigRestOrder::Preserve)))
+    Ok((input, rest_order.unwrap_or(DigRestOrder::PlayerChoice)))
 }
 
 /// Whole-line dig continuation matcher — delegates to [`parse_put_rest_on_bottom_line`]
@@ -1551,11 +1551,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 // rather than re-adding only the named type after replacement.
                 // Keep it with its animation so the descriptor owner receives
                 // that policy before publishing layer-4 modifications.
-                if nom_primitives::scan_at_word_boundaries(
+                if crate::parser::oracle_static::split_type_retention_clause(
                     &current.to_lowercase(),
-                    parse_become_verb,
                 )
-                .is_some()
+                .is_none()
+                    && nom_primitives::scan_at_word_boundaries(
+                        &current.to_lowercase(),
+                        parse_become_verb,
+                    )
+                    .is_some()
                     && crate::parser::oracle_static::parse_type_retention_clause(
                         &remainder.trim_start().to_lowercase(),
                     )
@@ -2318,6 +2322,20 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     // creature card in your library perpetually gets +X/+X").
     if starts_perpetual_subject_conjunct(&trimmed_lower) {
         return Some((ClauseBoundary::Comma, whitespace_len));
+    }
+
+    // CR 509.1c + CR 608.2c: a coordinated mass-block requirement is its
+    // own instruction even after a leading-duration prefix. Let its existing
+    // complete parser own the tail before the prefix-comma latch can absorb it.
+    if let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed_lower.as_str()) {
+        if super::try_parse_mass_forced_block(
+            TextPair::new(after_and, after_and),
+            &mut ParseContext::default(),
+        )
+        .is_some()
+        {
+            return Some((ClauseBoundary::Comma, whitespace_len + "and ".len()));
+        }
     }
 
     if starts_prefix_clause(&current_lower) {
@@ -7624,11 +7642,8 @@ pub(super) fn parse_dig_from_among(
         let (quantity, filter_text) = if mass {
             (PutCount::All, after_put_q)
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-            if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-                (PutCount::up(n), remainder.trim())
-            } else {
-                (PutCount::up(1), rest)
-            }
+            let (quantity, remainder) = parse_count_expr(rest)?;
+            (PutCount::Up(quantity), remainder.trim())
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
         {
@@ -7738,11 +7753,8 @@ pub(super) fn parse_dig_from_among(
         let (quantity, filter_text) = if mass {
             (PutCount::All, after_put_q)
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
-            if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
-                (PutCount::up(n), remainder.trim())
-            } else {
-                (PutCount::up(1), rest)
-            }
+            let (quantity, remainder) = parse_count_expr(rest)?;
+            (PutCount::Up(quantity), remainder.trim())
         } else if let Ok((rest, _)) =
             tag::<_, _, OracleError<'_>>("any number of ").parse(after_put)
         {
@@ -8282,6 +8294,8 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
         destination,
         if random {
             DigRestOrder::Random
+        } else if destination == Zone::Library {
+            DigRestOrder::PlayerChoice
         } else {
             DigRestOrder::Preserve
         },
@@ -9000,6 +9014,27 @@ fn parse_followup_continuation_ast_inner(
     previous_is_search_destination_exile: bool,
 ) -> Option<ContinuationAst> {
     let lower = text.to_lowercase();
+    // CR 608.2c: the negative placement-relative clause denotes the unchosen
+    // reveal remainder. Its embedded battlefield phrase is not its destination.
+    if matches!(previous_effect, Effect::Dig { .. }) {
+        if let Ok((rest, _)) = (
+            opt(tag::<_, _, OracleError<'_>>("then ")),
+            tag("put all cards revealed this way that "),
+            alt((tag("weren't"), tag("were not"))),
+            tag(" put onto the battlefield into your graveyard"),
+            opt(tag(".")),
+            eof,
+        )
+            .parse(lower.as_str())
+        {
+            debug_assert!(rest.is_empty());
+            return Some(ContinuationAst::PutRest {
+                destination: Zone::Graveyard,
+                reorder_all: false,
+                rest_order: DigRestOrder::Preserve,
+            });
+        }
+    }
     let face_down_profile_spec =
         parse_theyre_face_down_profile(&lower).or_else(|| parse_its_face_down_profile(&lower));
     // The object phrase of a "… revealed this way" consumer after a hand reveal,

@@ -1602,3 +1602,262 @@ fn ordinary_host_cost_and_token_definition_keep_distinct_owners() {
         assert_created(outcome.state(), outcome.events(), spell, 1, (7, 8));
     }
 }
+
+#[test]
+fn divine_sacrament_paid_source_tracks_both_graveyard_threshold_crossings() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        spell_pool(1, &[ManaType::White, ManaType::White, ManaType::Green]),
+    );
+    scenario.with_library_top(P1, &["Observed card", "Reserve"]);
+    for _ in 0..6 {
+        scenario.add_spell_to_graveyard(P0, "Graveyard card", true);
+    }
+    let white = scenario
+        .add_creature(P0, "White beneficiary", 2, 2)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let opposing_white = scenario
+        .add_creature(P1, "Opposing white beneficiary", 2, 2)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let nonwhite = scenario
+        .add_creature(P0, "Nonwhite decoy", 2, 2)
+        .with_color(vec![ManaColor::Green])
+        .id();
+    let sacrament = scenario
+        .add_real_card(P0, "Divine Sacrament", Zone::Hand, &db)
+        .id();
+    let bauble = scenario
+        .add_real_card(P0, "Mishra's Bauble", Zone::Battlefield, &db)
+        .id();
+    let ooze = scenario
+        .add_real_card(P0, "Scavenging Ooze", Zone::Battlefield, &db)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(sacrament).resolve();
+    for id in [white, opposing_white] {
+        assert_eq!(runner.state().objects[&id].power, Some(3));
+    }
+    runner.activate(bauble, 0).target_player(P1).resolve();
+    assert_eq!(runner.state().objects[&bauble].zone, Zone::Graveyard);
+    for id in [white, opposing_white] {
+        assert_eq!(
+            runner.state().objects[&id].power,
+            Some(4),
+            "the seventh card changes a live static predicate"
+        );
+    }
+    runner.activate(ooze, 0).target_object(bauble).resolve();
+    assert_eq!(runner.state().objects[&bauble].zone, Zone::Exile);
+    for id in [white, opposing_white] {
+        assert_eq!(
+            runner.state().objects[&id].power,
+            Some(3),
+            "leaving threshold removes only the additional bonus"
+        );
+    }
+    assert_eq!(runner.state().objects[&nonwhite].power, Some(2));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn diplomacy_paid_spell_keeps_the_revealed_opponent_as_the_life_loss_recipient() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    for warrior in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(2, &[ManaType::Black]));
+        if warrior {
+            scenario
+                .add_creature(P0, "Warrior reach guard", 2, 2)
+                .with_subtypes(vec!["Warrior"]);
+        }
+        let own = scenario.add_spell_to_hand(P0, "Own hand decoy", true).id();
+        let selected = scenario
+            .add_spell_to_hand(P1, "Chosen opposing card", true)
+            .id();
+        let other = scenario
+            .add_spell_to_hand(P1, "Other opposing card", false)
+            .id();
+        let land = scenario.add_land_to_hand(P1, "Opposing land decoy").id();
+        let spell = scenario
+            .add_real_card(P0, "Diplomacy of the Wastes", Zone::Hand, &db)
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .cast(spell)
+            .target_player(P1)
+            .effect_zone(&[selected])
+            .resolve();
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Graveyard);
+        for id in [own, other, land] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
+        }
+        assert_eq!(runner.state().players[0].life, 20);
+        assert_eq!(
+            runner.state().players[1].life,
+            if warrior { 18 } else { 20 }
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_spell_complete(runner.state());
+    }
+}
+
+#[test]
+fn sword_of_the_meek_returns_and_attaches_to_the_entering_creature() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(1, &[]));
+    let sword = scenario
+        .add_real_card(P0, "Sword of the Meek", Zone::Graveyard, &db)
+        .id();
+    let decoy = scenario.add_creature(P0, "Earlier 1/1", 1, 1).id();
+    let entering = scenario
+        .add_creature_to_hand(P0, "Paid entering 1/1", 1, 1)
+        .with_mana_cost(printed_cost("{1}"))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(entering).accept_optional().resolve();
+    assert_eq!(runner.state().objects[&sword].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&entering].power, Some(2));
+    assert_eq!(runner.state().objects[&entering].toughness, Some(3));
+    assert_eq!(runner.state().objects[&decoy].power, Some(1));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::counter::CounterType;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let kitten = scenario
+        .add_real_card(P0, "The Swamp Kitten", Zone::Battlefield, &db)
+        .id();
+    let swamp = scenario
+        .add_land(P0, "Selected Swamp")
+        .with_subtypes(vec!["Swamp"])
+        .as_artifact()
+        .id();
+    let other = scenario
+        .add_land(P0, "Non-Swamp decoy")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_phase(Phase::BeginCombat);
+    runner.choose_first_legal_target().unwrap();
+    runner.advance_until_stack_empty();
+    let object = &runner.state().objects[&swamp];
+    for kind in [CoreType::Land, CoreType::Creature, CoreType::Artifact] {
+        assert!(object.card_types.core_types.contains(&kind));
+    }
+    assert_eq!(object.counters.get(&CounterType::Plus1Plus1), Some(&1));
+    assert!(object.keywords.contains(&Keyword::Menace));
+    assert!(runner.state().objects[&kitten].counters.is_empty());
+    assert!(!runner.state().objects[&other]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn rowan_paid_color_scoped_grant_snapshots_life_lost_at_resolution() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        spell_pool(2, &[ManaType::Red, ManaType::Red, ManaType::Black]),
+    );
+    let rowan = scenario
+        .add_real_card(P0, "Rowan, Scion of War", Zone::Battlefield, &db)
+        .id();
+    let first = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+        .with_mana_cost(printed_cost("{R}"))
+        .id();
+    let second = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+        .with_mana_cost(printed_cost("{R}"))
+        .id();
+    let probe = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic black cost probe", true, "You gain 1 life.")
+        .with_color(vec![ManaColor::Black])
+        .with_mana_cost(printed_cost("{4}{B}"))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(first).target_player(P0).resolve();
+    assert_eq!(runner.state().players[0].life, 18);
+    runner.activate(rowan, 0).resolve();
+    assert!(runner.state().objects[&rowan].tapped);
+    runner.cast(second).target_player(P0).resolve();
+    assert_eq!(runner.state().players[0].life, 16);
+    runner.cast(probe).resolve();
+    // The later two life lost cannot increase the locked reduction from two
+    // to four, and the black shard is still paid.
+    assert_eq!(runner.state().players[0].life, 17);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn wrenn_paid_loyalty_emblem_grants_retrace_after_its_source_leaves() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::game_state::CastingVariant;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(0, &[ManaType::Red]));
+    let wrenn = scenario
+        .add_real_card(P0, "Wrenn and Six", Zone::Battlefield, &db)
+        .as_planeswalker_with_loyalty("Wrenn", 7)
+        .id();
+    let shock = scenario
+        .add_spell_to_graveyard(P0, "Shock", true)
+        .from_oracle_text("Shock deals 2 damage to any target.")
+        .with_mana_cost(printed_cost("{R}"))
+        .id();
+    let land = scenario.add_land_to_hand(P0, "Retrace land payment").id();
+    let mut runner = scenario.build();
+    runner.activate(wrenn, 2).resolve();
+    assert_eq!(runner.state().objects[&wrenn].zone, Zone::Graveyard);
+    let emblems: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_emblem)
+        .collect();
+    assert_eq!(emblems.len(), 1);
+    assert_eq!(emblems[0].controller, P0);
+    assert_eq!(emblems[0].zone, Zone::Command);
+    runner
+        .cast(shock)
+        .casting_variant(CastingVariant::Retrace)
+        .pay_cost_with(&[land])
+        .target_player(P1)
+        .resolve();
+    assert_eq!(runner.state().objects[&land].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[1].life, 18);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}

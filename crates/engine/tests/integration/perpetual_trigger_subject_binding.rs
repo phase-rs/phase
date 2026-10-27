@@ -116,3 +116,150 @@ fn effluence_devourer_grants_the_sacrificed_creature_not_the_trigger_source() {
         "the trigger source must not receive a grant meant for the sacrificed creature"
     );
 }
+
+#[test]
+fn paid_hand_choice_perpetual_edits_keep_the_newly_selected_card() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario::P1;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::ability::QuantityExpr;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::mana::{ManaType, ManaUnit};
+    let db = export_route_repair_db();
+    for (name, payment, delta) in [
+        ("Sap Vitality", vec![ManaType::Black; 2], (3, 0)),
+        (
+            "Veteran Charger",
+            vec![ManaType::Green, ManaType::Colorless, ManaType::Colorless],
+            (2, 2),
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            payment
+                .into_iter()
+                .map(|color| ManaUnit::new(color, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let victim = scenario
+            .add_creature(P1, "Prior damage recipient", 1, 8)
+            .id();
+        let earlier = scenario
+            .add_creature_to_hand(P0, "Earlier eligible creature", 2, 2)
+            .id();
+        let selected = scenario
+            .add_creature_to_hand(P0, "Selected hand creature", 3, 3)
+            .id();
+        let opposing = scenario
+            .add_creature_to_hand(P1, "Opponent hand decoy", 4, 4)
+            .id();
+        let source = scenario.add_real_card(P0, name, Zone::Hand, &db).id();
+        let mut runner = scenario.build();
+        if name == "Sap Vitality" {
+            runner.cast(source).target_object(victim).resolve();
+        } else {
+            runner.cast(source).resolve();
+        }
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!("the full printed hand choice must be reached");
+        };
+        assert!(cards.contains(&earlier) && cards.contains(&selected));
+        assert!(!cards.contains(&opposing));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert!(runner.state().objects[&selected].perpetual_mods.iter().any(|modification| matches!(modification,
+            PerpetualModification::ModifyPowerToughness { power: QuantityExpr::Fixed { value: p }, toughness: QuantityExpr::Fixed { value: t }, .. } if (*p, *t) == delta)));
+        for id in [earlier, opposing, victim, source] {
+            assert!(runner.state().objects[&id].perpetual_mods.is_empty());
+        }
+        if name == "Sap Vitality" {
+            assert_eq!(runner.state().objects[&victim].damage_marked, 3);
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    }
+}
+
+#[test]
+fn unsavory_kitchen_empty_hand_cannot_replace_the_selected_card_with_the_damage_event() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario::P1;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    let db = export_route_repair_db();
+    for eligible in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+        let kitchen = scenario
+            .add_real_card(P0, "Unsavory Kitchen", Zone::Battlefield, &db)
+            .id();
+        let victim = scenario
+            .add_creature(P1, "Damaged creature decoy", 2, 8)
+            .id();
+        let selected = eligible.then(|| {
+            scenario
+                .add_creature_to_hand(P0, "Eligible hand creature", 2, 2)
+                .id()
+        });
+        let noncreature = scenario
+            .add_spell_to_hand(P0, "Ineligible hand card", false)
+            .id();
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(shock).target_object(victim).resolve();
+        assert_eq!(
+            runner.state().objects[&victim].damage_marked,
+            2,
+            "trigger event reach guard"
+        );
+        if let Some(selected) = selected {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseFromZoneChoice { .. }
+            ) {
+                runner
+                    .act(GameAction::SelectCards {
+                        cards: vec![selected],
+                    })
+                    .unwrap();
+                runner.advance_until_stack_empty();
+            }
+            assert!(
+                !runner.state().objects[&selected].perpetual_mods.is_empty(),
+                "positive chosen-card producer guard"
+            );
+        }
+        for id in [kitchen, victim, noncreature] {
+            assert!(runner.state().objects[&id].perpetual_mods.is_empty());
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    }
+}
