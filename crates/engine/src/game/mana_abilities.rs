@@ -6462,7 +6462,7 @@ mod tests {
     #[test]
     fn post_delivery_mana_cost_pause_preserves_its_live_prompt() {
         let mut state = GameState::new_two_player(42);
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -6490,7 +6490,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         let live_prompt = WaitingFor::DiscardChoice {
             player: PlayerId(0),
             count: 1,

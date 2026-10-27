@@ -1898,7 +1898,7 @@ mod paused_search_audience_tests {
         );
         let original =
             ProposedEvent::zone_change(entrant, Zone::Graveyard, Zone::Battlefield, None);
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: original.clone(),
@@ -1918,7 +1918,7 @@ mod paused_search_audience_tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
 
         // The owner parks on the unanswered event.
         let paused_current = state

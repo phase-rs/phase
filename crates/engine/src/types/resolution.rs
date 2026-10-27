@@ -10395,7 +10395,7 @@ mod tests {
             additional_cost_payments: Vec::new(),
             convoked_creatures: Vec::new(),
         };
-        spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+        spell.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {
@@ -10423,7 +10423,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);
         let mut spell = serde_json::to_value(spell).expect("legacy spell fixture serializes");

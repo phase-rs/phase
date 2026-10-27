@@ -4612,7 +4612,7 @@ mod tests {
 
         // A replacement choice is pending: resolution is paused mid-event. The
         // proposed event's contents are irrelevant here — only `is_some()` matters.
-        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+        state.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -4637,7 +4637,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
 
         // A concurrent player-loss SBA (P2 at 0 life) — the reason reconcile runs
         // the SBA loop mid-choice in the first place.
@@ -4792,7 +4792,7 @@ mod tests {
             last_applied_decides: false,
             remember_identity: None,
         };
-        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+        state.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -4817,7 +4817,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
 
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);

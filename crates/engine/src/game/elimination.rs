@@ -2425,7 +2425,9 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked batch has its pre-delivery authority");
         let paused = paused_zone_change_delivery(&state, leaving, ObjectId(900));
-        state.pending_replacement = Some(pending_replacement_for(paused.expected_event.clone()));
+        state.pending_replacement = Some(Box::new(pending_replacement_for(
+            paused.expected_event.clone(),
+        )));
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 1,
@@ -2493,7 +2495,9 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("parked iteration has its pre-delivery authority");
         let paused = paused_zone_change_delivery(&state, leaving, ObjectId(901));
-        state.pending_replacement = Some(pending_replacement_for(paused.expected_event.clone()));
+        state.pending_replacement = Some(Box::new(pending_replacement_for(
+            paused.expected_event.clone(),
+        )));
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 1,
@@ -3685,7 +3689,7 @@ mod tests {
         }
 
         // Parked OBJECT-REFERENTIAL replacement: affected_player reads O's controller.
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::AddCounter {
@@ -3713,7 +3717,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         // Latched chooser identity — the fix's key. C = P2.
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(2),
@@ -3835,7 +3839,7 @@ mod tests {
             "Conniver".into(),
             Zone::Battlefield,
         );
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -3860,7 +3864,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 1,
@@ -3893,7 +3897,7 @@ mod tests {
             Zone::Library,
         );
         state.pending_search_found_batch = Some(pending_search_found_batch(PlayerId(0), found));
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::SearchFound {
@@ -3919,7 +3923,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 1,
@@ -3945,7 +3949,7 @@ mod tests {
         let mut state = setup_three_player();
 
         // Chooser C = P0 (survivor). Player-keyed parked Draw.
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -3970,7 +3974,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 1,
@@ -4026,7 +4030,7 @@ mod tests {
     #[test]
     fn opponent_leaving_preserves_living_choosers_draw_replacement() {
         let mut state = setup_three_player();
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Draw {
@@ -4051,7 +4055,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         state.waiting_for = WaitingFor::ReplacementChoice {
             player: PlayerId(0),
             candidate_count: 1,

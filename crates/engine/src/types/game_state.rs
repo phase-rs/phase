@@ -24870,7 +24870,10 @@ declare_game_state! {
     pub priority_pass_count: u8,
 
     // Replacement effects
-    pub pending_replacement: Option<PendingReplacement>,
+    /// Parked only while a replacement choice is pending. Its proposed event
+    /// and replacement descriptors live on the heap to preserve the stack
+    /// budget for every otherwise idle GameState (see game_state_size.rs).
+    pub pending_replacement: Option<Box<PendingReplacement>>,
     /// CR 510.2 + CR 616.1: see [`PendingCombatLifelink`]. Boxed like its
     /// `pending_discard_batch` sibling — `GameState` is moved by value through
     /// the server action and AI paths and has a hard stack budget
@@ -42898,7 +42901,7 @@ mod tests {
         let member = ObjectIncarnationRef::from_object(&state.objects[&object]);
         let expected =
             ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Exile, Some(object));
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: expected.clone(),
@@ -42917,7 +42920,8 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
-        });
+            unrepresentable_life_change: Default::default(),
+        }));
         (state, PendingZoneChangeDelivery::new(member, expected))
     }
 

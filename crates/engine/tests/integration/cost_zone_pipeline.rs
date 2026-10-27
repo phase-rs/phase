@@ -968,7 +968,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .regeneration_shield()
         .description("Prevent the staged mana cost move".to_string())]
     .into();
-    state.pending_replacement = Some(PendingReplacement {
+    state.pending_replacement = Some(Box::new(PendingReplacement {
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed: ProposedEvent::Destroy {
@@ -993,7 +993,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
-    });
+    }));
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
         candidate_count: 1,
@@ -4944,7 +4944,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .regeneration_shield()
         .description("Prevent the staged cost move".to_string())]
     .into();
-    runner.state_mut().pending_replacement = Some(PendingReplacement {
+    runner.state_mut().pending_replacement = Some(Box::new(PendingReplacement {
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed: ProposedEvent::Destroy {
@@ -4969,7 +4969,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
-    });
+    }));
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
         candidate_count: 1,

@@ -678,7 +678,7 @@ pub(crate) fn resume_replacement_may_cost_move(
         ));
     };
     state.last_effect_count = Some(paid_count);
-    state.pending_replacement = Some(*outer_replacement);
+    state.pending_replacement = Some(outer_replacement);
     super::engine_replacement::handle_replacement_choice(state, 0, events)
 }
 

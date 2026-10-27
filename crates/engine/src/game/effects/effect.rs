@@ -1008,6 +1008,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::And { .. }
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
         | TargetFilter::SpecificObject { .. }
         | TargetFilter::PlayerWhoChoseLabel { .. }
         | TargetFilter::PlayerMatching { .. }

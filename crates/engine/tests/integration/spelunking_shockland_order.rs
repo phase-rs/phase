@@ -379,7 +379,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         is_optional: false,
     };
     let state = runner.state_mut();
-    state.pending_replacement = Some(PendingReplacement {
+    state.pending_replacement = Some(Box::new(PendingReplacement {
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed: ProposedEvent::SearchFound {
@@ -405,7 +405,7 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: Default::default(),
-    });
+    }));
     let parked = engine::game::replacement::replacement_choice_waiting_for(P0, runner.state());
     runner.state_mut().waiting_for = parked;
 

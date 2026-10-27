@@ -3276,7 +3276,7 @@ mod tests {
             players: Vec<(i32, u32, u32)>,
             state_revision: u64,
             waiting_for: WaitingFor,
-            pending_replacement: Option<PendingReplacement>,
+            pending_replacement: Option<Box<PendingReplacement>>,
             stack_is_empty: bool,
             journal_len: usize,
             pridemate_counters: u32,
@@ -4025,10 +4025,10 @@ mod tests {
                 .as_object_mut()
                 .expect("pending replacement serializes as an object")
                 .remove("unrepresentable_life_change");
-            runner.state_mut().pending_replacement = Some(
+            runner.state_mut().pending_replacement = Some(Box::new(
                 serde_json::from_value::<PendingReplacement>(legacy_json)
                     .expect("old payload shape deserializes"),
-            );
+            ));
             assert_eq!(
                 runner
                     .state()

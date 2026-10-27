@@ -88,6 +88,11 @@
 //! transparent; current source choices continue to use their owning
 //! `SpellContext`. The existing ceiling remains the verification gate.
 //!
+//! The merged token-creation and source-choice replacement payloads also live
+//! behind `GameState::pending_replacement`'s box. This holder is populated only
+//! across a replacement-choice pause; serde retains its existing representation.
+//! The 14,848 B ceiling is unchanged, and no new layout measurement is claimed.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

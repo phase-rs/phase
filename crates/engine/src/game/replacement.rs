@@ -12522,7 +12522,7 @@ fn park_entry_controller_choice(
     player: PlayerId,
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
-    state.pending_replacement = Some(PendingReplacement {
+    state.pending_replacement = Some(Box::new(PendingReplacement {
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
@@ -12542,7 +12542,7 @@ fn park_entry_controller_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
-    });
+    }));
     state.waiting_for = WaitingFor::EntryControllerChoice { player, candidates };
     ReplacementResult::NeedsChoice(player)
 }
@@ -12698,7 +12698,7 @@ fn park_as_enters_named_choice(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     let object_id = rid.source;
-    state.pending_replacement = Some(PendingReplacement {
+    state.pending_replacement = Some(Box::new(PendingReplacement {
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
@@ -12718,7 +12718,7 @@ fn park_as_enters_named_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
-    });
+    }));
     raise_as_enters_named_choice(state, object_id, choice, events)
 }
 
@@ -12910,7 +12910,7 @@ fn park_as_enters_pay_choice(
     choice: AsEntersPayChoice,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    state.pending_replacement = Some(PendingReplacement {
+    state.pending_replacement = Some(Box::new(PendingReplacement {
         damage_opportunity: Default::default(),
         damage_source_context: None,
         proposed,
@@ -12930,7 +12930,7 @@ fn park_as_enters_pay_choice(
         may_cost_remaining: None,
         delivery_boundary: None,
         unrepresentable_life_change: state.ingress_life_policy(),
-    });
+    }));
     raise_as_enters_pay_choice(state, rid.source, choice, events)
 }
 
@@ -13700,7 +13700,7 @@ fn pipeline_loop_in_opportunity(
                 };
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
-                state.pending_replacement = Some(PendingReplacement {
+                state.pending_replacement = Some(Box::new(PendingReplacement {
                     damage_opportunity: opportunity.clone(),
                     damage_source_context: damage_source_context.clone().map(Box::new),
                     proposed,
@@ -13726,7 +13726,7 @@ fn pipeline_loop_in_opportunity(
                     may_cost_remaining: None,
                     delivery_boundary: None,
                     unrepresentable_life_change: state.ingress_life_policy(),
-                });
+                }));
                 return replay_pending_replacement(state, affected, events, Some(opportunity));
             }
 
@@ -13776,7 +13776,7 @@ fn pipeline_loop_in_opportunity(
             let affected = proposed.affected_player(state);
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
-            state.pending_replacement = Some(PendingReplacement {
+            state.pending_replacement = Some(Box::new(PendingReplacement {
                 damage_opportunity: opportunity.clone(),
                 damage_source_context: damage_source_context.clone().map(Box::new),
                 proposed,
@@ -13800,7 +13800,7 @@ fn pipeline_loop_in_opportunity(
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 unrepresentable_life_change: state.ingress_life_policy(),
-            });
+            }));
             return replay_pending_replacement(state, affected, events, Some(opportunity));
         } else {
             // CR 616.1: the choice is degenerate here — every candidate ordering
@@ -14030,7 +14030,7 @@ pub(crate) fn replace_combat_damage_batch(
 /// ordering choice without re-reading live replacement sources.
 fn continue_search_found_after_decline(
     state: &mut GameState,
-    mut pending: PendingReplacement,
+    mut pending: Box<PendingReplacement>,
     declined: ReplacementId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
@@ -14498,7 +14498,7 @@ fn continue_replacement_in_opportunity(
                     state.replacement_may_cost_paused = true;
                     return ReplacementResult::Execute(proposed);
                 }
-                state.pending_replacement = Some(outer_replacement);
+                state.pending_replacement = Some(Box::new(outer_replacement));
                 state.replacement_may_cost_paused = true;
                 return ReplacementResult::Execute(proposed);
             }
@@ -18393,7 +18393,7 @@ mod tests {
         // Drive the prompt state directly (the CR 616.1 accept/decline choice a
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
@@ -18416,7 +18416,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
 
         let WaitingFor::ReplacementChoice {
             candidate_count,
@@ -18458,7 +18458,7 @@ mod tests {
             (Zone::Library, "Put into library"),
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
-            state.pending_replacement = Some(PendingReplacement {
+            state.pending_replacement = Some(Box::new(PendingReplacement {
                 damage_opportunity: Default::default(),
                 damage_source_context: None,
                 proposed: ProposedEvent::zone_change(
@@ -18483,7 +18483,7 @@ mod tests {
                 may_cost_remaining: None,
                 delivery_boundary: None,
                 unrepresentable_life_change: Default::default(),
-            });
+            }));
 
             let WaitingFor::ReplacementChoice { candidates, .. } =
                 replacement_choice_waiting_for(PlayerId(0), &state)
@@ -18542,7 +18542,7 @@ mod tests {
                 action: StepEndManaAction::Retain,
                 description: "Retain green mana".to_string(),
             }];
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::EmptyManaPool {
@@ -18571,7 +18571,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
 
         let WaitingFor::ReplacementChoice { candidates, .. } =
             replacement_choice_waiting_for(PlayerId(0), &state)
@@ -23912,7 +23912,7 @@ mod tests {
         // ~298), which must still route to Priority rather than an actionless
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
-        state.pending_replacement = Some(PendingReplacement {
+        state.pending_replacement = Some(Box::new(PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
@@ -23932,7 +23932,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
 
         let waiting_for = replacement_choice_waiting_for(PlayerId(0), &state);
 

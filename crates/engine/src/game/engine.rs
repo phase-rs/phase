@@ -9996,9 +9996,7 @@ fn drain_pending_deferred_life_cost_resume(
                 // resolution chain — no `last_effect_count` stamp. The fork keys
                 // on the resume marker, never on `waiting_for`: the drain fires
                 // at Priority, long after the inner prompt closed.
-                Some(pending) => {
-                    engine_replacement::complete_entry_payment(state, *pending, events)
-                }
+                Some(pending) => engine_replacement::complete_entry_payment(state, pending, events),
                 None => Ok(super::engine_resolution_choices::finish_pay_amount_choice(
                     state, player, total, events,
                 )),

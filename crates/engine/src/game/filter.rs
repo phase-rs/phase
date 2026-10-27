@@ -29397,7 +29397,7 @@ mod entry_projection_tests {
         }
         assert!(answered.parks_delivery(&original));
         assert!(!answered.parks_delivery(&answered.proposed.clone()));
-        state.pending_replacement = Some(answered);
+        state.pending_replacement = Some(Box::new(answered));
         assert_eq!(
             state
                 .pending_zone_change_delivery_from_replacement()

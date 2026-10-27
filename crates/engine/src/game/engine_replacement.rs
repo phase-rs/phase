@@ -2220,7 +2220,7 @@ pub(super) fn handle_entry_payment(
                 player,
                 total: accumulated.saturating_add(amount),
                 resume_at_resolution_depth,
-                pending_entry: Some(Box::new(pending)),
+                pending_entry: Some(pending),
             });
             Ok(state.waiting_for.clone())
         }
@@ -2247,7 +2247,7 @@ pub(crate) fn resume_parked_entry_payment(
     // battlefield-to-battlefield proposal — there is no delivery to resume.
     if state
         .pending_replacement
-        .as_ref()
+        .as_deref()
         .is_some_and(super::replacement::parked_entry_payment_is_copy_surface)
     {
         return complete_copy_surfaced_payment(state, events);
@@ -2316,7 +2316,7 @@ fn complete_copy_surfaced_payment(
 /// continuation — the drain resumes an ENTRY, not a resolution chain.
 pub(crate) fn complete_entry_payment(
     state: &mut GameState,
-    pending: PendingReplacement,
+    pending: Box<PendingReplacement>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     state.pending_replacement = Some(pending);
@@ -4875,7 +4875,7 @@ mod tests {
         // the actual `continue_replacement` path, marks it applied, and delivers
         // the terminal Connive survivor through `handle_replacement_choice`.
         let candidate = install_optional_replacement(&mut state, ReplacementEvent::Connive);
-        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+        state.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Connive {
@@ -4903,7 +4903,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
         let draw_card_id = CardId(state.next_object_id);
@@ -5555,7 +5555,7 @@ mod tests {
             .regeneration_shield()
             .description("Regenerate".to_string())]
         .into();
-        state.pending_replacement = Some(crate::types::game_state::PendingReplacement {
+        state.pending_replacement = Some(Box::new(crate::types::game_state::PendingReplacement {
             damage_opportunity: Default::default(),
             damage_source_context: None,
             proposed: ProposedEvent::Destroy {
@@ -5583,7 +5583,7 @@ mod tests {
             may_cost_remaining: None,
             delivery_boundary: None,
             unrepresentable_life_change: Default::default(),
-        });
+        }));
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
 
