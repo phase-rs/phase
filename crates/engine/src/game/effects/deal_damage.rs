@@ -1560,11 +1560,17 @@ fn active_excess_recipient(
 
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
-pub(crate) fn resolve_owned(
+pub(super) fn resolve_owned(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<crate::types::ability::DamageOpportunity, EffectError> {
+) -> Result<
+    (
+        crate::types::ability::DamageOpportunity,
+        super::TailOwnership,
+    ),
+    EffectError,
+> {
     let opportunity = Rc::new(RefCell::new(
         ability
             .context
@@ -1600,8 +1606,29 @@ pub(crate) fn resolve_owned(
         .sub_ability
         .as_deref()
         .is_some_and(|next| next.context.damage_opportunity.is_some());
-    if !continued
-        && state.pending_replacement.is_none()
+    let paused = state.pending_replacement.is_some()
+        || super::waits_for_resolution_choice(&state.waiting_for);
+    let parked_damage = state.active_ability_continuation().is_some_and(|pending| {
+        pending.chain.context.damage_opportunity.as_ref() == Some(&opportunity)
+    });
+    if paused
+        && !continued
+        && !parked_damage
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| !matches!(pending.proposed, ProposedEvent::Damage { .. }))
+    {
+        // CR 615.5 + CR 615.8: the last damage leg may have completed while
+        // its lifelink gain is still choosing a replacement. Freeze the owed
+        // prevention rider onto the actual paused continuation, before the
+        // independent tail. The nested LifeGain owns no damage opportunity.
+        if let Some(rider) = replacement::take_noncombat_opportunity_riders(state, &mut opportunity)
+        {
+            super::prepend_to_pending_continuation(state, rider);
+        }
+    } else if !continued
+        && !paused
         && matches!(
             state.waiting_for,
             crate::types::game_state::WaitingFor::Priority { .. }
@@ -1612,7 +1639,17 @@ pub(crate) fn resolve_owned(
             super::resolve_ability_chain(state, &rider, events, 0)?;
         }
     }
-    Ok(opportunity)
+    // Each damage pause has already stashed its exact remainder and tail.
+    // Return the existing tail-ownership contract so the generic chain walker
+    // cannot prepend the independent tail ahead of the owed prevention rider.
+    Ok((
+        opportunity,
+        if paused {
+            super::TailOwnership::Transferred
+        } else {
+            super::TailOwnership::Caller
+        },
+    ))
 }
 
 pub fn resolve(
@@ -1808,6 +1845,7 @@ fn resolve_post_replacement_in_opportunity(
         apply_damage_after_replacement(state, &ctx, event, is_combat, events),
         DamageResult::NeedsChoice
     ) {
+        stash_remaining_post_replacement_damage(state, ability, &[]);
         return Ok(());
     }
 
@@ -8948,15 +8986,37 @@ mod damage_opportunity_public_remainder_tests {
 
     #[test]
     fn source_batch_post_survivors_retain_the_owed_gain_before_an_independent_tail() {
+        source_batch_post_survivor_fixture(false);
+    }
+
+    #[test]
+    fn terminal_source_batch_post_survivor_lifelink_retains_owed_gain_without_damage_remainder() {
+        // CR 615.5 + CR 615.8 + CR 119.9: one additional gain belongs to the
+        // completed prevented instance, even when the last survivor's lifelink pauses.
+        source_batch_post_survivor_fixture(true);
+    }
+
+    fn source_batch_post_survivor_fixture(terminal_lifelink: bool) {
         for family in 0..2 {
             for trusted in [false, true] {
                 let mut scenario = GameScenario::new();
                 scenario.at_phase(Phase::PreCombatMain);
-                let first = scenario
-                    .add_creature(P0, "First source", 1, 5)
-                    .with_keyword(Keyword::Lifelink)
-                    .id();
-                let middle = scenario.add_creature(P0, "Middle source", 2, 5).id();
+                let first = if terminal_lifelink {
+                    scenario.add_creature(P0, "First source", 1, 5).id()
+                } else {
+                    scenario
+                        .add_creature(P0, "First source", 1, 5)
+                        .with_keyword(Keyword::Lifelink)
+                        .id()
+                };
+                let middle = if terminal_lifelink {
+                    scenario
+                        .add_creature(P0, "Middle source", 2, 5)
+                        .with_keyword(Keyword::Lifelink)
+                        .id()
+                } else {
+                    scenario.add_creature(P0, "Middle source", 2, 5).id()
+                };
                 let last = scenario.add_creature(P0, "Last source", 3, 5).id();
                 let recipient = scenario.add_creature(P1, "Recipient", 0, 30).id();
                 let body = if family == 0 {
@@ -9047,9 +9107,16 @@ mod damage_opportunity_public_remainder_tests {
                         .target_object(recipient)
                         .resolve();
                 }
+                let lifelink: i32 = if terminal_lifelink { 2 } else { 1 };
+                let pending = runner.state().pending_replacement.as_ref().unwrap();
+                assert!(matches!(pending.proposed,
+                    ProposedEvent::LifeGain { player_id, amount, .. } if player_id == P0 && amount == lifelink as u32));
                 assert!(
-                    matches!(runner.state().pending_replacement.as_ref().unwrap().proposed,
-                    ProposedEvent::LifeGain { player_id, amount: 1, .. } if player_id == P0)
+                    matches!(runner.state().waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
+                );
+                assert!(
+                    pending.damage_opportunity.is_empty(),
+                    "the independent lifelink event cannot inherit outer damage work"
                 );
                 assert_eq!(
                     runner.life(P1),
@@ -9057,24 +9124,54 @@ mod damage_opportunity_public_remainder_tests {
                     "the owed prevention gain has not run during phase B"
                 );
                 let parked = runner.state().active_ability_continuation().unwrap();
-                assert!(matches!(
-                    parked.chain.effect,
-                    Effect::ApplyPostReplacementDamage { .. }
-                ));
-                assert_eq!(
-                    parked
-                        .chain
-                        .context
-                        .damage_opportunity
-                        .as_ref()
-                        .unwrap()
-                        .prevention_tally
-                        .as_ref()
-                        .unwrap()[0]
-                        .1,
-                    3
-                );
-                *runner.state_mut() = if trusted {
+                if terminal_lifelink {
+                    assert!(matches!(parked.chain.effect, Effect::GainLife { amount: QuantityExpr::Fixed { value: 3 }, .. }), "completed prevention owes its frozen aggregate despite an empty damage remainder");
+                    assert_eq!(parked.chain.controller, P1);
+                    let mut node = Some(parked.chain.as_ref());
+                    while let Some(current) = node {
+                        assert!(!matches!(
+                            current.effect,
+                            Effect::DealDamage { .. }
+                                | Effect::ApplyPostReplacementDamage { .. }
+                                | Effect::DamageAll { .. }
+                                | Effect::DamageEachPlayer { .. }
+                                | Effect::EachDealsDamageEqualToPower { .. }
+                                | Effect::EachSourceDealsDamage { .. }
+                        ));
+                        assert!(current.context.damage_opportunity.is_none());
+                        node = current.sub_ability.as_deref();
+                    }
+                } else {
+                    assert!(matches!(
+                        parked.chain.effect,
+                        Effect::ApplyPostReplacementDamage { .. }
+                    ));
+                    assert_eq!(
+                        parked
+                            .chain
+                            .context
+                            .damage_opportunity
+                            .as_ref()
+                            .unwrap()
+                            .prevention_tally
+                            .as_ref()
+                            .unwrap()[0]
+                            .1,
+                        3
+                    );
+                }
+                *runner.state_mut() = if trusted && terminal_lifelink {
+                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                        serde_json::to_value(
+                            crate::types::resolution::ResolutionStateWire::from_game_state(
+                                runner.state().clone(),
+                            ),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state()
+                } else if trusted {
                     serde_json::from_value::<TrustedGameStateEnvelope>(
                         serde_json::to_value(TrustedGameStateEnvelope::capture(
                             runner.state().clone(),
@@ -9087,10 +9184,10 @@ mod damage_opportunity_public_remainder_tests {
                     serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap()
                 };
                 let mut gains = Vec::new();
-                for (player, amount) in [(P0, 1), (P1, 3), (P0, 1)] {
+                for (player, amount) in [(P0, lifelink), (P1, 3), (P0, 1)] {
                     assert!(
                         matches!(runner.state().pending_replacement.as_ref().unwrap().proposed,
-                        ProposedEvent::LifeGain { player_id, amount: actual, .. } if player_id == player && actual == amount)
+                        ProposedEvent::LifeGain { player_id, amount: actual, .. } if player_id == player && actual == amount as u32)
                     );
                     let result = runner
                         .act(GameAction::ChooseReplacement { index: 1 })
@@ -9103,9 +9200,9 @@ mod damage_opportunity_public_remainder_tests {
                     }));
                 }
                 runner.advance_until_stack_empty();
-                assert_eq!(gains, vec![(P0, 1), (P1, 3), (P0, 1)], "lifelink, aggregate rider and independent following gain each run once in their order");
+                assert_eq!(gains, vec![(P0, lifelink), (P1, 3), (P0, 1)], "lifelink, aggregate rider and independent following gain each run once in their order");
                 assert_eq!(runner.state().objects[&recipient].damage_marked, 3);
-                assert_eq!((runner.life(P0), runner.life(P1)), (22, 23));
+                assert_eq!((runner.life(P0), runner.life(P1)), (21 + lifelink, 23));
                 assert!(matches!(
                     runner.state().waiting_for,
                     WaitingFor::Priority { .. }
@@ -9117,6 +9214,7 @@ mod damage_opportunity_public_remainder_tests {
                         && runner.state().deferred_triggers.is_empty()
                 );
                 assert!(runner.state().owed_spell_final_part().is_none());
+                assert!(runner.state().pending_combat_lifelink.is_none());
             }
         }
     }

@@ -2345,20 +2345,28 @@ pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Val
                         }
                     });
                 }
-                let registered_payload = matches!(
-                    object.get("type").and_then(serde_json::Value::as_str),
-                    Some(
-                        "CreateDelayedTrigger"
-                            | "AddTargetReplacement"
-                            | "CreateEmblem"
-                            | "Token"
-                            | "GenericEffect"
-                            | "Counter"
-                    )
-                );
+                let effect_type = object
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
                 for (key, child) in object.iter_mut() {
                     // Own-resolution descendants and actual flip branches inherit
-                    // the producer. Registered later programs begin a new scope.
+                    // the producer. Match the registered payload boundaries of
+                    // ability_visit::visit_effect_scoped, not all of the creator's
+                    // operands: each later program begins its own scope.
+                    let registered_payload = matches!(
+                        (effect_type.as_deref(), key.as_str()),
+                        (
+                            Some("CreateDrawReplacement" | "CreatePlaneswalkReplacement"),
+                            "replacement_effect"
+                        ) | (Some("CreateDelayedTrigger"), "effect")
+                            | (Some("CreateBoon"), "trigger")
+                            | (Some("GenericEffect" | "Token"), "static_abilities")
+                            | (Some("AddTargetReplacement"), "replacement")
+                            | (Some("Counter"), "source_rider")
+                            | (Some("CreateEmblem"), "statics" | "triggers")
+                            | (Some("ReturnAsAura"), "grants")
+                    );
                     let owned = !registered_payload
                         && (inherited || selected || (producer && key == "sub_ability"));
                     walk(child, owned);
@@ -2373,6 +2381,77 @@ pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Val
         }
     }
     walk(value, false);
+}
+
+#[cfg(test)]
+mod legacy_damage_source_scope_tests {
+    use super::normalize_legacy_damage_source_program;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn all_registered_payloads_reset_legacy_ownership_while_own_resolution_branches_inherit() {
+        for (effect, fields) in [
+            ("CreateDrawReplacement", &["replacement_effect"][..]),
+            ("CreatePlaneswalkReplacement", &["replacement_effect"][..]),
+            ("CreateDelayedTrigger", &["effect"][..]),
+            ("CreateBoon", &["trigger"][..]),
+            ("GenericEffect", &["static_abilities"][..]),
+            ("AddTargetReplacement", &["replacement"][..]),
+            ("Counter", &["source_rider"][..]),
+            ("Token", &["static_abilities"][..]),
+            ("CreateEmblem", &["statics", "triggers"][..]),
+            ("ReturnAsAura", &["grants"][..]),
+        ] {
+            for field in fields {
+                let mut later = json!({"type": effect});
+                later[*field] = json!({"type": "ChosenDamageSource"});
+                let mut program = json!({
+                    "effect": {"type": "ChooseDamageSource"},
+                    "sub_ability": {"effect": later}
+                });
+                normalize_legacy_damage_source_program(&mut program);
+                assert_eq!(
+                    program["sub_ability"]["effect"][*field]["chooser"],
+                    json!("Controller"),
+                    "{effect}.{field} owns a later fresh choice"
+                );
+            }
+        }
+        for (effect, field) in [
+            ("FlipCoins", "win_effect"),
+            ("FlipCoins", "lose_effect"),
+            ("RollDie", "results"),
+            ("ChooseOneOf", "branches"),
+            ("Vote", "per_choice_effect"),
+            ("SeparateIntoPiles", "chosen_pile_effect"),
+            ("SeparateIntoPiles", "unchosen_pile_effect"),
+        ] {
+            let mut branch = json!({"type": effect});
+            branch[field] = json!({"effect": {"type": "PreventDamage", "damage_source_filter": "ChosenDamageSource"}});
+            let mut program = json!({"effect": {"type": "ChooseDamageSource"}, "sub_ability": {"effect": branch}});
+            normalize_legacy_damage_source_program(&mut program);
+            assert_eq!(
+                program["sub_ability"]["effect"][field]["effect"]["damage_source_filter"]
+                    ["chooser"],
+                Value::Null,
+                "{effect}.{field} retains its actual producer"
+            );
+            assert!(
+                program["sub_ability"]["effect"][field]["effect"]["damage_source_filter"]
+                    .get("chooser")
+                    .is_some()
+            );
+        }
+        for chooser in [Value::Null, json!("Controller")] {
+            let mut current = json!({"effect": {"type": "ChooseDamageSource"}, "sub_ability": {"effect": {"type": "CreateDrawReplacement", "replacement_effect": {"type": "ChosenDamageSource", "chooser": chooser}}}});
+            let expected = current.clone();
+            normalize_legacy_damage_source_program(&mut current);
+            assert_eq!(
+                current, expected,
+                "explicit current meanings are never inferred again"
+            );
+        }
+    }
 }
 
 impl RedirectionLifetime {

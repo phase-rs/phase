@@ -13415,6 +13415,7 @@ fn resolve_effect_step(
         }
         _ => {
             let mut damage_opportunity = None;
+            let mut tail = TailOwnership::Caller;
             let (result, progress) =
                 LegacyEffectBoundary::run(state, ability, |state, boundary| {
                     let result = if matches!(
@@ -13426,8 +13427,10 @@ fn resolve_effect_step(
                             | Effect::EachDealsDamageEqualToPower { .. }
                             | Effect::EachSourceDealsDamage { .. }
                     ) {
-                        damage_opportunity =
-                            Some(deal_damage::resolve_owned(state, ability, events)?);
+                        let (opportunity, ownership) =
+                            deal_damage::resolve_owned(state, ability, events)?;
+                        damage_opportunity = Some(opportunity);
+                        tail = ownership;
                         None
                     } else {
                         resolve_legacy_effect(state, ability, events)?
@@ -13452,7 +13455,7 @@ fn resolve_effect_step(
             Ok(EffectStep {
                 progress,
                 result,
-                tail: TailOwnership::Caller,
+                tail,
                 damage_opportunity,
             })
         }

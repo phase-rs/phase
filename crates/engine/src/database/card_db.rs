@@ -3302,6 +3302,306 @@ pub(crate) fn source_choice_expected_faces() -> Vec<CardFace> {
 #[cfg(test)]
 mod complete_source_choice_publication_tests {
     use super::*;
+
+    fn source_program_face() -> CardFace {
+        use crate::types::ability::*;
+        let prevention = |chooser| Effect::PreventDamage {
+            lifetime: RedirectionLifetime::OneOpportunity,
+            amount: PreventionAmount::All,
+            amount_dynamic: None,
+            target: TargetFilter::Controller,
+            recipient_scope: EffectScope::Single,
+            scope: PreventionScope::AllDamage,
+            damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                chooser,
+                filter: None,
+            }),
+            prevention_duration: None,
+        };
+        // Deliberately typed composition: the first prevention is an actual
+        // same-resolution reader; the registered substitute is a later producer.
+        let mut register = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDrawReplacement {
+                replacement_effect: Box::new(prevention(Some(Chooser::Controller))),
+            },
+        );
+        register.sub_link = SubAbilityLink::SequentialSibling;
+        let reader =
+            AbilityDefinition::new(AbilityKind::Spell, prevention(None)).sub_ability(register);
+        let choose = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::ChooseDamageSource {
+                source_filter: TargetFilter::Any,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::generic(1),
+        })
+        .sub_ability(reader);
+        let draw = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::generic(1),
+        });
+        CardFace {
+            name: "Typed source ownership fixture".into(),
+            card_type: crate::types::card_type::CardType {
+                core_types: vec![CoreType::Artifact],
+                ..Default::default()
+            },
+            abilities: vec![choose, draw],
+            ..CardFace::default()
+        }
+    }
+
+    fn omit_source_choosers(value: &mut serde_json::Value, unit: bool) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if object.get("type").and_then(serde_json::Value::as_str)
+                    == Some("ChosenDamageSource")
+                {
+                    if unit {
+                        *value = serde_json::json!("ChosenDamageSource");
+                        return;
+                    }
+                    object.remove("chooser");
+                }
+                for child in object.values_mut() {
+                    omit_source_choosers(child, unit);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    omit_source_choosers(child, unit);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn restore_legacy_source_program(
+        state: &crate::types::game_state::GameState,
+        wire: bool,
+    ) -> crate::types::game_state::GameState {
+        use crate::types::resolution::ResolutionStateWire;
+        let mut raw = if wire {
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap()
+        } else {
+            serde_json::to_value(state).unwrap()
+        };
+        omit_source_choosers(&mut raw, false);
+        if wire {
+            serde_json::from_value::<ResolutionStateWire>(raw)
+                .unwrap()
+                .into_game_state()
+        } else {
+            serde_json::from_value(raw).unwrap()
+        }
+    }
+
+    // CR 608.2c + CR 614.1: the same-resolution reader follows its producer;
+    // a registered replacement's substitute resolves at its own later event.
+    fn assert_source_program_public_flow(face: &CardFace, canonical: Option<bool>) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::*;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::WaitingFor;
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::replacements::ReplacementEvent;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Library A", "Library B"]);
+        let damage = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::generic(0),
+        });
+        let first = scenario
+            .add_creature(P0, "First source", 1, 5)
+            .with_ability_definition(damage.clone())
+            .id();
+        let second = scenario
+            .add_creature(P0, "Second source", 1, 5)
+            .with_ability_definition(damage)
+            .id();
+        let driver = scenario
+            .add_artifact_from_oracle(P0, &face.name, "")
+            .with_ability_definition(face.abilities[0].clone())
+            .with_ability_definition(face.abilities[1].clone())
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 2],
+        );
+        let mut runner = scenario.build();
+        if let Some(wire) = canonical {
+            *runner.state_mut() = restore_legacy_source_program(runner.state(), wire);
+        }
+        runner.activate(driver, 0).resolve();
+        let offered = |runner: &crate::game::scenario::GameRunner, id| {
+            let WaitingFor::DamageSourceChoice {
+                player, options, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("required source prompt: {:?}", runner.state().waiting_for);
+            };
+            assert_eq!(*player, P0);
+            options
+                .iter()
+                .find(|option| option.identity.reference.object_id == id)
+                .expect("exact offered source")
+                .identity
+                .reference
+        };
+        let first_ref: ObjectIncarnationRef = offered(&runner, first);
+        runner
+            .act(GameAction::ChooseDamageSource { source: first_ref })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let installed = &runner.state().pending_damage_replacements;
+        assert!(
+            installed.iter().any(
+                |definition| definition.event == ReplacementEvent::DamageDone
+                    && definition
+                        .selected_damage_source
+                        .as_ref()
+                        .is_some_and(|source| source.identity.reference == first_ref)
+            ),
+            "the actual own-resolution reader installs its chosen-source shield"
+        );
+        assert!(installed.iter().any(
+            |definition| definition.event == ReplacementEvent::Draw && !definition.is_consumed
+        ));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().resolution_stack.is_empty());
+        if let Some(wire) = canonical {
+            *runner.state_mut() = restore_legacy_source_program(runner.state(), wire);
+        }
+        runner.activate(driver, 1).resolve();
+        let second_ref = offered(&runner, second);
+        assert_ne!(second_ref, first_ref);
+        assert!(
+            runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .all(|definition| definition
+                    .selected_damage_source
+                    .as_ref()
+                    .is_none_or(|source| source.identity.reference != second_ref)),
+            "the later source is still unanswered"
+        );
+        runner
+            .act(GameAction::ChooseDamageSource { source: second_ref })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert!(
+            runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .any(
+                    |definition| definition.event == ReplacementEvent::DamageDone
+                        && definition
+                            .selected_damage_source
+                            .as_ref()
+                            .is_some_and(|source| source.identity.reference == second_ref)
+                ),
+            "the later body binds its own answer, never the first choice"
+        );
+        assert_eq!(
+            runner.state().players[0].library.len(),
+            2,
+            "the reached draw was replaced by the later source-choice body"
+        );
+        for source in [first, second] {
+            let before = runner.life(P0);
+            runner.activate(source, 0).target_player(P0).resolve();
+            assert_eq!(
+                runner.life(P0),
+                before,
+                "each independently selected source is prevented"
+            );
+            runner.activate(source, 0).target_player(P0).resolve();
+            assert_eq!(
+                runner.life(P0),
+                before - 1,
+                "its next independent opportunity is ordinary damage"
+            );
+        }
+        assert_eq!(runner.life(P0), 18);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().resolution_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+        );
+        assert!(
+            runner.state().pending_replacement.is_none()
+                && runner.state().pending_combat_lifelink.is_none()
+        );
+        assert!(runner.state().owed_spell_final_part().is_none());
+    }
+
+    #[test]
+    fn normal_complete_string_and_file_loaders_keep_later_fresh_choice_and_own_reader() {
+        let expected = source_program_face();
+        let current = serde_json::json!({"typed source ownership fixture": CardExportEntry {
+            face: expected.clone(), legalities: HashMap::new(), layout: Some("normal".into()), face_index: Some(0), printings: vec![], rulings: vec![], bracket_signals: Default::default(),
+        }});
+        for old in [None, Some(false), Some(true)] {
+            let mut entry = current.clone();
+            if let Some(unit) = old {
+                omit_source_choosers(&mut entry, unit);
+            }
+            let complete = serde_json::to_string(&entry).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), complete.as_bytes()).unwrap();
+            assert_eq!(std::fs::read(file.path()).unwrap(), complete.as_bytes());
+            for db in [
+                CardDatabase::from_json_str(&complete).unwrap(),
+                CardDatabase::from_export(file.path()).unwrap(),
+            ] {
+                assert_eq!(
+                    db.faces_in_scan_order().cloned().collect::<Vec<_>>(),
+                    vec![expected.clone()]
+                );
+                assert_source_program_public_flow(
+                    db.get_face_by_name(&expected.name).unwrap(),
+                    None,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn both_canonical_legacy_readers_keep_later_fresh_choice_and_genuine_own_reader() {
+        for wire in [false, true] {
+            assert_source_program_public_flow(&source_program_face(), Some(wire));
+        }
+    }
+
     #[test]
     fn complete_twelve_faces_and_metadata_survive_identical_current_and_authentic_legacy_normal_loaders(
     ) {
