@@ -1157,6 +1157,7 @@ mod lasting_play_from_exile_permission;
 mod latched_control_lifetimes;
 mod latched_redirect_controller;
 mod lathiel_end_step_counters_repro;
+mod layer_boundary_census;
 mod leading_duration_distribution_7923;
 mod leeching_sliver;
 mod legacy_deferred_spell_delivery_restore;

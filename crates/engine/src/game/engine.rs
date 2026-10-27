@@ -4773,7 +4773,7 @@ fn entry_announces(
     // `bounded_cycle_pin_slots_requires_a_single_mandatory_announcement_slot`, the third by
     // `bounded_cycle_pin_slots_legal_set_comes_from_the_announcement_authority`:
     // * `len() == 1` — a chained second "target" (2 slots) or an effect whose filter the
-    //   SLOT BUILDER declines (0 slots: `triggers::extract_target_filter_from_effect`
+    //   SLOT BUILDER declines (0 slots: `types::ability::extract_target_filter_from_effect`
     //   carves out `Sacrifice`/`UnattachAll`/… for which `Effect::target_filter()` still
     //   returns `Some`, and `target_choice_timing == Resolution` surfaces no stack slot at
     //   all) would leave the published `min/max_targets: 1` contradicting the announcement.

@@ -12109,7 +12109,7 @@ fn as_enters_payment_shape(def: &ReplacementDefinition) -> bool {
         Effect::PayCost {
             cost: AbilityCost::PayLife { amount },
             ..
-        } if crate::game::effects::pay::is_pay_any_amount(amount)
+        } if crate::types::ability::is_pay_any_amount(amount)
     )
 }
 

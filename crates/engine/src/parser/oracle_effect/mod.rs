@@ -116,33 +116,33 @@ use super::oracle_util::{
     parse_count_slot, parse_creature_subtype, parse_equal_to_count, parse_mana_symbols,
     parse_number, split_around, starts_with_possessive, strip_after, CountSlot, TextPair,
 };
-use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
-    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
-    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
-    GuardReading, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
-    KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty,
-    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter,
-    TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
-    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    extract_target_filter_from_effect, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
+    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
+    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject, IntensityScope,
+    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TrackedAnaphorSource,
+    TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier,
+    UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource,
+    ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -1294,7 +1294,7 @@ fn demote_unproven_reveal_this_way_gates(clauses: &mut [ClauseIr], repeats_a_pro
         let is_gate = clauses[index]
             .condition
             .as_ref()
-            .is_some_and(crate::game::effects::condition_has_reveal_until_matched_guard);
+            .is_some_and(crate::types::ability::condition_has_reveal_until_matched_guard);
         if !is_gate {
             continue;
         }
@@ -11442,15 +11442,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         .map(|(rest, subject)| {
             (
                 rest,
-                subject
-                    .unwrap_or_else(crate::game::effects::reveal_chosen_numbers::default_players),
+                subject.unwrap_or_else(crate::types::ability::default_players),
             )
         })
         .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
-            (
-                lower.as_str(),
-                crate::game::effects::reveal_chosen_numbers::default_players(),
-            )
+            (lower.as_str(), crate::types::ability::default_players())
         });
         // COMPLETE-CLAUSE consumption. A prefix match would lower the whole chunk
         // to a bare reveal and silently discard whatever followed — the swallow
@@ -20640,7 +20636,7 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
 /// resolver itself consumes.
 fn is_ownership_candidate(reading: GuardReading, clause: &ParsedEffectClause) -> bool {
     reading == GuardReading::Event
-        && crate::game::effects::cast_from_zone::graveyard_destination_rider(
+        && crate::types::ability::graveyard_destination_rider(
             &clause.effect,
             clause.condition.as_ref(),
         )
@@ -21440,8 +21436,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // imperative parser lowers "destroy X target ..." to the target filter but
     // the target count lives outside that filter, so recover it from the full
     // source sentence here.
-    if clause.multi_target.is_none()
-        && triggers::extract_target_filter_from_effect(&clause.effect).is_some()
+    if clause.multi_target.is_none() && extract_target_filter_from_effect(&clause.effect).is_some()
     {
         // The generalized optional-count fixup has ONE owner: the clause
         // junction `lower_clause_ast` (via `apply_optional_target_fixup`), so
@@ -22578,7 +22573,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         ))
         .parse(sub_lower.as_str())
         .is_ok()
-        && triggers::extract_target_filter_from_effect(&primary_effect)
+        && extract_target_filter_from_effect(&primary_effect)
             .is_some_and(|filter| !is_player_scoped_filter(filter))
     {
         continuation_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
@@ -27026,7 +27021,7 @@ fn has_explicit_player_target(effect: &Effect) -> bool {
 
 /// CR 115.1 + CR 108.3: a clause announces a player when it targets one or when the cards it acts on are scoped to a target player's zone ("target player's graveyard").
 fn clause_announces_player(effect: &Effect) -> bool {
-    use crate::game::ability_utils::{
+    use crate::types::ability::{
         effect_bound_filter_matches, filter_binds_target_player, PlayerBindingAxis,
     };
     has_explicit_player_target(effect)
@@ -27429,7 +27424,7 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// attach operands, damage sources, companion player slots, …). `Ok(None)` for
 /// a node that announces nothing.
 fn single_declared_slot_filter(effect: &Effect) -> Result<Option<&TargetFilter>, ()> {
-    let Some(filter) = triggers::extract_target_filter_from_effect(effect) else {
+    let Some(filter) = extract_target_filter_from_effect(effect) else {
         return Ok(None);
     };
     let plain_single_slot = matches!(
@@ -27456,7 +27451,7 @@ fn single_declared_slot_filter(effect: &Effect) -> Result<Option<&TargetFilter>,
 /// CR 109.4 + CR 115.1: a `TargetPlayer` controller scope surfaces a companion
 /// player slot, which this walk does not number.
 fn filter_names_target_player(filter: &TargetFilter) -> bool {
-    crate::game::filter::filter_contains(filter, &|inner| {
+    crate::types::ability::filter_contains(filter, &|inner| {
         matches!(
             inner,
             TargetFilter::Typed(TypedFilter {
@@ -27585,7 +27580,7 @@ fn declared_slot_named_by(
     let index = unique_slot_for_anaphor(anaphor, &filters)?;
     entries
         .get(index)
-        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))?
+        .filter(|entry| !crate::types::ability::filter_reads_declared_slot(&entry.filter))?
         .index
 }
 
@@ -27628,7 +27623,7 @@ pub(super) fn resolve_pronoun_declared_slot_anaphor<'a>(
     // evidence either way.
     let eligible: Vec<&crate::parser::oracle_ir::context::DeclaredSlotEntry> = entries
         .iter()
-        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))
+        .filter(|entry| !crate::types::ability::filter_reads_declared_slot(&entry.filter))
         .collect();
     if eligible.is_empty() {
         return None;
@@ -27653,13 +27648,12 @@ pub(super) fn resolve_pronoun_declared_slot_anaphor<'a>(
 fn clause_announces_own_target(clause: &ClauseIr) -> bool {
     clause.multi_target.is_some()
         || clause.parsed.multi_target.is_some()
-        || triggers::extract_target_filter_from_effect(&clause.parsed.effect).is_some()
+        || extract_target_filter_from_effect(&clause.parsed.effect).is_some()
         || std::iter::successors(clause.parsed.sub_ability.as_deref(), |def| {
             def.sub_ability.as_deref()
         })
         .any(|def| {
-            def.multi_target.is_some()
-                || triggers::extract_target_filter_from_effect(&def.effect).is_some()
+            def.multi_target.is_some() || extract_target_filter_from_effect(&def.effect).is_some()
         })
 }
 
@@ -28316,7 +28310,7 @@ fn lift_untargeted_declared_slot_destroy(
     else {
         return (clause, multi_target);
     };
-    if !crate::game::filter::filter_reads_declared_slot(target)
+    if !crate::types::ability::filter_reads_declared_slot(target)
         || nom_primitives::scan_contains(text_lower, "target ")
     {
         return (clause, multi_target);
@@ -28496,7 +28490,7 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
             // announce as a target ("sacrifice a Blood token") declares no object
             // target, so it is no antecedent of a later anaphor.
             Some(TargetFilter::Typed(_))
-                if triggers::extract_target_filter_from_effect(&prev.parsed.effect).is_none() =>
+                if extract_target_filter_from_effect(&prev.parsed.effect).is_none() =>
             {
                 return None
             }
@@ -41917,7 +41911,7 @@ pub(crate) fn refuse_linked_paid_cast_in_activated_mana_ability(
 ) {
     if def.kind == AbilityKind::Activated
         && def.cost.is_some()
-        && crate::game::mana_abilities::could_be_activated_mana_ability(def)
+        && crate::types::ability::could_be_activated_mana_ability(def)
     {
         refuse_linked_paid_cast_in_mana_ability(def, source_text);
     }
@@ -48503,9 +48497,7 @@ fn parse_effect_chain_ir_body(
             // player-scope iteration is the printed controller, so such a choice
             // cannot be represented — honest gap.
             if (player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk)
-                && crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(
-                    &clause.effect,
-                )
+                && crate::types::ability::effect_parks_reveal_card_choice(&clause.effect)
             {
                 clause.effect =
                     Effect::unimplemented("non_controller_reveal_choice", normalized_text);

@@ -9,6 +9,9 @@ use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use super::ability_visit::{
+    visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
+};
 use super::card::{PrintedCardRef, PrintedLoyalty};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
@@ -4084,7 +4087,7 @@ impl ManaTargetRole {
     /// targeting path surfaces for this role — 0 or 1.
     ///
     /// The generic path reads `Effect::target_filter()` (the FIRST DECLARED role
-    /// filter) through `triggers::extract_target_filter_from_effect`, which ends
+    /// filter) through `extract_target_filter_from_effect`, which ends
     /// in `.filter(|t| !t.is_context_ref())`. So it surfaces one slot iff the
     /// first declared filter exists and is not a context ref — exactly what this
     /// returns.
@@ -8800,6 +8803,1899 @@ pub enum TargetFilter {
     AllPlayers,
 }
 
+/// Whether `filter`, or any filter nested anywhere inside it, satisfies `leaf`.
+///
+/// The single authority for `TargetFilter`'s recursive shape. Every predicate
+/// that asks "does this filter mention X anywhere" routes here instead of
+/// re-listing the nesting variants, because a predicate that lists them itself
+/// lists them from memory: `filter_contains_last_zone_changed` and its
+/// `last_created` twin both omitted `ChosenDamageSource`'s optional inner filter,
+/// so a `LastCreated` nested one level inside it read as absent.
+///
+/// The match is EXHAUSTIVE on purpose — no `_` arm. A `_ => false` silently
+/// classifies every future variant as a leaf, which is how that omission
+/// survived; with the wildcard gone, a new nesting variant does not compile until
+/// someone decides which side of this match it belongs on. The same discipline
+/// applies to the two enums this traversal descends into,
+/// [`filter_prop_contains`] and [`player_filter_contains`].
+///
+/// SCOPE, stated rather than left implicit: this traverses every nested
+/// `TargetFilter`. It deliberately does NOT descend into the `QuantityExpr`
+/// magnitudes some `FilterProp`s and `PlayerFilter`s carry (`Cmc { value }`,
+/// `Counters { count }`, `PtComparison { value }`, `ControlsCount { count }`,
+/// `PlayerAttribute { attr, value }`). A filter reached through a quantity is a
+/// *population being counted*, not a quality this filter mentions, and callers
+/// that number slots or project a prop's own threshold rely on that boundary.
+/// Its operand-closed twin, `filter_operands_contain`, descends those
+/// operands too; the created-referent reader in `effects` reads through it.
+pub(crate) fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
+    if leaf(filter) {
+        return true;
+    }
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters.iter().any(recurse),
+        TargetFilter::Not { filter } => recurse(filter),
+        // CR 102.1: the player-axis crossing into `PlayerFilter`, which boxes
+        // filters of its own (`ControlsCount`, `TrackedSetPossessor`,
+        // `OpponentDealtDamage`) — the mirror of the
+        // `FilterProp::ControllerMatches` arm below (which keeps CR 109.4
+        // because it really is about an object's controller). NOT a leaf.
+        TargetFilter::PlayerMatching { player } => player_filter_contains(player, leaf),
+        TargetFilter::TrackedSetFiltered { filter, .. } => recurse(filter),
+        // CR 609.7a: the source a "source of your choice" effect chose. CR 609.7b:
+        // the optional inner filter is the "red source"-style quality the shield
+        // rechecks, so it is a real nested filter. The `None` case ("a source of
+        // your choice", unqualified) is a leaf.
+        TargetFilter::ChosenDamageSource { filter } => filter.as_deref().is_some_and(recurse),
+        // `Typed` is NOT a leaf: six of its `FilterProp`s box a `TargetFilter`
+        // (`CanEnchant`, `DifferentNameFrom`, `DistinctFrom`, `SharesQuality`,
+        // `Targets`, `TargetsOnly`), `Not`/`AnyOf` recurse through more props, and
+        // `ControllerMatches` crosses into `PlayerFilter`, which boxes filters of
+        // its own.
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| filter_prop_contains(prop, leaf)),
+        // Leaves: no nested `TargetFilter` to descend into.
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// [`filter_contains`] across the `TargetFilter`s a single `FilterProp` nests.
+///
+/// Exhaustive for the same reason `filter_contains` is: a `_ => false` here would
+/// silently reclassify every future prop as anaphor-free, which is the defect
+/// class this pair exists to make uncompilable.
+pub(crate) fn filter_prop_contains(
+    prop: &FilterProp,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match prop {
+        // CR 303.4 + CR 702.5: the referenced host an Aura "could enchant".
+        FilterProp::CanEnchant { target } => recurse(target),
+        FilterProp::DifferentNameFrom { filter } => recurse(filter),
+        // CR 109.1 + CR 120.3: the object-identity reference.
+        FilterProp::DistinctFrom { reference } => recurse(reference),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`,
+        // so a leaf reference inside the host filter is found by the same
+        // traversal the siblings above use.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => recurse(filter),
+        FilterProp::SharesQuality { reference, .. } => reference.as_deref().is_some_and(recurse),
+        // CR 115.9b/9c: the stack entry's target-side filters.
+        FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => recurse(filter),
+        // CR 608.2c: prop-level combinators.
+        FilterProp::Not { prop } => filter_prop_contains(prop, leaf),
+        FilterProp::AnyOf { props } => props.iter().any(|p| filter_prop_contains(p, leaf)),
+        // CR 109.4: the object-axis crossing into the player axis.
+        FilterProp::ControllerMatches { player } => player_filter_contains(player, leaf),
+        // CR 109.4 + CR 120.1: same object-axis-into-player-axis crossing. The
+        // recipient scope is an `Option<PlayerFilter>` that can itself nest a
+        // `TargetFilter` (e.g. `OpponentDealtDamage { source }`), so it must be
+        // routed rather than treated as a leaf. `None` = any recipient, which
+        // nests nothing.
+        FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+            .as_ref()
+            .is_some_and(|scope| player_filter_contains(scope, leaf)),
+        // Leaves: no nested `TargetFilter`. (Props carrying only a `QuantityExpr`
+        // magnitude are leaves HERE by the scope rule documented on
+        // `filter_contains` — `filter_prop_operands_contain` reads those.)
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PtComparison { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => false,
+    }
+}
+
+/// [`filter_contains`] across the `TargetFilter`s a single `PlayerFilter` nests.
+/// Player-axis third of the same exhaustive traversal; see [`filter_contains`].
+pub(crate) fn player_filter_contains(
+    filter: &PlayerFilter,
+    leaf: &dyn Fn(&TargetFilter) -> bool,
+) -> bool {
+    let recurse = |inner: &TargetFilter| filter_contains(inner, leaf);
+    match filter {
+        // CR 120.3: the "dealt damage by a <source>" quality.
+        PlayerFilter::OpponentDealtDamage { source, .. } => source.as_deref().is_some_and(recurse),
+        PlayerFilter::ControlsCount { filter, .. } => recurse(filter),
+        PlayerFilter::TrackedSetPossessor { filter, .. } => recurse(filter),
+        PlayerFilter::AnyOf { filters } => filters.iter().any(|f| player_filter_contains(f, leaf)),
+        // The excluded players are themselves a player filter, which can box
+        // a `TargetFilter` of its own (e.g. `ControlsCount { filter }`).
+        PlayerFilter::AllExcept { exclude } => player_filter_contains(exclude, leaf),
+        // Leaves: no nested `TargetFilter`. `PlayerAttribute`'s `QuantityRef` /
+        // `QuantityExpr` and `ControlsCount.count` are quantities, which the
+        // scope rule on `filter_contains` assigns to the operand-closed twin.
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::PlayerAttribute { .. }
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::GrantingObjectCaster => false,
+    }
+}
+
+/// Whether `filter`, including every nested filter/property/player-filter
+/// surface, contains a property accepted by `predicate`.
+///
+/// This is the single read authority for a `FilterProp` buried below a
+/// `TargetFilter`. It deliberately mirrors the complete target → property →
+/// player topology rather than treating typed properties as terminal leaves:
+/// the nested filters in target restrictions and controller/recipient scopes
+/// are semantically part of the same filter expression.
+pub(crate) fn filter_contains_filter_prop(
+    filter: &TargetFilter,
+    predicate: &dyn Fn(&FilterProp) -> bool,
+) -> bool {
+    filter_grammar_any(filter, &|node| match node {
+        FilterGrammarNode::Prop(prop) => predicate(prop),
+        FilterGrammarNode::Filter(_) => false,
+    })
+}
+
+/// One node of the filter grammar as the grammar walkers below reach it: a
+/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
+/// generic over what a caller looks for; each entry that calls them names the
+/// node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family).
+#[derive(Clone, Copy)]
+pub(crate) enum FilterGrammarNode<'a> {
+    Filter(&'a TargetFilter),
+    Prop(&'a FilterProp),
+}
+
+/// The complete target → property → player → quantity topology of the filter
+/// grammar, visiting every `TargetFilter` and `FilterProp` it reaches;
+/// `true` as soon as `visit` accepts a node. Exhaustive at every level, no
+/// wildcard arm. `crate::game::filter`'s `*_contains_input` family walks the same topology
+/// while threading object-information and slot context; keep the two
+/// arm-for-arm.
+pub(crate) fn filter_grammar_any(
+    filter: &TargetFilter,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    if visit(FilterGrammarNode::Filter(filter)) {
+        return true;
+    }
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|inner| filter_grammar_any(inner, visit))
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            filter_grammar_any(filter, visit)
+        }
+        TargetFilter::PlayerMatching { player } => player_filter_grammar_any(player, visit),
+        TargetFilter::ChosenDamageSource { filter } => filter
+            .as_deref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| filter_prop_grammar_any(prop, visit)),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+pub(crate) fn filter_prop_grammar_any(
+    prop: &FilterProp,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    visit(FilterGrammarNode::Prop(prop))
+        || match prop {
+            FilterProp::CanEnchant { target } => filter_grammar_any(target, visit),
+            FilterProp::DifferentNameFrom { filter } => filter_grammar_any(filter, visit),
+            FilterProp::DistinctFrom { reference } => filter_grammar_any(reference, visit),
+            FilterProp::SharesQuality { reference, .. } => reference
+                .as_deref()
+                .is_some_and(|inner| filter_grammar_any(inner, visit)),
+            FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            // The filter-matched host is part of the filter grammar: its inner
+            // filter can itself name a target, event subject or typed quality.
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter },
+            } => filter_grammar_any(filter, visit),
+            FilterProp::Not { prop } => filter_prop_grammar_any(prop, visit),
+            FilterProp::AnyOf { props } => props
+                .iter()
+                .any(|inner| filter_prop_grammar_any(inner, visit)),
+            FilterProp::ControllerMatches { player } => player_filter_grammar_any(player, visit),
+            FilterProp::DealtDamageThisTurn { recipient, .. } => recipient
+                .as_ref()
+                .is_some_and(|scope| player_filter_grammar_any(scope, visit)),
+            FilterProp::Counters { count, .. }
+            | FilterProp::Cmc { value: count, .. }
+            | FilterProp::PtComparison { value: count, .. } => {
+                quantity_expr_grammar_any(count, visit)
+            }
+            FilterProp::Token
+            | FilterProp::NonToken
+            | FilterProp::RepresentedByCard
+            | FilterProp::ControllerChoseLabel { .. }
+            | FilterProp::WasPlayed
+            | FilterProp::Attacking { .. }
+            | FilterProp::Blocking
+            | FilterProp::BlockingSource
+            | FilterProp::CombatRelation { .. }
+            | FilterProp::BlockStatus { .. }
+            | FilterProp::AttackingAlone
+            | FilterProp::BlockingAlone
+            | FilterProp::Tapped
+            | FilterProp::Untapped
+            | FilterProp::IsSaddled
+            | FilterProp::SaddledSource
+            | FilterProp::CrewedThisTurn { .. }
+            | FilterProp::ConvokedSource
+            | FilterProp::ProtectorMatches { .. }
+            | FilterProp::HasHasteOrControlledSinceTurnBegan
+            | FilterProp::WithKeyword { .. }
+            | FilterProp::HasKeywordKind { .. }
+            | FilterProp::WithoutKeyword { .. }
+            | FilterProp::WithoutKeywordKind { .. }
+            | FilterProp::ManaValueParity { .. }
+            | FilterProp::ManaCostIn { .. }
+            | FilterProp::InZone { .. }
+            | FilterProp::Owned { .. }
+            | FilterProp::Foretold
+            | FilterProp::HasAdventure
+            | FilterProp::EnchantedBy
+            | FilterProp::EquippedBy
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Source,
+            }
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Recipient,
+            }
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::Player { .. },
+            }
+            | FilterProp::AttachedTo {
+                to: AttachmentReferent::DeclaredTarget { .. },
+            }
+            | FilterProp::HasAttachment { .. }
+            | FilterProp::HasAnyAttachmentOf { .. }
+            | FilterProp::Another
+            | FilterProp::Unpaired
+            | FilterProp::OtherThanTriggerObject
+            | FilterProp::HasColor { .. }
+            | FilterProp::PowerGTSource
+            | FilterProp::ColorCount { .. }
+            | FilterProp::ManaSymbolCount { .. }
+            | FilterProp::HasSupertype { .. }
+            | FilterProp::IsChosenCreatureType
+            | FilterProp::MostPrevalentCreatureTypeIn { .. }
+            | FilterProp::IsChosenColor
+            | FilterProp::IsChosenCardType
+            | FilterProp::MatchesLastChosenCardPredicate
+            | FilterProp::HasSingleTarget
+            | FilterProp::Modal
+            | FilterProp::PrepareSpell
+            | FilterProp::NotColor { .. }
+            | FilterProp::NotSupertype { .. }
+            | FilterProp::Suspected
+            | FilterProp::Renowned
+            | FilterProp::Goaded
+            | FilterProp::Prepared
+            | FilterProp::ToughnessGTPower
+            | FilterProp::PowerExceedsBase
+            | FilterProp::InTrackedSet { .. }
+            | FilterProp::Modified
+            | FilterProp::Historic
+            | FilterProp::NotHistoric
+            | FilterProp::InAnyZone { .. }
+            | FilterProp::WasDealtDamageThisTurn
+            | FilterProp::EnteredThisTurn
+            | FilterProp::ControlledContinuouslySinceTurnBegan
+            | FilterProp::ZoneChangedThisTurn { .. }
+            | FilterProp::AttackedThisTurn { .. }
+            | FilterProp::BlockedThisTurn
+            | FilterProp::AttackedOrBlockedThisTurn
+            | FilterProp::CountersPutOnThisTurn { .. }
+            | FilterProp::FaceDown
+            | FilterProp::Transformed
+            | FilterProp::CouldBeTargetedByTriggeringSpell
+            | FilterProp::HasXInManaCost
+            | FilterProp::HasXInActivationCost
+            | FilterProp::WasKicked
+            | FilterProp::HasManaAbility
+            | FilterProp::HasNoAbilities
+            | FilterProp::Named { .. }
+            | FilterProp::SameName
+            | FilterProp::SameNameAsParentTarget
+            | FilterProp::SameNameAsExiledBySource
+            | FilterProp::NameMatchesAnyPermanent { .. }
+            | FilterProp::IsCommander
+            | FilterProp::SharesCreatureTypeWithCommander
+            | FilterProp::Other { .. } => false,
+        }
+}
+
+pub(crate) fn player_filter_grammar_any(
+    filter: &PlayerFilter,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match filter {
+        PlayerFilter::OpponentDealtDamage { source, .. } => source
+            .as_deref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            filter_grammar_any(filter, visit) || quantity_expr_grammar_any(count, visit)
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            quantity_ref_grammar_any(attr, visit) || quantity_expr_grammar_any(value, visit)
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => filter_grammar_any(filter, visit),
+        PlayerFilter::AllExcept { exclude } => player_filter_grammar_any(exclude, visit),
+        PlayerFilter::AnyOf { filters } => {
+            filters.iter().any(|f| player_filter_grammar_any(f, visit))
+        }
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::GrantingObjectCaster => false,
+    }
+}
+
+/// Visits the filter-grammar nodes carried by dynamic quantity operands. This is
+/// part of the same filter grammar as the direct property recursion above:
+/// quantities can themselves count filtered object/player populations.
+pub(crate) fn quantity_expr_grammar_any(
+    expr: &QuantityExpr,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_grammar_any(qty, visit),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_grammar_any(inner, visit),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(|inner| quantity_expr_grammar_any(inner, visit)),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_grammar_any(left, visit) || quantity_expr_grammar_any(right, visit)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
+/// EXHAUSTIVE, wildcard-free leaf classifier for
+/// [`quantity_expr_grammar_any`]. Keep this arm-for-arm with
+/// [`rewrite_quantity_ref_filter_props`] so readers and rewriters reach the
+/// same dynamic quantity topology.
+pub(crate) fn quantity_ref_grammar_any(
+    qty: &QuantityRef,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => filter_grammar_any(filter, visit),
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => filter_grammar_any(filter, visit),
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            player_filter_grammar_any(filter, visit)
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            card_type_set_source_grammar_any(aggregate.source(), visit)
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => {
+            card_type_set_source_grammar_any(source, visit)
+        }
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            filter_grammar_any(source, visit) || filter_grammar_any(target, visit)
+        }
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => {
+                filter_grammar_any(source_filter, visit)
+            }
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { .. } => false,
+        },
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+/// Whether a visited grammar node is reachable through a card-type population.
+/// An exhausted bounded union walk is treated as a possible match, preserving
+/// the reader's conservative dependency contract.
+fn card_type_set_source_grammar_any(
+    source: &CardTypeSetSource,
+    visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
+) -> bool {
+    match source {
+        CardTypeSetSource::Objects { filter } => filter_grammar_any(filter, visit),
+        CardTypeSetSource::TurnJournal { filter, .. } => filter
+            .as_ref()
+            .is_some_and(|inner| filter_grammar_any(inner, visit)),
+        CardTypeSetSource::AnyOf { .. } => {
+            let mut contains = false;
+            let complete = source.try_for_each_member(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| {
+                    contains |= card_type_set_source_grammar_any(leaf, visit);
+                },
+            );
+            // An incomplete walk may have missed the visit below the
+            // budget boundary. This is a dependency/capability query, where
+            // the conservative answer prevents an under-reported consumer.
+            contains || !complete
+        }
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => false,
+    }
+}
+
+/// Rewrites only `IsChosenCardType` leaves beneath `filter` to the corresponding
+/// creature-type discriminator. The recursive topology is deliberately shared
+/// with [`filter_contains_filter_prop`] at this module boundary: neither parser
+/// callers nor individual consumers may maintain a partial traversal.
+///
+/// Returns `false` when a bounded `CardTypeSetSource::AnyOf` walk was
+/// incomplete. In that case `filter` is left untouched: applying only the
+/// reachable prefix would silently produce a mixed card-type / creature-type
+/// discriminator.
+pub(crate) fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    rewrite_filter_props::<()>(
+        &mut rewritten,
+        &mut |_, _, _| {},
+        &mut |prop| {
+            if matches!(prop, FilterProp::IsChosenCardType) {
+                *prop = FilterProp::IsChosenCreatureType;
+            }
+        },
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if complete {
+        *filter = rewritten;
+    }
+    complete
+}
+
+/// Rewrite every node and property reachable through `filter`, recording any incomplete
+/// bounded population walk in `complete` for the transactional caller.
+pub(crate) fn rewrite_filter_props<C>(
+    filter: &mut TargetFilter,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
+    rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
+    complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&C>,
+) {
+    rewrite_node(filter, object_information_available, slot_context);
+    match filter {
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter_mut().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
+            rewrite_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }
+        TargetFilter::PlayerMatching { player } => rewrite_player_filter_props(
+            player,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        TargetFilter::ChosenDamageSource { filter } => {
+            filter.as_deref_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        TargetFilter::Typed(typed) => typed.properties.iter_mut().for_each(|prop| {
+            rewrite_filter_prop(
+                prop,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => {}
+    }
+}
+
+/// Rewrite one property and every nested filter-bearing payload it owns.
+pub(crate) fn rewrite_filter_prop<C>(
+    prop: &mut FilterProp,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
+    rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
+    complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&C>,
+) {
+    rewrite(prop);
+    match prop {
+        FilterProp::CanEnchant { target } => rewrite_filter_props(
+            target,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::DifferentNameFrom { filter } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::DistinctFrom { reference } => rewrite_filter_props(
+            reference,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // every generic rewrite (declared groups, chosen card types, owner
+        // authority, …) must descend into it — this is the traversal the
+        // `DeclaredGroupBinder` and the `IsChosenCardType` rewriter share.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::SharesQuality { reference, .. } => {
+            reference.as_deref_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        FilterProp::Targets { filter } | FilterProp::TargetsOnly { filter } => {
+            rewrite_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }
+        FilterProp::Not { prop } => rewrite_filter_prop(
+            prop,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::AnyOf { props } => props.iter_mut().for_each(|inner| {
+            rewrite_filter_prop(
+                inner,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }),
+        FilterProp::ControllerMatches { player } => rewrite_player_filter_props(
+            player,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::DealtDamageThisTurn { recipient, .. } => {
+            recipient.as_mut().into_iter().for_each(|scope| {
+                rewrite_player_filter_props(
+                    scope,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        FilterProp::Counters { count, .. }
+        | FilterProp::Cmc { value: count, .. }
+        | FilterProp::PtComparison { value: count, .. } => rewrite_quantity_expr_filter_props(
+            count,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::WasPlayed
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::WithoutKeywordKind { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Recipient,
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Player { .. },
+        }
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::DeclaredTarget { .. },
+        }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Another
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::HasColor { .. }
+        | FilterProp::PowerGTSource
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::HasSupertype { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::NotColor { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::Suspected
+        | FilterProp::Prepared
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::ToughnessGTPower
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => {}
+    }
+    post_property(prop);
+}
+
+/// Rewrite nested property carriers in a player filter.
+pub(crate) fn rewrite_player_filter_props<C>(
+    filter: &mut PlayerFilter,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
+    rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
+    complete: &mut bool,
+    _object_information_available: bool,
+    _slot_context: Option<&C>,
+) {
+    match filter {
+        PlayerFilter::OpponentDealtDamage { source, .. } => {
+            source.as_deref_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    false,
+                    None,
+                )
+            })
+        }
+        PlayerFilter::ControlsCount { filter, count, .. } => {
+            rewrite_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
+            rewrite_quantity_expr_filter_props(
+                count,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
+        }
+        PlayerFilter::PlayerAttribute { attr, value, .. } => {
+            rewrite_quantity_ref_filter_props(
+                attr,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
+            rewrite_quantity_expr_filter_props(
+                value,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            );
+        }
+        PlayerFilter::TrackedSetPossessor { filter, .. } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            false,
+            None,
+        ),
+        PlayerFilter::AllExcept { exclude } => rewrite_player_filter_props(
+            exclude,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            false,
+            None,
+        ),
+        PlayerFilter::AnyOf { filters } => filters.iter_mut().for_each(|f| {
+            rewrite_player_filter_props(
+                f,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                false,
+                None,
+            )
+        }),
+        PlayerFilter::Controller
+        | PlayerFilter::Opponent
+        | PlayerFilter::DefendingPlayer
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::All
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::PerformedActionThisWay { .. }
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::TargetPlayer
+        | PlayerFilter::GrantingObjectCaster => {}
+    }
+}
+
+/// Mutable counterpart of [`quantity_expr_grammar_any`]. Keep this
+/// structural recursion in lockstep with the reader so a filter property cannot
+/// be found below a dynamic threshold without also being rewritten there.
+pub(crate) fn rewrite_quantity_expr_filter_props<C>(
+    expr: &mut QuantityExpr,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
+    rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
+    complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&C>,
+) {
+    match expr {
+        QuantityExpr::Ref { qty } => rewrite_quantity_ref_filter_props(
+            qty,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => rewrite_quantity_expr_filter_props(
+            inner,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter_mut().for_each(|inner| {
+                rewrite_quantity_expr_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        QuantityExpr::Difference { left, right } => {
+            rewrite_quantity_expr_filter_props(
+                left,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+            rewrite_quantity_expr_filter_props(
+                right,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+/// EXHAUSTIVE, wildcard-free mutable twin of
+/// [`quantity_ref_grammar_any`].
+fn rewrite_quantity_ref_filter_props<C>(
+    qty: &mut QuantityRef,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
+    rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
+    complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&C>,
+) {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. }
+        | QuantityRef::CountersOnObjects { filter, .. }
+        | QuantityRef::ControlledByEachPlayer { filter, .. }
+        | QuantityRef::EnteredThisTurn { filter }
+        | QuantityRef::SacrificedThisTurn { filter, .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeCountThisTurn { filter, .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { filter, .. }
+        | QuantityRef::CounterAddedThisTurn { target: filter, .. }
+        | QuantityRef::TokensCreatedThisTurn { filter, .. }
+        | QuantityRef::DistinctCounterKindsAmong { filter } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityRef::TargetObjectManaValue { filter }
+        | QuantityRef::FilteredTrackedSetSize { filter, .. } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityRef::PlayerCount { filter } | QuantityRef::EventContextPlayerCount { filter } => {
+            rewrite_player_filter_props(
+                filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            )
+        }
+        QuantityRef::PropertyAggregate(aggregate) => {
+            let mut source = aggregate.source().clone();
+            rewrite_card_type_set_source_filter_props(
+                &mut source,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+            *aggregate = crate::types::ability::PropertyAggregate::new(
+                aggregate.function(),
+                aggregate.property(),
+                source,
+            )
+            .expect("rewriting a property aggregate filter preserves aggregate validity");
+        }
+        QuantityRef::DistinctCardTypes { source }
+        | QuantityRef::SharedCardTypes { source }
+        | QuantityRef::DistinctSubtypes { source, .. }
+        | QuantityRef::DistinctColorsAmong { source } => rewrite_card_type_set_source_filter_props(
+            source,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        QuantityRef::ZoneCardCount { filter, .. }
+        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
+        | QuantityRef::AttackedThisTurn { filter, .. }
+        | QuantityRef::SpellsCastThisGame { filter, .. } => {
+            filter.as_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        QuantityRef::DamageDealtThisTurn { source, target, .. } => {
+            rewrite_filter_props(
+                source,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+            rewrite_filter_props(
+                target,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            );
+        }
+        QuantityRef::ManaSpentToCast { metric, .. } => match metric {
+            CastManaSpentMetric::FromSource { source_filter } => rewrite_filter_props(
+                source_filter,
+                rewrite_node,
+                rewrite,
+                post_property,
+                complete,
+                object_information_available,
+                slot_context,
+            ),
+            CastManaSpentMetric::Total
+            | CastManaSpentMetric::DistinctColors
+            | CastManaSpentMetric::OfColor { .. } => {}
+        },
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => {}
+    }
+}
+
+/// Rewrite nested property carriers in a card-type population, recording an
+/// incomplete bounded union walk instead of assuming it was exhaustive.
+fn rewrite_card_type_set_source_filter_props<C>(
+    source: &mut CardTypeSetSource,
+    rewrite_node: &mut dyn FnMut(&mut TargetFilter, bool, Option<&C>),
+    rewrite: &mut dyn FnMut(&mut FilterProp),
+    post_property: &mut dyn FnMut(&mut FilterProp),
+    complete: &mut bool,
+    object_information_available: bool,
+    slot_context: Option<&C>,
+) {
+    match source {
+        CardTypeSetSource::Objects { filter } => rewrite_filter_props(
+            filter,
+            rewrite_node,
+            rewrite,
+            post_property,
+            complete,
+            object_information_available,
+            slot_context,
+        ),
+        CardTypeSetSource::TurnJournal { filter, .. } => {
+            filter.as_mut().into_iter().for_each(|inner| {
+                rewrite_filter_props(
+                    inner,
+                    rewrite_node,
+                    rewrite,
+                    post_property,
+                    complete,
+                    object_information_available,
+                    slot_context,
+                )
+            })
+        }
+        CardTypeSetSource::AnyOf { .. } => {
+            let source_complete = source.try_for_each_member_mut(
+                crate::types::ability::UNION_DEPTH_BUDGET,
+                &mut |leaf| {
+                    rewrite_card_type_set_source_filter_props(
+                        leaf,
+                        rewrite_node,
+                        rewrite,
+                        post_property,
+                        complete,
+                        object_information_available,
+                        slot_context,
+                    )
+                },
+            );
+            *complete &= source_complete;
+        }
+        CardTypeSetSource::Zone { .. }
+        | CardTypeSetSource::ExiledBySource
+        | CardTypeSetSource::TrackedSet { .. } => {}
+    }
+}
+
+/// CR 601.2c: does `filter` (at any depth) carry a
+/// `FilterProp::AttachedTo { to: DeclaredTarget }` referent — i.e. does its
+/// legality depend on the object chosen for another declared target slot?
+pub(crate) fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
+    filter_contains_filter_prop(
+        filter,
+        &|prop| matches!(prop, FilterProp::AttachedTo { to } if to.reads_declared_slot()),
+    )
+}
+
+/// CR 403.3 + CR 608.2h: can `battlefield_entry_matches_filter` actually answer this filter
+/// against a `BattlefieldEntryRecord`?
+///
+/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
+/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
+/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
+/// matcher fails closed at the `FilterProp` match's fail-closed arm inside
+/// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
+/// `_ => false` arm that closes out that function's outer `match`, and the whole tally reads
+/// a silent constant 0 — but see the `Or` exception documented beside that function's
+/// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
+/// instead. Measured: 100
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
+///
+/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
+/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
+/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
+/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
+/// The list (this function's own `TargetFilter::Typed` arm, below) must name exactly the props
+/// the matcher answers; the binder is
+/// `ledger_guard_agrees_with_matcher` (test, `crate::game::restrictions`).
+///
+/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
+/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
+/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+///
+/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
+/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
+/// `true` for every permanent.
+pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(typed) => {
+            // CR 109.5: `entry_controller_matches` answers only these two.
+            typed
+                .controller
+                .as_ref()
+                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
+                && typed.properties.iter().all(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::HasColor { .. }
+                            | FilterProp::InZone { .. }
+                            | FilterProp::WithKeyword { .. }
+                            | FilterProp::Another
+                    )
+                })
+        }
+        // CR 608.2i: mirrors the monotone connectives (the `TargetFilter::Or` and
+        // `TargetFilter::And` arms) of `battlefield_entry_matches_filter`; every leaf must be
+        // answerable, otherwise the composite silently drops one.
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().all(ledger_filter_is_evaluable)
+        }
+        // Everything else is the fail-closed `_ => false` arm that closes out
+        // `battlefield_entry_matches_filter`'s outer `match`, including the anti-monotone
+        // `TargetFilter::Not`.
+        _ => false,
+    }
+}
+
+/// Whether the host operand of `Effect::Attach` consumes an explicit target.
+///
+/// Single authority for "would this host filter claim a declared target slot?".
+/// Two consumers share it so they cannot drift: the parser's clause-timing
+/// classifier (`oracle_effect::lower::target_choice_timing_for_clause`, deciding
+/// whether a printed described-host Attach chooses its host while resolving) and
+/// the runtime described-host gate
+/// (`effects::attach::prompt_described_host_choice`).
+pub(crate) fn attach_host_filter_needs_target_slot(filter: &TargetFilter) -> bool {
+    !filter.is_context_ref()
+        && !matches!(
+            filter,
+            TargetFilter::LastCreated | TargetFilter::LastRevealed | TargetFilter::LastZoneChanged
+        )
+}
+
+/// Which player relation of a `TypedFilter` a player-binding walk reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlayerBindingAxis {
+    /// Only a `FilterProp::Owned` property ("cards target player owns").
+    Owner,
+    /// The filter's `controller` or a `FilterProp::Owned` property.
+    ControllerOrOwner,
+}
+
+/// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
+/// binds a player through `axis` to a `ControllerRef` satisfying `pred`.
+pub(crate) fn filter_binds_player(
+    filter: &TargetFilter,
+    axis: PlayerBindingAxis,
+    pred: fn(&ControllerRef) -> bool,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            controller,
+            properties,
+            ..
+        }) => {
+            let controlled = match axis {
+                PlayerBindingAxis::Owner => false,
+                PlayerBindingAxis::ControllerOrOwner => controller.as_ref().is_some_and(pred),
+            };
+            controlled
+                || properties.iter().any(
+                    |prop| matches!(prop, FilterProp::Owned { controller } if pred(controller)),
+                )
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(|f| filter_binds_player(f, axis, pred))
+        }
+        TargetFilter::Not { filter } => filter_binds_player(filter, axis, pred),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds, through
+/// `axis`, to a declared-target player scope — `TargetPlayer` (any player) or
+/// `TargetOpponent` (opponent-only). Both surface a companion player slot; they
+/// differ only in that slot's legal targets, so slot *detection* treats them alike.
+pub(crate) fn filter_binds_target_player(filter: &TargetFilter, axis: PlayerBindingAxis) -> bool {
+    filter_binds_player(filter, axis, |c| {
+        matches!(
+            c,
+            ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
+        )
+    })
+}
+
+/// CR 115.10a + CR 608.2d: does this `DealDamage` recipient filter DESCRIBE its
+/// recipient, so the controller chooses it while the damage is applied?
+///
+/// "Comet deals damage … to a creature or player" and "deal 2 damage to another
+/// creature you control" never use the word "target", so nothing is announced as
+/// the ability goes on the stack (CR 115.10a: only a thing identified by the word
+/// "target" is a target) and the recipient is chosen as the effect is applied
+/// (CR 115.10 + CR 608.2d). The shape is a population of battlefield objects, or
+/// one together with players ("a creature or player").
+///
+/// Everything else stays out, each on its own reading: a context reference (the
+/// source, an earlier target, an event participant) and an attachment host (CR
+/// 303.4b + CR 301.5f: "enchanted creature" is whatever the Aura is attached to)
+/// are determined, not chosen; a player-only recipient ("an opponent", "a
+/// player") names no object population and keeps its existing reading; and a
+/// filter that matches everything ("any target") is announced as a target.
+/// The parser (the timing) and the resolver (the prompt) both ask this one
+/// question, so a recipient the parser times for resolution is exactly one the
+/// resolver offers a choice for.
+pub(crate) fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
+    if target.is_context_ref()
+        || target.contains_source_attachment_host()
+        || filter_refs_parent_target(target)
+    {
+        return false;
+    }
+    match target {
+        TargetFilter::Or { filters } => {
+            filters
+                .iter()
+                .all(|leg| leg.denotes_battlefield_objects() || matches!(leg, TargetFilter::Player))
+                && filters
+                    .iter()
+                    .any(TargetFilter::denotes_battlefield_objects)
+        }
+        leaf => leaf.denotes_battlefield_objects(),
+    }
+}
+
+/// Recurse into compound filters so a wrapped `ParentTargetController` is
+/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
+pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
+    match filter {
+        // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
+        // must snapshot the parent targets at creation, exactly like the broad
+        // `ParentTarget` anaphor — the index is honored later by
+        // `effect_object_targets` when the snapshot fires.
+        TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. } => true,
+        TargetFilter::Typed(typed) => {
+            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+                // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
+                // property (Jodah's "put the rest ..." exclusion of the declined
+                // hit, Radiance's "each OTHER creature that shares a color with it")
+                // reads the parent's chosen target, so the enclosing effect must
+                // inherit `ability.targets` on a decline for the exclusion to fire.
+                || typed.properties.iter().any(|prop| match prop {
+                    FilterProp::DistinctFrom { reference } => {
+                        filter_refs_parent_target(reference)
+                    }
+                    // CR 701.3a: a mass object set defined by attachment to the
+                    // parent referent ("destroy all Auras attached to that
+                    // creature") names the parent inside the host filter, so
+                    // propagation, delayed-trigger snapshotting and loop
+                    // rebinding must see it.
+                    FilterProp::AttachedTo {
+                        to: AttachmentReferent::Host { filter },
+                    } => filter_refs_parent_target(filter),
+                    _ => false,
+                })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_refs_parent_target)
+        }
+        TargetFilter::Not { filter } => filter_refs_parent_target(filter),
+        TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
+        _ => false,
+    }
+}
+
 /// CR 701.26a / CR 701.26b: Selection scope for `Effect::SetTapState`. Picks
 /// whether the tap/untap targets a single chosen/source permanent (the legacy
 /// `Tap` / `Untap`) or every permanent matching the filter (the legacy
@@ -12359,6 +14255,12 @@ pub enum PlayerFilter {
     },
 }
 
+/// The default population when a card does not name one. "Reveal those numbers"
+/// with no subject means every player who chose (CR 101.4).
+pub(crate) fn default_players() -> PlayerFilter {
+    PlayerFilter::All
+}
+
 /// An expression that produces an integer for quantity comparisons.
 /// Either a dynamic game-state lookup or a literal constant.
 ///
@@ -12472,6 +14374,151 @@ pub enum QuantityExpr {
     /// convention without a dedicated rule); CR 107.2 authorizes the empty
     /// fallback to 0.
     Max { exprs: Vec<QuantityExpr> },
+}
+
+/// CR 608.2h: How a `QuantityRef` reads a specific object through an
+/// [`ObjectScope`]. The single exhaustive authority for the object-scope axis of
+/// `quantity_expr_uses_resolution_only_object_scope`,
+/// `quantity_expr_contains_scope`, and
+/// `quantity_expr_missing_resolution_only_referent`, so a new reference forces
+/// one decision here instead of escaping three wildcard tails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectScopeRead {
+    /// Reads no object through an `ObjectScope`: player, population, record,
+    /// and number references, plus object reads on their own axis.
+    Unscoped,
+    /// CR 608.2h: reads information from the scoped object (power, toughness,
+    /// mana value, colors, name, name stickers, typeline, mana symbols,
+    /// intensity), determined once when the effect is applied. When a
+    /// resolution-only scope has no bound referent,
+    /// `quantity_expr_missing_resolution_only_referent` treats the read as
+    /// absent rather than 0.
+    ObjectInformation(ObjectScope),
+    /// CR 122.1: counts counters on the scoped object. It names its scope for
+    /// `quantity_expr_contains_scope`, but is never pre-gated on referent
+    /// presence because its resolvers own a live-vs-LKI ladder (CR 608.2h).
+    /// `quantity_expr_uses_resolution_only_object_scope` also leaves it
+    /// dynamic; that preserves the earlier verdict and is not derived from
+    /// the CR.
+    CounterCount(ObjectScope),
+}
+
+/// Classify every reference explicitly (no wildcard) so a new variant requires a decision.
+pub(crate) fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
+    match qty {
+        QuantityRef::Power { scope }
+        | QuantityRef::BasePower { scope }
+        // CR 608.2h: intensity is information from a specific object, read
+        // through `resolve_object_pt` like power (digital-only; no CR entry of its own).
+        | QuantityRef::Intensity { scope }
+        | QuantityRef::Toughness { scope }
+        | QuantityRef::ObjectManaValue { scope }
+        | QuantityRef::ObjectColorCount { scope }
+        | QuantityRef::ObjectNameWordCount { scope }
+        | QuantityRef::NameStickerLetterCount { stickers: NameStickerSet::OnObject { scope }, letters: _ }
+        | QuantityRef::ObjectTypelineComponentCount { scope }
+        | QuantityRef::ManaSymbolsInManaCost { scope, .. } => ObjectScopeRead::ObjectInformation(*scope),
+        QuantityRef::CountersOn { scope, .. } => ObjectScopeRead::CounterCount(*scope),
+        // CR 123.1 + CR 123.6d / CR 123.6e: "that sticker" names a sticker, not an object
+        // ("Stickers are not objects"); no such sticker reads 0.
+        QuantityRef::NameStickerLetterCount { stickers: NameStickerSet::ThatSticker, letters: _ } => ObjectScopeRead::Unscoped,
+        // Object reads on their own axis: an own target slot
+        // (`quantity_ref_target_slot_spec`), `CastManaObjectScope`, the
+        // `resolve_quantity` source, an exile index, leaving-object LKI, a commander.
+        QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::CommanderManaValue { .. }
+        // Player-scoped quantities.
+        | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. } | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. } | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. } | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. } | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        // Populations, filters, journals, and aggregates.
+        | QuantityRef::ObjectCount { .. } | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. } | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::EnteredThisTurn { .. } | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::FilteredTrackedSetSize { .. } | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::AttackedThisTurn { .. } | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. } | QuantityRef::PropertyAggregate(_)
+        | QuantityRef::DistinctCardTypes { .. } | QuantityRef::SharedCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. } | QuantityRef::DistinctColorsAmong { .. }
+        | QuantityRef::PlayerCount { .. } | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. } | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::SpellsCastThisTurn { .. } | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::SpellsCastThisGame { .. } | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::TargetZoneCardCount { .. } | QuantityRef::Devotion { .. }
+        | QuantityRef::BasicLandTypeCount { .. } | QuantityRef::CardsExiledBySource
+        // Numbers, counters on players, and resolution/turn records.
+        | QuantityRef::LifeAboveStarting | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. } | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. } | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount | QuantityRef::UnspentMana { .. }
+        | QuantityRef::EventContextAmount | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn | QuantityRef::TurnsTaken | QuantityRef::NotedNumber
+        | QuantityRef::ChosenNumber | QuantityRef::DescendedThisTurn | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::VoteCount { .. } => ObjectScopeRead::Unscoped,
+    }
+}
+
+/// CR 120.1 + CR 608.2: True when `expr` references `scope` anywhere — including
+/// nested inside any composite wrapper (`Multiply`, `Offset`, `Sum`,
+/// `Difference`, …). Structural recursion over the already-parsed `QuantityExpr`;
+/// the `QuantityRef` leaf is classified exhaustively by
+/// `quantity_ref_object_scope_read`. Used by the parser (does the
+/// "each <filter> deals damage" amount carry the deferred `Anaphoric` pronoun?)
+/// and by the resolver (does the batch amount read the per-source `BatchSource`
+/// scope?).
+pub(crate) fn quantity_expr_contains_scope(expr: &QuantityExpr, scope: ObjectScope) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => match quantity_ref_object_scope_read(qty) {
+            ObjectScopeRead::ObjectInformation(read) | ObjectScopeRead::CounterCount(read) => {
+                read == scope
+            }
+            ObjectScopeRead::Unscoped => false,
+        },
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_contains_scope(inner, scope),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => exprs
+            .iter()
+            .any(|expr| quantity_expr_contains_scope(expr, scope)),
+        QuantityExpr::UpTo { max } => quantity_expr_contains_scope(max, scope),
+        QuantityExpr::Power { exponent, .. } => quantity_expr_contains_scope(exponent, scope),
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_contains_scope(left, scope) || quantity_expr_contains_scope(right, scope)
+        }
+    }
+}
+
+/// CR 107.1c + CR 107.14: Detect a "pay any amount of X" shape — the parser
+/// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
+/// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
+/// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
+/// Shared by the resolution prompt (`crate::game::effects::pay::resolve`), the
+/// pre-entry payment shape predicate (`replacement::as_enters_payment_shape`),
+/// and the as-enters payment builder (`parse_as_enters_pay`).
+pub(crate) fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
+    matches!(
+        amount,
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X"
+    )
 }
 
 /// CR 107: Back-compatible `Deserialize` for [`QuantityExpr`]. Accepts BOTH the
@@ -15409,6 +17456,169 @@ pub enum AbilityCost {
     },
 }
 
+/// CR 608.2d: choices made while applying an effect must be legal; CR 118.12:
+/// an optional resolution-time cost is offered only when its exact payment
+/// shape is supported.
+///
+/// Phase-1 structural allowlist for immediate direct optional-payment leaves.
+/// Execution and affordability remain owned by [`supported_at_resolution`] and
+/// `can_pay`; this predicate only keeps parser admission and prompt emission
+/// on the same exact branch family.
+pub(crate) fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool {
+    use crate::types::ability::{CardSelectionMode, DiscardSelfScope, QuantityExpr};
+
+    match cost {
+        AbilityCost::Mana { cost } => !cost.has_x(),
+        AbilityCost::Discard {
+            count: QuantityExpr::Fixed { value },
+            filter,
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+        } => *value > 0 && matches!(filter, None | Some(TargetFilter::Typed(_))),
+        AbilityCost::Exile {
+            count,
+            zone: Some(_),
+            filter,
+        } => *count > 0 && matches!(filter, None | Some(TargetFilter::Typed(_))),
+        AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
+}
+
+/// CR 118.12: The single source of truth for which `AbilityCost` shapes
+/// `pay_ability_cost_inner` can actually pay at `PaymentScope::Resolution`. Both
+/// the resolution affordability oracle (`can_pay_resolution`) and the
+/// resolution-scope structural guard inside `pay_ability_cost_inner` derive from
+/// this one predicate, so the two can never disagree and a future variant forces
+/// a deliberate decision in exactly one place.
+///
+/// A shape outside this set has no resolution-time payment arm: at resolution
+/// there is no interactive `WaitingFor` interceptor and no activation-window
+/// mana detour, so executing such an arm would either silently report a no-op
+/// cost as `Paid` (`Waterbend`, `ExileMaterials`, targeted `RemoveCounter`) or
+/// perform an effect that was never meant to fire at
+/// resolution (singleton `Tap`, self-ref `Sacrifice`/`Exile`, `Loyalty`,
+/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, arbitrary `EffectCost`,
+/// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
+/// guard refuses them with `Failed`. Fixed non-self sacrifice is deliberately
+/// absent: the optional-branch selector intercepts it before this executor and
+/// rewrites the completed frame to an empty prepaid composite.
+pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
+    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
+    match cost {
+        AbilityCost::Mana { .. }
+        | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::Composite { .. }
+        // CR 702.21a + CR 122.1: Ward's unless-pay always resolves at
+        // resolution time (never activation), so this must be true here.
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::OneOf { .. } => true,
+        // Only the chosen-from-hand discard has a resolution arm (the
+        // `WaitingFor::DiscardChoice` / forced-choice fast path). The source-card
+        // discard arm is an activation-cost shape with no resolution payment.
+        AbilityCost::Discard {
+            selection: CardSelectionMode::Chosen,
+            self_scope: DiscardSelfScope::FromHand,
+            ..
+        } => true,
+        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
+        // "exile two creature cards from graveyards"). The interactive choice is
+        // surfaced via WaitingFor::PayCost before this resume runs.
+        AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
+        // CR 118.3: The shared effect-cost predicate admits only deterministic
+        // payment effects that the authority resolves directly.
+        AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
+        AbilityCost::Discard { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        // CR 117.1 + CR 601.2b: `ExileWithAggregate` is an activation-only cost
+        // (paid by the interactive `PayCost { ExileAggregate }` detour); it has
+        // no resolution-time payment path.
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Unattach
+        // CR 701.3d: an unattach-from cost is paid at activation via the
+        // interactive `PayCost { UnattachFrom }` detour, never at resolution.
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, never as
+        // a resolution-time activation cost.
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
+}
+
+/// Check whether an ability cost includes a tap component.
+/// Matches both `AbilityCost::Tap` and `Composite` costs containing `Tap`.
+/// True when `cost` contains a component satisfying `pred`, checking both a bare
+/// cost and every component of a `Composite`. Single walker behind all
+/// component-presence predicates (`has_tap_component`, `has_untap_component`,
+/// `cost_includes_sacrifice`, `cost_includes_loyalty`).
+///
+/// Walks **one `Composite` level only**: a component nested inside a child
+/// `Composite` is not seen. Sound for presence checks, whose `false` merely
+/// declines a fast path, but never sound for an arity bound — for that use
+/// `count_leaf_components`, which recurses to the same flattened leaf
+/// multiset the payment path actually pays.
+pub(crate) fn cost_has_component(
+    cost: &Option<AbilityCost>,
+    pred: impl Fn(&AbilityCost) -> bool,
+) -> bool {
+    match cost {
+        Some(AbilityCost::Composite { costs }) => costs.iter().any(&pred),
+        Some(c) => pred(c),
+        None => false,
+    }
+}
+
 /// CR 118: Cost taxonomy — a structural classifier over `AbilityCost` variants.
 ///
 /// Provides a single-authority view of what an ability "does" to pay itself
@@ -15621,7 +17831,7 @@ impl AbilityCost {
     /// callers, and it overlaps harmlessly (idempotent boolean OR) with the
     /// effect walk's own surfacing of the same inner effect.
     ///
-    /// **`mana_sources::cost_has_component` is deliberately NOT used and NOT
+    /// **`cost_has_component` is deliberately NOT used and NOT
     /// widened here.** Widening it would also alter the loyalty criterion and
     /// `cost_removes_self_from_battlefield`, which are two different shipping
     /// predicates; and it cannot see nested composition, which is exactly what
@@ -22045,6 +24255,484 @@ pub enum Effect {
         #[serde(default)]
         description: Option<String>,
     },
+}
+
+/// CR 109.4 + CR 115.1: Returns true if `effect` needs a companion
+/// `TargetFilter::Player` target slot. This covers filters that reference
+/// `ControllerRef::TargetPlayer` and restriction effects whose affected player
+/// scope is the declared "target player".
+/// Mass-placement `target` field that is NOT surfaced as a normal target slot
+/// (`PutCounterAll`, `DestroyAll`, …). Their `target_filter()` returns `None`
+/// because the field is a resolution-time population scan, not a targeting filter.
+/// Single authority for the mass-target variant list.
+pub(crate) fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::PutCounterAll { target, .. }
+        | Effect::DestroyAll { target, .. }
+        | Effect::GainControlAll { target, .. }
+        | Effect::PumpAll { target, .. }
+        | Effect::DamageAll { target, .. }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        // CR 701.27a + CR 115.10a: mass Transform's `target` is a resolution-time
+        // population scan (`target_filter()`==None), exactly like `TapAll`/`DestroyAll`.
+        | Effect::Transform {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        | Effect::DoublePTAll { target, .. }
+        // CR 508.1d + CR 109.4: the mass forced-attack population (Gideon Jura's
+        // "creatures that player controls"). Listed here — not just excluded from
+        // `target_filter()` — so its `ControllerRef::TargetOpponent` still
+        // surfaces the COMPANION PLAYER slot the ability genuinely targets.
+        | Effect::ForceAttack {
+            scope: EffectScope::All,
+            target,
+            ..
+        } => Some(target),
+        _ => None,
+    }
+}
+
+/// Shared walker behind the target-player / target-opponent companion-slot
+/// detectors. Returns true if any filter seam (`Attach` operands, a non-targeted
+/// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
+/// mass-placement `target`) satisfies `pred`.
+pub(crate) fn effect_bound_filter_matches(
+    effect: &Effect,
+    pred: fn(&TargetFilter) -> bool,
+) -> bool {
+    if let Effect::Attach {
+        attachment, target, ..
+    }
+    | Effect::UnattachAll { attachment, target } = effect
+    {
+        if pred(attachment) || pred(target) {
+            return true;
+        }
+    }
+    if let Effect::GenericEffect {
+        static_abilities,
+        target: None,
+        ..
+    } = effect
+    {
+        if static_abilities
+            .iter()
+            .any(|static_def| static_def.affected.as_ref().is_some_and(pred))
+        {
+            return true;
+        }
+    }
+    if let Effect::CopyTokenOf {
+        source_filter: Some(filter),
+        ..
+    } = effect
+    {
+        if pred(filter) {
+            return true;
+        }
+    }
+    if effect.target_filter().is_some_and(pred) {
+        return true;
+    }
+    mass_all_target_filter(effect).is_some_and(pred)
+}
+
+/// CR 608.2c + CR 701.20b: An effect that introduces a single per-player object
+/// referent which a later anaphoric clause ("that card", "it", "its mana value")
+/// in the same iteration binds to. `RevealTop` is the canonical case: it reveals
+/// one card per scoped player, captured into `effect_context_object` and exposed
+/// to later clauses as `Demonstrative`/`Anaphoric`/`ParentTarget`. This referent
+/// is rebuilt fresh each iteration, so a consuming sub-clause MUST run inside the
+/// same iteration as its introducer.
+pub(crate) fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
+    matches!(effect, Effect::RevealTop { .. })
+}
+
+/// CR 608.2c + CR 701.20a: a per-iteration reveal choice introduces the chosen
+/// card as that iteration's object referent (chain targets), consumed by a
+/// co-scoped `ParentTarget` clause ("exile a creature card they revealed this
+/// way" — Valki, God of Lies).
+fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
+    effect_parks_reveal_card_choice(effect)
+}
+
+/// CR 608.2c: single authority for "this clause introduces a per-iteration object
+/// referent" — consumed by the player-scope co-scope split and by the swallow
+/// audit's per-player-iteration evidence.
+pub(crate) fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
+    effect_introduces_per_player_object_referent(effect)
+        || effect_introduces_per_player_chosen_card_referent(effect)
+}
+
+pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::TriggeringSource
+            | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
+            | TargetFilter::CostPaidObject
+            // CR 701.47c: "the amassed Army" is a resolution-local single-object
+            // reference (`ResolvedAbility.amassed_army_object`), not a broadcast
+            // population — mirrors `CostPaidObject` immediately above. This
+            // routes a future "amass N, then the amassed Army gains/gets ..."
+            // continuous grant to the dedicated `amassed_army_object` arm in
+            // `game/effects/effect.rs`
+            // (mirroring the `CostPaidObject` arm) and to the matching
+            // early-return guard in the broadcast-scan arm, instead of relying
+            // on the battlefield re-scan happening to narrow to one object.
+            | TargetFilter::AmassedArmy
+    )
+}
+
+/// CR 608.2c: Choose the filter that governs *where modifications land* at
+/// resolution. The outer `GenericEffect.target` slot names what the player
+/// chose; `static_def.affected` names how that choice is bound onto objects.
+/// Inherited-reference `affected` values (`ParentTarget`, …) win over the
+/// targeting descriptor so a `target: Typed(Creature)` + `affected:
+/// ParentTarget` pair binds to the chosen creature, not every creature.
+pub fn generic_effect_application_filter<'a>(
+    target_filter: Option<&'a TargetFilter>,
+    static_affected: Option<&'a TargetFilter>,
+) -> Option<&'a TargetFilter> {
+    if static_affected.is_some_and(generic_effect_affected_uses_inherited_targets) {
+        static_affected
+    } else {
+        target_filter.or(static_affected)
+    }
+}
+
+/// CR 508.1a + CR 608.2c + CR 611.2c: SINGLE AUTHORITY for "which static on this
+/// `GenericEffect` names the population `those creatures` freezes" — shared by the
+/// parser's population-publisher routing (`oracle_effect::lower`) and the runtime's
+/// publish arm (`effects::affected_objects_from_events`) so lowering can never mark
+/// a head a publisher that resolution then declines to publish.
+///
+/// Eligible modes are the ones whose population is FROZEN at resolution rather than
+/// re-evaluated live at each future check: a coercion requirement (`MustAttack` /
+/// `MustAttackDefender`, CR 508.1a/d) or a `Continuous` grant.
+///
+/// Selection is `find_map`, NOT `find`-then-ask: a chain may carry an earlier
+/// eligible static with no application filter (a `Continuous` coercion with neither
+/// an outer `target` nor an `affected`), and taking it would suppress a later
+/// application-bearing broadcast static — so neither routing nor publishing would
+/// see the actual population. Shape mirrors the `any`-quantified sibling
+/// `is_mass_coerce_static` (`oracle_effect/mod.rs`) rather than a first-wins scan.
+pub fn generic_effect_population_filter<'a>(
+    target_filter: Option<&'a TargetFilter>,
+    static_abilities: &'a [StaticDefinition],
+) -> Option<&'a TargetFilter> {
+    static_abilities
+        .iter()
+        .filter(|static_def| {
+            matches!(
+                static_def.mode,
+                crate::types::statics::StaticMode::MustAttack
+                    | crate::types::statics::StaticMode::MustAttackDefender { .. }
+                    | crate::types::statics::StaticMode::Continuous
+            )
+        })
+        .find_map(|static_def| {
+            generic_effect_application_filter(target_filter, static_def.affected.as_ref())
+        })
+}
+
+/// CR 608.2d + CR 701.20a: whether a hand reveal with this card filter and
+/// optionality parks a post-reveal card choice (`WaitingFor::RevealChoice`).
+pub(crate) fn reveal_hand_parks_card_choice(
+    card_filter: &TargetFilter,
+    choice_optional: bool,
+) -> bool {
+    choice_optional || !matches!(card_filter, TargetFilter::None)
+}
+
+/// CR 608.2d + CR 701.20a: "this effect parks a post-reveal card choice" over a
+/// whole `Effect` — read by the fan-out referent predicate, the trigger-lowering
+/// chosen-object boundary and the parser's per-player reveal-choice rule; the
+/// resolver's needs-choice test reads `reveal_hand_parks_card_choice` directly.
+pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::RevealHand { card_filter, choice_optional, .. }
+            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
+    )
+}
+
+/// CR 614.1a + CR 608.2n: Torrential Gearhulk / Kylox's Voltstrider class — the
+/// parser represents "If that spell would be put into a graveyard, [exile it /
+/// put it on the bottom of its owner's library / return it to its owner's hand]
+/// instead" as a sequential rider sub-ability on `CastFromZone`, targeting the
+/// cast spell (`ParentTarget`). Runtime consumes that rider as permission
+/// metadata (the CR 608.2n redirect destination), not as an immediate zone
+/// move. Asked of the LINK, not the effect alone: CR 608.2c — a link whose gate
+/// reads the preceding instruction's outcome
+/// (`condition_depends_on_effect_performed`; the "If you don't [cast it], put it
+/// into your hand / exile it / put it on the bottom" decline branch of Solstice
+/// Revelations, Djinn of Wishes, Descendants' Path) carries a printed "if you
+/// do" / "if you don't" instruction that the controller follows in order, never
+/// a CR 614.1a "instead" replacement of the cast spell's trip to the graveyard.
+/// Returns the redirect destination the rider encodes, or `None` when the link
+/// is not such a rider.
+pub(crate) fn graveyard_destination_rider(
+    effect: &Effect,
+    condition: Option<&AbilityCondition>,
+) -> Option<SpellStackToGraveyardReplacement> {
+    // CR 608.2c + CR 614.1a: an outcome-gated link is an instruction followed in
+    // order, not an "instead" replacement.
+    if condition.is_some_and(condition_depends_on_effect_performed) {
+        return None;
+    }
+    match effect {
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+            ..
+        } => Some(SpellStackToGraveyardReplacement::Exile),
+        // Invasion of Alara's "Put one of them into your hand." is not such a
+        // rider: it lowers to a choice from the cards its exile loop found
+        // (`ZoneChoiceCandidateSource::ParentTargets`) and never reaches this arm
+        // (issue #8750).
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget,
+            ..
+        } => Some(SpellStackToGraveyardReplacement::Hand),
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::ParentTarget,
+            position,
+            ..
+        } => Some(SpellStackToGraveyardReplacement::Library {
+            position: position.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Exile-only view of [`graveyard_destination_rider`] — the structural marker
+/// that suppresses the counter path's immediate graveyard→exile sub-ability and
+/// is the only destination the COUNTER rider ever encodes (Force of Negation,
+/// No More Lies; the counter library/hand redirect rides `countered_spell_zone`
+/// instead, never a sub-ability).
+pub(crate) fn is_graveyard_exile_rider_subability(
+    effect: &Effect,
+    condition: Option<&AbilityCondition>,
+) -> bool {
+    matches!(
+        graveyard_destination_rider(effect, condition),
+        Some(SpellStackToGraveyardReplacement::Exile)
+    )
+}
+
+/// Extract the TargetFilter from an effect, if it has targeting requirements.
+/// Returns None for effects with no targeting (Draw, GainLife, etc.) or
+/// effects targeting self/controller (which don't need player selection).
+///
+/// CR 115.1: Only objects on the battlefield, stack, graveyard, exile, and
+/// command zone can be targeted. Selections from private zones (hand, library)
+/// are resolution-time choices, not targeting. ChangeZone effects with a
+/// hand or library origin are therefore excluded — the resolution path
+/// handles them via WaitingFor::EffectZoneChoice.
+///
+/// Note: TriggeringSpellController, TriggeringSpellOwner, TriggeringPlayer,
+/// and TriggeringSource auto-resolve from event context at resolution time
+/// (via `state.current_trigger_event`), so they do not require player selection.
+/// CR 115.1 + CR 702.26a: True when a `PhaseOut`/`PhaseIn` filter denotes a
+/// population to expand at resolution rather than a single declared target.
+fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ScopedPlayer => true,
+        TargetFilter::Typed(tf) => {
+            tf.type_filters == [TypeFilter::Permanent]
+                && tf.controller.is_some()
+                && tf.properties.is_empty()
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 701.21a: Sacrifice does not target — the controller chooses permanents
+    // at resolution time via EffectZoneChoice. Returning a filter here would
+    // cause collect_target_slots to create target selection slots, routing
+    // resolution through the targeted path which lacks controller scoping.
+    if matches!(effect, Effect::Sacrifice { .. }) {
+        return None;
+    }
+    // CR 701.3d + CR 115.1: `UnattachAll` is a non-targeted mass effect. Its
+    // `target` is a resolution-time host-scope filter that `resolve_unattach_all`
+    // mass-scans (never a chosen target), and its `attachment` is a context-ref
+    // anaphor ("unattach it") resolved from the snapshot. Surfacing the host
+    // filter here would create a spurious required target slot (Stolen Uniform's
+    // "unattach it" would demand the controller pick among the creatures they
+    // control), stalling the delayed trigger unresolved. Mirrors the Sacrifice
+    // carve-out above; matches the `None` its mass siblings (DestroyAll/BounceAll)
+    // return from `Effect::target_filter`.
+    if matches!(effect, Effect::UnattachAll { .. }) {
+        return None;
+    }
+    // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
+    // the word "target" ("return a creature you control to its owner's hand")
+    // is NOT a targeted effect — the controller chooses an eligible permanent
+    // at resolution time via `EffectZoneChoice`. Returning a filter here would
+    // route resolution through the targeted path, which (a) creates spurious
+    // target selection slots at stack-push time and (b) leaves the resolver's
+    // targets vector empty, causing the effect to silently no-op. Mirrors the
+    // Sacrifice carve-out above.
+    if matches!(
+        effect,
+        Effect::Bounce {
+            selection: BounceSelection::AtResolution,
+            ..
+        }
+    ) {
+        return None;
+    }
+    // CR 702.95a + CR 115.10a + CR 608.2d: Soulbond pair choices are not
+    // targets. PairWith computes its legal partner while resolving.
+    if matches!(effect, Effect::PairWith { .. }) {
+        return None;
+    }
+    // CR 115.1 + CR 303.4f + CR 303.4g: An Aura's enchanted permanent is a
+    // CHOICE, not a target — Old-Growth Troll / Bronzehide Lion / Harold and
+    // Bob's return-as-Aura sub-effect contains no "target" word in Oracle
+    // text. The pick happens at resolution time via
+    // `WaitingFor::ReturnAsAuraTarget` (built without hexproof / protection
+    // filtering per CR 702.16b's targeting scope).
+    if matches!(effect, Effect::ReturnAsAura { .. }) {
+        return None;
+    }
+    // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
+    // selection, not stack-push-time targeting.
+    if let Effect::ChangeZone { origin, target, .. } = effect {
+        if matches!(origin, Some(Zone::Hand) | Some(Zone::Library)) {
+            return None;
+        }
+        // Also check InZone property when origin is None but the filter specifies a private zone
+        if origin.is_none() {
+            if let Some(zone) = target.extract_in_zone() {
+                if matches!(zone, Zone::Hand | Zone::Library) {
+                    return None;
+                }
+            }
+        }
+    }
+    // CR 115.1 + CR 400.2: PutAtLibraryPosition from a private zone (hand/library)
+    // is a resolution-time selection, not a casting-time target. Brainstorm's
+    // "put two cards from your hand on top of your library" does not use the word
+    // "target" — the player chooses cards during resolution via EffectZoneChoice.
+    if let Effect::PutAtLibraryPosition { target, .. } = effect {
+        if let Some(zone) = target.extract_in_zone() {
+            if matches!(zone, Zone::Hand | Zone::Library) {
+                return None;
+            }
+        }
+    }
+    // CR 601.2c: "You may cast a spell ... from your hand without paying its mana
+    // cost" (Baral's Expertise, Bring Back-style sub-effects) names no "target" —
+    // CR 601.2c puts target announcement BEFORE costs, and these clauses skip it
+    // entirely. The spell is chosen at resolution from the granting player's hand
+    // (or library, for Future Sight-style cast-from-library permissions), so a
+    // stack-time target slot would surface a phantom 4th pick alongside the real
+    // bounce/etc. targets.
+    //
+    // CR 115.1: Exile-link variants (`ExiledBySource`, `ParentTarget`, anaphoric
+    // "that card" / "the exiled card") stay resolved context references via the
+    // final `is_context_ref` guard rather than stack-time target slots. Those bind
+    // a single object selected earlier in the same effect chain and are not the
+    // "free pick from hand" pattern this carve-out covers. The is-private-zone
+    // test mirrors `Effect::ChangeZone` and `Effect::PutAtLibraryPosition` above.
+    if let Effect::CastFromZone { target, .. } = effect {
+        if let Some(zone) = target.extract_in_zone() {
+            if matches!(zone, Zone::Hand | Zone::Library) {
+                return None;
+            }
+        }
+        // CR 115.1 + CR 608.2c: "Draw three cards and reveal them. You may
+        // cast one of them without paying its mana cost" (Mad Wizard's Lair)
+        // names no "target" — the pick is chosen at resolution from the cards
+        // the same resolution revealed (`EffectZoneChoice` over
+        // `LastRevealed`). At stack-push time nothing is revealed yet, so
+        // surfacing a slot builds a required pick with zero legal candidates
+        // and the whole trigger is dropped for lack of a legal target before
+        // it can resolve. Deliberately NOT folded into `is_context_ref`:
+        // that predicate also drives the optional-frame stash injector
+        // (`ability_with_event_context_targets`), which would singular-bind
+        // the first revealed card and collapse the choose-one-of-many into a
+        // forced pick.
+        if matches!(target, TargetFilter::LastRevealed) {
+            return None;
+        }
+    }
+    // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
+    // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
+    // matching permanents at resolution time" — it is never a declared target on any
+    // effect. The one exception is `DealDamage`, which uses `TargetFilter::Any` to
+    // represent the "any target" wording in damage-dealing spells and abilities (e.g.
+    // "deals 3 damage to any target"), where the player does choose a single target
+    // from the combined pool of creatures, planeswalkers, and players.
+    //
+    // For all other effects, `TargetFilter::Any` arises in two ways: (a) as a mass
+    // broadcast where the Oracle text contains no "target" keyword (e.g. "creatures
+    // get -N/-M until end of turn"), or (b) as an unthreaded subject sentinel produced
+    // by a sub-parser before the calling parser threads the real subject (SelfRef,
+    // ParentTarget, etc.). In both cases no player-chosen target is required.
+    // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
+    // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
+    // class).
+    // CR 120.1 + CR 115.1: `EachSourceDealsDamage` with a `Shared(Any)` recipient
+    // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
+    // is the same "any target" player-chosen slot as `DealDamage` — surface it so
+    // the cast/trigger-time target slot is built.
+    // CR 115.1a/c/d + CR 115.4 + CR 615.7: `PreventDamage` with a declared `Single`
+    // recipient, `TargetFilter::Any`, and no `damage_source_filter` ("prevent the
+    // next 2 damage that would be dealt to any target this turn", Aven Redeemer,
+    // Healing Salve) is a player-chosen target slot over creatures, planeswalkers,
+    // and players. When `damage_source_filter` is present (Awe Strike, Maze of Ith),
+    // the target slot is carried by the source filter and `Any` is an untargeted
+    // broadcast recipient that must not mint a slot. When `amount` is `All`
+    // (Fog, Sewers of Estark), it is an untargeted mass prevention effect that must
+    // not mint a slot.
+    if effect.target_filter() == Some(&TargetFilter::Any)
+        && !matches!(
+            effect,
+            Effect::DealDamage { .. }
+                | Effect::EachSourceDealsDamage { .. }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    damage_source_filter: None,
+                    amount: PreventionAmount::Next(_),
+                    ..
+                }
+                | Effect::PreventDamage {
+                    recipient_scope: EffectScope::Single,
+                    damage_source_filter: None,
+                    amount_dynamic: Some(_),
+                    ..
+                }
+        )
+    {
+        return None;
+    }
+    // CR 115.1 + CR 702.26a: Mass phase-out / phase-in ("all permanents you
+    // control phase out" — Teferi's Protection; "you phase out") expands its
+    // population filter at resolution. Only "target [type] phase(s) out/in"
+    // requires a stack-time target slot.
+    if matches!(effect, Effect::PhaseOut { .. } | Effect::PhaseIn { .. })
+        && effect
+            .target_filter()
+            .is_some_and(phase_out_or_in_filter_is_mass)
+    {
+        return None;
+    }
+    effect.target_filter().filter(|t| !t.is_context_ref())
 }
 
 /// The edge a nested [`AbilityDefinition`] hangs from in
@@ -29401,6 +32089,104 @@ pub struct AbilityDefinition {
     pub granting_object: Option<ObjectIncarnationRef>,
 }
 
+/// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
+/// resolution move a card to or from a library? Walks the head effect, the
+/// cost's embedded effects, and the `sub_ability` / `else_ability` /
+/// `mode_abilities` chain, stopping at the CR 603.3 boundary owned by
+/// [`ResolutionScope::OwnResolutionOnly`] — so a payload that is merely
+/// *registered* to resolve later (a CR 603.7a delayed trigger, a CR 603.12
+/// reflexive trigger, a CR 614.1 replacement, an emblem, a token's granted
+/// abilities) is not attributed to this ability.
+pub(crate) fn chain_moves_card_to_or_from_library(ability_def: &AbilityDefinition) -> bool {
+    visit_ability_def_scoped(
+        ability_def,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |effect| {
+            if effect.moves_card_to_or_from_library() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .is_break()
+}
+
+/// CR 605.1a "its cost": the root activation cost (CR 602.1a — "the activation
+/// cost is everything before the colon"), PLUS every cost paid during this
+/// ability's own resolution, which CR 118.12a -> CR 118.12 classifies as a cost
+/// ("the action [do something] is a cost, paid when the spell or ability
+/// resolves") and CR 608.2c therefore places under "its effect":
+/// `unless_pay.cost` and the `cost` on every `sub_ability` / `else_ability` /
+/// `mode_abilities` link.
+///
+/// This CANNOT be folded into [`chain_moves_card_to_or_from_library`]: that
+/// walk's visitor is `FnMut(&Effect)`, and `AbilityCost::Mill` / `Exile` /
+/// `ExileWithAggregate` / `ReturnToHand` carry no nested `Effect` at all, so they
+/// are structurally invisible to it. That is a type-level gap, not a missing
+/// match arm — see `ability_visit::visit_ability_def_costs_scoped`.
+pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition) -> bool {
+    visit_ability_def_costs_scoped(
+        ability_def,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |cost| {
+            if cost.moves_card_to_or_from_library() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    )
+    .is_break()
+}
+
+/// CR 605.1a: semantic support check for a complete activated ability,
+/// including mana produced after another instruction. The legacy inline router
+/// (`is_mana_ability`) requires a Mana root; using that narrower admission here
+/// would let the parser newly support a linked cast on an ordinary stack
+/// ability even though the whole ability must resolve immediately. This check
+/// does not widen runtime admission for other mixed chains. The shared own-
+/// resolution walk supplies mana/target semantics; cost/library exclusions use
+/// the same authorities as the existing activated classifier.
+pub(crate) fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
+    could_be_triggered_mana_ability_body(def)
+        && !cost_has_component(&def.cost, |cost| {
+            matches!(cost, AbilityCost::Loyalty { .. })
+        })
+        && !cost_moves_card_to_or_from_library(def)
+        && !chain_moves_card_to_or_from_library(def)
+}
+
+/// CR 605.1b: could this triggered ability body — if its trigger observed an
+/// activated mana ability — be a triggered mana ability? True when its OWN
+/// resolution could add mana (any reachable `Effect::Mana`, whatever else the
+/// chain does or in whatever order) and it requires no target anywhere in that
+/// resolution (CR 115.6). Separately registered payloads (delayed, reflexive,
+/// replacement bodies) are not this ability's resolution and are not walked
+/// (`ResolutionScope::OwnResolutionOnly`). A static, parse-time classification:
+/// target slots are read through the same per-effect slot authority
+/// (`extract_target_filter_from_effect`) trigger announcement uses.
+pub(crate) fn could_be_triggered_mana_ability_body(def: &AbilityDefinition) -> bool {
+    let mut adds_mana = false;
+    let mut targets = false;
+    let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if let Effect::Mana { target, .. } = effect {
+            adds_mana = true;
+            if target
+                .as_ref()
+                .is_some_and(|role| role.declared_filters().next().is_some())
+            {
+                targets = true;
+            }
+        }
+        if extract_target_filter_from_effect(effect).is_some() {
+            targets = true;
+        }
+        ControlFlow::Continue(())
+    });
+    adds_mana && !targets
+}
+
 /// Private serialization mirror for `AbilityDefinition`. Holds a borrowed view
 /// of every field so the field list (and every `skip_serializing_if`
 /// predicate) stays single-sourced in `AbilityDefinition` itself — this struct
@@ -31665,6 +34451,50 @@ impl AbilityCondition {
             kicker_cost: None,
             min_count: 1,
         }
+    }
+}
+
+/// Whether a sub-ability condition references a per-iteration outcome gate —
+/// "was the effect performed" (`IfYouDo` / `IfAPlayerDoes`, CR 118.12
+/// optional-cost branch) or "did the current scope iteration succeed"
+/// (`IfCurrentScopeSucceeded`, CR 101.3 + CR 118.12 mandatory-cost branch),
+/// including a `Not`-wrapped form or a composite `And`/`Or` that contains
+/// one. Such conditions cannot be evaluated while the parent effect is
+/// suspended for a player choice — the answer is not yet known — so the
+/// sub-ability must be deferred as a continuation rather than gated eagerly.
+/// They are also load-bearing for `detach_after_player_scope_local_chain`:
+/// a per-iteration outcome gate has meaning ONLY relative to its surrounding
+/// scoped iteration, so the sub-ability must stay inside the scoped template
+/// rather than detach as an unscoped post-loop tail. A composite like
+/// `Or { [IfYouDo, QuantityCheck] }` (Armored Kincaller) also qualifies:
+/// declining the optional effect leaves `IfYouDo` false, but the sibling
+/// disjunct may still be satisfied, so the sub-ability must be re-evaluated
+/// rather than dropped. Predicate helper, not rule-implementing code.
+pub(crate) fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::EffectOutcome { .. } => true,
+        AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_depends_on_effect_performed)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the root condition carries the reveal-until-hit guard, alone or as a
+/// member of the flat root `And` built by `when_you_do_with_guard`.
+pub(crate) fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
+    let is_guard = |condition: &AbilityCondition| {
+        matches!(
+            condition,
+            AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::RevealUntilMatched,
+            }
+        )
+    };
+    match condition {
+        AbilityCondition::And { conditions } => conditions.iter().any(is_guard),
+        condition => is_guard(condition),
     }
 }
 
@@ -35961,6 +38791,195 @@ impl ReplacementDefinition {
         self.ensure_token_specs = Some(specs);
         self
     }
+}
+
+/// Whether a duration supplies a replacement expiry at the installation seam.
+///
+/// `Unstated` is deliberately distinct from `Unsupported`: only a truly absent
+/// duration may use the engine's end-of-turn fallback. A stated duration that
+/// this replacement lifecycle cannot enforce must fail closed rather than be
+/// shortened to a different window (CR 611.2a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReplacementDurationExpiry {
+    Unstated,
+    Explicit(RestrictionExpiry),
+    /// CR 611.2a: the CONTROLLER's own next turn. The only class whose stamp
+    /// needs the resolving ability's controller, so it is left unresolved here
+    /// and named by each install seam. Keeping it out of `Explicit` is what
+    /// makes the classification controller-free, which in turn lets the
+    /// parse-time honesty net consult this same authority
+    /// (`parser::oracle::demote_unenforceable_replacement_lifetimes`) with no
+    /// second duration list.
+    ExplicitControllerNextTurn,
+    /// The duration is enforced by a separate applicability gate rather than
+    /// an expiry prune — the CONTROL gate on the bare untap-prevention rider
+    /// (`stamp_for_as_long_as_controlled_gate`). That gate is
+    /// `ReplacementCondition::ControllerControlsSource`, so this class carries
+    /// exactly one duration: `Duration::WhileControllingHost`. An install whose
+    /// replacement cannot carry the gate fails closed in
+    /// `replacement_with_ability_expiry`.
+    GateControlled,
+    Unsupported,
+}
+
+/// CR 611.2a: map a parser-side `Duration` onto the engine's replacement-side
+/// lifecycle without conflating an absent duration with an unrepresentable one.
+pub(crate) fn expiry_from_duration(duration: Option<&Duration>) -> ReplacementDurationExpiry {
+    match duration {
+        None => ReplacementDurationExpiry::Unstated,
+        Some(Duration::UntilEndOfTurn) => {
+            ReplacementDurationExpiry::Explicit(RestrictionExpiry::EndOfTurn)
+        }
+        Some(Duration::UntilEndOfCombat) => {
+            ReplacementDurationExpiry::Explicit(RestrictionExpiry::EndOfCombat)
+        }
+        Some(Duration::UntilNextTurnOf {
+            player: crate::types::ability::PlayerScope::Controller,
+        }) => ReplacementDurationExpiry::ExplicitControllerNextTurn,
+        // `UntilEndOfNextTurnOf` needs replacement-side arming, while non-controller
+        // turn/step scopes need a resolution-time player binding. Neither is present
+        // at this seam, so applying an `EndOfTurn` default would be rules-incorrect.
+        Some(Duration::UntilNextTurnOf { .. })
+        | Some(Duration::UntilEndOfNextTurnOf { .. })
+        | Some(Duration::UntilNextStepOf { .. }) => ReplacementDurationExpiry::Unsupported,
+        // CR 611.2b: the CONTROL reading, and only it. The gate this class
+        // promises is `ReplacementCondition::ControllerControlsSource`, which
+        // re-reads the source each layer pass, so it observes a control change
+        // and a battlefield exit alike — and both genuinely end "for as long as
+        // you control ~", the second because a permanent that has left the
+        // battlefield is no longer controlled. CR 611.2b's own example is this
+        // duration class (Master Thief, "gain control of target artifact for as
+        // long as you control this creature"); it illustrates the duration
+        // failing to START, not the two ways it ends, so the ends above are read
+        // off the wording, not quoted from the rule.
+        Some(Duration::WhileControllingHost) => ReplacementDurationExpiry::GateControlled,
+        // CR 611.2a: the two NON-control host readings have no enforceable
+        // lifetime at this seam, so they fail closed.
+        //
+        // They must not take the control gate: both survive a control change
+        // while their source stays on the battlefield, and
+        // `ControllerControlsSource` would end them there — a window SHORTER
+        // than the printed one, which CR 611.2a forbids just as much as a
+        // longer one.
+        //
+        // Nor is `RestrictionExpiry::UntilHostLeavesPlay` the answer for the
+        // event deadline, despite the shared name: the `Duration` means "when
+        // the SOURCE object leaves the battlefield", while the
+        // `RestrictionExpiry` is pruned when the object HOSTING the definition
+        // leaves (`layers.rs`, the host-left prune, which keys on the departed
+        // id). For a rider installed on a TARGET those are different objects —
+        // Old Fat Spider Can't See Me chapter II binds to the Saga while
+        // hosting its shield on the targeted creature, so the identity mapping
+        // would strand an immortal shield when the Saga leaves first. And
+        // `WhileHostOnBattlefield` additionally ends on a phase-out
+        // (CR 702.26f), which no `RestrictionExpiry` stamp expresses at all.
+        //
+        // Failing closed here is not a silent drop: the parse-time honesty net
+        // demotes the whole line to `Effect::Unimplemented` before it can be
+        // reported as supported, and the install seam returns a hard error if
+        // one ever reaches it anyway.
+        Some(Duration::UntilHostLeavesPlay) | Some(Duration::WhileHostOnBattlefield) => {
+            ReplacementDurationExpiry::Unsupported
+        }
+        // CR 611.2b conditional windows are gated by
+        // `stamp_for_as_long_as_controlled_gate` / `ReplacementCondition`, not by
+        // an expiry stamp.
+        Some(Duration::ForAsLongAs { .. })
+        | Some(Duration::UntilSourceExilesAnotherCard)
+        | Some(Duration::UntilOpponentBecomesMonarch)
+        | Some(Duration::Permanent) => ReplacementDurationExpiry::Unsupported,
+        // CR 611.2a: the event deadline is ended by the spell-cast expiry in
+        // `casting_costs`, which ends transient continuous effects only; no
+        // replacement expiry stamp carries it, so this fails closed.
+        Some(Duration::UntilEvent { .. }) => ReplacementDurationExpiry::Unsupported,
+    }
+}
+
+/// CR 611.2a: does the install seam REFUSE this replacement under this stated
+/// duration? The single authority for that question, and deliberately shared by
+/// its two consumers:
+///
+/// * `replacement_with_ability_expiry`, at resolution, which turns a refusal
+///   into a hard `EffectError` rather than a successful no-op; and
+/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
+///   post-lowering honesty net, which demotes a refused line to
+///   `Effect::Unimplemented` so no card ever REPORTS the shape as supported.
+///
+/// Both axes are read from their own single owner — the duration axis from
+/// `expiry_from_duration`, the form axis from `host_gate_enforceable` — so
+/// neither list exists twice and a newly routed duration reaches both consumers
+/// in the same breath.
+///
+/// The `expiry.is_some()` short-circuit mirrors the install seam exactly: a
+/// replacement that already carries a parser-stamped expiry does not take its
+/// lifetime from the ability's duration at all, so the duration cannot refuse it.
+pub(crate) fn replacement_install_is_refused(
+    replacement: &ReplacementDefinition,
+    duration: Option<&Duration>,
+) -> bool {
+    if replacement.expiry.is_some() {
+        return false;
+    }
+    match expiry_from_duration(duration) {
+        ReplacementDurationExpiry::Unsupported => true,
+        ReplacementDurationExpiry::GateControlled => !host_gate_enforceable(replacement),
+        ReplacementDurationExpiry::Unstated
+        | ReplacementDurationExpiry::Explicit(_)
+        | ReplacementDurationExpiry::ExplicitControllerNextTurn => false,
+    }
+}
+
+/// Whether `stamp_for_as_long_as_controlled_gate` can enforce a host-bound
+/// duration on this replacement's FORM: the bare untap-prevention rider (event
+/// `Untap`, no `execute`, no pre-existing condition). Shared by the stamp and
+/// by `replacement_with_ability_expiry`'s `GateControlled` fail-closed arm, so
+/// a shape the stamp skips can never be installed as if it were gated. The
+/// duration axis is deliberately NOT part of this predicate — it lives in
+/// `expiry_from_duration`, which both consumers also share.
+pub(crate) fn host_gate_enforceable(replacement: &ReplacementDefinition) -> bool {
+    replacement.event == ReplacementEvent::Untap
+        && replacement.execute.is_none()
+        && replacement.condition.is_none()
+}
+
+/// CR 611.2a + CR 615: does the prevention-shield seam refuse this stated
+/// lifetime? THE authority for that question, shared by two consumers:
+///
+/// * `crate::game::effects::prevent_damage::resolve`, which turns a refusal into a
+///   hard `EffectError` rather than a successful no-op; and
+/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
+///   post-lowering honesty net, which demotes a refused line to
+///   `Effect::Unimplemented` so no card reports the shape as supported.
+///
+/// The fallback order mirrors `crate::game::effects::prevent_damage::resolve`'s
+/// exactly — the clause's own
+/// `prevention_duration` first, the resolving ability's duration only when the
+/// clause states none — so the net and the install seam cannot disagree about
+/// which shape is supported.
+///
+/// Both refused classes are genuinely unenforceable HERE, for different
+/// reasons: `Unsupported` has no expiry stamp at all, and `GateControlled`
+/// promises a runtime applicability gate that only the bare untap-prevention
+/// rider carries (`add_target_replacement::stamp_for_as_long_as_controlled_gate`)
+/// — a prevention shield has no such gate, so it would install with no lifetime
+/// the engine can end.
+///
+/// Reachable, measured over the parsed corpus: Old Fat Spider Can't See Me
+/// chapter II states "for as long as this Saga remains on the battlefield" on a
+/// prevention clause, which lands in the refused set. Before this guard it
+/// resolved successfully and installed nothing.
+pub(crate) fn prevention_shield_is_refused(
+    prevention_duration: Option<&crate::types::ability::Duration>,
+    ability_duration: Option<&crate::types::ability::Duration>,
+) -> bool {
+    let effective = match expiry_from_duration(prevention_duration) {
+        ReplacementDurationExpiry::Unstated => expiry_from_duration(ability_duration),
+        stated => stated,
+    };
+    matches!(
+        effective,
+        ReplacementDurationExpiry::GateControlled | ReplacementDurationExpiry::Unsupported
+    )
 }
 
 // ---------------------------------------------------------------------------

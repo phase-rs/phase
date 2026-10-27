@@ -12,6 +12,7 @@ pub mod counter;
 pub mod custom_format;
 pub mod definitions;
 pub(crate) mod deterministic_serde;
+pub mod dungeon;
 pub mod events;
 pub mod format;
 pub mod game_state;
@@ -33,6 +34,7 @@ pub mod resolution;
 pub mod resolved_commands;
 pub mod statics;
 pub mod stickers;
+pub mod token_presets;
 pub mod triggers;
 pub mod zones;
 

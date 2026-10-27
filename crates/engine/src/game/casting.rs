@@ -19849,7 +19849,7 @@ pub(crate) fn requires_additional_cost_declaration_before_targets(
             if matches!(
                 sub_ability.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)
-            ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect)
+            ) && crate::types::ability::extract_target_filter_from_effect(&sub_ability.effect)
                 .is_some()
             {
                 return true;

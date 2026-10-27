@@ -2509,7 +2509,7 @@ fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<Replacem
     let AbilityCost::PayLife { amount } = &cost else {
         return None;
     };
-    if !crate::game::effects::pay::is_pay_any_amount(amount) {
+    if !crate::types::ability::is_pay_any_amount(amount) {
         return None;
     }
     let execute = AbilityDefinition::new(
@@ -21451,11 +21451,11 @@ mod tests {
             let def = cast_enters_install(trigger.execute.as_deref().expect("execute"));
             let rider_filter = def.valid_card.as_ref().expect("valid_card set");
             assert!(
-                crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                     filter,
                     TargetFilter::SpecificObject { id }
                         if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
-                )) && !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                )) && !crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                     filter,
                     TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
                 )),
@@ -29268,7 +29268,7 @@ mod tests {
         // the recipient without imposing continued installer control.
         let rider_filter = replacement.valid_card.as_ref().expect("valid_card set");
         assert!(
-            crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+            crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                 filter,
                 TargetFilter::SpecificObject { id }
                     if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
@@ -29276,7 +29276,7 @@ mod tests {
             "entry rider must identify the triggering spell: {rider_filter:?}"
         );
         assert!(
-            !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+            !crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                 filter,
                 TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
             )),

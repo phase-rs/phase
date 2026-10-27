@@ -807,7 +807,7 @@ fn parse_token_description_with_context(
     // take precedence and are never overwritten. The lookup keys on the bare
     // descriptor, so type-bearing descriptors ("Soldier creature") never match
     // a catalog `display_name` and are left untouched.
-    if let Some(body) = crate::game::token_presets::known_token_body_by_name_for_source(
+    if let Some(body) = crate::types::token_presets::known_token_body_by_name_for_source(
         descriptor,
         ctx.card_name.as_deref(),
     ) {
@@ -1718,7 +1718,7 @@ fn known_registry_token_identity(
     source_name: Option<&str>,
 ) -> Option<(String, Vec<String>)> {
     let body =
-        crate::game::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
+        crate::types::token_presets::known_token_body_by_name_for_source(descriptor, source_name)?;
     let mut types: Vec<String> = body
         .core_types
         .iter()
