@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1870
 expression: "&lowered"
 ---
 {
@@ -49,6 +50,7 @@ expression: "&lowered"
                 "type": "Controller"
               }
             },
+            "instruction_actor": "You",
             "cost": null,
             "sub_ability": null,
             "else_ability": {
@@ -65,6 +67,7 @@ expression: "&lowered"
                   }
                 }
               },
+              "instruction_actor": "ScopedPlayer",
               "cost": null,
               "sub_ability": null,
               "duration": null,

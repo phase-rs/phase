@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 1944
+assertion_line: 1946
 expression: "&lowered"
 ---
 {
@@ -23,6 +23,7 @@ expression: "&lowered"
             "type": "Top"
           }
         },
+        "instruction_actor": "ScopedPlayer",
         "cost": null,
         "sub_ability": {
           "kind": "Spell",

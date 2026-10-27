@@ -27858,6 +27858,16 @@ fn lower_subject_predicate_ast_body(
             // pick rewrite in the player-target wrapper below), so sibling
             // predicates keep their original scope.
             let mut clause = lower_imperative_clause(&text, ctx);
+            // CR 401.1 + CR 608.2c: the shared imperative parser also lowers
+            // look instructions, including a look-and-exile fusion. Their
+            // library owner was bound before the subject's acting-player scope.
+            if let (
+                Some(library_player),
+                Effect::Dig { player, .. } | Effect::ExileTop { player, .. },
+            ) = (library_player, &mut clause.effect)
+            {
+                *player = library_player.clone();
+            }
             if let Some(actor) = instruction_actor {
                 lower::default_clause_instruction_actor(&mut clause, actor.clone());
             }
@@ -49650,6 +49660,38 @@ fn subject_library_owner_keeps_named_players_independent_of_its_actor() {
                 ),
                 expected,
                 "{noun} of {owner} library",
+            );
+        }
+    }
+}
+
+#[test]
+fn subject_look_library_owner_survives_ordinary_and_exile_fused_lowering() {
+    for (owner, expected) in [
+        ("their", TargetFilter::ParentTargetController),
+        ("that opponent's", TargetFilter::TriggeringPlayer),
+        ("your", TargetFilter::OriginalController),
+    ] {
+        for ending in ["", " and exiles it face down"] {
+            let mut ctx = ParseContext {
+                relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+                ..ParseContext::default()
+            };
+            let clause = parse_effect_clause(
+                &format!("its controller looks at the top card of {owner} library{ending}"),
+                &mut ctx,
+            );
+            let player = match &clause.effect {
+                Effect::Dig { player, .. } | Effect::ExileTop { player, .. } => player,
+                other => panic!("look instruction must lower, got {other:?}"),
+            };
+            assert_eq!(*player, expected, "{owner} library{ending}");
+            assert_eq!(
+                clause
+                    .instruction_actor
+                    .as_ref()
+                    .and_then(|actor| actor.as_controller()),
+                Some(&ControllerRef::ParentTargetController),
             );
         }
     }

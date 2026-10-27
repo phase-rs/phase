@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 2737
 expression: "&lowered"
 ---
 {
@@ -16,6 +17,7 @@ expression: "&lowered"
           "type": "Player"
         }
       },
+      "instruction_actor": "TargetPlayer",
       "declares_chosen_group": 2147483648,
       "cost": {
         "type": "Composite",
@@ -61,6 +63,7 @@ expression: "&lowered"
           "type": "Player"
         }
       },
+      "instruction_actor": "TargetPlayer",
       "declares_chosen_group": 2147483649,
       "cost": {
         "type": "Composite",

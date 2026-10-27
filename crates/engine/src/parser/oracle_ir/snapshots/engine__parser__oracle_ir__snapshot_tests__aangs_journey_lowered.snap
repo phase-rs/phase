@@ -1,6 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
-assertion_line: 2112
+assertion_line: 2231
 expression: "&lowered"
 ---
 {
@@ -147,6 +147,7 @@ expression: "&lowered"
                     "value": 2
                   }
                 },
+                "instruction_actor": "You",
                 "cost": null,
                 "sub_ability": null,
                 "duration": null,
@@ -231,6 +232,7 @@ expression: "&lowered"
                     "value": 2
                   }
                 },
+                "instruction_actor": "You",
                 "cost": null,
                 "sub_ability": null,
                 "duration": null,

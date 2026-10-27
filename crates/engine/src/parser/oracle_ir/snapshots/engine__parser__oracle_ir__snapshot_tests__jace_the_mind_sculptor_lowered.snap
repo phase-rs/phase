@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1176
 expression: "&lowered"
 ---
 {
@@ -207,6 +208,7 @@ expression: "&lowered"
             "type": "TerminalShuffle"
           }
         },
+        "instruction_actor": "ParentTargetController",
         "cost": null,
         "sub_ability": {
           "kind": "Spell",
@@ -216,6 +218,7 @@ expression: "&lowered"
               "type": "ParentTargetController"
             }
           },
+          "instruction_actor": "ParentTargetController",
           "cost": null,
           "sub_ability": null,
           "duration": null,

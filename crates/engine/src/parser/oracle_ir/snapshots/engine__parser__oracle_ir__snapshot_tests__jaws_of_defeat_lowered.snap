@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 2307
 expression: "&lowered"
 ---
 {
@@ -39,6 +40,7 @@ expression: "&lowered"
             "properties": []
           }
         },
+        "instruction_actor": "TargetOpponent",
         "declares_chosen_group": 2147483648,
         "cost": null,
         "sub_ability": null,
