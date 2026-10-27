@@ -3,8 +3,8 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, Effect, GameRestriction, PreventionAmount, ShieldKind,
-    TapCreaturesRequirement, TapCreaturesSelectionMode, TargetRef,
+    AbilityCondition, AbilityCost, Effect, GameRestriction, TapCreaturesRequirement,
+    TapCreaturesSelectionMode, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -306,20 +306,25 @@ fn empty_population_still_resolves_the_head() {
 }
 
 #[test]
-fn shieldmates_blessing_is_bypassed_without_spending_the_shield() {
+fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn() {
     for prevent_disabled in [false, true] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let target = scenario.add_creature(P1, "Shielded target", 0, 9).id();
-        let peer = scenario.add_creature(P1, "Peer", 0, 9).id();
-        let blessing = scenario
-            .add_spell_to_hand_from_oracle(P0, "Shieldmate's Blessing", true, BLESSING)
-            .with_mana_cost(cost(vec![ManaCostShard::White], 0))
-            .id();
-        let shock = scenario
-            .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
-            .with_mana_cost(cost(vec![ManaCostShard::Red], 0))
-            .id();
+        let peer = scenario.add_creature(P1, "Unshielded peer", 0, 9).id();
+        let [blessing, fresh_blessing] = [(); 2].map(|()| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Shieldmate's Blessing", true, BLESSING)
+                .with_mana_cost(cost(vec![ManaCostShard::White], 0))
+                .id()
+        });
+        let [peer_shock, first_shock, second_shock, expired_shield_shock, fresh_shield_shock] =
+            [(); 5].map(|()| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+                    .with_mana_cost(cost(vec![ManaCostShard::Red], 0))
+                    .id()
+            });
         let fff = spell(&mut scenario);
         let mut runner = scenario.build();
         add_mana(&mut runner, P0, ManaType::White, 1);
@@ -329,69 +334,87 @@ fn shieldmates_blessing_is_bypassed_without_spending_the_shield() {
             .resolve()
             .assert_zone(&[blessing], Zone::Graveyard);
         finished(&runner);
-        assert!(
-            runner
-                .state()
-                .pending_damage_replacements
-                .iter()
-                .any(|shield| {
-                    shield.shield_kind
-                        == ShieldKind::Prevention {
-                            amount: PreventionAmount::Next(3),
-                        }
-                        && !shield.is_consumed
-                }),
-            "printed three-point shield installed"
-        );
-        if prevent_disabled {
-            cast(&mut runner, fff, target, 3);
-            // CR 615.12: unpreventable damage does not consume the existing shield.
-            assert_eq!(runner.state().objects[&target].damage_marked, 3);
-            assert_eq!(runner.state().objects[&peer].damage_marked, 1);
-            assert!(
-                runner
-                    .state()
-                    .pending_damage_replacements
-                    .iter()
-                    .any(|shield| {
-                        shield.shield_kind
-                            == ShieldKind::Prevention {
-                                amount: PreventionAmount::Next(3),
-                            }
-                            && !shield.is_consumed
-                    }),
-                "unpreventable damage leaves all three prevention points available"
-            );
-        }
+
         add_mana(&mut runner, P0, ManaType::Red, 1);
         runner
-            .cast(shock)
+            .cast(peer_shock)
+            .target_object(peer)
+            .resolve()
+            .assert_zone(&[peer_shock], Zone::Graveyard);
+        finished(&runner);
+        // CR 615.7: the shield protects only the selected recipient, not its peers.
+        assert_eq!(runner.state().objects[&peer].damage_marked, 2);
+        assert_eq!(runner.state().objects[&target].damage_marked, 0);
+
+        if prevent_disabled {
+            cast(&mut runner, fff, target, 3);
+            // CR 615.12: the existing shield cannot prevent FFF's damage.
+            assert_eq!(runner.state().objects[&target].damage_marked, 3);
+            assert_eq!(runner.state().objects[&peer].damage_marked, 3);
+        }
+        for (shock, expected_damage) in [
+            (first_shock, if prevent_disabled { 5 } else { 0 }),
+            (second_shock, if prevent_disabled { 7 } else { 1 }),
+        ] {
+            add_mana(&mut runner, P0, ManaType::Red, 1);
+            runner
+                .cast(shock)
+                .target_object(target)
+                .resolve()
+                .assert_zone(&[shock], Zone::Graveyard);
+            finished(&runner);
+            // CR 615.7 + CR 615.12: the control prevents exactly three of four
+            // damage across two Shocks; FFF makes both follow-up Shocks unpreventable.
+            assert_eq!(
+                runner.state().objects[&target].damage_marked,
+                expected_damage
+            );
+            assert_eq!(
+                runner.state().objects[&peer].damage_marked,
+                if prevent_disabled { 3 } else { 2 }
+            );
+        }
+
+        runner.advance_to_upkeep();
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        finished(&runner);
+        // CR 514.2: cleanup removes marked damage and ends both this-turn effects.
+        assert_eq!(runner.state().objects[&target].damage_marked, 0);
+        assert_eq!(runner.state().objects[&peer].damage_marked, 0);
+        assert!(!disabled(&runner), "this-turn restriction expires");
+        add_mana(&mut runner, P0, ManaType::Red, 1);
+        runner
+            .cast(expired_shield_shock)
             .target_object(target)
             .resolve()
-            .assert_zone(&[shock], Zone::Graveyard);
+            .assert_zone(&[expired_shield_shock], Zone::Graveyard);
         finished(&runner);
         assert_eq!(
             runner.state().objects[&target].damage_marked,
-            if prevent_disabled { 5 } else { 0 }
+            2,
+            "the previous turn's shield no longer prevents damage"
         );
-        // CR 615.7 + CR 615.12: Shock consumes two points only in the shield-only control.
-        let remaining = if prevent_disabled { 3 } else { 1 };
-        assert!(runner
-            .state()
-            .pending_damage_replacements
-            .iter()
-            .any(|shield| {
-                shield.shield_kind
-                    == ShieldKind::Prevention {
-                        amount: PreventionAmount::Next(remaining),
-                    }
-                    && !shield.is_consumed
-            }));
-        if prevent_disabled {
-            runner.advance_to_upkeep();
-            assert!(!disabled(&runner), "this-turn restriction expires");
-            finished(&runner);
-        }
+
+        add_mana(&mut runner, P0, ManaType::White, 1);
+        runner
+            .cast(fresh_blessing)
+            .target_object(target)
+            .resolve()
+            .assert_zone(&[fresh_blessing], Zone::Graveyard);
+        finished(&runner);
+        add_mana(&mut runner, P0, ManaType::Red, 1);
+        runner
+            .cast(fresh_shield_shock)
+            .target_object(target)
+            .resolve()
+            .assert_zone(&[fresh_shield_shock], Zone::Graveyard);
+        finished(&runner);
+        // CR 514.2 + CR 615.7: fresh prevention works after FFF's prohibition ends.
+        assert_eq!(
+            runner.state().objects[&target].damage_marked,
+            2,
+            "a fresh shield prevents the new Shock after cleanup"
+        );
     }
 }
 
