@@ -9899,6 +9899,24 @@ pub(crate) fn defiler_reduced_cost_alongside(
     Some(reduced)
 }
 
+/// CR 601.2b + CR 601.2f: the reduction entry an affordable Defiler life
+/// payment would add to the cast, for pricing the cast through the ordered
+/// reduction set (floors last) without paying life.
+pub(crate) fn defiler_reduction_entry_if_affordable(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+) -> Option<CostReductionEntry> {
+    let reduction = defiler_reduction_alongside(state, caster, spell_id, 0)?;
+    Some(accepted_defiler_reduction_entry(
+        state,
+        caster,
+        spell_id,
+        &reduction.mana_reduction,
+        reduction.reach,
+    ))
+}
+
 /// CR 601.2f + CR 601.2h: whether a paused cast still owes committed non-mana
 /// costs that only `finish_pending_cost_or_cast` pays: a required (imposed)
 /// cost on `additional_cost_flow`, a deferred required cost (a compound
