@@ -1069,22 +1069,14 @@ fn settle_prompts(runner: &mut GameRunner) {
     }
 }
 
-/// The trigger's `Counter` node, after the reach guards: it declares nothing
-/// and names the parent anaphor, whose fallback without an event is the source.
-fn counter_node(runner: &GameRunner, entry: ObjectId) -> Vec<TargetRef> {
+/// The trigger's `Counter` node naming `expected`, after the reach guards: it
+/// declares nothing.
+fn counter_node(runner: &GameRunner, entry: ObjectId, expected: &TargetFilter) -> Vec<TargetRef> {
     let nodes = reach(runner.state(), entry);
     let (_, own, acted) = nodes
         .iter()
-        .find(|(e, _, _)| {
-            matches!(
-                e,
-                Effect::Counter {
-                    target: TargetFilter::ParentTarget,
-                    ..
-                }
-            )
-        })
-        .expect("reach guard: the trigger counters its parent referent");
+        .find(|(e, _, _)| matches!(e, Effect::Counter { target, .. } if target == expected))
+        .unwrap_or_else(|| panic!("reach guard: the trigger counters {expected:?}"));
     assert!(own.is_empty(), "reach guard: the counter declares nothing");
     acted.clone()
 }
@@ -1092,7 +1084,10 @@ fn counter_node(runner: &GameRunner, entry: ObjectId) -> Vec<TargetRef> {
 #[test]
 fn chancellor_of_the_annex_counter_acts_on_the_spell_that_triggered_it() {
     let (mut runner, source, bear, entry) = opponent_cast_trigger(CHANCELLOR_OF_THE_ANNEX, false);
-    assert_eq!(counter_node(&runner, entry), vec![TargetRef::Object(bear)]);
+    assert_eq!(
+        counter_node(&runner, entry, &TargetFilter::ParentTarget),
+        vec![TargetRef::Object(bear)]
+    );
     runner.resolve_top();
     settle_prompts(&mut runner);
     let zone = |id| runner.state().objects.get(&id).map(|o| o.zone);
@@ -1106,7 +1101,7 @@ fn chancellor_of_the_annex_counter_acts_on_the_spell_that_triggered_it() {
 #[test]
 fn counterbalance_counter_below_its_reveal_acts_on_nothing() {
     let (mut runner, source, bear, entry) = opponent_cast_trigger(COUNTERBALANCE, true);
-    assert!(counter_node(&runner, entry).is_empty());
+    assert!(counter_node(&runner, entry, &TargetFilter::TriggeringSource).is_empty());
     runner.resolve_top();
     settle_prompts(&mut runner);
     let zone = |id| runner.state().objects.get(&id).map(|o| o.zone);

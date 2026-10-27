@@ -54,6 +54,8 @@ pub mod effects;
 pub mod elimination;
 pub mod engine;
 pub(crate) mod engine_casting;
+#[cfg(feature = "test-support")]
+pub use engine_casting::CastUndoReferenceCheck;
 pub(crate) mod engine_combat;
 pub(crate) mod engine_debug;
 pub(crate) mod engine_modes;

@@ -8705,7 +8705,8 @@ fn try_extract_entering_object_name_comparison(
 /// `try_extract_entering_object_name_comparison`. See that function's doc.
 fn parse_entering_object_name_comparison(input: &str) -> OracleResult<'_, TriggerCondition> {
     let (rest, _) = tag("if it ").parse(input)?;
-    let (rest, prop) = crate::parser::oracle_effect::parse_search_name_reference_suffix(rest)?;
+    let (rest, prop) =
+        crate::parser::oracle_effect::parse_search_name_reference_suffix(rest, None)?;
     let FilterProp::SharesQuality {
         quality,
         reference,
@@ -13227,6 +13228,15 @@ pub(crate) fn parse_trigger_condition(
     if let Some((mode, mut def)) = try_parse_event(&subject, rest, &lower, ctx) {
         // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
         ctx.diagnostics.extend(subject_diagnostics);
+        // CR 109.2: the type-phrase parser swallows the trailing "card" of "a
+        // creature card", but the word is what stops the subject from denoting
+        // only battlefield permanents. Restore it for becomes-target subjects,
+        // whose matcher reads it (`filter_denotes_battlefield_permanent`).
+        if def.mode == TriggerMode::BecomesTarget
+            && subject_ends_with_card_noun(&after_keyword[..after_keyword.len() - rest.len()])
+        {
+            def.valid_card = def.valid_card.take().map(with_card_qualifier);
+        }
         if is_batched {
             def.batched = true;
         }
@@ -14935,6 +14945,31 @@ fn collapse_or(mut filters: Vec<TargetFilter>) -> TargetFilter {
         filters.pop().expect("len checked")
     } else {
         TargetFilter::Or { filters }
+    }
+}
+
+/// CR 109.2: does the consumed subject phrase end in the noun "card"/"cards"?
+fn subject_ends_with_card_noun(consumed: &str) -> bool {
+    let last_word = consumed.trim_end().rsplit(' ').next().unwrap_or_default();
+    all_consuming(alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))))
+        .parse(last_word)
+        .is_ok()
+}
+
+/// CR 109.2: add the `Card` type qualifier to every typed leaf of a subject
+/// filter whose printed phrase carried the word "card".
+fn with_card_qualifier(filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if !typed.type_filters.contains(&TypeFilter::Card) {
+                typed.type_filters.push(TypeFilter::Card);
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.into_iter().map(with_card_qualifier).collect(),
+        },
+        other => other,
     }
 }
 
@@ -21734,7 +21769,9 @@ pub(crate) fn parse_post_spell_modifier(modifier: &str) -> Option<TargetFilter> 
     // CR 608.2b: "that has the same name as a card in your graveyard"
     // (Pyromancer's Ascension). Reuse the search-filter name-reference suffix
     // combinator so graveyard SharesQuality semantics stay aligned.
-    if let Ok((rest, prop)) = super::oracle_effect::parse_search_name_reference_suffix(modifier) {
+    if let Ok((rest, prop)) =
+        super::oracle_effect::parse_search_name_reference_suffix(modifier, None)
+    {
         if rest.trim().is_empty() {
             return Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![prop]),
@@ -25349,6 +25386,36 @@ mod attached_set_trigger_tests {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::Host { filter }
             } if **filter == TargetFilter::Typed(TypedFilter::creature())
+        ));
+    }
+
+    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
+    /// becomes-target subject, while "a creature" stays a bare permanent type.
+    #[test]
+    fn becomes_target_subject_keeps_card_qualifier() {
+        let card = parse_trigger_line(
+            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
+            "Test",
+        );
+        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
+            panic!("expected typed subject, got {:?}", card.valid_card);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
+            card.valid_card.as_ref().unwrap()
+        ));
+
+        let bare = parse_trigger_line(
+            "Whenever a creature becomes the target of a spell or ability, draw a card.",
+            "Test",
+        );
+        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
+            panic!("expected typed subject, got {:?}", bare.valid_card);
+        };
+        assert!(!typed.type_filters.contains(&TypeFilter::Card));
+        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
+            bare.valid_card.as_ref().unwrap()
         ));
     }
 }

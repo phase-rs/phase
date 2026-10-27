@@ -13,9 +13,9 @@ import {
   detectAndParseDeck,
   expandParsedDeck,
   parsedDeckHasCards,
-  resolveCommander,
   type ParsedDeck,
 } from "../../services/deckParser";
+import { resolveCommander } from "../../services/commanderResolution";
 import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import { fetchDeckFromUrl } from "../../services/deckUrlImport";
 import {

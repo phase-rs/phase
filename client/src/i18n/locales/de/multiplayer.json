@@ -352,5 +352,10 @@
   "deepLink": {
     "gameInProgressTitle": "Spiel läuft",
     "gameInProgressBody": "Beende oder verlasse dein aktuelles Spiel und öffne den Link dann erneut."
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Die Aufgabe hat einen Full-Endzustand erreicht, aber die nativen Endansichten konnten nicht veröffentlicht werden.",
+    "concedeUnreconciled": "Das Ergebnis der Aufgabe konnte nicht abgeglichen werden; der Platz bleibt gesperrt.",
+    "receiptUnsent": "Die dauerhafte Empfangsbestätigung für das Endergebnis konnte nicht gesendet werden; warte auf erneute Zustellung"
   }
 }

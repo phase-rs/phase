@@ -12558,7 +12558,11 @@ fn apply_non_priority_pass_action(
 
     // CR 608.2g: whether this action answers a step of a spell being cast or
     // an ability being activated — see the resolution settle below the match.
-    let answers_a_cast_step = state.waiting_for.has_pending_cast();
+    // CR 709.3 / CR 712.11b: choosing which half or face to cast is a step of
+    // that cast, made before it is put onto the stack and before any
+    // `PendingCast` exists.
+    let answers_a_cast_step = state.waiting_for.has_pending_cast()
+        || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -12976,38 +12980,43 @@ fn apply_non_priority_pass_action(
                     },
                     &mut events,
                 );
-                if result.is_err() {
-                    if let Some(object) = resolution_object_before {
-                        state.objects.insert(*object_id, object);
+                match result {
+                    // CR 608.2g: the elected face's cast continues through the
+                    // shared post-action seam below, which finishes the
+                    // still-resolving parent once the cast leaves priority.
+                    Ok(waiting_for) => waiting_for,
+                    Err(error) => {
+                        if let Some(object) = resolution_object_before {
+                            state.objects.insert(*object_id, object);
+                        }
+                        return Err(error);
                     }
                 }
-                return result.map(|waiting_for| {
-                    ActionResult::applied(std::mem::take(&mut events), waiting_for)
-                });
-            }
-            // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
-            // type. A land face is put onto the battlefield via the play-land
-            // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
-            // // The Prismatic Bridge). After a swap
-            // the new back_face (from snapshot_object_face) has layout_kind: None,
-            // and a front-face choice clears it explicitly — so neither the
-            // both-faces-land intercept nor the spell-face intercept re-fires.
-            let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
-                obj.card_types
-                    .core_types
-                    .contains(&crate::types::card_type::CoreType::Land)
-            });
-            if active_is_land {
-                handle_play_land(state, *player, *object_id, *card_id, &mut events)?
             } else {
-                casting::handle_cast_spell_with_payment_mode(
-                    state,
-                    *player,
-                    *object_id,
-                    *card_id,
-                    *payment_mode,
-                    &mut events,
-                )?
+                // CR 712.12 / CR 712.11b: Route the re-entry by the now-active face's
+                // type. A land face is put onto the battlefield via the play-land
+                // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
+                // // The Prismatic Bridge). After a swap
+                // the new back_face (from snapshot_object_face) has layout_kind: None,
+                // and a front-face choice clears it explicitly — so neither the
+                // both-faces-land intercept nor the spell-face intercept re-fires.
+                let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
+                    obj.card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                });
+                if active_is_land {
+                    handle_play_land(state, *player, *object_id, *card_id, &mut events)?
+                } else {
+                    casting::handle_cast_spell_with_payment_mode(
+                        state,
+                        *player,
+                        *object_id,
+                        *card_id,
+                        *payment_mode,
+                        &mut events,
+                    )?
+                }
             }
         }
         // CR 118.9: Player chooses between the printed mana cost and the
@@ -18392,6 +18401,145 @@ fn record_land_played_from_zone(
         .push_back(LandPlayRecord { from_zone: zone });
 }
 
+/// CR 305.2a + CR 305.2b + CR 805.4c: whether `player` may play one more land
+/// this turn — no "can't play lands" static, no temporary prohibition on this
+/// land, and the allowance not yet reached. The single allowance authority read
+/// by the special action (`handle_play_land`) and the resolution-time play
+/// ([`resolution_land_play_is_legal`]); CR 305.2a counts lands played during
+/// resolution against the same allowance.
+fn land_play_allowance_refusal(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> Result<(), EngineError> {
+    // CR 305.2: "Can't play lands" suppresses the play-land special action outright.
+    if super::static_abilities::player_has_static_other(state, player, "CantPlayLand") {
+        return Err(EngineError::ActionNotAllowed(
+            "Player is under a CantPlayLand static (CR 305.2)".to_string(),
+        ));
+    }
+    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
+    // play-from-zone and per-land prohibitions for every legal source zone.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
+            return Err(EngineError::ActionNotAllowed(
+                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
+            ));
+        }
+    }
+    let additional = super::static_abilities::additional_land_drops(state, player);
+    let effective_limit = state.max_lands_per_turn.saturating_add(additional);
+    // CR 805.4c: per-player land count under team turns (each teammate has
+    // their own allowance); the legacy single-counter `lands_played_this_turn`
+    // is correct outside team-based formats, where only the active player
+    // ever plays lands during their own turn.
+    let lands_played = if state.format_config.topology().has_shared_team_turns() {
+        state
+            .players
+            .iter()
+            .find(|p| p.id == player)
+            .map(|p| p.lands_played_this_turn)
+            .unwrap_or(0)
+    } else {
+        state.lands_played_this_turn
+    };
+    if lands_played >= effective_limit {
+        return Err(EngineError::ActionNotAllowed(
+            "Already played maximum lands this turn".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// CR 712.12: a modal double-faced card offers a land-face election when its
+/// back face is a land. The single predicate shared by the special action's
+/// face prompt (`handle_play_land`) and the resolution-time play route
+/// (`cast_from_zone::resolution_play_route`). A transform DFC with a land back
+/// face is not modal and offers no election (CR 712.8a: it is played by its
+/// front face).
+pub(crate) fn modal_land_face_election_available(
+    obj: &crate::game::game_object::GameObject,
+) -> bool {
+    obj.back_face.as_ref().is_some_and(|bf| {
+        bf.layout_kind == Some(crate::types::card::LayoutKind::Modal)
+            && bf
+                .card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+    })
+}
+
+/// CR 305.2a + CR 305.2b + CR 305.3 + CR 305.9 + CR 805.4c: whether an effect
+/// that instructs `player` to play `object_id` as it resolves can be followed:
+/// the object is a land card outside the battlefield and stack, it is that
+/// player's turn (or their team's turn under shared team turns), and the
+/// allowance permits one more land. No main-phase, empty-stack or priority gate
+/// applies — those belong to the special action (CR 305.1); a play during
+/// resolution is an instruction of the resolving ability (CR 701.18b).
+pub(crate) fn resolution_land_play_is_legal(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if matches!(obj.zone, Zone::Battlefield | Zone::Stack)
+        || !obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return false;
+    }
+    // CR 305.3: a player can't play a land, for any reason, if it isn't their
+    // turn. CR 805.4c: each player on a team may play a land during each of
+    // that team's turns.
+    let is_players_turn = state.active_player == player
+        || (state.format_config.topology().has_shared_team_turns()
+            && super::topology::team_members(state, state.active_player).contains(&player));
+    is_players_turn && land_play_allowance_refusal(state, player, object_id).is_ok()
+}
+
+/// CR 701.18b + CR 305.2a + CR 116.2a: play `object_id` as a land while the
+/// instructing ability resolves, putting it onto the battlefield from the zone
+/// it is in under `player`'s control (CR 110.2a). `None` is the CR 305.2b /
+/// CR 305.3 "ignore any part of an effect that instructs a player to do so":
+/// nothing happens and nothing is counted.
+///
+/// No CR 712.12 face prompt is opened here: a land//land modal card bound
+/// outside the graveyard never reaches here from a Play instruction —
+/// `cast_from_zone::resolution_play_route` keeps it on the lingering grant,
+/// whose PlayLand authority (its front face is a Land) opens `ModalFaceChoice`.
+/// A spell//land MDFC never reaches here either: it is cast by its front face
+/// (CR 712.8a). The `CastFromZone` graveyard route is excluded from that
+/// fallback because base takes the immediate graveyard route there and never
+/// lingers; a graveyard land//land plays its front face (no printed carrier;
+/// CR 712.12 election is the follow-up's). Resolution-owned face election,
+/// including the spell//land land face, is a tracked follow-up.
+pub(crate) fn play_land_during_resolution(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Option<LandPlayCommit> {
+    if !resolution_land_play_is_legal(state, player, object_id) {
+        return None;
+    }
+    // CR 116.2a: the land is put onto the battlefield from the zone it was in.
+    let origin_zone = state.objects.get(&object_id)?.zone;
+    Some(commit_land_play(
+        state,
+        player,
+        object_id,
+        origin_zone,
+        None,
+        None,
+        None,
+        events,
+    ))
+}
+
 fn handle_play_land(
     state: &mut GameState,
     acting_player: PlayerId,
@@ -18438,42 +18586,7 @@ fn handle_play_land(
     } else {
         turn_control::turn_resource_owner(state)
     };
-    // CR 305.2: "Can't play lands" suppresses the play-land special action outright.
-    if super::static_abilities::player_has_static_other(state, player, "CantPlayLand") {
-        return Err(EngineError::ActionNotAllowed(
-            "Player is under a CantPlayLand static (CR 305.2)".to_string(),
-        ));
-    }
-    // CR 116.2a + CR 305.1: The shared restriction gate covers both temporary
-    // play-from-zone and per-land prohibitions for every legal source zone.
-    if let Some(obj) = state.objects.get(&object_id) {
-        if !super::casting::land_play_is_permitted_by_restrictions(state, player, obj) {
-            return Err(EngineError::ActionNotAllowed(
-                "A temporary effect prevents playing this land (CR 305.1)".to_string(),
-            ));
-        }
-    }
-    let additional = super::static_abilities::additional_land_drops(state, player);
-    let effective_limit = state.max_lands_per_turn.saturating_add(additional);
-    // CR 805.4c: per-player land count under team turns (each teammate has
-    // their own allowance); the legacy single-counter `lands_played_this_turn`
-    // is correct outside team-based formats, where only the active player
-    // ever plays lands during their own turn.
-    let lands_played = if state.format_config.topology().has_shared_team_turns() {
-        state
-            .players
-            .iter()
-            .find(|p| p.id == player)
-            .map(|p| p.lands_played_this_turn)
-            .unwrap_or(0)
-    } else {
-        state.lands_played_this_turn
-    };
-    if lands_played >= effective_limit {
-        return Err(EngineError::ActionNotAllowed(
-            "Already played maximum lands this turn".to_string(),
-        ));
-    }
+    land_play_allowance_refusal(state, player, object_id)?;
 
     // Validate that object_id exists in hand or graveyard (with permission)
     // or on top of library (with TopOfLibraryCastPermission { play_mode: Play })
@@ -18616,22 +18729,14 @@ fn handle_play_land(
         // CR 712.12 + CR 601.2b (#7565): the face prompt is offered only while
         // this cast's choice is still open — `cast_face_committed` suppresses
         // the re-entry re-prompt (layout_kind itself stays untouched).
-        let is_modal = !obj.cast_face_committed
-            && obj
-                .back_face
-                .as_ref()
-                .is_some_and(|bf| bf.layout_kind == Some(crate::types::card::LayoutKind::Modal));
+        let land_face_election =
+            !obj.cast_face_committed && modal_land_face_election_available(obj);
         let front_is_land = obj
             .card_types
             .core_types
             .contains(&crate::types::card_type::CoreType::Land);
-        let back_is_land = obj.back_face.as_ref().is_some_and(|bf| {
-            bf.card_types
-                .core_types
-                .contains(&crate::types::card_type::CoreType::Land)
-        });
 
-        if is_modal && front_is_land && back_is_land {
+        if land_face_election && front_is_land {
             // Both faces are lands — player must choose which face to put into play.
             // The land path never consumes payment_mode (lands cost no mana), but
             // the field is required; Auto is the inert default.
@@ -18644,7 +18749,7 @@ fn handle_play_land(
             });
         }
 
-        if is_modal && !front_is_land && back_is_land {
+        if land_face_election && !front_is_land {
             // CR 712.12: Only back face is a land — auto-swap (player already chose "play as land")
             let obj = state.objects.get_mut(&object_id).unwrap();
             super::printed_cards::swap_object_faces(obj);
@@ -18667,6 +18772,57 @@ fn handle_play_land(
         Zone::Library
     };
 
+    match commit_land_play(
+        state,
+        player,
+        object_id,
+        origin_zone,
+        gy_permission_grant,
+        exile_play_authorization,
+        library_permission_src,
+        events,
+    ) {
+        // Player retains priority after playing a land
+        LandPlayCommit::Entered => Ok(WaitingFor::Priority { player }),
+        LandPlayCommit::AwaitingEntryChoice(waiting_for) => Ok(*waiting_for),
+        LandPlayCommit::Prevented => Ok(WaitingFor::Priority {
+            player: state.priority_player,
+        }),
+    }
+}
+
+/// CR 305.1 + CR 614.1 + CR 614.12a: how a committed land play ended — the
+/// single answer [`commit_land_play`] gives both the special action
+/// (`handle_play_land`) and the resolution-time play
+/// ([`play_land_during_resolution`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum LandPlayCommit {
+    /// The land entered the battlefield and the play was finalized.
+    Entered,
+    /// CR 614.12a: the play is committed, but an entry replacement or delivery
+    /// choice is pending; the carried `WaitingFor` is that prompt. Boxed to
+    /// keep the enum small (clippy::large_enum_variant).
+    AwaitingEntryChoice(Box<WaitingFor>),
+    /// CR 614.1: a replacement prevented the land from entering; nothing was
+    /// counted.
+    Prevented,
+}
+
+/// CR 305.1 + CR 116.2a + CR 614.1: move a land the caller already authorized
+/// from `origin_zone` onto the battlefield through the replacement pipeline and
+/// finalize the play. The single land-play commit authority shared by the
+/// special action and the resolution-time play.
+#[allow(clippy::too_many_arguments)]
+fn commit_land_play(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    origin_zone: Zone,
+    gy_permission_grant: Option<(ObjectId, Option<CastFrequency>)>,
+    exile_play_authorization: Option<casting::ExileLandPlayAuthorization>,
+    library_permission_src: Option<(ObjectId, CastFrequency)>,
+    events: &mut Vec<GameEvent>,
+) -> LandPlayCommit {
     // Route through the replacement pipeline (handles ETB replacements like shock lands)
     let mut proposed = crate::types::proposed_event::ProposedEvent::zone_change(
         object_id,
@@ -18721,7 +18877,7 @@ fn handle_play_land(
     // "Each land played this way enters tapped."). Seed the tap state on the
     // proposed event so the replacement pipeline applies it like any other
     // ETB-tapped land. Only the exile-play path can carry this grant field.
-    if in_exile_with_permission {
+    if exile_play_authorization.is_some() {
         let enters_tapped = state
             .objects
             .get(&object_id)
@@ -18795,7 +18951,9 @@ fn handle_play_land(
                         // pause drops the `LandPlayed` occurrence emitted above,
                         // so park a clone for the resume to replay (issue #8738).
                         park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
-                        return Ok(state.waiting_for.clone());
+                        return LandPlayCommit::AwaitingEntryChoice(Box::new(
+                            state.waiting_for.clone(),
+                        ));
                     }
                 }
                 // CR 305.1 + CR 400.7i: stamp land-play provenance ("where it
@@ -18849,16 +19007,14 @@ fn handle_play_land(
                         events,
                     )
                 {
-                    return Ok(next_waiting_for);
+                    return LandPlayCommit::AwaitingEntryChoice(Box::new(next_waiting_for));
                 }
-                return Ok(WaitingFor::Priority { player });
+                return LandPlayCommit::Entered;
             }
         }
         super::replacement::ReplacementResult::Prevented => {
             // Land play was prevented — don't increment counters
-            return Ok(WaitingFor::Priority {
-                player: state.priority_player,
-            });
+            return LandPlayCommit::Prevented;
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => {
             // A replacement needs player choice (e.g., shock land "pay 2 life?").
@@ -18879,8 +19035,8 @@ fn handle_play_land(
             // resume to replay once the land actually enters (issue #8738).
             park_land_played_for_deferred_entry(state, player, object_id, origin_zone);
 
-            return Ok(super::replacement::replacement_choice_waiting_for(
-                player, state,
+            return LandPlayCommit::AwaitingEntryChoice(Box::new(
+                super::replacement::replacement_choice_waiting_for(player, state),
             ));
         }
     }
@@ -18897,7 +19053,7 @@ fn handle_play_land(
     );
 
     // Player retains priority after playing a land
-    Ok(WaitingFor::Priority { player })
+    LandPlayCommit::Entered
 }
 
 pub(super) fn handle_tap_land_for_mana(

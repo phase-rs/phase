@@ -21,6 +21,7 @@ use super::ability_utils::{
     selected_mode_labels, validate_modal_indices, validate_selected_targets_for_ability,
     TargetSelectionAdvance,
 };
+use super::announcement_triggers::stage_announcement_trigger_events;
 use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
     finish_pending_cast_cost_or_pay,
@@ -221,14 +222,28 @@ pub(crate) fn handle_select_modes(
             )?;
             let mut resolved = resolved;
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
-            super::casting::emit_targeting_events(
-                state,
-                &super::ability_utils::declared_targets_in_chain(&resolved),
-                pending.object_id,
-                controller,
-                super::casting::pending_cast_targeter(state, &pending),
-                events,
-            );
+            // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+            if pending.activation_ability_index.is_none() {
+                let event_start = events.len();
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+                stage_announcement_trigger_events(state, events, event_start);
+            } else {
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+            }
             return finish_pending_cast_cost_or_pay(
                 state, controller, pending, resolved, total_cost, events,
             );
@@ -242,14 +257,28 @@ pub(crate) fn handle_select_modes(
         )? {
             let mut resolved = resolved;
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
-            super::casting::emit_targeting_events(
-                state,
-                &super::ability_utils::declared_targets_in_chain(&resolved),
-                pending.object_id,
-                controller,
-                super::casting::pending_cast_targeter(state, &pending),
-                events,
-            );
+            // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+            if pending.activation_ability_index.is_none() {
+                let event_start = events.len();
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+                stage_announcement_trigger_events(state, events, event_start);
+            } else {
+                super::casting::emit_targeting_events(
+                    state,
+                    &super::ability_utils::declared_targets_in_chain(&resolved),
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+            }
             return finish_pending_cast_cost_or_pay(
                 state, controller, pending, resolved, total_cost, events,
             );
@@ -386,14 +415,28 @@ pub(crate) fn handle_select_targets(
 
     // CR 601.2c / CR 602.2b: targets become targets at declaration, before
     // any later distribution or cost-payment continuation.
-    super::casting::emit_targeting_events(
-        state,
-        &announced_targets,
-        pending.object_id,
-        pending.ability.controller,
-        super::casting::pending_cast_targeter(state, &pending),
-        events,
-    );
+    // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+    if pending.activation_ability_index.is_none() {
+        let event_start = events.len();
+        super::casting::emit_targeting_events(
+            state,
+            &announced_targets,
+            pending.object_id,
+            pending.ability.controller,
+            super::casting::pending_cast_targeter(state, &pending),
+            events,
+        );
+        stage_announcement_trigger_events(state, events, event_start);
+    } else {
+        super::casting::emit_targeting_events(
+            state,
+            &announced_targets,
+            pending.object_id,
+            pending.ability.controller,
+            super::casting::pending_cast_targeter(state, &pending),
+            events,
+        );
+    }
 
     if let Some(waiting_for) = maybe_pause_for_cast_distribution(state, player, &pending, &ability)?
     {
@@ -491,14 +534,28 @@ pub(crate) fn handle_choose_target(
 
             // CR 601.2c / CR 602.2b: complete target declaration before later
             // distribution or cost-payment continuations.
-            super::casting::emit_targeting_events(
-                state,
-                &announced_targets,
-                pending.object_id,
-                controller,
-                super::casting::pending_cast_targeter(state, &pending),
-                events,
-            );
+            // CR 601.2c + CR 603.2: Stage announcement triggers for spells before cost payment.
+            if pending.activation_ability_index.is_none() {
+                let event_start = events.len();
+                super::casting::emit_targeting_events(
+                    state,
+                    &announced_targets,
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+                stage_announcement_trigger_events(state, events, event_start);
+            } else {
+                super::casting::emit_targeting_events(
+                    state,
+                    &announced_targets,
+                    pending.object_id,
+                    controller,
+                    super::casting::pending_cast_targeter(state, &pending),
+                    events,
+                );
+            }
 
             if let Some(waiting_for) =
                 maybe_pause_for_cast_distribution(state, controller, &pending, &ability)?

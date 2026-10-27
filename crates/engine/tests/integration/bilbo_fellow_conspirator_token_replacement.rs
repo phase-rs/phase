@@ -78,6 +78,7 @@ fn create_token_batch(runner: &mut GameRunner, owner: PlayerId, subtype: &str, c
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
     let mut events: Vec<GameEvent> = Vec::new();
