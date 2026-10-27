@@ -1341,9 +1341,16 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         };
     }
 
-    // "Reveal this card from your hand" — reveal self cost
+    // "Reveal this card from your hand" / "Reveal this card in your hand" — reveal self cost
     if nom_on_lower(text, &lower, |i| {
-        value((), tag("reveal this card from your hand")).parse(i)
+        value(
+            (),
+            alt((
+                tag("reveal this card from your hand"),
+                tag("reveal this card in your hand"),
+            )),
+        )
+        .parse(i)
     })
     .is_some()
     {
@@ -1503,7 +1510,10 @@ fn parse_reveal_from_hand_cost_body(body: &str) -> Option<AbilityCost> {
             nom_quantity::parse_quantity_expr_number,
             tag::<_, _, E<'_>>(" "),
         ),
-        terminated(take_until(" from your hand"), tag(" from your hand")),
+        alt((
+            terminated(take_until(" from your hand"), tag(" from your hand")),
+            terminated(take_until(" in your hand"), tag(" in your hand")),
+        )),
     ))
     .parse(body)
     .ok()?;
@@ -4899,6 +4909,21 @@ mod tests {
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::default().subtype("Dragon".to_string())
                 )),
+            }
+        );
+    }
+
+    #[test]
+    fn cost_reveal_black_card_from_hand() {
+        assert_eq!(
+            parse_oracle_cost("Reveal a black card in your hand"),
+            AbilityCost::Reveal {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::HasColor {
+                        color: crate::types::mana::ManaColor::Black
+                    }
+                ])))
             }
         );
     }

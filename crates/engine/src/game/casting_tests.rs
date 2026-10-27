@@ -46484,6 +46484,85 @@ fn bestow_aura_static_buff_applies_to_enchanted_creature() {
     );
 }
 
+/// CR 303.4 + CR 702.103b: a bestow card on the battlefield as an unattached
+/// creature (Nyxborn Rollicker) must not buff creatures enchanted by other
+/// Auras; only the creature it is attached to gets the bonus.
+#[test]
+fn unattached_bestow_creature_does_not_buff_creatures_enchanted_by_other_auras() {
+    use crate::game::layers::evaluate_layers;
+
+    let mut state = setup_game_at_main_phase();
+    let enchanted = create_target_creature_on_battlefield(&mut state, PlayerId(0), "Knight", 810);
+    let bystander = create_target_creature_on_battlefield(&mut state, PlayerId(0), "Squire", 811);
+    let other_aura = create_object(
+        &mut state,
+        CardId(812),
+        PlayerId(0),
+        "Pacifism".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&other_aura)
+        .unwrap()
+        .card_types
+        .subtypes
+        .push("Aura".to_string());
+    state.battlefield.push_back(other_aura);
+    super::super::effects::attach::attach_to(&mut state, other_aura, enchanted);
+
+    let rollicker = create_bestow_creature_in_hand(
+        &mut state,
+        PlayerId(0),
+        "Nyxborn Rollicker",
+        813,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        },
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        },
+    );
+    {
+        let obj = state.objects.get_mut(&rollicker).unwrap();
+        obj.zone = Zone::Battlefield;
+        let buff = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        Arc::make_mut(&mut obj.base_static_definitions).push(buff);
+    }
+    state.players[0].hand.retain(|&id| id != rollicker);
+    state.battlefield.push_back(rollicker);
+
+    evaluate_layers(&mut state);
+
+    // Positive reach guard: the Knight really is enchanted (by Pacifism).
+    assert_eq!(
+        state.objects.get(&enchanted).unwrap().attachments,
+        vec![other_aura]
+    );
+    for id in [enchanted, bystander] {
+        let o = state.objects.get(&id).unwrap();
+        assert_eq!((o.power, o.toughness), (Some(3), Some(3)));
+    }
+
+    // Aura form attached to the Squire: only the Squire is buffed.
+    apply_bestow_aura_form(state.objects.get_mut(&rollicker).unwrap());
+    super::super::effects::attach::attach_to(&mut state, rollicker, bystander);
+    evaluate_layers(&mut state);
+    let o = state.objects.get(&bystander).unwrap();
+    assert_eq!((o.power, o.toughness), (Some(4), Some(4)));
+    let o = state.objects.get(&enchanted).unwrap();
+    assert_eq!((o.power, o.toughness), (Some(3), Some(3)));
+}
+
 /// Issue #310 (Maddening Cacophony / Fractured Sanity): the spell-cast
 /// path must propagate `player_scope` from the printed `AbilityDefinition`
 /// into the `ResolvedAbility` pushed onto the stack. Prior to the fix,

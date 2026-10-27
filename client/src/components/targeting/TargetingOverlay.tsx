@@ -128,6 +128,7 @@ export function TargetingOverlay() {
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const targetKind = useGameStore((s) => s.gameState?.derived?.current_target_kind);
   const legalActions = useGameStore((s) => s.legalActions);
+  const allowsCancelCast = useGameStore((s) => s.gameState?.allows_cancel_cast);
   const selectedCardIds = useUiStore((s) => s.selectedCardIds);
   const clearSelectedCards = useUiStore((s) => s.clearSelectedCards);
 
@@ -169,7 +170,7 @@ export function TargetingOverlay() {
     : undefined;
   const isTapCreatureChoice =
     waitingFor?.type === "PayCost" && waitingFor.data.kind.type === "TapCreatures";
-  const boardChoice = getBoardChoiceView(waitingFor, objects);
+  const boardChoice = getBoardChoiceView(waitingFor, objects, allowsCancelCast);
   const isBoardChoice = boardChoice != null;
   // Cancel-01 scope: only the five in-scope flows gate cancel on engine
   // legalActions. Every other cancel button keeps status-quo rendering:

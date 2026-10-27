@@ -4879,17 +4879,25 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             && !effect_refs_parent_target(&sub.effect))
 }
 
+/// Whether a resolved sub-ability owns a resolution-time zone choice; see
+/// [`effect_owns_resolution_zone_choice`], the single authority shared with the
+/// parser's cross-choice antecedent binder.
+fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
+    effect_owns_resolution_zone_choice(&sub.effect, sub.target_choice_timing)
+}
+
 /// CR 115.10 + CR 608.2d: a nontargeted zone choice announced while the effect
 /// resolves owns a fresh object choice instead of consuming an object selected
 /// by an earlier instruction. The explicit zone set is the provenance marker:
 /// it covers both scalar `InZone` (Broken Bond) and mixed `InAnyZone`
 /// (Worldsoul's Rage), while context references such as Beseech the Mirror's
 /// exile-linked card remain bound continuations rather than fresh choices.
-fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
-    let (target, origin) = match &sub.effect {
-        Effect::ChangeZone { origin, target, .. }
-            if sub.target_choice_timing == TargetChoiceTiming::Resolution =>
-        {
+pub(crate) fn effect_owns_resolution_zone_choice(
+    effect: &Effect,
+    timing: TargetChoiceTiming,
+) -> bool {
+    let (target, origin) = match effect {
+        Effect::ChangeZone { origin, target, .. } if timing == TargetChoiceTiming::Resolution => {
             (target, *origin)
         }
         Effect::PutAtLibraryPosition { target, .. }
@@ -4902,7 +4910,368 @@ fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
     let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);
     !selection_zones.is_empty()
         && !target.is_context_ref()
-        && !effect_requires_parent_target_object(&sub.effect)
+        && !effect_requires_parent_target_object(effect)
+}
+
+/// CR 608.2c + CR 400.7 + CR 115.10a: what one instruction can single out,
+/// introduce or move — the objects a later instruction's definite anaphor
+/// ("that creature") could name. See [`instruction_object_reach`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum InstructionObjectReach<'a> {
+    /// Singles out, introduces and moves no object: the instruction affects only
+    /// players (their life totals, player counters, turns, speed or library
+    /// order) or a number.
+    NoObject,
+    /// Affects only what its one slot names and introduces or moves no other
+    /// object. The slot may be a declared target, a player, an object an earlier
+    /// instruction handed the chain, or a described population; the caller
+    /// decides which of these it is.
+    Slot(&'a TargetFilter),
+    /// May single out, introduce, reveal or move an object outside one slot, or
+    /// its reach is not classified. A later anaphor may name what it touches.
+    Unclassified,
+}
+
+/// CR 608.2c + CR 400.7 + CR 115.10a: the one classification of every `Effect`
+/// variant by the objects it can hand a later instruction's definite anaphor
+/// (see [`InstructionObjectReach`]). An object chosen while an instruction is
+/// applied is affected, not targeted (CR 115.10a), and an object that moves to
+/// another zone becomes a new object (CR 400.7); either can be what a later
+/// "that <noun>" names under the rules of English (CR 608.2c).
+///
+/// `NoObject` and `Slot` are allow-lists whose arms name every field, so a new
+/// field is a compile error until it is classified. Every other variant is
+/// named in the `Unclassified` arm, so a new variant is a compile error too.
+pub(crate) fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
+    match effect {
+        // CR 119.3: only a player gains or loses life. CR 122.1: energy and
+        // player counters are placed on players. CR 701.24a: a shuffle
+        // randomizes a library and singles out no card in it.
+        Effect::GainLife {
+            amount: _,
+            player: _,
+        }
+        | Effect::LoseLife {
+            amount: _,
+            target: _,
+        }
+        | Effect::SetLifeTotal {
+            target: _,
+            amount: _,
+        }
+        | Effect::ExchangeLifeTotals {
+            player_a: _,
+            player_b: _,
+        }
+        | Effect::DamageEachPlayer {
+            amount: _,
+            player_filter: _,
+        }
+        | Effect::GainEnergy { amount: _ }
+        | Effect::GivePlayerCounter {
+            counter_kind: _,
+            count: _,
+            target: _,
+        }
+        | Effect::LoseAllPlayerCounters { target: _ }
+        | Effect::Shuffle { target: _ }
+        | Effect::BecomeMonarch { target: _ }
+        | Effect::ExtraTurn {
+            target: _,
+            count: _,
+        }
+        | Effect::SkipNextTurn {
+            target: _,
+            count: _,
+        }
+        | Effect::StartYourEngines { player_scope: _ }
+        | Effect::ChangeSpeed {
+            player_scope: _,
+            amount: _,
+            direction: _,
+            floor: _,
+        }
+        | Effect::NoteNumber { value: _ }
+        | Effect::NoOp => InstructionObjectReach::NoObject,
+        // Instructions that act on what their one `target` names and on
+        // nothing else. Moving that object (destroy, sacrifice, return, exile)
+        // is acting on it; the caller reads where a `ChangeZone` leaves it.
+        Effect::DealDamage {
+            amount: _,
+            target,
+            damage_source: None,
+            // CR 120.4a: excess damage goes to the damaged permanent's
+            // controller, a player.
+            excess: _,
+        }
+        | Effect::Pump {
+            power: _,
+            toughness: _,
+            target,
+        }
+        | Effect::PutCounter {
+            counter_type: _,
+            count: _,
+            target,
+        }
+        | Effect::RemoveCounter {
+            counter_type: _,
+            count: _,
+            target,
+        }
+        | Effect::SetTapState {
+            target,
+            scope: _,
+            state: _,
+        }
+        | Effect::Destroy {
+            target,
+            cant_regenerate: _,
+        }
+        | Effect::Regenerate { target }
+        | Effect::RemoveAllDamage { target }
+        | Effect::TargetOnly { target }
+        | Effect::GainControl { target }
+        | Effect::ChangeZone {
+            origin: _,
+            destination: _,
+            target,
+            owner_library: _,
+            enter_transformed: _,
+            enters_under: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            up_to: _,
+            enter_with_counters: _,
+            conditional_enter_with_counters: _,
+            face_down_profile: _,
+            enters_modified_if: _,
+        }
+        | Effect::Bounce {
+            target,
+            destination: _,
+            selection: _,
+        }
+        | Effect::Sacrifice {
+            target,
+            count: _,
+            min_count: _,
+        } => InstructionObjectReach::Slot(target),
+        // A damage source other than the instruction's own source is a second
+        // object slot.
+        Effect::DealDamage {
+            damage_source: Some(_),
+            ..
+        }
+        | Effect::ApplyPostReplacementDamage { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. }
+        | Effect::Draw { .. }
+        | Effect::PairWith { .. }
+        | Effect::Counter { .. }
+        | Effect::CounterAll { .. }
+        | Effect::Token { .. }
+        | Effect::DiscardCard { .. }
+        | Effect::Mill { .. }
+        | Effect::Scry { .. }
+        | Effect::PumpAll { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DestroyAll { .. }
+        | Effect::ChangeZoneAll { .. }
+        | Effect::Dig { .. }
+        | Effect::GainControlAll { .. }
+        | Effect::ControlNextTurn { .. }
+        | Effect::Attach { .. }
+        | Effect::UnattachAll { .. }
+        | Effect::Surveil { .. }
+        | Effect::Fight { .. }
+        | Effect::BounceAll { .. }
+        | Effect::Explore
+        | Effect::ExploreAll { .. }
+        | Effect::Investigate
+        | Effect::Tribute { .. }
+        | Effect::TimeTravel
+        | Effect::Proliferate
+        | Effect::ProliferateTarget { .. }
+        | Effect::Populate
+        | Effect::Clash
+        | Effect::ExileTopCardContest { .. }
+        | Effect::Behold { .. }
+        | Effect::EndTheTurn
+        | Effect::EndCombatPhase
+        | Effect::Vote { .. }
+        | Effect::SeparateIntoPiles { .. }
+        | Effect::SwitchPT { .. }
+        | Effect::CopySpell { .. }
+        | Effect::EpicCopy { .. }
+        | Effect::CastCopyOfCard { .. }
+        | Effect::CopyTokenOf { .. }
+        | Effect::CreateTokenCopyFromPool { .. }
+        | Effect::Myriad
+        | Effect::Encore
+        | Effect::CombineHost { .. }
+        | Effect::ChooseAugmentAndCombineWithHost { .. }
+        | Effect::Meld { .. }
+        | Effect::ExileHaunting { .. }
+        | Effect::HideawayConceal { .. }
+        | Effect::CopyTokenBlockingAttacker { .. }
+        | Effect::BecomeCopy { .. }
+        | Effect::ChoosePermanent { .. }
+        | Effect::GainActivatedAbilitiesOfTarget { .. }
+        | Effect::ChooseCard { .. }
+        | Effect::ChooseCounterKind { .. }
+        | Effect::PutChosenCounter { .. }
+        | Effect::PutCounterAll { .. }
+        | Effect::MultiplyCounter { .. }
+        | Effect::ChooseCounterAdjustment { .. }
+        | Effect::DoublePT { .. }
+        | Effect::DoublePTAll { .. }
+        | Effect::MoveCounters { .. }
+        | Effect::ReproduceEventCounters { .. }
+        | Effect::Animate { .. }
+        | Effect::ReturnAsAura { .. }
+        | Effect::RegisterBending { .. }
+        | Effect::GenericEffect { .. }
+        | Effect::Cleanup { .. }
+        | Effect::Mana { .. }
+        | Effect::Discard { .. }
+        | Effect::Transform { .. }
+        | Effect::FlipPermanent { .. }
+        | Effect::SearchLibrary { .. }
+        | Effect::SearchOutsideGame { .. }
+        | Effect::OpenBoosterPack { .. }
+        | Effect::RevealHand { .. }
+        | Effect::RevealFromHand { .. }
+        | Effect::Reveal { .. }
+        | Effect::RevealChosenNumbers { .. }
+        | Effect::RevealTop { .. }
+        | Effect::ExileTop { .. }
+        | Effect::ExileFaceDownPile { .. }
+        | Effect::Choose { .. }
+        | Effect::OpponentGuess { .. }
+        | Effect::SwapChosenLabels { .. }
+        | Effect::ChooseDamageSource { .. }
+        | Effect::Suspect { .. }
+        | Effect::Unsuspect { .. }
+        | Effect::Connive { .. }
+        | Effect::PhaseOut { .. }
+        | Effect::PhaseIn { .. }
+        | Effect::ForceBlock { .. }
+        | Effect::ForceAttack { .. }
+        | Effect::SolveCase
+        | Effect::BecomePrepared { .. }
+        | Effect::BecomeUnprepared { .. }
+        | Effect::BecomeSaddled { .. }
+        | Effect::SetClassLevel { .. }
+        | Effect::CreateDelayedTrigger { .. }
+        | Effect::AddTargetReplacement { .. }
+        | Effect::AddRestriction { .. }
+        | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::AddPendingEntersModifications { .. }
+        | Effect::CreateEmblem { .. }
+        | Effect::CreateBoon { .. }
+        | Effect::PayCost { .. }
+        | Effect::CastFromZone { .. }
+        | Effect::FreeCastFromZones { .. }
+        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
+        | Effect::PreventDamage { .. }
+        | Effect::CreateDamageReplacement { .. }
+        | Effect::CreateDrawReplacement { .. }
+        | Effect::CreatePlaneswalkReplacement { .. }
+        | Effect::LoseTheGame { .. }
+        | Effect::WinTheGame { .. }
+        | Effect::RollDie { .. }
+        | Effect::FlipCoins { .. }
+        | Effect::RingTemptsYou
+        | Effect::VentureIntoDungeon
+        | Effect::VentureInto { .. }
+        | Effect::TakeTheInitiative
+        | Effect::ArrangePlanarDeckTop { .. }
+        | Effect::Planeswalk
+        | Effect::ChaosEnsues
+        | Effect::ReverseTurnOrder
+        | Effect::RedistributeLifeTotals
+        | Effect::OpenAttractions { .. }
+        | Effect::RollToVisitAttractions
+        | Effect::AssembleContraptions { .. }
+        | Effect::AssembleContraptionsFromRollDifference
+        | Effect::CrankContraptions { .. }
+        | Effect::ReassembleContraption { .. }
+        | Effect::AssembleContraptionOnSprocket { .. }
+        | Effect::ReassembleContraptionOnSprocket { .. }
+        | Effect::PutSticker { .. }
+        | Effect::ApplySticker { .. }
+        | Effect::ProcessRadCounters
+        | Effect::GrantCastingPermission { .. }
+        | Effect::ChooseFromZone { .. }
+        | Effect::RememberCard { .. }
+        | Effect::NoteManaSpent
+        | Effect::ForEachCategory { .. }
+        | Effect::ChooseObjectsIntoTrackedSet { .. }
+        | Effect::ChooseAndSacrificeRest { .. }
+        | Effect::EachPlayerCopyChosen { .. }
+        | Effect::Exploit { .. }
+        | Effect::ExileFromTopUntil { .. }
+        | Effect::RevealUntil { .. }
+        | Effect::Discover { .. }
+        | Effect::PhysicalContest { .. }
+        | Effect::Heist { .. }
+        | Effect::HeistExile
+        | Effect::Cascade
+        | Effect::Ripple { .. }
+        | Effect::MiracleCast { .. }
+        | Effect::MadnessCast { .. }
+        | Effect::PutAtLibraryPosition { .. }
+        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
+        | Effect::PutOnTopOrBottom { .. }
+        | Effect::GiftDelivery { .. }
+        | Effect::Goad { .. }
+        | Effect::GoadAll { .. }
+        | Effect::Detain { .. }
+        | Effect::SetRoomDoorLock { .. }
+        | Effect::ExchangeControl { .. }
+        | Effect::ChangeTargets { .. }
+        | Effect::Manifest { .. }
+        | Effect::ManifestDread
+        | Effect::Cloak { .. }
+        | Effect::TurnFaceUp { .. }
+        | Effect::TurnFaceDown { .. }
+        | Effect::GrantExtraLoyaltyActivations { .. }
+        | Effect::SkipNextStep { .. }
+        | Effect::AdditionalPhase { .. }
+        | Effect::ModifyAnnouncedX { .. }
+        | Effect::Double { .. }
+        | Effect::RuntimeHandled { .. }
+        | Effect::Incubate { .. }
+        | Effect::Amass { .. }
+        | Effect::EmpowerJace { .. }
+        | Effect::Monstrosity { .. }
+        | Effect::Specialize
+        | Effect::Renown { .. }
+        | Effect::Bolster { .. }
+        | Effect::Adapt { .. }
+        | Effect::Learn
+        | Effect::Forage
+        | Effect::CompletePlayerAction { .. }
+        | Effect::Harness
+        | Effect::CollectEvidence { .. }
+        | Effect::Endure { .. }
+        | Effect::BlightEffect { .. }
+        | Effect::Seek { .. }
+        | Effect::ExchangeLifeWithStat { .. }
+        | Effect::SetDayNight { .. }
+        | Effect::GiveControl { .. }
+        | Effect::RemoveFromCombat { .. }
+        | Effect::BecomeBlocked { .. }
+        | Effect::Conjure { .. }
+        | Effect::ApplyPerpetual { .. }
+        | Effect::Intensify { .. }
+        | Effect::DraftFromSpellbook { .. }
+        | Effect::ChooseOneOf { .. }
+        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
+    }
 }
 
 /// Whether a child owns an object-selection slot independent of its parent's
@@ -8811,7 +9180,7 @@ fn effect_fields_read_filter_population(
                         filters.iter().any(has_filter)
                     }
                     SearchSelectionConstraint::None
-                    | SearchSelectionConstraint::DistinctQualities { .. }
+                    | SearchSelectionConstraint::SharesQualities { .. }
                     | SearchSelectionConstraint::TotalManaValue { .. } => false,
                 }
         }
@@ -15707,16 +16076,24 @@ pub(crate) fn publish_battlefield_object_for_pending_continuation(
 /// surfaces `SearchLibrary::target_player`, so iterated-search variants are
 /// covered through the same single path.
 pub(crate) fn effect_refs_parent_target(effect: &Effect) -> bool {
+    effect_parent_ref_slot_count(effect) > 0
+}
+
+/// CR 608.2c: how many of the effect's target-filter slots (the ones
+/// [`effect_refs_parent_target`] scans) read its parent's target. The parser's
+/// cross-choice antecedent binder links a reader only when exactly one does.
+pub(crate) fn effect_parent_ref_slot_count(effect: &Effect) -> usize {
     effect_parent_ref_slots(effect)
         .iter()
-        .any(|filter| filter_refs_parent_target(filter))
+        .filter(|filter| filter_refs_parent_target(filter))
+        .count()
 }
 
 /// CR 608.2c + CR 608.2h: Whether a later instruction needs the parent object
 /// itself, rather than only its move-time controller/owner metadata. Used when
 /// deciding whether a resolution-time private-zone choice owns a fresh
-/// object-selection slot.
-fn effect_requires_parent_target_object(effect: &Effect) -> bool {
+/// object-selection slot, and by the parser's cross-choice antecedent binder.
+pub(crate) fn effect_requires_parent_target_object(effect: &Effect) -> bool {
     effect_parent_ref_slots(effect)
         .iter()
         .any(|filter| filter_requires_parent_target_object(filter))
