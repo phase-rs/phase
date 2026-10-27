@@ -7924,6 +7924,10 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         // shuffling it for its "If you do" rider is an intervening instruction;
         // a later continuation may still refer to an earlier Dig.
         Effect::ExileFaceDownPile { .. } => true,
+        // CR 608.2c: changing a card's perpetual characteristics neither moves
+        // nor reselects the cards left by an earlier look instruction, so a
+        // later "put the rest" still disposes of that look's original remainder.
+        Effect::ApplyPerpetual { .. } => true,
         // CR 406.3: turning the exiled card face up is its own resolving effect,
         // not a Dig-lookback-transparent clause.
         Effect::TurnFaceUp { .. } => false,
@@ -8156,7 +8160,6 @@ pub(super) fn clause_is_dig_lookback_transparent(effect: &Effect) -> bool {
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
         | Effect::Intensify { .. }
-        | Effect::ApplyPerpetual { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::ChooseOneOf { .. }
         | Effect::ChooseCounterAdjustment { .. }

@@ -1097,6 +1097,7 @@ mod tests {
                             player: TargetFilter::SpecificPlayer { id: P1 },
                         },
                     );
+                    dependent.instruction_actor = Some(ControllerRef::ScopedPlayer.into());
                     dependent.sub_ability = child.sub_ability.take();
                     child.sub_ability = Some(Box::new(dependent));
                     child.else_ability = Some(Box::new(AbilityDefinition::new(
@@ -1174,7 +1175,8 @@ mod tests {
                     let searcher = if controller_head { P0 } else { player };
                     assert!(matches!(&runner.state().waiting_for,
                         WaitingFor::SearchChoice { player: actual, library_owner: Some(owner), cards: eligible, .. }
-                        if *actual == searcher && *owner == searcher && eligible.contains(&cards[index])));
+                        if *actual == searcher && *owner == searcher && eligible.contains(&cards[index])),
+                        "head={head_actor:?}, child={child_actor:?}, prior_choice={prior_choice}, index={index}, wait={:?}", runner.state().waiting_for);
                     if controller_head {
                         assert!(runner.state().pending_scoped_library_search.is_none());
                         assert_eq!(runner.state().objects[&cards[index]].owner, P0);

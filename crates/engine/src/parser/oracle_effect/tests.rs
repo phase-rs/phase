@@ -45504,6 +45504,45 @@ fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
     ));
 }
 
+/// SHAPE: the later remainder instruction still owns the complete Dig rest
+/// pile across a conjured card's independent perpetual modification.
+#[test]
+fn dig_remainder_placement_crosses_a_perpetual_modification() {
+    let def = parse_effect_chain(
+        "Look at the top six cards of your library. You may put a creature card with mana value 3 or less from among them onto the battlefield, then conjure a duplicate of that card onto the battlefield. The duplicate perpetually has base power and toughness 1/1. Put the rest on the bottom of your library in a random order.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 6 },
+                keep_count: Some(1),
+                destination: Some(Zone::Battlefield),
+                rest_destination: Some(Zone::Library),
+                rest_order: DigRestOrder::Random,
+                ..
+            }
+        ),
+        "the original Dig must dispose of every unkept card: {def:?}"
+    );
+    let mut saw_conjure = false;
+    let mut saw_perpetual = false;
+    for node in std::iter::successors(Some(&def), |node| node.sub_ability.as_deref()) {
+        saw_conjure |= matches!(node.effect.as_ref(), Effect::Conjure { .. });
+        saw_perpetual |= matches!(node.effect.as_ref(), Effect::ApplyPerpetual { .. });
+        assert!(
+            !matches!(node.effect.as_ref(), Effect::PutAtLibraryPosition { .. }),
+            "the full remainder must not become a separate one-card choice: {node:?}",
+        );
+    }
+    assert!(
+        saw_conjure && saw_perpetual,
+        "the intervening instructions must remain"
+    );
+}
+
 #[test]
 fn perpetual_parser_maps_self_base_pt() {
     use crate::types::ability::PerpetualModification;

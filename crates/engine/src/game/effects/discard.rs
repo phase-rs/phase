@@ -2990,65 +2990,39 @@ mod tests {
     /// now resolve as a no-op instead — only the life loss applies.
     #[test]
     fn reveal_choose_nonland_discard_is_noop_when_hand_has_no_nonland_card() {
-        use crate::game::ability_utils::build_resolved_from_def_with_targets;
-        use crate::game::effects::resolve_ability_chain;
-        use crate::parser::oracle_effect::parse_effect_chain;
-        use crate::types::ability::AbilityKind;
-        use crate::types::card_type::CoreType;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::phase::Phase;
 
-        let mut state = GameState::new_two_player(42);
-        let opp_land = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(1),
-            "Forest".into(),
-            Zone::Hand,
-        );
-        // `create_object` does not infer type from the name — it must be
-        // stamped explicitly, same as `reveal_hand_offset_count_truncates_to_inner_plus_one`
-        // does for CoreType::Creature. Without this the Non(Land) filter treats
-        // "Forest" as an eligible nonland card and the whole scenario is moot.
-        state
-            .objects
-            .get_mut(&opp_land)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Land);
-
-        let def = parse_effect_chain(
-            "Target player reveals their hand. You choose a nonland card from it. \
-             That player discards that card. You lose 2 life.",
-            AbilityKind::Spell,
-        );
-        let ability = build_resolved_from_def_with_targets(
-            &def,
-            ObjectId(100),
-            PlayerId(0),
-            vec![TargetRef::Player(PlayerId(1))],
-        );
-        let mut events = Vec::new();
-        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let opp_land = scenario.add_land_to_hand(P1, "Forest").id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Thoughtseize",
+                false,
+                "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        // CR 601.2c + CR 608.2c: keep the announced player on the resolving
+        // spell while the reveal choice forwards a different, object referent.
+        let outcome = runner.cast(spell).target_player(P1).resolve();
 
         assert!(
-            state.players[1].hand.contains(&opp_land),
+            outcome.state().players[1].hand.contains(&opp_land),
             "no nonland card was eligible — the land must NOT be discarded"
         );
         assert!(
-            !state.players[1].graveyard.contains(&opp_land),
+            !outcome.state().players[1].graveyard.contains(&opp_land),
             "the land must not have moved to the graveyard"
         );
         assert!(
-            !matches!(
-                state.waiting_for,
-                WaitingFor::DiscardChoice { .. } | WaitingFor::RevealChoice { .. }
-            ),
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
             "empty-eligible reveal must not leave the game waiting on a stale discard/reveal choice"
         );
-        assert_eq!(
-            state.players[0].life, 18,
-            "the life-loss clause still applies even when the discard whiffs"
-        );
+        outcome.assert_life_delta(P0, -2);
+        outcome.assert_zone(&[spell], Zone::Graveyard);
     }
 
     /// Companion case for #4950: with a nonland card present, the reveal
@@ -3057,81 +3031,58 @@ mod tests {
     /// non-empty `specific_targets`) is unchanged.
     #[test]
     fn reveal_choose_nonland_discard_targets_the_chosen_nonland_card() {
-        use crate::game::ability_utils::build_resolved_from_def_with_targets;
-        use crate::game::effects::resolve_ability_chain;
-        use crate::game::engine_resolution_choices::handle_resolution_choice;
-        use crate::parser::oracle_effect::parse_effect_chain;
-        use crate::types::ability::AbilityKind;
+        use crate::game::scenario::{GameScenario, P0, P1};
         use crate::types::actions::GameAction;
-        use crate::types::card_type::CoreType;
+        use crate::types::phase::Phase;
 
-        let mut state = GameState::new_two_player(42);
-        let opp_land = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(1),
-            "Forest".into(),
-            Zone::Hand,
-        );
-        state
-            .objects
-            .get_mut(&opp_land)
-            .unwrap()
-            .card_types
-            .core_types
-            .push(CoreType::Land);
-        let opp_spell = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(1),
-            "Opp Spell".into(),
-            Zone::Hand,
-        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let opp_land = scenario.add_land_to_hand(P1, "Forest").id();
+        let opp_spell = scenario.add_card_to_hand(P1, "Opp Spell");
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Thoughtseize",
+                false,
+                "Target player reveals their hand. You choose a nonland card from it. That player discards that card. You lose 2 life.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        // CR 601.2c + CR 608.2c: the original player target remains available
+        // when the chosen card becomes the continuation's object target.
+        runner.cast(spell).target_player(P1).resolve();
 
-        let def = parse_effect_chain(
-            "Target player reveals their hand. You choose a nonland card from it. \
-             That player discards that card. You lose 2 life.",
-            AbilityKind::Spell,
-        );
-        let ability = build_resolved_from_def_with_targets(
-            &def,
-            ObjectId(100),
-            PlayerId(0),
-            vec![TargetRef::Player(PlayerId(1))],
-        );
-        let mut events = Vec::new();
-        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
-
-        let (chooser, cards) = match state.waiting_for.clone() {
+        let (chooser, cards) = match runner.state().waiting_for.clone() {
             WaitingFor::RevealChoice { player, cards, .. } => (player, cards),
             other => panic!("expected RevealChoice for the nonland pick, got {other:?}"),
         };
-        assert_eq!(chooser, PlayerId(0));
+        assert_eq!(chooser, P0);
         assert_eq!(cards, vec![opp_spell], "only the nonland card is eligible");
 
-        let waiting = state.waiting_for.clone();
-        handle_resolution_choice(
-            &mut state,
-            waiting,
-            GameAction::SelectCards {
+        runner
+            .act(GameAction::SelectCards {
                 cards: vec![opp_spell],
-            },
-            &mut events,
-        )
-        .expect("choosing the nonland card should succeed");
+            })
+            .expect("choosing the nonland card should succeed");
 
         assert!(
-            !state.players[1].hand.contains(&opp_spell),
+            !runner.state().players[1].hand.contains(&opp_spell),
             "the chosen nonland card must be discarded"
         );
         assert!(
-            state.players[1].graveyard.contains(&opp_spell),
+            runner.state().players[1].graveyard.contains(&opp_spell),
             "the chosen nonland card must land in the graveyard"
         );
         assert!(
-            state.players[1].hand.contains(&opp_land),
+            runner.state().players[1].hand.contains(&opp_land),
             "the land must be left alone"
         );
-        assert_eq!(state.players[0].life, 18);
+        assert_eq!(runner.life(P0), 18);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 }

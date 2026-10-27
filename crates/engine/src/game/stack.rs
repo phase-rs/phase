@@ -10856,9 +10856,12 @@ mod tests {
                     canonical[0].ability().unwrap().context.source_identity
                 );
                 let saved = serde_json::to_string(runner.state()).unwrap();
-                let restored: GameState = serde_json::from_str(&saved).unwrap();
+                let mut restored: GameState = serde_json::from_str(&saved).unwrap();
                 // Runtime layer/index caches, display dirtiness and the public
                 // revision are rebuilt after decoding rather than persisted.
+                // Rebuild outward-facing derived fields too: creature tokens'
+                // summoning-sickness display is deliberately not deserialized.
+                crate::game::public_state::finalize_public_state(&mut restored);
                 assert_eq!(
                     serde_json::to_value(&restored).unwrap(),
                     serde_json::to_value(runner.state()).unwrap()

@@ -2229,6 +2229,9 @@ mod tests {
                             player: TargetFilter::SpecificPlayer { id: P1 },
                         },
                     );
+                    if !targeted {
+                        dependent.instruction_actor = Some(ControllerRef::ScopedPlayer.into());
+                    }
                     dependent.sub_ability = draw.sub_ability.take();
                     draw.sub_ability = Some(Box::new(dependent));
                     draw.else_ability = Some(Box::new(AbilityDefinition::new(

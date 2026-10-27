@@ -7247,11 +7247,12 @@ fn scope_keeps_scoped_whole_hand_shuffle_local(scope: &PlayerFilter) -> bool {
 /// 115.10: the per-iteration acting player). Used to keep parser-distributed
 /// chains inside the scoped template: compound-subject "you and that player
 /// each ..." distribution, and per-opponent decline-consequence bodies. A
-/// `ScopedPlayer`-recipient `LoseLife` is the same iteration-bound recipient
+/// `ScopedPlayer`-recipient life adjustment is the same iteration-bound recipient
 /// class as `Draw`/`Discard`/`Mill`/`Token` — not a separate pattern.
 fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
     let recipient = match effect {
         Effect::Token { owner, .. } => owner,
+        Effect::GainLife { player, .. } => player,
         Effect::Draw { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. } => target,
@@ -7470,8 +7471,20 @@ fn detach_after_player_scope_local_chain(
         next.player_scope,
         Some(PlayerFilter::PerformedActionThisWay { .. })
     );
+    // CR 608.2c: a continuation performed by this iteration's player stays
+    // with that player even when its recipient is independently named.
+    let next_has_iteration_bound_actor = next
+        .instruction_actor
+        .as_ref()
+        .and_then(|actor| actor.as_controller())
+        == Some(&ControllerRef::ScopedPlayer)
+        && next
+            .player_scope
+            .as_ref()
+            .is_none_or(|child_scope| child_scope == scope);
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
-        && is_player_scope_local_continuation(&node.effect, &next.effect, scope)
+        && (next_has_iteration_bound_actor
+            || is_player_scope_local_continuation(&node.effect, &next.effect, scope))
         && !next_is_scoped_search_shuffle_tail;
     if next_is_performed_gated
         || next_is_zone_change_this_way_gated
@@ -22628,11 +22641,11 @@ mod tests {
                     actor.as_controller(),
                     Some(
                         ControllerRef::You
-                            | ControllerRef::ScopedPlayer
                             | ControllerRef::ActivePlayer
                             | ControllerRef::SpecificPlayer { .. }
                     )
-                );
+                ) || (family < 3
+                    && actor.as_controller() == Some(&ControllerRef::ScopedPlayer));
                 let fixed_actor = match actor.as_controller() {
                     Some(ControllerRef::SpecificPlayer { id }) => *id,
                     _ => P0,
@@ -22677,6 +22690,9 @@ mod tests {
                     _ => unreachable!(),
                 };
                 definition.instruction_actor = Some(actor.clone());
+                if scoped_actor && family < 2 {
+                    definition.player_scope = Some(PlayerFilter::Controller);
+                }
                 let mut tail = AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::GainLife {
@@ -22811,7 +22827,8 @@ mod tests {
                 if family == 0 {
                     assert_eq!(
                         runner.state().rng.outcome_draws() - rng_before,
-                        u64::from(admitted)
+                        u64::from(admitted),
+                        "actor={actor:?}, family={family}"
                     );
                     let choices: Vec<_> = [P1, p2]
                         .into_iter()
@@ -22903,7 +22920,7 @@ mod tests {
         use crate::types::replacements::ReplacementEvent;
         let p2 = PlayerId(2);
         let p3 = PlayerId(3);
-        for (actor, expected) in [
+        for (actor, expected, has_parent_target) in [
             (InstructionActorRef::from(ControllerRef::You), Some(P0)),
             (
                 InstructionActorRef::from(ControllerRef::SpecificPlayer { id: p3 }),
@@ -22927,6 +22944,7 @@ mod tests {
             ),
         ]
         .into_iter()
+        .map(|(actor, expected)| (actor, expected, false))
         .chain(
             crate::types::ability::instruction_actor_test_refs()
                 .into_iter()
@@ -22938,12 +22956,12 @@ mod tests {
                             | ControllerRef::TargetPlayer
                             | ControllerRef::TargetOpponent
                             | ControllerRef::ParentTargetController
-                            | ControllerRef::ParentTargetOwner
                             | ControllerRef::ActivePlayer,
                         ) => Some(P0),
                         Some(ControllerRef::SpecificPlayer { id }) => Some(*id),
                         Some(
                             ControllerRef::Opponent
+                            | ControllerRef::ParentTargetOwner
                             | ControllerRef::DeclaredPlayer { .. }
                             | ControllerRef::EventTargetController
                             | ControllerRef::DefendingPlayer
@@ -22960,9 +22978,14 @@ mod tests {
                             unexpected => panic!("closed actor fixture contains {unexpected:?}"),
                         },
                     };
-                    (actor, expected)
+                    (actor, expected, false)
                 }),
-        ) {
+        )
+        .chain([(
+            InstructionActorRef::from(ControllerRef::ParentTargetOwner),
+            Some(P0),
+            true,
+        )]) {
             let mut scenario = GameScenario::new_n_player(4, 42);
             scenario.at_phase(Phase::PreCombatMain);
             let host = scenario
@@ -22992,7 +23015,11 @@ mod tests {
                     branches: vec![branch],
                     kind: ChooseOneOfKind::Ordinary,
                 },
-                vec![],
+                if has_parent_target {
+                    vec![TargetRef::Object(host)]
+                } else {
+                    vec![]
+                },
                 host,
                 P0,
             );
@@ -40393,6 +40420,76 @@ mod tests {
             ),
             "no extra unless/discard prompts after both iterations"
         );
+    }
+
+    #[test]
+    fn player_scope_split_retains_only_the_continuations_own_iteration_actor() {
+        for (actor, child_scope, link, retained) in [
+            (
+                ControllerRef::ScopedPlayer,
+                None,
+                SubAbilityLink::ContinuationStep,
+                true,
+            ),
+            (
+                ControllerRef::ScopedPlayer,
+                Some(PlayerFilter::All),
+                SubAbilityLink::ContinuationStep,
+                true,
+            ),
+            (
+                ControllerRef::ScopedPlayer,
+                Some(PlayerFilter::Opponent),
+                SubAbilityLink::ContinuationStep,
+                false,
+            ),
+            (
+                ControllerRef::ScopedPlayer,
+                None,
+                SubAbilityLink::SequentialSibling,
+                false,
+            ),
+            (
+                ControllerRef::You,
+                None,
+                SubAbilityLink::ContinuationStep,
+                false,
+            ),
+        ] {
+            let mut head = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), P0);
+            head.player_scope = Some(PlayerFilter::All);
+            let mut child = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::SpecificPlayer { id: P1 },
+                },
+                vec![],
+                ObjectId(1),
+                P0,
+            );
+            child.instruction_actor = Some(actor.clone().into());
+            child.player_scope = child_scope.clone();
+            child.sub_link = link;
+            head.sub_ability = Some(Box::new(child));
+            let (scoped, after_scope) = split_player_scope_chain(&head, &PlayerFilter::All);
+            assert_eq!(
+                scoped.sub_ability.is_some(),
+                retained,
+                "{actor:?}, {child_scope:?}, {link:?}"
+            );
+            assert_eq!(after_scope.is_none(), retained);
+            if let Some(child) = scoped.sub_ability {
+                assert_eq!(child.instruction_actor, Some(actor.into()));
+                assert!(child.player_scope.is_none());
+                assert!(matches!(
+                    child.effect,
+                    Effect::GainLife {
+                        player: TargetFilter::SpecificPlayer { id: P1 },
+                        ..
+                    }
+                ));
+            }
+        }
     }
 
     /// CR 608.2c (maintainer review, #7484): the publish gate must judge the
