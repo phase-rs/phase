@@ -84,7 +84,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues,
     CounterSourceRider, Effect, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TriggerDefinition, VoteSubject,
+    TargetFilter, TriggerDefinition, VoteSubject,
 };
 use std::ops::ControlFlow;
 
@@ -1540,4 +1540,51 @@ pub(crate) fn each_granter_symbol(
     v: &mut impl FnMut(granter_symbols::Symbol<'_>),
 ) {
     granter_symbols::each_node(root, &mut |node| granter_symbols::node_fields(node, v));
+}
+
+/// CR 201.5a: whether a granter symbol still names an unbound granter.
+pub(crate) fn names_unbound_granter(symbol: &granter_symbols::Symbol<'_>) -> bool {
+    match symbol {
+        granter_symbols::Symbol::Filter(bound) => bound.is_none(),
+        granter_symbols::Symbol::Scope(scope) => {
+            matches!(scope, crate::types::ability::ObjectScope::GrantingObject)
+        }
+        granter_symbols::Symbol::Caster(_) => false,
+    }
+}
+
+/// CR 201.5a: whether a static's own fields name an unbound granter. Nested definition nodes
+/// are not entered; [`nested_definitions_name_granter`] covers them.
+pub(crate) fn own_fields_name_granter(def: &StaticDefinition) -> bool {
+    let mut names = false;
+    granter_symbols::node_fields(DefinitionNode::Static(def), &mut |symbol| {
+        names |= names_unbound_granter(&symbol);
+    });
+    names
+}
+
+/// CR 201.5a: whether a definition nested in `def`'s modifications names an unbound
+/// granter — together with [`own_fields_name_granter`], the whole of
+/// [`each_granter_symbol`]'s walk over a static.
+pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
+    let mut names = false;
+    for m in &def.modifications {
+        granter_symbols::each_node_in(m, &mut |node| {
+            granter_symbols::node_fields(node, &mut |symbol| {
+                names |= names_unbound_granter(&symbol);
+            })
+        });
+    }
+    names
+}
+
+/// CR 111.3 + CR 201.5a: whether a created token's static grants its nested definitions
+/// to the token itself. Those definitions are the token's own quoted abilities — its
+/// text, written by the creating effect — so a by-name reference in them names the
+/// creator and is bound at creation, as one in the static's own fields is. Any other
+/// static grants its nested definitions to other objects; the token is that grant's
+/// source, so a by-name reference in them names the token and binds at layer 6
+/// (CR 613.1f).
+pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
+    matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
 }

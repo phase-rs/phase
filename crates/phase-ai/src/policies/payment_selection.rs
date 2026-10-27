@@ -83,6 +83,7 @@ impl PaymentSelectionPolicy {
             CostResume::Spell { .. } | CostResume::SpellCost { .. } => 1.0,
             CostResume::Resolution => 1.0,
             CostResume::ManaAbility { .. } => 0.8,
+            CostResume::TurnFaceUp { .. } => 1.0,
         };
 
         let needed_land_penalty = if discard_spends_last_playable_land(ctx, kind, cards) {

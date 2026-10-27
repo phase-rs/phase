@@ -586,7 +586,7 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_for_parallel_worker,
+    choose_action_with_issued_contract, score_candidates_for_parallel_worker,
     select_safe_action_from_scores, AiSession, SessionCache,
 };
 thread_local! {
@@ -4379,7 +4379,7 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let Some(action) =
-            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+            choose_action_with_issued_contract(state, &config, &mut rng, &session, &contract)
         else {
             return Ok(JsValue::NULL);
         };
@@ -4414,7 +4414,7 @@ pub fn get_ai_tactical_action_proposal(
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let Some(action) =
-            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+            choose_action_with_issued_contract(state, &config, &mut rng, &session, &contract)
         else {
             return Ok(JsValue::NULL);
         };
@@ -4444,13 +4444,8 @@ pub fn get_ai_action_proposal_with_diagnostics(
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
-        let selection = choose_action_with_session_diagnostic(
-            state,
-            semantic_owner,
-            &config,
-            &mut rng,
-            &session,
-        );
+        let selection =
+            choose_action_with_session_diagnostic(state, &config, &mut rng, &session, &contract);
         let Some(action) = selection.action else {
             return Ok(JsValue::NULL);
         };
@@ -4486,13 +4481,8 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
         config.search.time_budget_ms = Some(0);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
-        let selection = choose_action_with_session_diagnostic(
-            state,
-            semantic_owner,
-            &config,
-            &mut rng,
-            &session,
-        );
+        let selection =
+            choose_action_with_session_diagnostic(state, &config, &mut rng, &session, &contract);
         let Some(action) = selection.action else {
             return Ok(JsValue::NULL);
         };

@@ -977,10 +977,10 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0); // any seed: rank/score/probability are seed-invariant here
         let selection = crate::search::choose_action_with_session_diagnostic(
             state,
-            P0,
             &config,
             &mut rng,
             &crate::AiSession::arc_from_game(state),
+            &engine::ai_support::AiDecisionContract::issue(state, P0),
         );
         let receipt = selection
             .receipt

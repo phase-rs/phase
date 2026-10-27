@@ -175,7 +175,7 @@ export const GameBoard = memo(function GameBoard({
       }
     }
 
-    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects);
+    const boardChoice = getBoardChoiceView(waitingFor, gameState?.objects, gameState?.allows_cancel_cast);
     if (boardChoice && canActForWaitingState) {
       for (const objectId of boardChoice.objectIds) {
         boardChoiceObjectIds.add(objectId);

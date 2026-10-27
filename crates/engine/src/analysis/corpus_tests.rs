@@ -104,9 +104,9 @@ fn corpus_partition_is_locked() {
         .filter(|&i| corpus::row(i).deferral.is_some())
         .collect();
 
-    assert_eq!(driven.len(), 23, "23 driven rows");
+    assert_eq!(driven.len(), 24, "24 driven rows");
     assert_eq!(gated.len(), 5, "5 gated rows");
-    assert_eq!(deferred.len(), 34, "34 deferred rows");
+    assert_eq!(deferred.len(), 33, "33 deferred rows");
 
     assert!(driven.is_disjoint(&gated), "driven ∩ gated must be empty");
     assert!(
@@ -543,6 +543,83 @@ fn drive_combo_11_selvala_staff() {
     let cert = corpus::drive_offline_selvala_staff(card_db())
         .expect("Selvala + Staff of Domination must confirm infinite mana");
     assert_combo(12, &cert);
+}
+
+/// BASALT MONOLITH + RINGS OF BRIGHTHEARTH — infinite colorless mana: Rings copies the untap
+/// (CR 707.10), so a steady cycle taps Monolith twice ({C}x6) for one {3} untap and one {2}
+/// copy, +{C} net.
+#[test]
+fn drive_combo_basalt_rings() {
+    let cert = corpus::drive_offline_basalt_rings(card_db())
+        .expect("Basalt Monolith + Rings must confirm infinite colorless mana");
+    assert_combo(3, &cert);
+    assert!(
+        cert.unbounded
+            .contains(&ResourceAxis::Mana(ManaType::Colorless)),
+        "the certificate must name colorless mana (got {:?})",
+        cert.unbounded
+    );
+    // The steady cycle's yield, measured the same way: +{C} per copied untap.
+    let (mut board, cycle) =
+        corpus::basalt_rings_board(card_db()).expect("reach: the Basalt + Rings board builds");
+    let mut probe = LoopProbe::new(&mut board.runner);
+    assert_eq!(
+        cycle.run(&mut probe, true),
+        Some(true),
+        "reach: first cycle"
+    );
+    let _ = probe.iteration_delta();
+    assert_eq!(
+        cycle.run(&mut probe, true),
+        Some(true),
+        "reach: steady cycle"
+    );
+    assert_eq!(
+        probe.iteration_delta().mana[5],
+        1,
+        "{{C}}x6 in for {{3}} + {{2}} out nets one colorless mana"
+    );
+}
+
+/// Control: declining Rings' {2} leaves one tap ({C}x3) per {3} untap, a net-zero cycle, so the
+/// copy is what makes the loop net-positive and no certificate stands without it. The declined
+/// path is driven first with reach guards, so a broken setup or action fails here rather than
+/// passing as "no loop".
+#[test]
+fn drive_combo_basalt_rings_requires_the_copy() {
+    let (mut board, cycle) =
+        corpus::basalt_rings_board(card_db()).expect("reach: the Basalt + Rings board builds");
+    let mut probe = LoopProbe::new(&mut board.runner);
+    // The first cycle taps Monolith from untapped; steady cycles start and end with it tapped.
+    assert_eq!(
+        cycle.run(&mut probe, false),
+        Some(true),
+        "reach: the first declined cycle completes after Rings' prompt"
+    );
+    let _ = probe.iteration_delta();
+    assert_eq!(
+        cycle.run(&mut probe, false),
+        Some(true),
+        "reach: a steady declined cycle reaches and declines Rings' prompt, then completes"
+    );
+    let delta = probe.iteration_delta();
+    let state = probe.runner().state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty(),
+        "reach: the cycle ends at an empty-stack priority window"
+    );
+    assert!(
+        state.objects[&cycle.monolith].tapped,
+        "reach: Monolith ends the cycle tapped"
+    );
+    assert_eq!(
+        delta.mana[5], 0,
+        "one {{3}} untap for one {{C}}x3 tap nets no colorless mana"
+    );
+    assert!(
+        corpus::drive_basalt_rings(card_db(), false).is_none(),
+        "without the copied untap the cycle is net-zero, so no loop is certified"
+    );
 }
 
 /// D2 KILO, APOGEE MIND + FREED + RELIC OF LEGENDS — infinite proliferate triggers.
