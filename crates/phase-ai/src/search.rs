@@ -515,7 +515,7 @@ fn choose_action_with_session_inner(
         return direct(fallback_action(state, config, &contract).and_then(&bind_specialist));
     }
 
-    let fast_priority = fast_priority_action(state, ai_player, config, session);
+    let fast_priority = fast_priority_action(state, ai_player, config, session, Some(&contract));
     // Only an absent shortcut is reusable: a present one may be filtered out or
     // followed by session writes below, so the scorer recomputes it.
     let priority_shortcut = match &fast_priority {
@@ -658,6 +658,7 @@ fn fast_priority_action(
     ai_player: PlayerId,
     config: &AiConfig,
     session: &Arc<AiSession>,
+    issued: Option<&AiDecisionContract>,
 ) -> Option<GameAction> {
     let WaitingFor::Priority { player } = state.waiting_for else {
         return None;
@@ -671,13 +672,43 @@ fn fast_priority_action(
             .then_some(GameAction::PassPriority);
     }
 
-    let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
-        .into_iter()
-        .filter(|action| root_action_is_allowed(state, ai_player, action))
-        .collect();
-    let action = low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
-        large_board_main_phase_fast_action_from_actions(state, ai_player, &actions, config, session)
+    // While the engine's pass authority holds, the issued contract holds every
+    // action the validated list below can, `PassPriority` included: a priority
+    // prompt's candidates all belong to the priority player, validation admits
+    // the pass whenever `pass_priority_structurally_legal` holds
+    // (`structurally_valid_pass_priority`), and validation and
+    // `root_action_is_allowed` otherwise only remove actions. The low-value
+    // rule passes only when every action qualifies, so a pass it finds over the
+    // issued actions is the pass it finds over the validated ones, without
+    // enumerating them a second time. Without that authority (a CR 723.5
+    // submitter mismatch, a CR 732.2c divergence obligation, or a parked cost
+    // resume) validation may drop the pass, so the validated list decides.
+    let pass_authority = engine::game::priority::pass_priority_structurally_legal(state, ai_player);
+    let issued_pass = issued.filter(|_| pass_authority).and_then(|contract| {
+        let issued_actions: Vec<GameAction> = contract
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.action)
+            .filter(|action| !action.is_mana_ability())
+            .cloned()
+            .collect();
+        low_value_priority_pass_from_actions(state, ai_player, &issued_actions)
     });
+
+    let action = issued_pass.or_else(|| {
+        #[cfg(test)]
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(count.get() + 1));
+        let actions: Vec<_> = engine::ai_support::flat_priority_actions(state)
+            .into_iter()
+            .filter(|action| root_action_is_allowed(state, ai_player, action))
+            .collect();
+        low_value_priority_pass_from_actions(state, ai_player, &actions).or_else(|| {
+            large_board_main_phase_fast_action_from_actions(
+                state, ai_player, &actions, config, session,
+            )
+        })
+    });
+    // One fetch-then-cast filter covers both answers.
     action.filter(|_| !has_certified_fetch_then_cast_route(state, ai_player))
 }
 
@@ -2688,12 +2719,24 @@ enum RootReuse<'c> {
     },
 }
 
+impl<'c> RootReuse<'c> {
+    /// The decision contract the chooser issued for the root, if it supplied one.
+    fn issued_contract(self) -> Option<&'c AiDecisionContract> {
+        match self {
+            RootReuse::Fresh => None,
+            RootReuse::FromChooser { contract, .. } => Some(contract),
+        }
+    }
+}
+
 #[cfg(test)]
 thread_local! {
     /// Times the scorer core derived the root decision contract itself.
     static ROOT_CONTRACT_ISSUES_IN_CORE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Times the scorer core ran the priority shortcut itself.
     static ROOT_FAST_PRIORITY_RERUNS_IN_CORE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Times the priority shortcut enumerated and validated the flat priority actions.
+    static FAST_PRIORITY_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Times the fetch-then-cast route check computed the validated domain.
     static FETCH_ROUTE_DOMAIN_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Times Pact drafting computed the validated domain.
@@ -3473,7 +3516,9 @@ fn score_candidates_core_for_root(
         } => {
             #[cfg(test)]
             ROOT_FAST_PRIORITY_RERUNS_IN_CORE.with(|count| count.set(count.get() + 1));
-            if let Some(action) = fast_priority_action(state, ai_player, config, session) {
+            if let Some(action) =
+                fast_priority_action(state, ai_player, config, session, root.issued_contract())
+            {
                 return vec![(action, 1.0)];
             }
         }
@@ -3713,7 +3758,11 @@ fn run_iterative_deepening(
                 completed = false;
                 break;
             }
-            let score = if let Some((child, sim)) = services.successor_edge(
+            let score = if r.score == f64::NEG_INFINITY {
+                // A policy Reject: `continuation + score * tactical_weight` is −∞
+                // for every finite continuation, so the simulation cannot change it.
+                f64::NEG_INFINITY
+            } else if let Some((child, sim)) = services.successor_edge(
                 Some(root),
                 state,
                 &r.candidate,
@@ -14853,6 +14902,39 @@ mod tests {
         );
     }
 
+    /// #9716: a root candidate a policy rejected (score −∞) keeps its −∞ score
+    /// without a successor simulation — `continuation + score * tactical_weight`
+    /// is −∞ for every finite continuation. Fails on revert of the rejected arm
+    /// in `run_iterative_deepening`.
+    #[test]
+    fn rejected_root_candidate_is_not_simulated() {
+        let state = searchable_state();
+        let mut config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(7);
+        config.search.planner_mode = PlannerMode::BeamOnly; // rung 0 only
+        let (_, cast) = pass_and_first_cast(&state);
+
+        // Reach-guard: the same candidate with a finite score is simulated.
+        let mut services =
+            PlannerServices::new_default(PlayerId(0), &config, PolicyRegistry::shared());
+        let ranked = vec![RankedCandidate::new(cast.clone(), 0.0)];
+        let _ = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+        assert!(
+            services.memo_witness.successor_simulations > 0,
+            "reach-guard: a scored candidate reaches its successor simulation"
+        );
+
+        let mut services =
+            PlannerServices::new_default(PlayerId(0), &config, PolicyRegistry::shared());
+        let ranked = vec![RankedCandidate::new(cast.clone(), f64::NEG_INFINITY)];
+        let out = run_iterative_deepening(&state, ranked, 0.1, &config, &mut services);
+        assert_eq!(
+            services.memo_witness.successor_simulations + services.memo_witness.successor_hits,
+            0,
+            "a rejected candidate must not request a successor"
+        );
+        assert_eq!(out, vec![(cast.action, f64::NEG_INFINITY)]);
+    }
+
     // V6: the rung witness records completion + node usage for every executed rung.
     #[test]
     fn rung_stats_record_completion_and_node_usage() {
@@ -18375,7 +18457,7 @@ one on the bottom of your library.";
         let config = root_reuse_config();
         let session = AiSession::arc_from_game(&state);
         assert!(
-            fast_priority_action(&state, PlayerId(0), &config, &session).is_none(),
+            fast_priority_action(&state, PlayerId(0), &config, &session, None).is_none(),
             "fixture: the priority shortcut is absent, so the decision is scored"
         );
 
@@ -18388,6 +18470,272 @@ one on the bottom of your library.";
             root_witnesses(),
             (0, 0),
             "the scorer must reuse the chooser's contract and shortcut result"
+        );
+    }
+
+    /// A forced pass is answered from the chooser's issued contract: the
+    /// priority shortcut does not enumerate and validate the flat priority
+    /// actions a second time. Fails on revert of the issued-contract check.
+    #[test]
+    fn priority_shortcut_passes_from_the_issued_contract_without_revalidating() {
+        let state = make_state();
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        assert_eq!(
+            fast_priority_action(&state, PlayerId(0), &config, &session, Some(&contract)),
+            Some(GameAction::PassPriority)
+        );
+        assert_eq!(
+            FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
+            0,
+            "a pass found over the issued contract must not re-enumerate the domain"
+        );
+
+        // Reach-guard and equivalence: without a contract the same pass comes
+        // from the validated list.
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        assert_eq!(
+            fast_priority_action(&state, PlayerId(0), &config, &session, None),
+            Some(GameAction::PassPriority)
+        );
+        assert_eq!(
+            FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
+            1
+        );
+    }
+
+    /// Without the engine's pass authority the validated list may drop
+    /// `PassPriority`, so an issued contract must not answer the pass. This test
+    /// builds the parked cost resume case;
+    /// `priority_shortcut_never_passes_through_a_divergence_obligation` covers
+    /// the CR 732.2c divergence obligation, and a CR 723.5 submitter mismatch is
+    /// the third case. Fails on revert of the pass-authority guard.
+    #[test]
+    fn priority_shortcut_without_pass_authority_defers_to_the_validated_list() {
+        let mut state = make_state();
+        state.pending_cost_move_resume =
+            Some(engine::types::game_state::PendingCostMoveResume::Foretell {
+                player: PlayerId(0),
+                object_id: engine::types::identifiers::ObjectId(1),
+                cost: engine::types::mana::ManaCost::NoCost,
+                turn_foretold: 1,
+            });
+        assert!(
+            !engine::game::priority::pass_priority_structurally_legal(&state, PlayerId(0)),
+            "reach-guard: the parked resume withholds the pass authority"
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        assert_eq!(
+            fast_priority_action(&state, PlayerId(0), &config, &session, Some(&contract)),
+            fast_priority_action(&state, PlayerId(0), &config, &session, None),
+        );
+        assert_eq!(
+            FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
+            2,
+            "both calls must reach the validated list"
+        );
+    }
+
+    /// P1 at priority under a CR 732.2c divergence obligation: P0 casts Chain of
+    /// Smog with Witherbloom Apprentice in play, proposes the pre-cast copy
+    /// shortcut, and P1 shortens it at P1's breakpoint.
+    fn divergence_latched_priority_state() -> GameState {
+        use std::path::Path;
+
+        use engine::database::card_db::CardDatabase;
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::actions::PrecastCopyShortcutResponse;
+        use engine::types::game_state::CastPaymentMode;
+        use engine::types::zones::Zone;
+
+        const CHAIN_OF_SMOG: &str =
+            "Target player discards two cards. That player may copy this spell and may choose a new target for that copy.";
+
+        let db = CardDatabase::from_mtgjson(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/mtgjson/test_fixture.json"),
+        )
+        .expect("test fixture must contain Witherbloom Apprentice");
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_real_card(P0, "Witherbloom Apprentice", Zone::Battlefield, &db);
+        let chain = scenario
+            .add_spell_to_hand_from_oracle(P0, "Chain of Smog", false, CHAIN_OF_SMOG)
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&chain].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: chain,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("Chain enters the normal target-selection pipeline");
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Player(P0)),
+            })
+            .expect("Chain can target its caster");
+        let WaitingFor::PrecastCopyShortcutOffer { epoch, .. } = runner.state().waiting_for else {
+            panic!(
+                "expected the pre-cast offer, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        runner
+            .act(GameAction::PrecastCopyShortcut {
+                epoch,
+                response: PrecastCopyShortcutResponse::Propose { route_id: epoch },
+            })
+            .expect("P0 proposes the route");
+        let breakpoint_id = match &runner.state().waiting_for {
+            WaitingFor::RespondToPrecastCopyShortcut {
+                player,
+                breakpoint_ids,
+                ..
+            } if *player == P1 => *breakpoint_ids.first().expect("P1 is issued a breakpoint"),
+            other => panic!("expected P1's shortcut response, got {other:?}"),
+        };
+        runner
+            .act(GameAction::PrecastCopyShortcut {
+                epoch,
+                response: PrecastCopyShortcutResponse::Shorten { breakpoint_id },
+            })
+            .expect("P1 shortens at its breakpoint");
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+            "expected P1's priority window, got {:?}",
+            runner.state().waiting_for
+        );
+        runner.state().clone()
+    }
+
+    /// CR 732.2c: the player who shortened a pre-cast copy shortcut must diverge,
+    /// so the reducer rejects their pass and the validated list omits it, while
+    /// the issued contract still carries `PassPriority`. Answering the low-value
+    /// pass from the contract would propose an illegal action. Fails on revert of
+    /// the pass-authority guard.
+    #[test]
+    fn priority_shortcut_never_passes_through_a_divergence_obligation() {
+        let state = divergence_latched_priority_state();
+        let p1 = PlayerId(1);
+        assert!(
+            !engine::game::priority::pass_priority_structurally_legal(&state, p1),
+            "reach-guard: the divergence obligation withholds the pass authority"
+        );
+        assert!(
+            !engine::ai_support::legal_actions(&state).contains(&GameAction::PassPriority),
+            "reach-guard: the validated domain omits the pass"
+        );
+        let contract = AiDecisionContract::issue(&state, p1);
+        assert!(
+            contract
+                .candidates
+                .iter()
+                .any(|candidate| matches!(candidate.action, GameAction::PassPriority)),
+            "reach-guard: the issued contract still carries the pass"
+        );
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+
+        let answer = fast_priority_action(&state, p1, &config, &session, Some(&contract));
+        assert_eq!(
+            answer,
+            fast_priority_action(&state, p1, &config, &session, None)
+        );
+        assert_ne!(answer, Some(GameAction::PassPriority));
+    }
+
+    /// The chooser hands its issued contract to the priority shortcut, so a
+    /// forced pass is decided without re-enumerating the priority domain.
+    /// Fails if the chooser's call site stops passing the contract.
+    #[test]
+    fn chooser_answers_a_forced_pass_without_revalidating() {
+        let state = make_state();
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        assert_eq!(
+            choose_action(
+                &state,
+                PlayerId(0),
+                &config,
+                &mut SmallRng::seed_from_u64(1)
+            ),
+            Some(GameAction::PassPriority)
+        );
+        assert_eq!(
+            FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
+            0
+        );
+    }
+
+    /// The scorer core reuses the chooser's contract when it reruns the
+    /// priority shortcut. Fails if the scorer's call site stops passing it.
+    #[test]
+    fn scorer_reruns_the_priority_shortcut_from_the_chooser_contract() {
+        let state = make_state();
+        let config = create_config(AiDifficulty::Medium, Platform::Native);
+        let session = AiSession::arc_from_game(&state);
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        let scored = score_candidates_core_for_root(
+            &state,
+            PlayerId(0),
+            &config,
+            &session,
+            None,
+            RootReuse::FromChooser {
+                contract: &contract,
+                priority_shortcut: RootPriorityShortcut::Recompute,
+            },
+        );
+        assert!(
+            scored
+                .iter()
+                .any(|(action, _)| matches!(action, GameAction::PassPriority)),
+            "reach-guard: the forced pass is scored: {scored:?}"
+        );
+        assert_eq!(
+            FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
+            0
+        );
+    }
+
+    /// An issued contract holding a real choice leaves the decision to the
+    /// validated list, with the same answer as having no contract.
+    #[test]
+    fn priority_shortcut_with_an_issued_choice_falls_through_to_the_validated_list() {
+        let state = searchable_state();
+        let config = root_reuse_config();
+        let session = AiSession::arc_from_game(&state);
+        let contract = AiDecisionContract::issue(&state, PlayerId(0));
+        assert!(
+            contract
+                .candidates
+                .iter()
+                .any(|candidate| matches!(candidate.action, GameAction::CastSpell { .. })),
+            "fixture: the contract issues a cast"
+        );
+
+        FAST_PRIORITY_DOMAIN_VALIDATIONS.with(|count| count.set(0));
+        assert_eq!(
+            fast_priority_action(&state, PlayerId(0), &config, &session, Some(&contract)),
+            fast_priority_action(&state, PlayerId(0), &config, &session, None),
+        );
+        assert_eq!(
+            FAST_PRIORITY_DOMAIN_VALIDATIONS.with(std::cell::Cell::get),
+            2,
+            "both calls must reach the validated list"
         );
     }
 
@@ -18464,7 +18812,7 @@ one on the bottom of your library.";
 
             let session = AiSession::arc_from_game(&state);
             assert!(
-                fast_priority_action(&state, PlayerId(0), &config, &session).is_none(),
+                fast_priority_action(&state, PlayerId(0), &config, &session, None).is_none(),
                 "{name}: the absent shortcut is what the chooser would report"
             );
             let contract = AiDecisionContract::issue(&state, PlayerId(0));

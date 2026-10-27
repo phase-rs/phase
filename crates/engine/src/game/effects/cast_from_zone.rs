@@ -686,6 +686,7 @@ pub fn resolve(
     let (
         target_filter,
         without_paying,
+        mode,
         cast_transformed,
         alt_ability_cost,
         constraint,
@@ -697,6 +698,7 @@ pub fn resolve(
         Effect::CastFromZone {
             target,
             without_paying_mana_cost,
+            mode,
             cast_transformed,
             alt_ability_cost,
             constraint,
@@ -708,6 +710,7 @@ pub fn resolve(
         } => (
             target,
             *without_paying_mana_cost,
+            *mode,
             *cast_transformed,
             alt_ability_cost.clone(),
             constraint.clone(),
@@ -842,56 +845,15 @@ pub fn resolve(
             crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. }
         )
     {
-        let linked = crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
-        let current_linked_ids: Vec<_> = state
-            .last_zone_changed_ids
-            .iter()
-            .copied()
-            .filter(|id| linked.iter().any(|link| link.exiled_id == *id))
-            .collect();
-        let candidate_ids: Vec<_> = if current_linked_ids.is_empty() {
-            linked.iter().map(|link| link.exiled_id).collect()
-        } else {
-            current_linked_ids
-        };
-        // CR 607.2a + CR 608.2c: For an immediately chained "exiled this way"
-        // cast grant, bind the filter's object-scope reads to the current
-        // resolution's linked cards, not the source's lifetime exile pile.
-        let mut scoped_ability = ability.clone();
-        scoped_ability.set_unpinned_targets(
-            candidate_ids
-                .iter()
-                .copied()
-                .map(TargetRef::Object)
-                .collect(),
-        );
-        let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
-        target_ids = candidate_ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                state
-                    .objects
-                    .get(id)
-                    .is_some_and(|obj| obj.zone == Zone::Exile)
-                    && crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
-            })
-            .collect();
-        pool_is_linked_exile = !target_ids.is_empty();
-        // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora, Sovereign of
-        // the Deep) leave the looked-at cards in the library. `Dig { keep_count:
-        // 0 }` publishes them via `last_revealed_ids`, not exile links, but the
-        // parser still binds the cast step to `ExiledBySource`.
-        if target_ids.is_empty()
-            && !matches!(
-                driver,
-                crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. }
-            )
-            && !state.last_revealed_ids.is_empty()
-        {
-            used_last_revealed_library_fallback = true;
-            target_ids =
-                crate::game::filter::last_revealed_library_ids_matching(state, target_filter, &ctx);
+        match exiled_by_source_fallback_binding(state, ability, target_filter) {
+            ExiledBySourceBinding::LinkedExile(ids) => {
+                pool_is_linked_exile = !ids.is_empty();
+                target_ids = ids;
+            }
+            ExiledBySourceBinding::LookedAtLibrary(ids) => {
+                used_last_revealed_library_fallback = true;
+                target_ids = ids;
+            }
         }
     }
 
@@ -1152,10 +1114,30 @@ pub fn resolve(
     // `ExiledBySource` filter, or an `alt_ability_cost`) are also
     // `LingeringPermission`: the controller casts them during the granting
     // effect's own priority window.
+    //
+    // CR 701.18b + CR 608.2g + CR 305.2a: a free, no-duration single-card PLAY
+    // instruction (Hideaway's "you may play the exiled card without paying its
+    // mana cost"; Djinn of Wishes' "you may play that card without paying its
+    // mana cost") is a `DuringResolution` producer too: the card is played as
+    // the ability resolves — cast if it is a spell, played as a land if it is a
+    // land — never deferred to a later priority window ("You can't play it later
+    // in the turn", Djinn of Wishes ruling). `resolution_play_route` picks the
+    // route per card. CR 712.12: a land//land modal card keeps the lingering
+    // grant (`ResolutionPlayRoute::LingeringFaceElection`) until a
+    // resolution-owned land-face election exists (follow-up); with this gate
+    // suppressed it falls past the paid branch (`!without_paying`) and the
+    // per-opponent fanout (`is_per_opponent_target_fanout`) to
+    // `grant_lingering_permissions`, exactly as the lingering driver does.
+    let single_card = single_resolution_card(&target_ids);
+    let play_route = single_card
+        .filter(|_| mode.is_play())
+        .and_then(|id| state.objects.get(&id))
+        .map(resolution_play_route);
     let driver_free_cast = driver.is_during_resolution()
         && without_paying
         && alt_ability_cost.is_none()
-        && target_ids.len() == 1;
+        && single_card.is_some()
+        && play_route != Some(ResolutionPlayRoute::LingeringFaceElection);
 
     // CR 608.2g: A targeted immediate free-cast of a card in a graveyard must
     // be driven DURING resolution — the controller chooses whether to cast as
@@ -1172,6 +1154,10 @@ pub fn resolve(
     // its during-resolution offer is the paid branch below, reached through
     // the `DuringResolution` driver the parser now stamps on that shape
     // (issue #8775).
+    //
+    // `play_route` is never `LingeringFaceElection` here: this gate requires the
+    // Graveyard, which `resolution_play_route` excludes from that route by
+    // construction.
     let immediate_graveyard_free_cast = without_paying
         && alt_ability_cost.is_none()
         && duration.is_none()
@@ -1352,6 +1338,10 @@ pub fn resolve(
         if is_stack_spell_copy(state, target_ids[0]) {
             return cast_stack_spell_copy_during_resolution(state, ability, target_ids[0], events);
         }
+        // CR 701.18b + CR 305.9: a Play instruction plays a land card as a land.
+        if play_route == Some(ResolutionPlayRoute::PlayLand) {
+            return play_land_during_resolution_instruction(state, ability, target_ids[0], events);
+        }
         return cast_single_target_during_resolution(
             state,
             ability,
@@ -1381,6 +1371,160 @@ pub fn resolve(
         }
     }
 
+    Ok(())
+}
+
+/// The cards an unbound "the exiled card" instruction binds, by authority.
+pub(crate) enum ExiledBySourceBinding {
+    /// CR 406.6 + CR 607.2a: the source's linked exiled cards (narrowed to this
+    /// resolution's own exile when it produced one) that match the filter.
+    LinkedExile(Vec<ObjectId>),
+    /// CR 701.20e: a look-then-cast chain's looked-at library cards
+    /// (`last_revealed_ids`), which the parser still binds to `ExiledBySource`.
+    LookedAtLibrary(Vec<ObjectId>),
+}
+
+/// CR 406.6 + CR 607.2a + CR 608.2c (+ CR 701.20e for the look-cast library
+/// form): the cards an unbound `ExiledBySource` cast/play instruction binds as
+/// it resolves. The single binding authority read by [`resolve`] (no-target,
+/// non-`ResolutionWindow` arm) and by the optional-effect feasibility probe, so
+/// the probe asks about exactly the cards resolution would act on.
+pub(crate) fn exiled_by_source_fallback_binding(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+) -> ExiledBySourceBinding {
+    let linked = crate::game::players::linked_exile_cards_for_source(state, ability.source_id);
+    let current_linked_ids: Vec<_> = state
+        .last_zone_changed_ids
+        .iter()
+        .copied()
+        .filter(|id| linked.iter().any(|link| link.exiled_id == *id))
+        .collect();
+    let candidate_ids: Vec<_> = if current_linked_ids.is_empty() {
+        linked.iter().map(|link| link.exiled_id).collect()
+    } else {
+        current_linked_ids
+    };
+    // CR 607.2a + CR 608.2c: For an immediately chained "exiled this way"
+    // cast grant, bind the filter's object-scope reads to the current
+    // resolution's linked cards, not the source's lifetime exile pile.
+    let mut scoped_ability = ability.clone();
+    scoped_ability.set_unpinned_targets(
+        candidate_ids
+            .iter()
+            .copied()
+            .map(TargetRef::Object)
+            .collect(),
+    );
+    let ctx = crate::game::filter::FilterContext::from_ability(&scoped_ability);
+    let linked_ids: Vec<_> = candidate_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == Zone::Exile)
+                && crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
+        })
+        .collect();
+    // CR 701.20e + CR 608.2c: Look-then-cast chains (Kiora, Sovereign of
+    // the Deep) leave the looked-at cards in the library. `Dig { keep_count:
+    // 0 }` publishes them via `last_revealed_ids`, not exile links, but the
+    // parser still binds the cast step to `ExiledBySource`.
+    if linked_ids.is_empty() && !state.last_revealed_ids.is_empty() {
+        return ExiledBySourceBinding::LookedAtLibrary(
+            crate::game::filter::last_revealed_library_ids_matching(state, target_filter, &ctx),
+        );
+    }
+    ExiledBySourceBinding::LinkedExile(linked_ids)
+}
+
+/// CR 608.2g + CR 701.18b: the cardinality authority for a free
+/// `DuringResolution` instruction. It executes as the ability resolves only for
+/// exactly one bound card; any other binding of a free instruction (e.g. a
+/// plural "them", or a linked exile holding several cards) takes
+/// [`grant_lingering_permissions`]. Read by
+/// both [`resolve`] and the optional-effect feasibility probe so they cannot
+/// disagree about which route a binding takes.
+pub(crate) fn single_resolution_card(target_ids: &[ObjectId]) -> Option<ObjectId> {
+    match target_ids {
+        [id] => Some(*id),
+        _ => None,
+    }
+}
+
+/// CR 701.18b: how a free single-card Play instruction executes for one card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResolutionPlayRoute {
+    /// CR 608.2g: cast as a spell during resolution (CR 712.8a: by the face it
+    /// has where it is).
+    CastSpell,
+    /// CR 305.2a + CR 305.9: played as a land during resolution.
+    PlayLand,
+    /// CR 712.12: a land//land modal DFC (front face and back face both lands),
+    /// whose land face the player may choose, bound in any zone the lingering
+    /// grant serves (exiled Hideaway card in place; library-revealed Djinn-class
+    /// card delivered to exile by `grant_lingering_permissions`). No
+    /// resolution-owned prompt can elect a land face yet, so it keeps the
+    /// pre-existing lingering grant, whose PlayLand authority admits it (its front
+    /// face is a Land) and opens `ModalFaceChoice` (follow-up: resolution-owned
+    /// land-face election). A spell//land MDFC is not this route: it is cast by its
+    /// front face (CR 712.8a). Never returned for the Graveyard: base takes the
+    /// immediate graveyard route there (`immediate_graveyard_free_cast`) and
+    /// never lingers.
+    LingeringFaceElection,
+}
+
+/// CR 701.18b + CR 712.8a + CR 712.12: the one per-card dispatch authority for a
+/// free single-card Play instruction, read by both [`resolve`] and the
+/// optional-effect feasibility probe so they cannot disagree.
+pub(crate) fn resolution_play_route(
+    obj: &crate::game::game_object::GameObject,
+) -> ResolutionPlayRoute {
+    let front_is_land = obj
+        .card_types
+        .core_types
+        .contains(&crate::types::card_type::CoreType::Land);
+    // CR 712.12: zone-independent except the Graveyard (see the variant doc),
+    // and land//land only — the front face must also be a Land.
+    if obj.zone != Zone::Graveyard
+        && front_is_land
+        && crate::game::engine::modal_land_face_election_available(obj)
+    {
+        ResolutionPlayRoute::LingeringFaceElection
+    } else if front_is_land {
+        ResolutionPlayRoute::PlayLand
+    } else {
+        ResolutionPlayRoute::CastSpell
+    }
+}
+
+/// CR 701.18b + CR 305.2a: execute a Play instruction for a land card by
+/// playing it as the ability resolves. A refused play (CR 305.2b / CR 305.3)
+/// is ignored; a pending entry choice becomes the resolution's prompt
+/// (CR 614.12a).
+fn play_land_during_resolution_instruction(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    card: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::CastFromZone,
+        source_id: ability.source_id,
+        subject: None,
+    });
+    match crate::game::engine::play_land_during_resolution(state, ability.controller, card, events)
+    {
+        None
+        | Some(crate::game::engine::LandPlayCommit::Entered)
+        | Some(crate::game::engine::LandPlayCommit::Prevented) => {}
+        Some(crate::game::engine::LandPlayCommit::AwaitingEntryChoice(waiting_for)) => {
+            state.waiting_for = *waiting_for;
+        }
+    }
     Ok(())
 }
 
@@ -6485,5 +6629,328 @@ mod tests {
             ),
             other => panic!("expected FreeCastWindow, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 701.18b: a free no-duration Play instruction resolves now (B1–B6)
+    // -----------------------------------------------------------------------
+
+    fn play_now_ability(card: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            vec![TargetRef::Object(card)],
+            ObjectId(999),
+            PlayerId(0),
+        )
+    }
+
+    fn play_now_state() -> GameState {
+        let mut state = make_test_state();
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.phase = crate::types::phase::Phase::PreCombatMain;
+        state
+    }
+
+    fn set_front_types(state: &mut GameState, id: ObjectId, core: CoreType) {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![core];
+        obj.base_card_types = obj.card_types.clone();
+    }
+
+    fn set_back_face(state: &mut GameState, id: ObjectId, core: CoreType, layout: LayoutKind) {
+        let mut card_types = crate::types::card_type::CardType::default();
+        card_types.core_types.push(core);
+        state.objects.get_mut(&id).unwrap().back_face =
+            Some(crate::game::game_object::BackFaceData {
+                name: "Back Face".to_string(),
+                card_types,
+                layout_kind: Some(layout),
+                ..Default::default()
+            });
+    }
+
+    fn add_exiled_land(state: &mut GameState, card_id: CardId) -> ObjectId {
+        let id = add_card_to_exile(state, PlayerId(0), card_id);
+        set_front_types(state, id, CoreType::Land);
+        state.objects.get_mut(&id).unwrap().mana_cost = ManaCost::NoCost;
+        id
+    }
+
+    fn has_lingering_play_grant(state: &GameState, id: ObjectId) -> bool {
+        let permissions = &state.objects[&id].casting_permissions;
+        permissions.iter().any(|p| {
+            matches!(
+                p,
+                CastingPermission::ExileWithAltCost { duration: None, .. }
+            )
+        }) && permissions
+            .iter()
+            .any(|p| matches!(p, CastingPermission::PlayFromExile { .. }))
+    }
+
+    /// B1 — CR 701.18b + CR 305.2a: the bound land is played as the ability
+    /// resolves; no permission lingers.
+    #[test]
+    fn play_now_plays_an_exiled_land_during_resolution() {
+        let mut state = play_now_state();
+        let land = add_exiled_land(&mut state, CardId(9_101));
+        let mut events = vec![];
+        resolve(&mut state, &play_now_ability(land), &mut events).unwrap();
+        assert_eq!(state.objects[&land].zone, Zone::Battlefield);
+        assert_eq!(state.lands_played_this_turn, 1);
+        assert!(state.objects[&land].casting_permissions.is_empty());
+    }
+
+    /// B2 — CR 305.2b: at the allowance the instruction is ignored; the ability
+    /// still resolves and nothing lingers.
+    #[test]
+    fn play_now_ignores_a_land_at_the_allowance() {
+        let mut state = play_now_state();
+        state.lands_played_this_turn = 1;
+        state.players[0].lands_played_this_turn = 1;
+        let land = add_exiled_land(&mut state, CardId(9_102));
+        let mut events = vec![];
+        resolve(&mut state, &play_now_ability(land), &mut events).unwrap();
+        assert_eq!(state.objects[&land].zone, Zone::Exile);
+        assert!(state.objects[&land].casting_permissions.is_empty());
+        assert_eq!(state.lands_played_this_turn, 1);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::CastFromZone,
+                ..
+            }
+        )));
+    }
+
+    /// B3 — CR 608.2g: a bound spell is cast during resolution.
+    #[test]
+    fn play_now_casts_an_exiled_instant_during_resolution() {
+        let mut state = play_now_state();
+        let instant = add_card_to_exile(&mut state, PlayerId(0), CardId(9_103));
+        set_front_types(&mut state, instant, CoreType::Instant);
+        let mut events = vec![];
+        resolve(&mut state, &play_now_ability(instant), &mut events).unwrap();
+        assert_eq!(state.objects[&instant].zone, Zone::Stack);
+    }
+
+    /// B3m — CR 712.8a + CR 608.2g: a spell//land MDFC is cast by its front face
+    /// during resolution; no lingering grant remains.
+    #[test]
+    fn play_now_casts_a_spell_land_modal_card_by_its_front_face() {
+        let mut state = play_now_state();
+        let card = add_card_to_exile(&mut state, PlayerId(0), CardId(9_104));
+        set_front_types(&mut state, card, CoreType::Instant);
+        set_back_face(&mut state, card, CoreType::Land, LayoutKind::Modal);
+        let mut events = vec![];
+        resolve(&mut state, &play_now_ability(card), &mut events).unwrap();
+        assert_eq!(state.objects[&card].zone, Zone::Stack);
+        assert!(
+            !state.objects[&card]
+                .casting_permissions
+                .iter()
+                .any(|p| matches!(
+                    p,
+                    CastingPermission::ExileWithAltCost { .. }
+                        | CastingPermission::PlayFromExile { .. }
+                )),
+            "the front face was cast; no lingering grant remains"
+        );
+    }
+
+    /// B3l — CR 712.12: a land//land modal card keeps the lingering grant (the
+    /// land-face election fallback); it is not played during resolution.
+    #[test]
+    fn play_now_keeps_a_land_land_modal_card_on_the_lingering_grant() {
+        let mut state = play_now_state();
+        let card = add_exiled_land(&mut state, CardId(9_105));
+        set_back_face(&mut state, card, CoreType::Land, LayoutKind::Modal);
+        let mut events = vec![];
+        resolve(&mut state, &play_now_ability(card), &mut events).unwrap();
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert!(has_lingering_play_grant(&state, card));
+        assert_eq!(state.lands_played_this_turn, 0);
+    }
+
+    /// B4 — CR 611.2a: a stated duration stays a lingering grant and both halves
+    /// carry it.
+    #[test]
+    fn play_mode_with_stated_duration_stamps_until_end_of_turn_on_both_halves() {
+        let mut state = make_test_state();
+        let obj_id = add_card_to_exile(&mut state, PlayerId(1), CardId(9_106));
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::Any,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: Some(Duration::UntilEndOfTurn),
+                driver: CastFromZoneDriver::LingeringPermission,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            vec![TargetRef::Object(obj_id)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let permissions = &state.objects[&obj_id].casting_permissions;
+        assert!(permissions.iter().any(|p| matches!(
+            p,
+            CastingPermission::ExileWithAltCost {
+                duration: Some(Duration::UntilEndOfTurn),
+                ..
+            }
+        )));
+        assert!(permissions.iter().any(|p| matches!(
+            p,
+            CastingPermission::PlayFromExile {
+                duration: Duration::UntilEndOfTurn,
+                ..
+            }
+        )));
+    }
+
+    /// B5 — CR 406.6 + CR 607.2a + CR 701.20e: the unbound "the exiled card"
+    /// binding reads the source's live exile link, else the looked-at library.
+    #[test]
+    fn exiled_by_source_fallback_binding_prefers_linked_exile_then_library_look() {
+        let mut state = make_test_state();
+        let source = create_object(
+            &mut state,
+            CardId(9_107),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land = add_exiled_land(&mut state, CardId(9_108));
+        state.exile_links.push(ExileLink {
+            exiled_id: land,
+            source_id: source,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        let ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: TargetFilter::ExiledBySource,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        match exiled_by_source_fallback_binding(&state, &ability, &TargetFilter::ExiledBySource) {
+            ExiledBySourceBinding::LinkedExile(ids) => assert_eq!(ids, vec![land]),
+            ExiledBySourceBinding::LookedAtLibrary(_) => panic!("a live link binds the exile"),
+        }
+
+        state.exile_links.clear();
+        let looked = create_object(
+            &mut state,
+            CardId(9_109),
+            PlayerId(0),
+            "Looked Card".to_string(),
+            Zone::Library,
+        );
+        state.last_revealed_ids = vec![looked];
+        assert!(matches!(
+            exiled_by_source_fallback_binding(&state, &ability, &TargetFilter::ExiledBySource),
+            ExiledBySourceBinding::LookedAtLibrary(_)
+        ));
+    }
+
+    /// B6 — CR 701.18b + CR 712.8a + CR 712.12: the per-card Play route. Only a
+    /// land//land MODAL card outside the graveyard keeps the lingering grant.
+    #[test]
+    fn resolution_play_route_classifies_each_card_by_front_face_layout_and_zone() {
+        let mut state = make_test_state();
+        let route = |state: &GameState, id: ObjectId| resolution_play_route(&state.objects[&id]);
+
+        let land = add_exiled_land(&mut state, CardId(9_110));
+        assert_eq!(route(&state, land), ResolutionPlayRoute::PlayLand);
+
+        let instant = add_card_to_exile(&mut state, PlayerId(0), CardId(9_111));
+        set_front_types(&mut state, instant, CoreType::Instant);
+        assert_eq!(route(&state, instant), ResolutionPlayRoute::CastSpell);
+
+        let spell_land = add_card_to_exile(&mut state, PlayerId(0), CardId(9_112));
+        set_front_types(&mut state, spell_land, CoreType::Instant);
+        set_back_face(&mut state, spell_land, CoreType::Land, LayoutKind::Modal);
+        assert_eq!(route(&state, spell_land), ResolutionPlayRoute::CastSpell);
+
+        let land_land = add_exiled_land(&mut state, CardId(9_113));
+        set_back_face(&mut state, land_land, CoreType::Land, LayoutKind::Modal);
+        assert_eq!(
+            route(&state, land_land),
+            ResolutionPlayRoute::LingeringFaceElection
+        );
+
+        let library_land_land = create_object(
+            &mut state,
+            CardId(9_114),
+            PlayerId(0),
+            "Library Pathway".to_string(),
+            Zone::Library,
+        );
+        set_front_types(&mut state, library_land_land, CoreType::Land);
+        set_back_face(
+            &mut state,
+            library_land_land,
+            CoreType::Land,
+            LayoutKind::Modal,
+        );
+        assert_eq!(
+            route(&state, library_land_land),
+            ResolutionPlayRoute::LingeringFaceElection
+        );
+
+        let graveyard_land_land = add_card_to_graveyard(&mut state, PlayerId(0), CardId(9_115));
+        set_front_types(&mut state, graveyard_land_land, CoreType::Land);
+        set_back_face(
+            &mut state,
+            graveyard_land_land,
+            CoreType::Land,
+            LayoutKind::Modal,
+        );
+        assert_eq!(
+            route(&state, graveyard_land_land),
+            ResolutionPlayRoute::PlayLand
+        );
+
+        // A Transform land-front / land-back card is not modal (CR 712.8a): it is
+        // played by its front face as a land.
+        let transform_land = add_exiled_land(&mut state, CardId(9_116));
+        set_back_face(
+            &mut state,
+            transform_land,
+            CoreType::Land,
+            LayoutKind::Transform,
+        );
+        assert_eq!(route(&state, transform_land), ResolutionPlayRoute::PlayLand);
     }
 }

@@ -67549,8 +67549,7 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
 /// the single authority the stack-time slot builder consults.
 #[test]
 fn prevent_recipient_scope_classification() {
-    // (oracle clause, scope, mints a declared slot, expected announced count)
-    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
+    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 9] = [
         (
             "Prevent all damage that would be dealt to target creature this turn.",
             EffectScope::Single,
@@ -67571,6 +67570,12 @@ fn prevent_recipient_scope_classification() {
         ),
         (
             "Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent the next 2 damage that would be dealt to any target this turn.",
             EffectScope::Single,
             true,
             None,
@@ -94909,6 +94914,192 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         );
         assert!(unimplemented, "{text}: {def:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 701.18b + CR 608.2g: a free, no-duration single-card Play resolves now
+// ---------------------------------------------------------------------------
+
+fn first_cast_from_zone(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    if matches!(&*def.effect, Effect::CastFromZone { .. }) {
+        return Some(def);
+    }
+    def.sub_ability.as_deref().and_then(first_cast_from_zone)
+}
+
+/// P1 — Hideaway's "You may play the exiled card without paying its mana cost"
+/// (verbatim, Shelldock Isle) selects the during-resolution driver: playing a
+/// card is casting it or playing it as a land (CR 701.18b), as the ability
+/// resolves (CR 608.2g + CR 305.2a).
+#[test]
+fn hideaway_free_play_of_the_exiled_card_resolves_now() {
+    let parsed = parse_oracle_text(
+        "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\n\
+         This land enters tapped.\n\
+         {T}: Add {U}.\n\
+         {U}, {T}: You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
+        "Shelldock Isle",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let cast = parsed
+        .abilities
+        .iter()
+        .find_map(first_cast_from_zone)
+        .expect("Shelldock Isle's play ability lowers to CastFromZone");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                mode: Play,
+                target: TargetFilter::ExiledBySource,
+                without_paying_mana_cost: true,
+                duration: None,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+}
+
+/// P2 — Djinn of Wishes (verbatim): "You may play that card without paying its
+/// mana cost. If you don't, exile it." The play resolves now; the decline
+/// branch is the `Not(OptionalEffectPerformed)`-gated exile (CR 608.2c).
+#[test]
+fn djinn_of_wishes_free_play_resolves_now_with_a_decline_exile() {
+    let parsed = parse_oracle_text(
+        "Flying\nThis creature enters with three wish counters on it.\n\
+         {2}{U}{U}, Remove a wish counter from this creature: Reveal the top card of your library. You may play that card without paying its mana cost. If you don't, exile it.",
+        "Djinn of Wishes",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Djinn".to_string()],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|def| first_cast_from_zone(def).is_some())
+        .expect("Djinn's activated ability");
+    assert!(
+        !chain_has_unimplemented(activated),
+        "reach-guard: the whole chain parses"
+    );
+    let cast = first_cast_from_zone(activated).unwrap();
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                mode: Play,
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+    assert!(cast.optional, "\"You may\" is optional");
+    let decline = cast
+        .sub_ability
+        .as_deref()
+        .expect("the If you don't branch");
+    assert!(
+        matches!(
+            &*decline.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "got {:?}",
+        decline.effect
+    );
+    assert!(decline
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_not_optional_effect_performed));
+}
+
+/// P3 — the forms that do NOT resolve a Play now, each paired with a positive
+/// `CastFromZone { mode: Play }` reach.
+#[test]
+fn durational_and_batch_play_forms_keep_their_drivers() {
+    // (a) A leading duration keeps the lingering grant (CR 611.2a).
+    let def = parse_effect_chain(
+        "Exile the top card. Until end of turn, you may play that card without paying its mana cost.",
+        AbilityKind::Activated,
+    );
+    let cast = first_cast_from_zone(&def).expect("leading-duration play");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                mode: Play,
+                driver: LingeringPermission,
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+
+    // (b) A trailing "this turn" keeps the lingering grant too.
+    let effect = parse_effect("you may play that card without paying its mana cost this turn");
+    assert!(
+        matches!(
+            &effect,
+            Effect::CastFromZone {
+                mode: Play,
+                duration: Some(Duration::UntilEndOfTurn),
+                driver: LingeringPermission,
+                ..
+            }
+        ),
+        "got {effect:?}"
+    );
+
+    // (c) The free plural "them" anaphor selects the during-resolution driver;
+    // the runtime single-target gate (`target_ids.len() == 1`) keeps a
+    // multi-card binding on the lingering grant.
+    let effect = parse_effect("you may play them without paying their mana costs");
+    assert!(
+        matches!(
+            &effect,
+            Effect::CastFromZone {
+                mode: Play,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {effect:?}"
+    );
+
+    // (d) "one of those two cards" Play has no resolution-scoped batch window
+    // that plays lands: it stays an honest gap.
+    let effect = parse_effect("you may play one of those two cards without paying its mana cost");
+    assert!(
+        matches!(&effect, Effect::Unimplemented { name, .. } if name == "bounded_batch_cast"),
+        "got {effect:?}"
+    );
+
+    // (e) The Cast sibling is unchanged.
+    let effect = parse_effect("you may cast that card without paying its mana cost");
+    assert!(
+        matches!(
+            &effect,
+            Effect::CastFromZone {
+                mode: Cast,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {effect:?}"
+    );
 }
 
 /// CR 701.24c + CR 400.6: "Shuffle ~ and your graveyard into their owner's

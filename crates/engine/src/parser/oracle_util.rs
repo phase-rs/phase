@@ -1330,6 +1330,9 @@ pub const SELF_REF_TYPE_PHRASES: &[&str] = &[
     "this class",
     "this case",
     "this room",
+    // CR 615.2: prevention effects apply to damage from a source; a source-scoped
+    // shield can name its own source with "this source" (Barbed Wire).
+    "this source",
 ];
 
 /// CR 201.5: Self-reference phrases recognized by parsers but NOT safe for `~` normalization.

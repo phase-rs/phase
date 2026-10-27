@@ -301,6 +301,40 @@ impl PlayTraceCounters {
     }
 }
 
+/// Test-only counters for the CR 733.1 cast-undo record
+/// (`engine_casting::record_spell_cast_undo`): the changed-member values it
+/// builds and what they serialize. Kept out of [`PerfCounterSnapshot`], whose
+/// serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CastUndoRecordCounters {
+    /// CR 733.1: changed-member cast-undo values built by `record_spell_cast_undo` (two per recorded step).
+    pub values: u64,
+    /// Game objects serialized into those values.
+    pub objects: u64,
+    /// Deck-pool entries serialized into those values.
+    pub deck_pool_entries: u64,
+    /// Recorded steps also computed over the complete states and compared (`CastUndoReferenceCheck`).
+    pub reference_checks: u64,
+    /// Of those, steps that folded a cast-start boundary rather than the prior reversal.
+    pub cast_start_reference_checks: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl CastUndoRecordCounters {
+    /// The counts accrued since `earlier`, a snapshot taken on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            values: self.values - earlier.values,
+            objects: self.objects - earlier.objects,
+            deck_pool_entries: self.deck_pool_entries - earlier.deck_pool_entries,
+            reference_checks: self.reference_checks - earlier.reference_checks,
+            cast_start_reference_checks: self.cast_start_reference_checks
+                - earlier.cast_start_reference_checks,
+        }
+    }
+}
+
 /// One replay take: the count it was driven at, the cycles it delivered, the whole take's counts,
 /// and each delivered cycle's counts in order.
 #[cfg(feature = "test-support")]
@@ -519,6 +553,16 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static TRIGGER_INDEX_COUNTERS: Cell<TriggerIndexCounters> = const {
         Cell::new(TriggerIndexCounters { full_rebuilds: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
+        Cell::new(CastUndoRecordCounters {
+            values: 0,
+            objects: 0,
+            deck_pool_entries: 0,
+            reference_checks: 0,
+            cast_start_reference_checks: 0,
+        })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
 }
@@ -1149,6 +1193,8 @@ pub fn reset() {
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
     #[cfg(feature = "test-support")]
     TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
+    #[cfg(feature = "test-support")]
+    CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
 
 /// One committed bulk token run resolved `n` stack entries.
@@ -1189,4 +1235,41 @@ pub fn record_trigger_index_rebuild() {
 #[cfg(feature = "test-support")]
 pub fn trigger_index_snapshot() -> TriggerIndexCounters {
     TRIGGER_INDEX_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+fn with_cast_undo_record(f: impl FnOnce(&mut CastUndoRecordCounters)) {
+    CAST_UNDO_RECORD_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+/// CR 733.1: one changed-member cast-undo value holding `objects` game objects
+/// and `deck_pool_entries` deck pools.
+#[cfg(feature = "test-support")]
+pub fn record_cast_undo_value(objects: usize, deck_pool_entries: usize) {
+    with_cast_undo_record(|c| {
+        c.values += 1;
+        c.objects += objects as u64;
+        c.deck_pool_entries += deck_pool_entries as u64;
+    });
+}
+
+/// CR 733.1: one recorded step also computed over the complete states.
+#[cfg(feature = "test-support")]
+pub fn record_cast_undo_reference_check() {
+    with_cast_undo_record(|c| c.reference_checks += 1);
+}
+
+/// CR 733.1: one reference-checked step that folded a cast-start boundary.
+#[cfg(feature = "test-support")]
+pub fn record_cast_undo_cast_start_reference_check() {
+    with_cast_undo_record(|c| c.cast_start_reference_checks += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn cast_undo_record_snapshot() -> CastUndoRecordCounters {
+    CAST_UNDO_RECORD_COUNTERS.with(Cell::get)
 }

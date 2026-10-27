@@ -207,6 +207,7 @@ pub fn roll_to_visit_attractions(
         results_table: Vec::new(),
         modifier: None,
         die_result: None,
+        trigger_context: None,
         continuation: DieRollContinuation::RollToVisitAttractions,
         // CR 608.2h: no resolution context — see the reach-guard comment above.
         chain_root_targets: Vec::new(),
