@@ -305,6 +305,52 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
     });
   });
 
+  // CR 608.2d + CR 115.10a: a single-pick resolution choice is answered by one
+  // board click, so a collapsed pile must offer its eligible members through the
+  // picker. The identical payload as a multi-pick keeps the modal: no picker.
+  it("dispatches a single-pick object selection from the collapsed picker", () => {
+    const selection = (max: number | undefined): WaitingFor => ({
+      type: "ChooseObjectsSelection",
+      data: {
+        player: 0,
+        eligible: [
+          { Object: 1 },
+          { Object: 2 },
+          { Object: 3 },
+          { Object: 4 },
+          { Object: 5 },
+          { Player: 1 },
+        ],
+        min: 1,
+        ...(max === undefined ? {} : { max }),
+      },
+    });
+
+    for (const max of [2, undefined]) {
+      const waitingFor = selection(max);
+      useGameStore.setState({ gameState: makeState(waitingFor), waitingFor });
+      renderGroup({ validTargetObjectIds: new Set([1, 2, 3, 4, 5]) });
+      expect(
+        screen.queryByRole("button", { name: "Choose Saproling token" }),
+        `max ${max}`,
+      ).toBeNull();
+      cleanup();
+    }
+    expect(dispatchAction).not.toHaveBeenCalled();
+
+    const waitingFor = selection(1);
+    useGameStore.setState({ gameState: makeState(waitingFor), waitingFor });
+    renderGroup({ validTargetObjectIds: new Set([1, 2, 3, 4, 5]) });
+
+    fireEvent.click(screen.getByRole("button", { name: "Choose Saproling token" }));
+    fireEvent.click(screen.getByRole("button", { name: "#3" }));
+
+    expect(dispatchAction).toHaveBeenCalledWith({
+      type: "ChooseTarget",
+      data: { target: { Object: 3 } },
+    });
+  });
+
   it("dispatches a concrete equip target from the picker", () => {
     const waitingFor: WaitingFor = {
       type: "EquipTarget",

@@ -5516,6 +5516,7 @@ fn floating_replacement_can_name_object(
         runtime_execute,
         mode,
         valid_card,
+        triggering_spell,
         condition,
         damage_modification,
         damage_source_filter,
@@ -5558,6 +5559,8 @@ fn floating_replacement_can_name_object(
         || runtime_execute.is_some()
         || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
         || valid_card.is_some()
+        // Conservatively retain object-naming authority carried by the pin.
+        || triggering_spell.is_some()
         || condition.is_some()
         || damage_modification.is_some()
         || damage_source_filter.is_some()

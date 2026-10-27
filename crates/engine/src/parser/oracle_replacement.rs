@@ -6477,14 +6477,10 @@ enum CastEntersWithShape<'a> {
     /// graveyard. That <type> enters with …" — a cast trigger whose first
     /// instruction exiles its source and whose second gives the triggering
     /// spell's permanent its counters. The line is owned here so it fails closed
-    /// whole: no part of it is built. The floating rider binds the triggering
-    /// spell only by object id and re-checks the trigger's "you cast" spell
-    /// filter as the permanent enters. A spell that leaves the stack after the
-    /// trigger resolves and is cast again is a new object (CR 400.7) that could
-    /// still pick up the counter, and the original spell would lose it if
-    /// another player gained control of it before it resolved. Until the rider
-    /// carries the exact triggering spell, this form stays unsupported;
-    /// publishing the exile alone would drop the second instruction.
+    /// whole: no part of it is built. Entry riders carry the exact triggering
+    /// spell occurrence independently of continued control; this form still
+    /// needs ordered self-exile plus rider construction. Publishing the exile
+    /// alone would drop the second instruction, so the grammar stays unsupported.
     SelfExilePrelude,
 }
 
@@ -6842,13 +6838,13 @@ fn compose_cast_enters_with_tap(core: AbilityDefinition, tapped: bool) -> Abilit
 /// second qualifying flash creature in response — a bare filter-scoped
 /// one-shot install would let that INTERLOPING spell's battlefield entry
 /// consume the replacement first, leaving the original entrant uncountered.
-/// This is closed by AND-ing the spell filter with
-/// `TargetFilter::SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }` — a
-/// parse-time placeholder id that `Effect::AddTargetReplacement`'s resolve
-/// function (`add_target_replacement.rs`) concretizes to the SPECIFIC spell
-/// object named by `state.current_trigger_event` (this trigger's own
-/// originating `SpellCast` event — CR 603.2) at install time, so only that
-/// exact spell's entry can ever satisfy it.
+/// CR 400.7 + CR 109.5: keep cast qualification on the trigger alone. The
+/// rider instead carries `SpecificObject { id: TRIGGERING_SPELL_PLACEHOLDER }`;
+/// installation concretizes that selector and latches the resolving carrier's
+/// spell-incarnation pin from the same authority. Only that occurrence's
+/// pre-move entry can match, regardless of subsequent control changes.
+/// A missing or departed spell installs nothing; a recast cannot inherit an
+/// already-installed rider.
 /// CR 603.1 + CR 603.3: What the dispatcher learned about a
 /// `"Whenever you cast …, that … enters with …"` line.
 ///
@@ -6907,23 +6903,17 @@ pub(crate) fn parse_whenever_you_cast_enters_with_trigger(
     let norm_lower = normalized.to_lowercase();
 
     let (mut replacement, constraint) = parse_whenever_you_cast_enters_with(&norm_lower, &text)?;
-    let spell_filter = replacement.valid_card.clone()?;
+    let spell_filter = replacement.valid_card.take()?;
     // CR 614.1c: one qualifying entry, then gone — this floating install must
     // never persist to affect a second, later cast of the same shape.
     replacement.consume_on_apply = true;
-    // CR 603.2 + CR 117.3b: bind to the SPECIFIC spell that caused this trigger,
-    // not just any spell matching the type/mana-value filter — see the
-    // interleaving-flash-creature note in the doc comment above.
-    // `TRIGGERING_SPELL_PLACEHOLDER` is concretized to the real triggering
-    // spell's id (or `ObjectId(0)`, matching nothing) by
-    // `Effect::AddTargetReplacement`'s resolve function at install time.
-    replacement.valid_card = Some(TargetFilter::And {
-        filters: vec![
-            spell_filter.clone(),
-            TargetFilter::SpecificObject {
-                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
-            },
-        ],
+    // CR 603.2 + CR 109.5: "you cast" and the type/mana-value qualification
+    // belong to trigger observation, not a continued-control entry predicate.
+    // CR 400.7 + CR 614.1c: the entry rider names only that spell occurrence.
+    // AddTargetReplacement binds this selector and its pin from the resolving
+    // carrier at installation; departed or missing authority installs nothing.
+    replacement.valid_card = Some(TargetFilter::SpecificObject {
+        id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
     });
 
     let install = AbilityDefinition::new(
@@ -21463,9 +21453,17 @@ mod tests {
             let trigger = parse_whenever_you_cast_enters_with_trigger(text, card)
                 .unwrap_or_else(|| panic!("{card}: elided-count conjunct list must parse"));
             let def = cast_enters_install(trigger.execute.as_deref().expect("execute"));
+            let rider_filter = def.valid_card.as_ref().expect("valid_card set");
             assert!(
-                matches!(&def.valid_card, Some(TargetFilter::And { .. })),
-                "{card}: bound to the triggering spell"
+                crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                    filter,
+                    TargetFilter::SpecificObject { id }
+                        if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
+                )) && !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+                )),
+                "{card}: entry rider identifies the triggering spell and carries no continued-control predicate"
             );
             let mut cursor = Some(def.execute.as_deref().expect("execute ability"));
             for (index, counter) in expected.iter().enumerate() {
@@ -29223,10 +29221,10 @@ mod tests {
     /// with mana value 5 or greater, that creature enters with X additional
     /// +1/+1 counters on it, where X is its mana value minus 4.") parses into
     /// a `SpellCast` trigger (not a static replacement scoped to Runadi
-    /// herself — issue #6492 regression), whose resolution installs a
-    /// floating one-shot `ChangeZone` replacement gated on mana value >= 5,
-    /// with a composite offset quantity over the entering creature's own
-    /// mana value.
+    /// herself — issue #6492 regression), whose mana-value-qualified trigger
+    /// installs a floating one-shot `ChangeZone` replacement bound to the
+    /// triggering spell occurrence, with a composite offset quantity over the
+    /// entering creature's own mana value.
     #[test]
     fn parses_runadi_behemoth_caller_trigger() {
         let text = "Whenever you cast a creature spell with mana value 5 or greater, that creature enters with X additional +1/+1 counters on it, where X is its mana value minus 4.";
@@ -29270,27 +29268,23 @@ mod tests {
             "floating install must be one-shot, or it would apply to a later, \
              unrelated qualifying spell too"
         );
-        // valid_card must AND the spell filter with a `SpecificObject` leaf
-        // carrying the trigger-source placeholder — `Effect::AddTargetReplacement`
-        // concretizes this to the SPECIFIC triggering spell's id at install
-        // time, so a different qualifying creature entering during the
-        // post-trigger priority window can't steal the install.
-        let TargetFilter::And { filters } =
-            replacement.valid_card.as_ref().expect("valid_card set")
-        else {
-            panic!(
-                "expected valid_card to be an And{{spell filter, trigger-source \
-                 placeholder}}, got {:?}",
-                replacement.valid_card
-            );
-        };
+        // The trigger above retains cast qualification. The rider identifies
+        // the recipient without imposing continued installer control.
+        let rider_filter = replacement.valid_card.as_ref().expect("valid_card set");
         assert!(
-            filters.iter().any(|f| matches!(
-                f,
+            crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                filter,
                 TargetFilter::SpecificObject { id }
                     if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
             )),
-            "valid_card must carry the trigger-source placeholder, got {filters:?}"
+            "entry rider must identify the triggering spell: {rider_filter:?}"
+        );
+        assert!(
+            !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                filter,
+                TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
+            )),
+            "cast qualification must not become continued control: {rider_filter:?}"
         );
         assert_eq!(replacement.event, ReplacementEvent::ChangeZone);
         assert_eq!(replacement.destination_zone, Some(Zone::Battlefield));

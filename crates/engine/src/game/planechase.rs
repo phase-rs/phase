@@ -758,6 +758,10 @@ pub fn finish_player_left_game_handoff(
     // CR 901.11: player-left-game handoff after the starting plane is a real
     // planeswalk, so collect normal planeswalk/encounter triggers.
     crate::game::triggers::collect_triggers_into_deferred(state, &[event]);
+    // CR 603.2c: claim the occurrence for the ordinary collectors, so a scan of
+    // the departure's events doesn't collect its triggers a second time.
+    let planeswalked = events.len() - 1;
+    crate::game::triggers::claim_events_for_ordinary_collection(state, events, planeswalked);
 }
 
 /// CR 311.5: helper so callers can confirm an object is a plane/phenomenon

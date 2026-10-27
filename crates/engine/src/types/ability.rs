@@ -812,11 +812,23 @@ pub enum SearchSelectionConstraint {
     /// CR 107.1c: No restriction beyond `count` (and `up_to`).
     #[default]
     None,
-    /// CR 608.2c: The spell's printed text constrains the selected set by
-    /// object qualities — e.g. "with different names", "with different
-    /// powers", or "that don't share a mana value, power, toughness, or card
-    /// type with each other".
-    DistinctQualities { qualities: Vec<SharedQuality> },
+    /// CR 608.2c + CR 701.23a: The printed text restricts the chosen set by a
+    /// relation among the chosen cards themselves, for every listed quality.
+    /// `DoesNotShare`: no two chosen cards share a value ("with different
+    /// names", "with different powers", "that don't share a mana value, power,
+    /// toughness, or card type with each other"; CR 201.2b for names).
+    /// `Shares`: some value is common to every chosen card ("that share a land
+    /// type" — CR 205.3i); vacuously true for fewer than two cards. The two are
+    /// the English readings of their phrases, not complements for 3+ cards.
+    ///
+    /// Backward compat: deserializes the legacy `DistinctQualities` tag, whose
+    /// missing `relation` means `DoesNotShare`.
+    #[serde(alias = "DistinctQualities")]
+    SharesQualities {
+        qualities: Vec<SharedQuality>,
+        #[serde(default = "default_legacy_distinct_qualities_relation")]
+        relation: SharedQualityRelation,
+    },
     /// CR 608.2c + CR 202.3: The chosen set's combined mana value must satisfy
     /// the printed comparator. Used by "cards with total mana value N or less"
     /// tutor text, where the constraint applies across the selected set rather
@@ -7002,7 +7014,8 @@ pub enum SharedQuality {
     PermanentType,
 }
 
-/// Relationship required by `FilterProp::SharesQuality`.
+/// Relationship required by `FilterProp::SharesQuality` and
+/// `SearchSelectionConstraint::SharesQualities`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SharedQualityRelation {
     #[default]
@@ -9893,7 +9906,7 @@ pub enum QuantityRef {
     ///
     /// Lifts the legacy `ObjectCountDistinctNames` leaf to the same
     /// `Vec<SharedQuality>` axis already used by
-    /// `SearchSelectionConstraint::DistinctQualities` (Batch 1) so the
+    /// `SearchSelectionConstraint::SharesQualities` (Batch 1) so the
     /// count-expression and constraint sides share one quality vocabulary.
     ///
     /// Backward compat: deserializes from the legacy tag
@@ -22226,6 +22239,14 @@ fn default_unblocked_status() -> AttackerBlockStatus {
 /// `qualities` field; the count was always deduplicated by name.
 fn default_distinct_names() -> Vec<SharedQuality> {
     vec![SharedQuality::Name]
+}
+
+/// Backward-compat default for the legacy
+/// `SearchSelectionConstraint::DistinctQualities` shape, which had no
+/// `relation` field and always meant "no two share". NOT the type-level
+/// `SharedQualityRelation::default()` (`Shares`).
+fn default_legacy_distinct_qualities_relation() -> SharedQualityRelation {
+    SharedQualityRelation::DoesNotShare
 }
 
 /// Backward-compat loader for the legacy
@@ -35196,6 +35217,24 @@ pub struct ReplacementDefinition {
     pub choice_authority: ReplacementChoiceAuthority,
     #[serde(default)]
     pub valid_card: Option<TargetFilter>,
+    /// CR 400.7 + CR 614.1c: recipient spell occurrence for a cast-triggered
+    /// entry rider. Captured when the trigger goes on the stack and latched
+    /// unchanged from the resolving carrier when the rider is installed.
+    ///
+    /// Distinct from the installer's `source_object` / `source_controller`,
+    /// `granting_object`, and `runtime_execute`. Control changes do not change
+    /// the recipient. Installation requires the pinned spell still on the
+    /// stack; absent, departed, or mismatched authority installs nothing.
+    /// Applicability checks this pin against the pre-move object for a
+    /// stack-to-battlefield event, without requiring a surviving stack entry.
+    /// Leaving and recasting the same storage id never refreshes this pin.
+    ///
+    /// Pin-bearing riders must retain `valid_card: Some(...)`, whose matcher
+    /// enforces the identity gate. Older definitions default to no pin;
+    /// historical in-flight saves with installed raw-id riders cannot be
+    /// migrated because they never recorded the recipient incarnation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub triggering_spell: Option<ObjectIncarnationRef>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
@@ -35592,6 +35631,7 @@ impl ReplacementDefinition {
             mode: ReplacementMode::Mandatory,
             choice_authority: ReplacementChoiceAuthority::AffectedPlayer,
             valid_card: None,
+            triggering_spell: None,
             description: None,
             condition: None,
             destination_zone: None,

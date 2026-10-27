@@ -3,8 +3,9 @@ use std::{borrow::Cow, ops::ControlFlow};
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while};
-use nom::character::complete::multispace0;
-use nom::combinator::{all_consuming, map, opt, value};
+use nom::character::complete::{anychar, multispace0};
+use nom::combinator::{all_consuming, map, not, opt, recognize, value};
+use nom::multi::{many1, separated_list1};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
@@ -12123,6 +12124,70 @@ fn parse_activation_timing_restriction(phrase: &str) -> Option<Vec<ActivationRes
     None
 }
 
+/// The item separator of a compound "Activate only <A>, only <B>, and only <C>"
+/// instruction. Longest first, so ", and only " is never read as ", " plus a
+/// residual "and only ".
+fn parse_activation_restriction_list_separator(i: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>(", and only "),
+            tag(", only "),
+            tag(" and only "),
+        )),
+    )
+    .parse(i)
+}
+
+/// One item of a compound activation-restriction list: a cadence ("once" /
+/// "once each turn") or any phrase the single-restriction authority
+/// `parse_activation_timing_restriction` accepts (speed, turn/step gates,
+/// before-windows, "if <condition>").
+fn parse_activation_restriction_item(item: &str) -> Option<Vec<ActivationRestriction>> {
+    if let Ok((_, cadence)) = all_consuming(parse_activation_cadence).parse(item) {
+        return Some(vec![cadence]);
+    }
+    parse_activation_timing_restriction(item)
+}
+
+/// CR 602.1b + CR 602.5: an "Activate only <A> and only <B>[, and only <C>]…"
+/// instruction is a list of activation restrictions, every one of which must
+/// hold (Defenders of Humanity: "Activate only if you control no creatures and
+/// only during your turn"; Grizzled Wolverine: "Activate only during the
+/// declare blockers step, only if at least one creature is blocking this
+/// creature, and only once each turn").
+///
+/// All-or-nothing: if any item fails to parse the whole list returns `None`, so
+/// the caller leaves the sentence intact and it surfaces as
+/// `Effect::Unimplemented` rather than committing a partial, more permissive
+/// gate. A single item is refused (`None`) — single phrases belong to
+/// `parse_activation_timing_restriction` and the dedicated condition branch.
+///
+/// Items are emitted in REVERSE text order. Restrictions are conjunctive, so
+/// order carries no rules meaning; reversing matches the right-to-left peeling
+/// order `strip_activated_constraints` already produces for two-item forms,
+/// keeping their output byte-identical.
+fn parse_activation_restriction_list(phrase: &str) -> Option<Vec<ActivationRestriction>> {
+    let lower = phrase.trim().trim_end_matches('.').trim().to_lowercase();
+    let (_, items) = all_consuming(separated_list1(
+        parse_activation_restriction_list_separator,
+        recognize(many1((
+            not(parse_activation_restriction_list_separator),
+            anychar,
+        ))),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    if items.len() < 2 {
+        return None;
+    }
+    let per_item = items
+        .into_iter()
+        .map(parse_activation_restriction_item)
+        .collect::<Option<Vec<_>>>()?;
+    Some(per_item.into_iter().rev().flatten().collect())
+}
+
 /// CR 602.5: Build a `RequiresCondition` activation restriction, or fail.
 ///
 /// The single authority for turning restriction text into an `ActivationRestriction`.
@@ -12500,30 +12565,41 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
 
         // CR 602.5b: Delegate bare "Activate only <timing>" phrases to the same
         // timing parser used by the "Any player may activate ... but only"
-        // composition path. The condition-only form stays on its specialized
-        // branch below so the once-per-turn rider is stripped before condition
-        // parsing. Here and below, the unmodernized "Activate this ability
-        // only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku and
-        // Riku) is the same restriction as "Activate only …".
+        // composition path. A lone condition ("Activate only if …") stays on its
+        // specialized branch below so the once-per-turn rider is stripped before
+        // condition parsing. Here and below, the unmodernized "Activate this
+        // ability only …" wording (M'Odo, the Gnarled Oracle; Piercing Rays; Riku
+        // and Riku) is the same restriction as "Activate only …".
+        // CR 602.1b + CR 602.5: when the tail is not one phrase, it may be a
+        // compound list ("if you control no creatures and only during your
+        // turn", "once each turn and only during your turn") — every item must
+        // parse or nothing is committed. The list only applies when the
+        // instruction opens its own sentence.
         if let Some((before, restriction)) = tp
             .rsplit_around("activate this ability only ")
             .or_else(|| tp.rsplit_around("activate only "))
         {
-            if tag::<_, _, OracleError<'_>>("if ")
+            let is_condition_tail = tag::<_, _, OracleError<'_>>("if ")
                 .parse(restriction.lower.trim_start())
-                .is_err()
-            {
-                if let Some(parsed) = parse_activation_timing_restriction(restriction.original) {
-                    constraints.restrictions.extend(parsed);
-                    remaining = before
-                        .original
-                        .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
-                        .to_string();
-                    if remaining.is_empty() {
-                        break;
-                    }
-                    continue;
+                .is_ok();
+            let single = (!is_condition_tail)
+                .then(|| parse_activation_timing_restriction(restriction.original))
+                .flatten();
+            let parsed = single.or_else(|| {
+                is_empty_or_sentence_boundary(before.original)
+                    .then(|| parse_activation_restriction_list(restriction.original))
+                    .flatten()
+            });
+            if let Some(parsed) = parsed {
+                constraints.restrictions.extend(parsed);
+                remaining = before
+                    .original
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                if remaining.is_empty() {
+                    break;
                 }
+                continue;
             }
         }
 
@@ -12898,22 +12974,30 @@ fn peel_only_once_rider(lower: &str) -> Option<(usize, ActivationRestriction)> {
     take_until::<_, _, OracleError<'_>>("activate only")
         .parse(before)
         .ok()?;
-    // "each turn" is the optional longest-match tail; the rider must end the line.
-    let (rest, each_turn) = preceded(
-        tag::<_, _, OracleError<'_>>(" and only once"),
-        opt(tag::<_, _, OracleError<'_>>(" each turn")),
-    )
+    // The cadence grammar is shared with the restriction list; the rider must
+    // end the line.
+    let (_, restriction) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>(" and only "),
+        parse_activation_cadence,
+    ))
     .parse(rider_onward)
     .ok()?;
-    if !rest.is_empty() {
-        return None;
-    }
-    let restriction = if each_turn.is_some() {
-        ActivationRestriction::OnlyOnceEachTurn
-    } else {
-        ActivationRestriction::OnlyOnce
-    };
     Some((before.len(), restriction))
+}
+
+/// CR 602.5b: the activation-cadence item of an "Activate only …" instruction —
+/// "once each turn" → `OnlyOnceEachTurn`, "once" → `OnlyOnce`. Longest match
+/// first so "once each turn" is never read as "once" with a residual. Callers
+/// wrap it in `all_consuming` so "once more" / "twice" are refused.
+fn parse_activation_cadence(i: &str) -> OracleResult<'_, ActivationRestriction> {
+    alt((
+        value(
+            ActivationRestriction::OnlyOnceEachTurn,
+            tag::<_, _, OracleError<'_>>("once each turn"),
+        ),
+        value(ActivationRestriction::OnlyOnce, tag("once")),
+    ))
+    .parse(i)
 }
 
 /// Strip trailing "X can't be 0." / "This ability can't be copied and X can't

@@ -873,6 +873,8 @@
     "chooseCreatureTokenToPopulate": "Choisissez un jeton de créature à peupler",
     "chooseReturnAsAuraTarget": "Choisissez un permanent à enchanter",
     "chooseTokenHost": "Choisissez un hôte pour le jeton",
+    "chooseOneHighlighted": "Choisissez l'une des options en surbrillance",
+    "chooseUpToOneHighlighted": "Choisissez jusqu'à une des options en surbrillance",
     "tapUntappedCreatures_one": "Engagez {{count}} créature dégagée",
     "tapUntappedCreatures_other": "Engagez {{count}} créatures dégagées",
     "chooseTargetOf": "Choisissez la cible {{current}} sur {{total}}",

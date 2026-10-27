@@ -9313,7 +9313,7 @@ fn build_target_assignments(
     }
 }
 
-fn build_target_assignments_for_ability_with_limit(
+pub(super) fn build_target_assignments_for_ability_with_limit(
     state: &GameState,
     ability: &ResolvedAbility,
     target_slots: &[TargetSelectionSlot],

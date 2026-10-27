@@ -2,8 +2,9 @@ use std::collections::HashSet;
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, PayCostKind, PendingCast,
-    PendingCostMoveResume, PendingSacrificeCostCompletion, WaitingFor,
+    ActiveSearchDecisionAuthority, CostResume, GameEnd, GameState, LeavingGameDeparture,
+    PayCostKind, PendingCast, PendingCostMoveResume, PendingSacrificeCostCompletion, WaitingFor,
+    ZoneDeparture,
 };
 use crate::types::identifiers::ObjectIncarnationRef;
 use crate::types::match_config::MatchPhase;
@@ -155,6 +156,50 @@ pub fn eliminate_players_simultaneously(
     players_to_eliminate: &[PlayerId],
     events: &mut Vec<GameEvent>,
 ) {
+    eliminate_players(
+        state,
+        players_to_eliminate,
+        DepartureTriggers::ScannedByCaller,
+        events,
+    );
+}
+
+/// CR 104.3a + CR 800.4a: A player concedes and leaves the game.
+///
+/// A concession is an action of its own, not part of a resolution or a
+/// state-based action check, so no post-action pipeline scans the events it
+/// produces. The departure collects the abilities they trigger itself (CR 603.2):
+/// a leaves-the-battlefield observer sees the conceding player's permanents leave
+/// the game (CR 603.6c).
+pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
+    eliminate_players(
+        state,
+        &[player],
+        DepartureTriggers::CollectedByDeparture,
+        events,
+    );
+}
+
+/// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
+/// events trigger.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepartureTriggers {
+    /// The caller's post-action pipeline scans its event buffer: a loss by
+    /// state-based action (CR 704.5a) or by an effect (CR 104.3e).
+    ScannedByCaller,
+    /// Nothing scans the departure's events after it returns (a concession,
+    /// CR 104.3a), so the departure queues their triggers itself.
+    CollectedByDeparture,
+}
+
+fn eliminate_players(
+    state: &mut GameState,
+    players_to_eliminate: &[PlayerId],
+    departure_triggers: DepartureTriggers,
+    events: &mut Vec<GameEvent>,
+) {
+    let first_event = events.len();
+    let first_record = state.zone_changes_this_turn.len();
     let mut eliminated_any = false;
     let mut leaving_set = HashSet::new();
     // CR 733: the CR 800.4a stack step is batch-scoped over the whole
@@ -261,6 +306,16 @@ pub fn eliminate_players_simultaneously(
         })
         .flatten();
 
+    // CR 603.10a + CR 603.3a: the observers of the departure as they were
+    // immediately before it. The leaving players' objects leave the game in the
+    // same event that ends their control effects (CR 800.4a); a look-back
+    // ability reads its source as it was immediately before that event, so an
+    // observer a leaving player stole triggers under that player and is retired
+    // with them (CR 800.4d) rather than handed to its owner.
+    let looked_back_observers = (departure_triggers == DepartureTriggers::CollectedByDeparture
+        && !leaving_set.is_empty())
+    .then(|| super::triggers::ImmediatelyBeforeObservers::latch(state));
+
     for &player in players_to_eliminate {
         // Skip if already eliminated (e.g. a teammate eliminated alongside an
         // earlier loser in this same batch).
@@ -286,6 +341,8 @@ pub fn eliminate_players_simultaneously(
     if !eliminated_any {
         return;
     }
+    mark_left_game_departures_simultaneous(state, events, first_event, first_record);
+    let departure_end = events.len();
 
     // CR 800.4a: after ALL owned-exiles, end control effects the leaving players
     // control and exile anything still under a leaver's control. Runs ONCE over
@@ -382,6 +439,19 @@ pub fn eliminate_players_simultaneously(
         WaitingFor::GameOver { winner } => Some(*winner),
         _ => None,
     };
+
+    // CR 603.2 + CR 603.3b: queue what the departure triggered with whatever else
+    // waits to be put on the stack; the pruning below drops any whose controller
+    // left (CR 800.4d) and the drain puts the rest on the stack together. CR 104.1:
+    // once the game is over, nothing triggered goes on the stack.
+    if departure_triggers == DepartureTriggers::CollectedByDeparture && game_over_winner.is_none() {
+        super::triggers::collect_unclaimed_triggers_into_deferred(
+            state,
+            events,
+            first_event,
+            looked_back_observers.map(|observers| (observers, departure_end)),
+        );
+    }
 
     // CR 603.3b + CR 800.4a: Always resolve in-flight trigger-ordering work
     // when players leave — including lethal combat damage that ends the game
@@ -810,25 +880,7 @@ fn prune_pending_trigger_order(state: &mut GameState) {
 /// CR 800.4a: Remove deferred triggers controlled by eliminated players.
 fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
     let deferred = std::mem::take(&mut state.deferred_triggers);
-    let mut terminal_firings = Vec::new();
-    for context in deferred {
-        if state
-            .players
-            .iter()
-            .find(|player| player.id == context.pending.controller)
-            .is_some_and(|player| !player.is_eliminated)
-        {
-            state.deferred_triggers.push(context);
-        } else {
-            terminal_firings.push(context.firing());
-        }
-    }
-    for firing in terminal_firings {
-        crate::game::lifecycle::record_delayed_terminal(
-            firing,
-            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-        );
-    }
+    state.deferred_triggers = super::triggers::retire_departed_controller_contexts(state, deferred);
 }
 
 /// CR 603.3b: If prune collapsed an ordering pass into `deferred_triggers`
@@ -907,8 +959,65 @@ fn exile_owned_objects_on_player_left_game(
     to_exile.dedup();
 
     for id in to_exile {
-        move_object_for_player_left_game(state, id, player, events);
+        move_owned_object_leaving_game(state, id, player, events);
     }
+}
+
+/// CR 800.4a: an object `owner` owns leaves the game with them. The move's record
+/// carries the departure from the moment it is built (and journaled); see
+/// `GameState::leaving_game_departure`.
+fn move_owned_object_leaving_game(
+    state: &mut GameState,
+    object_id: crate::types::identifiers::ObjectId,
+    owner: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 603.6c + CR 702.26k: a phased-in permanent leaving the game with its
+    // owner triggers leaves-the-battlefield abilities; a phased-out one doesn't
+    // cause zone-change abilities to trigger.
+    let departure = if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.is_phased_out_permanent())
+    {
+        ZoneDeparture::LeftGamePhasedOut
+    } else {
+        ZoneDeparture::LeftGame
+    };
+    state.leaving_game_departure = Some(LeavingGameDeparture {
+        object_id,
+        departure,
+    });
+    move_object_for_player_left_game(state, object_id, owner, events);
+    state.leaving_game_departure = None;
+}
+
+/// CR 800.4a + CR 603.10a: everything the leaving players own leaves the game at
+/// once, so a leaves-the-battlefield observer among those permanents (one a
+/// surviving player controlled) sees the others leave with it. Stamps the
+/// phased-in permanents that left the game in `events[first_event..]` and in the
+/// per-turn records from `first_record` as one simultaneous departure.
+fn mark_left_game_departures_simultaneous(
+    state: &mut GameState,
+    events: &mut [GameEvent],
+    first_event: usize,
+    first_record: usize,
+) {
+    let left_battlefield: Vec<_> = events[first_event..]
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                from: Some(Zone::Battlefield),
+                record,
+                ..
+            } if record.departure == ZoneDeparture::LeftGame => Some(*object_id),
+            _ => None,
+        })
+        .collect();
+    super::zones::mark_simultaneous_departures(&mut events[first_event..], &left_battlefield);
+    let records: Vec<usize> = (first_record..state.zone_changes_this_turn.len()).collect();
+    super::zones::mark_simultaneous_departure_records(state, &records, &left_battlefield);
 }
 
 /// CR 800.4a: End every control effect that gives a LEAVING player control of an
@@ -1836,7 +1945,8 @@ fn finish_abandoned_source_bound_resolution_carrier(
             .map(|object| object.owner)
             .filter(|owner| leaving_set.contains(owner));
         if let Some(leaver) = owner {
-            move_object_for_player_left_game(state, spell.id, leaver, events);
+            // CR 800.4a: the spell leaves the game with its owner; it is not exiled.
+            move_owned_object_leaving_game(state, spell.id, leaver, events);
         }
     }
     crate::game::stack::abandon_active_resolution_carrier(

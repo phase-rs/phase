@@ -2671,11 +2671,13 @@ fn unmask_keyword_action_walker_names(text: String, originals: &[String]) -> Str
 ///   cost self-ref combinators map it to `TargetFilter::GrantingObject`,
 ///   bound to the granting object by each Layer-6 grant's stamp; and
 /// * the DISPLAY channel — [`render_granting_self_reference`], invoked from the
-///   two production parse entry points `parser::oracle::parse_oracle_text` and
-///   `game::effects::token::catalog_rules_text_abilities`, which renders the
-///   marker as the granting object's PRINTED name.
+///   three production parse entry points `parser::oracle::parse_oracle_text`,
+///   `game::effects::token::catalog_rules_text_abilities` and
+///   `parser::oracle_effect::token::push_parsed_statics`, which render the
+///   marker as the granting object's PRINTED name (the token's, at the token
+///   entry point).
 ///
-/// Naming both entry points here makes the leak surface auditable from the
+/// Naming all three entry points here makes the leak surface auditable from the
 /// constant itself. The standing completeness authority for the display channel
 /// is not this comment: it is `parser::oracle::tests::render_net_effect_carrier_census`
 /// (a new `Effect` variant, or a new variant on an intermediate payload enum,
@@ -2722,6 +2724,13 @@ pub(crate) fn render_granting_self_reference(text: &str, card_name: &str) -> Str
     }
     // allow-noncombinator: display-string sentinel rendering; not parsing dispatch.
     text.replace(GRANTING_SELF_PLACEHOLDER, printed)
+}
+
+/// CR 201.5a: the number of granter self-reference markers in `text` — the
+/// counting twin of [`render_granting_self_reference`].
+pub(crate) fn granting_self_reference_count(text: &str) -> usize {
+    // allow-noncombinator: sentinel counting over a private-use marker, not parsing dispatch
+    text.matches(GRANTING_SELF_PLACEHOLDER).count()
 }
 
 /// CR 201.5a: The positions in which a granted quoted body's own card name names
