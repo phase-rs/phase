@@ -1329,7 +1329,8 @@
     "passwordPrompt": "Cette salle requiert un mot de passe :",
     "toasts": {
       "connectionFailed": "Échec de la connexion. Réessayez ou changez de serveur dans les paramètres.",
-      "eliminatedSpectating": "Vous avez été éliminé. Vous êtes désormais spectateur."
+      "eliminatedSpectating": "Vous avez été éliminé. Vous êtes désormais spectateur.",
+      "retainedTerminalUnreadable": "Impossible de lire la livraison conservée du résultat final"
     },
     "resumeReset": {
       "appUpdated": "L'application a été mise à jour et votre partie enregistrée est incompatible avec la nouvelle version.",
@@ -2706,6 +2707,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

@@ -34,6 +34,7 @@ use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
+use super::announcement_triggers::stage_with_pending_owner;
 use super::casting::emit_targeting_events;
 use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
@@ -2127,6 +2128,7 @@ pub(crate) fn begin_deferred_target_selection(
         );
         // CR 601.2c + CR 603.2: each automatically declared target becomes the
         // target of the spell or ability once, as a prompted declaration emits it.
+        let event_start = events.len();
         super::casting::emit_targeting_events(
             state,
             &declared_targets_in_chain(&pending.ability),
@@ -2135,6 +2137,14 @@ pub(crate) fn begin_deferred_target_selection(
             super::casting::pending_cast_targeter(state, &pending),
             events,
         );
+        // CR 601.2c + CR 603.2: Stage announcement triggers (e.g., Horobi) after
+        // target declaration but before cost payment, so automatic mana payments
+        // (e.g., sacrificing Blood Pet) don't move the target before the trigger
+        // is matched. The activation route uses begin_activation_trigger_collection();
+        // spells use the in-flight spell trigger carrier.
+        if pending.activation_ability_index.is_none() {
+            stage_with_pending_owner(state, &pending, events, event_start);
+        }
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -2162,6 +2172,7 @@ pub(crate) fn begin_deferred_target_selection(
         );
         // CR 601.2c + CR 603.2: each automatically declared target becomes the
         // target of the spell or ability once, as a prompted declaration emits it.
+        let event_start = events.len();
         super::casting::emit_targeting_events(
             state,
             &declared_targets_in_chain(&pending.ability),
@@ -2170,6 +2181,14 @@ pub(crate) fn begin_deferred_target_selection(
             super::casting::pending_cast_targeter(state, &pending),
             events,
         );
+        // CR 601.2c + CR 603.2: Stage announcement triggers (e.g., Horobi) after
+        // target declaration but before cost payment, so automatic mana payments
+        // (e.g., sacrificing Blood Pet) don't move the target before the trigger
+        // is matched. The activation route uses begin_activation_trigger_collection();
+        // spells use the in-flight spell trigger carrier.
+        if pending.activation_ability_index.is_none() {
+            stage_with_pending_owner(state, &pending, events, event_start);
+        }
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -6197,6 +6216,31 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
             "activation payment boundary missing an ability index".to_string(),
         )
     })?;
+
+    // CR 601.2c + CR 602.2b + CR 603.2: Targets have been declared and targeting
+    // events emitted before costs are paid. Collect any pre-payment announcement
+    // triggers now against the pre-payment game state so costs (such as activating
+    // mana abilities that sacrifice a creature target, or paying non-mana costs)
+    // do not alter the target's qualification or zone before becomes-target triggers
+    // are matched. Only an owned announcement scope has a carrier to commit them;
+    // an unowned one leaves collection to the priority pipeline.
+    if let crate::types::game_state::AnnouncementEventScope::From { start } =
+        state.announcement_event_scope
+    {
+        let unclaimed = super::announcement_triggers::unclaimed_events(state, events, start);
+        if !unclaimed.is_empty() {
+            pending.begin_activation_trigger_collection();
+            if let Some(collection) = pending.activation_trigger_collection.as_deref_mut() {
+                collection.collect(state, &unclaimed);
+                super::announcement_triggers::claim_ordinary_collected_span(
+                    state,
+                    events,
+                    start,
+                    events.len(),
+                );
+            }
+        }
+    }
 
     if !pending.cost.is_without_paying_mana() {
         return super::casting::finalize_pending_activation_mana_payment(
@@ -14086,6 +14130,7 @@ fn spell_graveyard_replacement_def(
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
                 position,
+                arranger: None,
             },
             "CR 614.1a: if this spell would be put into its owner's graveyard, put it on its \
              owner's library instead.",

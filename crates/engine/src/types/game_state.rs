@@ -55,7 +55,7 @@ use super::object_map::ObjectMap;
 use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
-    AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenSpec,
+    AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenBatch, TokenSpec,
 };
 use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
@@ -545,6 +545,14 @@ pub struct LKISnapshot {
     /// which is exactly the pre-change fail-closed behavior.
     #[serde(default)]
     pub attachments: Vec<AttachmentSnapshot>,
+    /// CR 608.2h (digital-only Alchemy intensity): the object's
+    /// intensity as it last existed in its public zone, so an ability whose
+    /// source has left reads it ("mana value equal to Jarsyl, Dark Age
+    /// Scion's intensity" with Jarsyl removed in response; Great Desert
+    /// Hellion's leaves-the-battlefield draw). `#[serde(default)]` ⇒
+    /// pre-existing saved states deserialize to 0, the pre-change read.
+    #[serde(default)]
+    pub intensity: u32,
 }
 
 /// Complete event-time authority for a triggered ability's source.
@@ -5211,26 +5219,45 @@ pub struct PendingPerPlayerZoneChoice {
     pub nominee: Option<PlayerId>,
 }
 
-/// CR 401.4 + CR 608.2c: Per-owner library-order prompts for one
-/// `ChangeZoneAll` instruction that places multiple owners' cards at the same
-/// library position with `random_order: false`. The first owner's batch is
-/// surfaced immediately as `WaitingFor::EffectZoneChoice`; remaining owner
-/// batches drain after each batch completes.
+/// CR 401.4 + CR 101.4 + CR 608.2c: Per-owner library-order prompts for one
+/// instruction that places several owners' cards at one library position. The
+/// first owner's batch is surfaced as `WaitingFor::EffectZoneChoice`; each
+/// submitted order is collected, the next owner is prompted in APNAP order, and
+/// every owner's cards move together after the last owner chooses. Each prompt
+/// is answered by its batch's `chooser()` — the owner, unless the instruction
+/// names the arranger itself (CR 101.1).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MassLibraryOrderMember {
     /// The exact object incarnation that was selected for this ordered move.
     pub identity: ObjectIncarnationRef,
-    /// The zone this member occupied when the mass move created the prompt.
+    /// The zone this member occupied when the library-order prompt was created.
     pub origin: Zone,
 }
 
 /// One owner's exact members of a mass library-order instruction.
 /// The identity and origin are frozen at prompt creation so a later object with
-/// the same id cannot satisfy an in-flight ordering choice.
+/// the same id cannot satisfy an in-flight ordering choice. `owner` is whose
+/// cards and library these are; the player who arranges them is `chooser()`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MassLibraryOrderBatch {
     pub owner: PlayerId,
+    /// CR 101.1 + CR 608.2c: the player the instruction directs to arrange this
+    /// owner's cards; `None` = CR 401.4 owner. Snapshotted at resolution
+    /// (CR 608.2d); if that player leaves the game while this batch still has
+    /// cards to arrange, the controller of the object elects another player,
+    /// who is written here (CR 800.4g + CR 800.4h). Older saves decode as
+    /// `None`: every earlier prompt was owner-arranged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arranger: Option<PlayerId>,
     pub members: Vec<MassLibraryOrderMember>,
+}
+
+impl MassLibraryOrderBatch {
+    /// CR 401.4 + CR 101.1: the player who arranges this batch — the arranger
+    /// the instruction names, else the owner of the cards.
+    pub fn chooser(&self) -> PlayerId {
+        self.arranger.unwrap_or(self.owner)
+    }
 }
 
 /// Remaining batches of an in-flight mass library order.
@@ -5273,6 +5300,24 @@ pub struct PendingMassLibraryOrderChoice {
     /// Remaining owner batches in APNAP order after the current prompt.
     #[serde(default)]
     pub remaining_batches: PendingMassLibraryOrderBatches,
+    /// CR 101.4 + CR 401.4: owners who have already chosen, in APNAP order;
+    /// each batch lists that owner's cards in their submitted order with the
+    /// identity/origin frozen at submission. Nothing has moved yet: the whole
+    /// arrangement is delivered as one simultaneous action after the last owner
+    /// chooses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub arranged_batches: Vec<MassLibraryOrderBatch>,
+    /// CR 608.2c: the stack entry whose resolution opened this arrangement. A
+    /// carrier is consumed only by a prompt of that same resolution; `None`
+    /// (older saves, or no resolving entry) binds on the instruction fields alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolving_entry: Option<ObjectId>,
+    /// CR 800.4g + CR 800.4h: the batch whose named arranger left the game with
+    /// cards still to arrange, held while the open prompt
+    /// (`ZoneOpponentChooserPurpose::SubstituteArranger`) elects the player who
+    /// arranges it. Taken when the election is answered; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arranger_election: Option<MassLibraryOrderBatch>,
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
@@ -7004,8 +7049,10 @@ pub enum BatchCompletion {
         player: PlayerId,
         /// Resolving effect source for the terminal `EffectResolved` event.
         source_id: ObjectId,
-        /// Full selected order. It determines the printed placement order and
-        /// remains the selected-object tracked set / effect count.
+        /// The complete arranged order: for an owner arrangement, every owner's
+        /// cards (APNAP owner segments, each in that owner's order). It
+        /// determines the printed placement order and remains the
+        /// selected-object tracked set / effect count.
         chosen: Vec<ObjectId>,
         /// Selection members that were already in a library at delivery time.
         /// They are repositions, not replaceable zone-change requests.
@@ -7508,6 +7555,46 @@ pub struct CopyTokenEntryTail {
     pub remaining_count: u32,
 }
 
+/// CR 614.1a + CR 616.1f + CR 608.2c: a batch of one compound CreateToken
+/// event at its position in the event (0 = the event's own batch).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionedTokenBatch {
+    pub position: u32,
+    pub batch: TokenBatch,
+}
+
+/// The ids one delivered batch created, at its event position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PositionedTokenIds {
+    pub position: u32,
+    pub ids: Vec<ObjectId>,
+}
+
+/// CR 614.1a + CR 616.1f + CR 608.2c: the rest of one compound CreateToken
+/// event's delivery after one of its batches paused. All of it is the one
+/// modified event, so its created referent ("that token", "those tokens") is
+/// published once, in event order, when the last batch lands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingTokenEventDelivery {
+    /// Batches not yet delivered, in delivery order.
+    pub remaining: Vec<PositionedTokenBatch>,
+    /// Ids of the batches delivered so far.
+    pub delivered: Vec<PositionedTokenIds>,
+    /// The paused batch whose own remainder runs just before this action — a
+    /// plain batch's `FinalizeTokenEntry` + `ContinueTokenCreation`, or a copy
+    /// batch's resumed entry; its ids are in `last_created_token_ids` when this
+    /// runs. Set whenever the cursor is stashed; `None` before the first pause.
+    pub resumed: Option<u32>,
+    /// Ids the caller placed ahead of the event (`initial_created_ids`).
+    pub prefix: Vec<ObjectId>,
+    /// CR 608.2c + CR 614.1a: its own batch's (position 0) source — the
+    /// creating instruction's unless a replacement substituted that batch's
+    /// spec — which every completion this cursor builds names. A replacement
+    /// that appends a batch modifies that action without making
+    /// it the replacement's, though an appended batch's spec names its host.
+    pub source_id: ObjectId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingCounterPostAction {
     EmitEffectResolved {
@@ -7557,6 +7644,11 @@ pub enum PendingCounterPostAction {
         spec: Box<TokenSpec>,
         enter_tapped: EtbTapState,
         remaining_count: u32,
+    },
+    /// CR 614.1a + CR 616.1f: deliver the rest of a compound CreateToken event
+    /// and publish its referent; see `token::continue_token_event_delivery`.
+    ContinueTokenEventDelivery {
+        delivery: Box<PendingTokenEventDelivery>,
     },
     FinalizeCopyTokenEntry {
         object_id: ObjectId,
@@ -12681,6 +12773,9 @@ fn visit_persisted_live_zone_changed_records(
         "stack",
         "waiting_for",
         "resolution_stack",
+        // The pre-roll instruction owns trigger events before dice or a
+        // resolution frame exist; their occurrence keys also rebind on load.
+        "pending_die_roll_instruction",
         "current_trigger_event",
         "resolving_stack_entry",
         "current_trigger_events",
@@ -15663,6 +15758,12 @@ pub enum ZoneOpponentChooserPurpose {
     /// pick has left the game; the next player in turn order after the
     /// object's controller elects another player to make that one choice.
     SubstituteChooser,
+    /// CR 800.4g + CR 800.4h: the arranger an instruction named for an owner's
+    /// library-order batch (CR 101.1 + CR 401.4) has left the game while the
+    /// batch still has cards to arrange; the controller of the object, or the
+    /// next player in turn order after them, elects the player who arranges
+    /// that batch.
+    SubstituteArranger,
 }
 
 impl ZoneOpponentChooserPurpose {
@@ -16716,9 +16817,12 @@ pub enum WaitingFor {
         /// preserves bottom/nth placement across the choice round-trip.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_position: Option<LibraryPosition>,
-        /// Exact origin/identity snapshot for a fresh
-        /// mass `ChangeZoneAll` library-order prompt. Generic zone choices leave
-        /// this absent and therefore retain their ordinary strict zone check.
+        /// Exact origin/identity snapshot for a fresh CR 401.4 owner
+        /// library-order prompt: a `ChangeZoneAll` mass placement or an
+        /// announced target set placed by `PutAtLibraryPosition`. The prompt's
+        /// `player` is the batch's `chooser()`: its owner, or the arranger the
+        /// instruction names (CR 101.1). Generic zone choices leave this absent
+        /// and therefore retain their ordinary strict zone check.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         mass_library_order: Option<MassLibraryOrderBatch>,
         /// CR 118.3: When true, this choice is for a cost payment (e.g., exile cost)
@@ -17680,7 +17784,8 @@ pub enum WaitingFor {
     /// "target opponent chooses" pre-binds the chooser at announcement).
     /// `candidates` is the legal opponent set; `ability` is the resolving
     /// choose ability, carried so the zone choice can be presented to the
-    /// picked opponent.
+    /// picked opponent. `purpose` names the pending choice the picked player is
+    /// for, and so the authority that answers it.
     ChooseFromZoneOpponentChooser {
         player: PlayerId,
         candidates: Vec<PlayerId>,
@@ -22351,6 +22456,18 @@ declare_game_state! {
     /// inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
+    /// Open while an action-ingress life change settles synchronously (a `try_*`
+    /// entry's whole call, or the replacement-choice handler resuming a `Reject`
+    /// record). Any life settlement inside it that is unrepresentable is recorded
+    /// here and the ingress caller rejects. Transient — never serialized.
+    #[serde(skip)]
+    pub(crate) ingress_life_window: Option<IngressLifeWindow>,
+    /// A replacement's computed life quantity overflowed while the current life
+    /// event was being replaced (see `ReplacementQuantityOverflow`). Recorded by
+    /// the life appliers, taken by the life settle step of the same event inside
+    /// one synchronous action. Transient — never serialized.
+    #[serde(skip)]
+    pub(crate) replacement_quantity_overflow: Option<ReplacementQuantityOverflow>,
     /// CR 601.2g + CR 605.3b: the row policy of the automatic mana payment that
     /// is executing (see `casting_costs::AutoTapRowPolicy`). Set while a
     /// payment activates its selected sources, and to `AllRows` while a
@@ -24099,8 +24216,9 @@ declare_game_state! {
     /// CR 608.2c + CR 616.1: Progress for a replacement-suspended exile loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_exile_from_top_until: Option<Box<PendingExileFromTopUntil>>,
-    /// CR 401.4: Remaining per-owner library-order batches for a mass
-    /// `ChangeZoneAll` instruction paused on `EffectZoneChoice`.
+    /// CR 401.4 + CR 101.4: the remaining per-owner prompts and the orders
+    /// already chosen for one owner library arrangement paused on
+    /// `EffectZoneChoice`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     /// Boxed to keep `GameState` inside its stack budget
     /// (`types/game_state_size.rs`): it is populated only between the batches of
@@ -24130,8 +24248,8 @@ declare_game_state! {
     /// Two applicable die-roll replacements (Barbarian Class + Pixie Guide) make
     /// the affected player order them, which suspends `roll_die::resolve` on a
     /// `ReplacementChoice`. The resolving ability is gone by the time the choice
-    /// is submitted, so the results table, modifier, and targets are parked here
-    /// and consumed by `roll_die::resume_roll_dice_after_replacement`. This is
+    /// is submitted, so the results table, modifier, targets, and owning trigger
+    /// scope are parked here and consumed by `roll_die::resume_roll_dice_after_replacement`. This is
     /// deliberately NOT a `ResolutionStack` frame: the stack top during the
     /// ordering choice belongs to the ability continuation, and a `DieRoll`
     /// frame pushed over it would break the top-of-stack ownership checks that
@@ -24612,6 +24730,21 @@ declare_game_state! {
     /// `resolving_stack_entry` like `resolving_trigger_firing`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) resolving_spell_final_part: Option<OwedSpellFinalPart>,
+    /// CR 400.7 + CR 608.2h: the exact object — storage id and incarnation —
+    /// the resolution carrier (`resolving_stack_entry`) resolves, pinned by
+    /// `stack::begin_resolving_stack_entry` while it is still on the stack and
+    /// cleared with the carrier. A spell that leaves the stack once it starts to
+    /// resolve continues to resolve (CR 608.2m), and its last known information
+    /// is this incarnation's `lki_by_incarnation` snapshot. A later departure
+    /// recorded under the same storage id — e.g. the exile of everything a
+    /// departing owner owns (CR 800.4a), which moves the already-exiled card
+    /// again — overwrites `lki_cache` but never this snapshot. `None` for an
+    /// ability, which has no object row (its controller is fixed at activation or
+    /// trigger, CR 113.8). Read only by
+    /// `stack::resolving_object_controller`. Serialized because the carrier
+    /// survives a mid-resolution pause, like `resolving_spell_final_part`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolving_stack_object: Option<ObjectIncarnationRef>,
     /// CR 603.3b + CR 608.2g: a terminal resolution batch (currently Ripple)
     /// has settled, but its final spell is still completing announcement. Keep
     /// the provenance until the post-announcement priority pipeline can collect
@@ -27810,9 +27943,95 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
+    /// Whether an engine-unrepresentable final life edit on resume rejects the
+    /// public action and restores its entry state (`Reject`), or uses the
+    /// compatibility skip when no ingress window owns it (`IgnoreImpossible`).
+    /// Older payloads omit this field and retain that compatibility policy.
+    #[serde(
+        default,
+        skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
+    )]
+    pub unrepresentable_life_change: UnrepresentablePolicy,
+}
+
+/// Who owns a life change whose final result the engine cannot represent
+/// (final amount beyond an `i32` delta, life total overflow, or per-turn
+/// gained/lost counter overflow).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnrepresentablePolicy {
+    /// Action ingress: return the typed error so the caller rejects the
+    /// action through the boundary snapshot restore (nothing settles).
+    Reject,
+    /// Compatibility fallback for ordinary resolution outside a public action
+    /// boundary and for older serialized payloads. This is an engine numeric
+    /// capacity limit, not a rules outcome: the change cannot be recorded, so it
+    /// is logged once and skipped without a life mutation. An open ingress
+    /// window instead records failure so the public boundary rejects the action
+    /// and restores its entry state.
+    #[default]
+    IgnoreImpossible,
+}
+
+impl UnrepresentablePolicy {
+    /// Serde skip predicate: the ordinary policy is the wire default.
+    pub fn is_ignore_impossible(&self) -> bool {
+        matches!(self, Self::IgnoreImpossible)
+    }
+}
+
+/// State of the transient action-ingress life window (see
+/// `GameState::ingress_life_window`): the first player whose life settlement
+/// inside the window proved unrepresentable, if any.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IngressLifeWindow {
+    pub(crate) failed_player: Option<PlayerId>,
+}
+
+/// A replacement's computed life quantity overflowed the engine's numeric
+/// range, so the modified event cannot be represented. This is an engine
+/// capacity limit, NOT a CR 101.3 impossibility: the applier records the
+/// overflowing replacement's source (diagnostic) and the life settle step takes
+/// the record and routes it through the existing unrepresentable-life-change
+/// authority. A public action boundary rejects and restores; the ordinary
+/// fallback outside one skips the change for compatibility (never clamping,
+/// and never inventing a CR 119.3 amount).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplacementQuantityOverflow {
+    pub(crate) source: ObjectId,
+}
+
+impl GameState {
+    /// Record that a replacement's computed life quantity overflowed. The first
+    /// writer wins: the loop stops at the first overflow, so a later record can
+    /// only be the same event.
+    pub(crate) fn record_replacement_quantity_overflow(&mut self, source: ObjectId) {
+        if self.replacement_quantity_overflow.is_none() {
+            self.replacement_quantity_overflow = Some(ReplacementQuantityOverflow { source });
+        }
+    }
+
+    /// Take (and clear) the recorded overflow, if any.
+    pub(crate) fn take_replacement_quantity_overflow(
+        &mut self,
+    ) -> Option<ReplacementQuantityOverflow> {
+        self.replacement_quantity_overflow.take()
+    }
 }
 
 impl PendingReplacement {
+    /// CR 616.1f: a record re-parked while its predecessor (stamped with
+    /// `predecessor_policy`) was being answered keeps the ingress stamp. Copies
+    /// `Reject` onto a record still at the default and never downgrades a
+    /// `Reject` already on it.
+    pub(crate) fn inherit_unrepresentable_life_change(
+        &mut self,
+        predecessor_policy: UnrepresentablePolicy,
+    ) {
+        if predecessor_policy == UnrepresentablePolicy::Reject {
+            self.unrepresentable_life_change = UnrepresentablePolicy::Reject;
+        }
+    }
+
     /// The event the logical owner of this paused zone-change delivery parked
     /// on. The single authority every owner match reads — capture
     /// (`GameState::pending_zone_change_delivery_from_replacement`),
@@ -31604,6 +31823,8 @@ impl GameState {
             active_casting_permission_index: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
+            ingress_life_window: None,
+            replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
             stack: im::Vector::new(),
@@ -31872,6 +32093,7 @@ impl GameState {
             resolving_stack_entry: None,
             resolving_trigger_firing: None,
             resolving_spell_final_part: None,
+            resolving_stack_object: None,
             pending_resolution_completion: None,
             resolution_source_relatch: None,
             current_trigger_events: Vec::new(),
@@ -33277,6 +33499,19 @@ impl GameState {
         self.exiled_from_hand_this_resolution = 0;
         self.die_result_this_resolution = None;
         self.consumed_before_priority_trigger_events.clear();
+        self.ingress_life_window = None;
+        self.replacement_quantity_overflow = None;
+    }
+
+    /// The policy a life event parked right now must be stamped with: `Reject`
+    /// while an action-ingress window is open (the event belongs to that public
+    /// action), otherwise legacy/outside-boundary compatibility behavior.
+    pub(crate) fn ingress_life_policy(&self) -> UnrepresentablePolicy {
+        if self.ingress_life_window.is_some() {
+            UnrepresentablePolicy::Reject
+        } else {
+            UnrepresentablePolicy::IgnoreImpossible
+        }
     }
 
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
@@ -33564,6 +33799,7 @@ impl GameState {
                 | GameEvent::PhysicalContestStarted { .. }
                 | GameEvent::PhysicalContestResolved { .. }
                 | GameEvent::VoteCast { .. }
+                | GameEvent::CardNamed { .. }
                 | GameEvent::VoteResolved { .. }
                 | GameEvent::PowerToughnessChanged { .. }
                 | GameEvent::CascadeMissed { .. }
@@ -33720,9 +33956,9 @@ impl GameState {
 
     /// Every trigger-event carrier that can still resume or resolve: the stack,
     /// pending/deferred/ordering triggers, current and batched trigger events,
-    /// every parked resolution frame, and a paused triggered mana ability. The
-    /// one traversal `normalize_for_loop` uses for both LKI retention and
-    /// identity canonicalization.
+    /// every parked resolution frame, the pre-roll die instruction, and a paused
+    /// triggered mana ability. The one traversal `normalize_for_loop` uses for
+    /// both LKI retention and identity canonicalization.
     fn for_each_trigger_event_carrier_mut(&mut self, f: &mut impl FnMut(&mut GameEvent)) {
         for entry in self
             .stack
@@ -33781,6 +34017,16 @@ impl GameState {
         // Every parked frame, not only the active one: an optional frame's
         // singular and plural events, a continuation's trigger contexts.
         self.resolution_stack.for_each_retained_trigger_event_mut(f);
+        if let Some(context) = self
+            .pending_die_roll_instruction
+            .as_mut()
+            .and_then(|instruction| instruction.trigger_context.as_mut())
+        {
+            if let Some(event) = context.event.as_mut() {
+                f(event);
+            }
+            context.events.iter_mut().for_each(&mut *f);
+        }
         // CR 605.4a: a triggered mana ability paused mid-occurrence retains its
         // current work item, its accepted tail and its collected batches.
         if let Some(resume) = self.pending_triggered_mana_resume.as_deref_mut() {
@@ -34638,6 +34884,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_casting_permission_index: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
+        ingress_life_window: _,
+        replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
         stack: _,
@@ -34932,6 +35180,13 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolving_stack_entry: _,
         resolving_trigger_firing: _,
         resolving_spell_final_part: _,
+        // `resolving_stack_object` (CR 400.7 resolution-object pin): EXCLUDED, like the
+        // carrier `resolving_stack_entry` it is derived from — a pure function of that
+        // carrier and its object's incarnation at install, cleared with it. Comparing an
+        // incarnation identity would make a loop sampled mid-resolution compare unequal
+        // every iteration; excluding it cannot hide growth (`resolution_source_relatch`
+        // precedent).
+        resolving_stack_object: _,
         pending_resolution_completion: _,
         current_trigger_events: _,
         stack_trigger_event_batches: _,
@@ -36488,6 +36743,59 @@ mod tests {
     use crate::types::phase::PhaseGroup;
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
+
+    /// SHAPE (serialized resume state): the compound token-event cursor rides a
+    /// counter-additions completion across a pause, so it must round-trip.
+    #[test]
+    fn continue_token_event_delivery_serde_roundtrip() {
+        let spec = TokenSpec {
+            characteristics: crate::types::proposed_event::TokenCharacteristics {
+                display_name: "Squirrel".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Squirrel".to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: "Squirrel".to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(3),
+            controller: PlayerId(0),
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+        };
+        let action = PendingCounterPostAction::ContinueTokenEventDelivery {
+            delivery: Box::new(PendingTokenEventDelivery {
+                remaining: vec![PositionedTokenBatch {
+                    position: 1,
+                    batch: TokenBatch {
+                        owner: PlayerId(0),
+                        spec: Box::new(spec),
+                        copy: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        count: 2,
+                    },
+                }],
+                delivered: vec![PositionedTokenIds {
+                    position: 0,
+                    ids: vec![ObjectId(40), ObjectId(41)],
+                }],
+                resumed: Some(0),
+                prefix: vec![ObjectId(7)],
+                source_id: ObjectId(9),
+            }),
+        };
+        let json = serde_json::to_string(&action).expect("cursor serializes");
+        let back: PendingCounterPostAction =
+            serde_json::from_str(&json).expect("cursor deserializes");
+        assert_eq!(action, back);
+    }
 
     /// CR 602.1a + CR 602.2b: the record's bound activation cost survives
     /// serialization, and a record predating the field decodes as `Unknown`
@@ -39641,6 +39949,69 @@ mod tests {
             fan_out: None,
             preceding_events: vec![persisted_zone_change_event(record)],
         })
+    }
+
+    #[test]
+    fn preroll_instruction_reconciles_singular_and_plural_occurrences() {
+        for trusted in [false, true] {
+            for plural in [false, true] {
+                let mut state = GameState::new_two_player(42);
+                state.turn_number = 19;
+                state
+                    .zone_changes_this_turn
+                    .push_back(persisted_zone_change_record(ObjectId(9_800), 18, 0));
+                let record = persisted_zone_change_record(ObjectId(9_801), 19, 1);
+                state.zone_changes_this_turn.push_back(record.clone());
+                let event = persisted_zone_change_event(record);
+                state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+                    source_id: ObjectId(9_801),
+                    controller: PlayerId(0),
+                    roller: PlayerId(0),
+                    targets: vec![],
+                    results_table: vec![],
+                    modifier: None,
+                    die_result: None,
+                    trigger_context: Some(ResolvingTriggerContext {
+                        event: (!plural).then(|| event.clone()),
+                        events: if plural { vec![event] } else { vec![] },
+                        match_count: None,
+                        die_result: None,
+                    }),
+                    continuation: crate::types::resolution::DieRollContinuation::Resolution,
+                    chain_root_targets: vec![],
+                }));
+                let wire = serde_json::to_value(if trusted {
+                    PersistedGameState::capture(state)
+                } else {
+                    PersistedGameState::Raw(Box::new(state))
+                })
+                .unwrap();
+                let restored = serde_json::from_value::<PersistedGameState>(wire)
+                    .unwrap()
+                    .into_game_state()
+                    .unwrap();
+                assert_eq!(restored.zone_changes_this_turn.len(), 1);
+                let context = restored
+                    .pending_die_roll_instruction
+                    .as_ref()
+                    .unwrap()
+                    .trigger_context
+                    .as_ref()
+                    .unwrap();
+                let event = if plural {
+                    &context.events[0]
+                } else {
+                    context.event.as_ref().unwrap()
+                };
+                let GameEvent::ZoneChanged { record, .. } = event else {
+                    panic!("retained ZoneChanged");
+                };
+                assert_eq!(
+                    (record.recorded_turn_number, record.turn_zone_change_index),
+                    (19, 0)
+                );
+            }
+        }
     }
 
     /// Registration surfaces 4 and 5 for `pending_discard_batch`: the
@@ -44155,6 +44526,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
 
@@ -44276,6 +44648,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
 
@@ -44566,6 +44939,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
 
@@ -44668,6 +45042,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             }
         }
         fn optional_frame(trigger_events: Vec<GameEvent>) -> ResolutionFrame {
@@ -44708,22 +45083,83 @@ mod tests {
         }
 
         let pyromancer = ObjectId(50);
-        let position_in = |copy_chosen: bool, incarnation: u64, controller: PlayerId| {
+        let position_in = |kind: u8, buried: bool, incarnation: u64, controller: PlayerId| {
+            use crate::types::resolution::{
+                FlipBranchContext, PendingCoinFlip, PendingCoinFlipKind, PendingDieRoll,
+            };
             let mut state = GameState::new_two_player(7);
             let tapped = GameEvent::PermanentTapped {
                 object_id: pyromancer,
                 caused_by: None,
                 incarnation: Some(incarnation),
             };
-            state.resolution_stack.push_inner(if copy_chosen {
-                copy_chosen_frame(tapped)
+            let context = ResolvingTriggerContext {
+                event: kind.is_multiple_of(2).then(|| tapped.clone()),
+                events: if !kind.is_multiple_of(2) {
+                    vec![tapped.clone()]
+                } else {
+                    vec![]
+                },
+                match_count: None,
+                die_result: None,
+            };
+            if kind >= 6 {
+                state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+                    source_id: ObjectId(5),
+                    controller: PlayerId(0),
+                    roller: PlayerId(0),
+                    targets: vec![],
+                    results_table: vec![],
+                    modifier: None,
+                    die_result: None,
+                    trigger_context: Some(context),
+                    continuation: crate::types::resolution::DieRollContinuation::Resolution,
+                    chain_root_targets: vec![],
+                }));
             } else {
-                optional_frame(vec![tapped])
-            });
-            // The frame above buries the event-bearing one.
-            state
-                .resolution_stack
-                .push_inner(optional_frame(Vec::new()));
+                state.resolution_stack.push_inner(match kind {
+                    0 => optional_frame(vec![tapped]),
+                    1 => copy_chosen_frame(tapped),
+                    2 | 3 => ResolutionFrame::CoinFlip(PendingCoinFlip {
+                        source_id: ObjectId(5),
+                        controller: PlayerId(0),
+                        flipper: PlayerId(0),
+                        targets: vec![],
+                        win_effect: None,
+                        lose_effect: None,
+                        kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+                        chain_root_targets: vec![],
+                        branch_context: FlipBranchContext::default(),
+                        trigger_context: Some(context),
+                    }),
+                    4 | 5 => ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+                        source_id: ObjectId(5),
+                        controller: PlayerId(0),
+                        roller: PlayerId(0),
+                        targets: vec![],
+                        sides: 6,
+                        results: vec![1, 2],
+                        ignore_rules: vec![],
+                        results_table: vec![],
+                        modifier: None,
+                        die_result: None,
+                        next_index: 1,
+                        running_total: 1,
+                        rolled_any: true,
+                        forced_ignored: vec![],
+                        chain_root_targets: vec![],
+                        trigger_context: Some(context),
+                    })),
+                    _ => unreachable!(),
+                });
+            }
+            // Buried coin fixtures exercise traversal only; they are not
+            // resumable/persisted stacks with two direct-choice owners.
+            if buried {
+                state
+                    .resolution_stack
+                    .push_inner(optional_frame(Vec::new()));
+            }
             state
                 .lki_by_incarnation
                 .entry(pyromancer)
@@ -44732,11 +45168,14 @@ mod tests {
             state
         };
 
-        // The buried optional frame's plural events, then a buried copy-chosen
-        // walk's singular trigger event.
-        for copy_chosen in [false, true] {
+        // Singular/plural coin and die authority, active and buried, joins the
+        // existing optional/copy carrier normalization family.
+        for (kind, buried) in
+            (0..8).flat_map(|kind| [false, true].map(move |buried| (kind, buried)))
+        {
+            let copy_chosen = format!("kind={kind}, buried={buried}");
             let position =
-                |incarnation, controller| position_in(copy_chosen, incarnation, controller);
+                |incarnation, controller| position_in(kind, buried, incarnation, controller);
             let early = position(3, PlayerId(1));
             let late = position(91, PlayerId(1));
             assert_ne!(
@@ -44764,6 +45203,26 @@ mod tests {
                 ),
                 "[copy_chosen={copy_chosen}] a different referent controller is a different position"
             );
+        }
+        for context in [
+            None,
+            Some(ResolvingTriggerContext {
+                event: None,
+                events: vec![],
+                match_count: None,
+                die_result: None,
+            }),
+        ] {
+            let mut state = position_in(6, false, 91, PlayerId(1));
+            state
+                .pending_die_roll_instruction
+                .as_mut()
+                .unwrap()
+                .trigger_context = context;
+            assert!(!state
+                .normalize_for_loop()
+                .lki_by_incarnation
+                .contains_key(&pyromancer));
         }
     }
 
@@ -44870,6 +45329,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
         let position = |incarnation: u64| {
             let parked = PendingManaAbility {
@@ -48774,6 +49234,7 @@ mod tests {
                 identity: ObjectIncarnationRef::of(ObjectId(1), 7),
                 origin: Zone::Battlefield,
             }],
+            arranger: None,
         };
         let wf = WaitingFor::EffectZoneChoice {
             player: PlayerId(0),
@@ -48831,6 +49292,9 @@ mod tests {
             track_exiled_by_source: false,
             duration: None,
             remaining_batches: PendingMassLibraryOrderBatches::Typed(Vec::new()),
+            arranged_batches: Vec::new(),
+            resolving_entry: None,
+            arranger_election: None,
         };
         let mut wire = serde_json::to_value(pending).unwrap();
         wire["remaining_batches"] = serde_json::json!([[1, [2, 3]]]);
@@ -48841,6 +49305,18 @@ mod tests {
             PendingMassLibraryOrderBatches::Legacy(ref batches)
                 if batches == &vec![(PlayerId(1), vec![ObjectId(2), ObjectId(3)])]
         ));
+        assert!(
+            decoded.arranged_batches.is_empty(),
+            "an older save without collected orders decodes with none"
+        );
+        assert_eq!(
+            decoded.resolving_entry, None,
+            "an older save without entry provenance binds on the instruction fields alone"
+        );
+        assert!(
+            decoded.arranger_election.is_none(),
+            "an older save holds no election"
+        );
 
         let reserialized = serde_json::to_value(decoded).unwrap();
         assert_eq!(
@@ -48848,6 +49324,110 @@ mod tests {
             serde_json::json!([[1, [2, 3]]]),
             "a legacy mass-order queue must retain its migration authority across a save"
         );
+    }
+
+    /// CR 101.4 + CR 401.4 + CR 608.2c: the orders owners have already chosen
+    /// and the resolution that opened the arrangement survive a save, so a
+    /// reloaded arrangement still delivers every owner's cards together.
+    #[test]
+    fn pending_mass_library_order_choice_round_trips_arranged_batches_and_entry() {
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::NthFromTop { n: 3 },
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![MassLibraryOrderBatch {
+                owner: PlayerId(2),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::of(ObjectId(5), 1),
+                    origin: Zone::Battlefield,
+                }],
+                arranger: None,
+            }]),
+            arranged_batches: vec![MassLibraryOrderBatch {
+                owner: PlayerId(1),
+                members: vec![
+                    MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::of(ObjectId(3), 2),
+                        origin: Zone::Battlefield,
+                    },
+                    MassLibraryOrderMember {
+                        identity: ObjectIncarnationRef::of(ObjectId(4), 0),
+                        origin: Zone::Graveyard,
+                    },
+                ],
+                arranger: None,
+            }],
+            resolving_entry: Some(ObjectId(7)),
+            arranger_election: Some(MassLibraryOrderBatch {
+                owner: PlayerId(3),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::of(ObjectId(6), 0),
+                    origin: Zone::Graveyard,
+                }],
+                arranger: Some(PlayerId(0)),
+            }),
+        };
+        let wire = serde_json::to_value(&pending).unwrap();
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, pending);
+    }
+
+    /// CR 800.4g + CR 800.4h: the substitute-arranger election purpose has a
+    /// stable wire name, distinct from the per-player substitute election.
+    #[test]
+    fn substitute_arranger_purpose_round_trips_by_name() {
+        assert_eq!(
+            serde_json::to_value(ZoneOpponentChooserPurpose::SubstituteArranger).unwrap(),
+            serde_json::json!("SubstituteArranger")
+        );
+        assert_eq!(
+            serde_json::from_value::<ZoneOpponentChooserPurpose>(serde_json::json!(
+                "SubstituteArranger"
+            ))
+            .unwrap(),
+            ZoneOpponentChooserPurpose::SubstituteArranger
+        );
+    }
+
+    /// CR 101.1 + CR 401.4: an instruction-named arranger survives serde on both
+    /// the queued and the arranged batch, so a reload still prompts the arranger
+    /// rather than falling back to the owner; a wire without the key decodes as
+    /// the owner default.
+    #[test]
+    fn mass_library_order_batch_round_trips_an_explicit_arranger() {
+        let batch = |owner: u8, object: u64| MassLibraryOrderBatch {
+            owner: PlayerId(owner),
+            members: vec![MassLibraryOrderMember {
+                identity: ObjectIncarnationRef::of(ObjectId(object), 0),
+                origin: Zone::Graveyard,
+            }],
+            arranger: Some(PlayerId(0)),
+        };
+        let pending = PendingMassLibraryOrderChoice {
+            source_id: ObjectId(10),
+            library_position: LibraryPosition::Top,
+            track_exiled_by_source: false,
+            duration: None,
+            remaining_batches: PendingMassLibraryOrderBatches::Typed(vec![batch(2, 5)]),
+            arranged_batches: vec![batch(1, 3)],
+            resolving_entry: None,
+            arranger_election: None,
+        };
+        let wire = serde_json::to_value(&pending).unwrap();
+        assert_eq!(
+            wire["arranged_batches"][0]["arranger"],
+            serde_json::json!(0)
+        );
+        let decoded: PendingMassLibraryOrderChoice = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, pending);
+        assert_eq!(decoded.arranged_batches[0].chooser(), PlayerId(0));
+
+        let mut legacy = serde_json::to_value(batch(1, 3)).unwrap();
+        legacy.as_object_mut().unwrap().remove("arranger");
+        let legacy: MassLibraryOrderBatch = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.arranger, None);
+        assert_eq!(legacy.chooser(), PlayerId(1));
     }
 
     /// CR 502.3: the bounded untap-subset prompt must survive serde round-trip
@@ -51740,6 +52320,169 @@ mod tests {
         assert_eq!(
             deserialized.active_auto_tap_row_policy, None,
             "deserialized active_auto_tap_row_policy must be None"
+        );
+    }
+
+    /// The ingress life window lives only inside one synchronous action: it is
+    /// never serialized, and the per-action reset closes it.
+    #[test]
+    fn ingress_life_window_is_skipped_by_serde_and_cleared_per_action() {
+        let mut state = GameState::new_two_player(7);
+        state.ingress_life_window = Some(IngressLifeWindow {
+            failed_player: Some(PlayerId(1)),
+        });
+        assert_eq!(
+            state.ingress_life_policy(),
+            UnrepresentablePolicy::Reject,
+            "reach guard: an open window selects the rejecting stamp"
+        );
+
+        let serialized = serde_json::to_string(&state).expect("state must serialize");
+        assert!(
+            !serialized.contains("ingress_life_window"),
+            "ingress_life_window must be skipped by serde: {serialized}"
+        );
+        let deserialized: GameState =
+            serde_json::from_str(&serialized).expect("state must deserialize");
+        assert_eq!(
+            deserialized.ingress_life_window, None,
+            "deserialized ingress_life_window must be None"
+        );
+
+        state.clear_player_action_transients();
+        assert_eq!(
+            state.ingress_life_window, None,
+            "the per-action reset must close the window"
+        );
+        assert_eq!(
+            state.ingress_life_policy(),
+            UnrepresentablePolicy::IgnoreImpossible
+        );
+    }
+
+    /// The replacement-quantity overflow record lives only inside one synchronous
+    /// action: it is never serialized, and the per-action reset clears it.
+    #[test]
+    fn replacement_quantity_overflow_is_skipped_by_serde_and_cleared_per_action() {
+        let mut state = GameState::new_two_player(7);
+        state.record_replacement_quantity_overflow(ObjectId(5));
+        state.record_replacement_quantity_overflow(ObjectId(6));
+        assert_eq!(
+            state.replacement_quantity_overflow,
+            Some(ReplacementQuantityOverflow {
+                source: ObjectId(5)
+            }),
+            "reach guard: the first recorded source wins"
+        );
+
+        let serialized = serde_json::to_string(&state).expect("state must serialize");
+        assert!(
+            !serialized.contains("replacement_quantity_overflow"),
+            "replacement_quantity_overflow must be skipped by serde: {serialized}"
+        );
+        let deserialized: GameState =
+            serde_json::from_str(&serialized).expect("state must deserialize");
+        assert_eq!(
+            deserialized.replacement_quantity_overflow, None,
+            "deserialized replacement_quantity_overflow must be None"
+        );
+
+        state.clear_player_action_transients();
+        assert_eq!(
+            state.replacement_quantity_overflow, None,
+            "the per-action reset must clear the record"
+        );
+
+        state.record_replacement_quantity_overflow(ObjectId(7));
+        assert_eq!(
+            state.take_replacement_quantity_overflow(),
+            Some(ReplacementQuantityOverflow {
+                source: ObjectId(7)
+            })
+        );
+        assert_eq!(state.take_replacement_quantity_overflow(), None);
+    }
+
+    fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
+        PendingReplacement {
+            proposed: ProposedEvent::LifeGain {
+                player_id: PlayerId(0),
+                amount: 1,
+                applied: HashSet::new(),
+            },
+            sacrifice_provenance: None,
+            candidates: Vec::new(),
+            search_found_candidates: Vec::new(),
+            depth: 0,
+            is_optional: false,
+            choice_player: None,
+            library_placement: None,
+            exile_controller: None,
+            exile_duration: None,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            excess_recipient: None,
+            lifelink_bonus: 0,
+            may_cost_paid: false,
+            may_cost_remaining: None,
+            delivery_boundary: None,
+            unrepresentable_life_change: policy,
+        }
+    }
+
+    /// Wire shape of the parked-record policy: present as `"Reject"` and
+    /// round-trips; omitted for the ordinary policy; absent in older payloads.
+    #[test]
+    fn pending_replacement_unrepresentable_life_change_wire_shape() {
+        let reject = pending_life_gain_replacement(UnrepresentablePolicy::Reject);
+        let json = serde_json::to_value(&reject).expect("record must serialize");
+        assert_eq!(
+            json.get("unrepresentable_life_change"),
+            Some(&serde_json::json!("Reject"))
+        );
+        let round_trip: PendingReplacement =
+            serde_json::from_value(json).expect("record must deserialize");
+        assert_eq!(round_trip, reject);
+
+        let ordinary = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        let mut json = serde_json::to_value(&ordinary).expect("record must serialize");
+        assert!(
+            json.get("unrepresentable_life_change").is_none(),
+            "the ordinary policy must be omitted from the wire: {json}"
+        );
+        // An older payload (no key) deserializes to the ordinary policy.
+        json.as_object_mut()
+            .expect("record serializes as an object")
+            .remove("unrepresentable_life_change");
+        let legacy: PendingReplacement =
+            serde_json::from_value(json).expect("legacy record must deserialize");
+        assert_eq!(
+            legacy.unrepresentable_life_change,
+            UnrepresentablePolicy::IgnoreImpossible
+        );
+    }
+
+    /// CR 616.1f: a re-parked record copies a `Reject` stamp from its
+    /// predecessor and never downgrades one it already carries.
+    #[test]
+    fn inherit_unrepresentable_life_change_copies_reject_and_never_downgrades() {
+        let mut reparked = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        assert_eq!(
+            reparked.unrepresentable_life_change,
+            UnrepresentablePolicy::IgnoreImpossible,
+            "an ordinary predecessor leaves the default record ordinary"
+        );
+        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::Reject);
+        assert_eq!(
+            reparked.unrepresentable_life_change,
+            UnrepresentablePolicy::Reject,
+            "a rejecting predecessor stamps the default record"
+        );
+        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        assert_eq!(
+            reparked.unrepresentable_life_change,
+            UnrepresentablePolicy::Reject,
+            "an ordinary predecessor must not downgrade a rejecting record"
         );
     }
 

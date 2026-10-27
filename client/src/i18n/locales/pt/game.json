@@ -1329,7 +1329,8 @@
     "passwordPrompt": "Esta sala requer uma senha:",
     "toasts": {
       "connectionFailed": "Falha na conexão. Tente novamente ou altere o servidor nas Configurações.",
-      "eliminatedSpectating": "Você foi eliminado. Agora está assistindo."
+      "eliminatedSpectating": "Você foi eliminado. Agora está assistindo.",
+      "retainedTerminalUnreadable": "Não foi possível ler a entrega retida do resultado final"
     },
     "resumeReset": {
       "appUpdated": "O aplicativo foi atualizado e seu jogo salvo é incompatível com a nova versão.",
@@ -2706,6 +2707,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

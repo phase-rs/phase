@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "LKISnapshot gains intensity: an ability whose source has left reads its last known intensity (CR 608.2h); an older peer drops the field and reads 0"
+}

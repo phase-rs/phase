@@ -234,6 +234,10 @@ pub struct PendingCoinFlip {
     /// exactly those versions' semantics: the branch inherited nothing.
     #[serde(default, skip_serializing_if = "FlipBranchContext::is_empty")]
     pub branch_context: FlipBranchContext,
+    /// CR 608.2c + CR 400.7e: the suspension's owning scope. `Some` with empty
+    /// channels clears foreign ambient authority; `None` preserves legacy no-push behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
@@ -328,6 +332,11 @@ pub struct PendingDieRoll {
     /// serialized before this field existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2c + CR 400.7e: the post-roll instruction's owning scope, retained
+    /// unchanged across results-table child pauses. An explicit empty scope is
+    /// distinct from unavailable authority in legacy frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -338,10 +347,9 @@ pub struct PendingDieRoll {
 /// Class + Pixie Guide), CR 616.1 makes the affected player order them, which
 /// suspends the resolver on `WaitingFor::ReplacementChoice` — and unlike the
 /// CR 706.6 ignore choice, the dice do NOT exist yet, so `PendingDieRoll`
-/// cannot carry it. This frame carries the instruction's non-event context
-/// (results table, modifier, targets, source) so the resume path can finish the
-/// roll with the fully-modified `ProposedEvent::RollDice` the pipeline hands
-/// back.
+/// cannot carry it. This carrier retains the instruction's results table,
+/// modifier, targets, source, and owning trigger scope so the resume path can
+/// finish the roll with the fully-modified `ProposedEvent::RollDice`.
 ///
 /// The `sides` and the die count both ride the proposed event, not this frame:
 /// a replacement may change how many dice are rolled (CR 706.1), so re-reading
@@ -371,6 +379,11 @@ pub struct PendingDieRollInstruction {
     /// boundary, and the CR 616.1 ordering choice is such a boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_result: Option<i32>,
+    /// CR 608.2c + CR 400.7e + CR 616.1: the rolling resolution's scope,
+    /// captured before replacement ordering. Some(empty) clears foreign input;
+    /// None preserves legacy no-push behavior and the non-resolution visit path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
     /// Which caller owns the completion of this roll (see the type docs).
     #[serde(default)]
     pub continuation: DieRollContinuation,
@@ -3520,6 +3533,22 @@ impl ResolutionStack {
                         context.events.iter_mut().for_each(&mut *f);
                     }
                 }
+                ResolutionFrame::CoinFlip(frame) => {
+                    if let Some(context) = frame.trigger_context.as_mut() {
+                        if let Some(event) = context.event.as_mut() {
+                            f(event);
+                        }
+                        context.events.iter_mut().for_each(&mut *f);
+                    }
+                }
+                ResolutionFrame::DieRoll(frame) => {
+                    if let Some(context) = frame.trigger_context.as_mut() {
+                        if let Some(event) = context.event.as_mut() {
+                            f(event);
+                        }
+                        context.events.iter_mut().for_each(&mut *f);
+                    }
+                }
                 // Exhaustive on purpose: a frame family that starts retaining a
                 // trigger event must be visited here.
                 ResolutionFrame::RepeatFor(_)
@@ -3536,8 +3565,6 @@ impl ResolutionStack {
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
                 | ResolutionFrame::PerCategoryZoneChoice(_)
-                | ResolutionFrame::CoinFlip(_)
-                | ResolutionFrame::DieRoll(_)
                 | ResolutionFrame::Proliferate(_)
                 | ResolutionFrame::MultiDraw(_)
                 | ResolutionFrame::Discard(_)
@@ -3941,7 +3968,8 @@ impl ResolutionStack {
 /// Version 8 replaces the coin-flip frame's `Single`/`FlipN`/`UntilLose` kinds with `Exactly`/`UntilLoss`; the older kinds are still read losslessly.
 /// Version 9 carries the coin-flip branch's inherited resolution context
 /// (`PendingCoinFlip.branch_context`).
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
+/// Version 10 retains the owning trigger scope on paused coin and post-roll die frames.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3976,6 +4004,9 @@ const LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
 /// `FlipBranchContext`, which is exactly that version's semantics: the branch
 /// inherited nothing. No migration is needed.
 const LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 8;
+
+/// Last wire version before random-result frames retained their owning trigger scope.
+const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
 
 /// Stable, machine-recognizable restore refusal for a v1–v6 save paused inside
 /// a multi-object ChangeZone whose unprocessed members' entry modifications
@@ -4309,40 +4340,57 @@ fn carries_resolved_change_zone_members(stack: &Value) -> Result<bool, String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinFlipBoundaryData {
-    /// Present only in a v9 frame whose branch inherits something
-    /// (`FlipBranchContext::is_empty` skips the default); only its presence
-    /// is inspected.
+struct RandomResultBoundaryData {
     #[serde(default)]
     branch_context: Option<Map<String, Value>>,
+    #[serde(default)]
+    trigger_context: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
-enum CoinFlipBoundaryFrame {
+enum RandomResultBoundaryFrame {
     CoinFlip {
-        data: CoinFlipBoundaryData,
+        data: RandomResultBoundaryData,
+    },
+    DieRoll {
+        data: RandomResultBoundaryData,
     },
     #[serde(other)]
     Other,
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinFlipBoundaryStack {
+struct RandomResultBoundaryStack {
     #[serde(default)]
-    frames: Vec<CoinFlipBoundaryFrame>,
+    frames: Vec<RandomResultBoundaryFrame>,
 }
 
-/// Whether any parked coin-flip frame in a serialized `ResolutionStack`
-/// carries a v9 `branch_context`. No earlier writer emitted the key, so it
-/// dates an unversioned payload.
-fn carries_coin_flip_branch_context(stack: &Value) -> Result<bool, String> {
-    let stack = serde_json::from_value::<CoinFlipBoundaryStack>(stack.clone())
+/// Non-null random-result authority (including an explicit empty scope) dates
+/// raw frames to v10. Coin branch inheritance alone dates them only to v9.
+fn random_result_context_version(stack: &Value) -> Result<Option<u64>, String> {
+    let stack = serde_json::from_value::<RandomResultBoundaryStack>(stack.clone())
         .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
-    Ok(stack.frames.iter().any(|frame| match frame {
-        CoinFlipBoundaryFrame::CoinFlip { data } => data.branch_context.is_some(),
-        CoinFlipBoundaryFrame::Other => false,
-    }))
+    let mut version = None;
+    for frame in stack.frames {
+        match frame {
+            RandomResultBoundaryFrame::CoinFlip { data } => {
+                if data.trigger_context.is_some() {
+                    return Ok(Some(RESOLUTION_STATE_WIRE_VERSION));
+                }
+                if data.branch_context.is_some() {
+                    version = Some(LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION);
+                }
+            }
+            RandomResultBoundaryFrame::DieRoll { data } => {
+                if data.trigger_context.is_some() {
+                    return Ok(Some(RESOLUTION_STATE_WIRE_VERSION));
+                }
+            }
+            RandomResultBoundaryFrame::Other => {}
+        }
+    }
+    Ok(version)
 }
 
 fn validate_draw_sequence_delivery_owner_fields(
@@ -4687,11 +4735,11 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
         .map(carries_resolved_change_zone_members)
         .transpose()?
         .unwrap_or(false);
-    let unversioned_stack_has_coin_flip_branch_context = object
+    let unversioned_random_result_context_version = object
         .get("resolution_stack")
-        .map(carries_coin_flip_branch_context)
+        .map(random_result_context_version)
         .transpose()?
-        .unwrap_or(false);
+        .flatten();
     // An undeclared payload carrying BOTH carriers is ambiguous, and inferring
     // from one would move `resolution_stack` onto the `resolution_frames` key
     // and discard the declared `resolution_frames` silently. Refuse instead.
@@ -4769,11 +4817,11 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
             // A ChangeZone member record is written only by the v7 carrier, so
             // it dates the payload exactly as `delivery_owner` dates v4. A
             // stack written that late also carries `delivery_owner` on every
-            // draw frame, which v7 validation still requires. A coin-flip
-            // frame's `branch_context` is written only by v9, so it dates the
-            // payload as the current version.
-            let declared_version = if unversioned_stack_has_coin_flip_branch_context {
-                RESOLUTION_STATE_WIRE_VERSION
+            // draw frame, which v7 validation still requires. Random-result
+            // fields distinguish v9 branch inheritance from v10 owned scope.
+            let declared_version = if let Some(version) = unversioned_random_result_context_version
+            {
+                version
             } else if unversioned_stack_has_resolved_change_zone_members {
                 LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             } else if unversioned_stack_has_delivery_owner {
@@ -4917,10 +4965,11 @@ impl ResolutionStateWire {
             | LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
             | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
             | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -5258,6 +5307,7 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
         state.resolving_stack_entry = None;
         state.resolving_trigger_firing = None;
         state.resolving_spell_final_part = None;
+        state.resolving_stack_object = None;
         state.resolution_source_relatch = None;
     }
 }
@@ -7151,6 +7201,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         });
         let mut stack = ResolutionStack::default();
         stack.push_inner(frame);
@@ -7216,6 +7267,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         }));
         assert_eq!(
             optional_effect.validate(&WaitingFor::CoinFlipKeepChoice {
@@ -7531,6 +7583,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         };
 
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
@@ -7615,6 +7668,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         };
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
         let mut legacy_frame = serde_json::to_value(&expected).expect("frame serializes");
@@ -7637,27 +7691,21 @@ mod tests {
     }
 
     #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 9);
-        assert_eq!(
-            LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION,
-            8
-        );
-        assert_eq!(LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION, 7);
-        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
-        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
-        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
-        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
-        assert_eq!(
-            LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION,
-            6
-        );
-
-        let mut v1 =
-            serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
-        v1["resolution_state_version"] = Value::from(1_u64);
-        serde_json::from_value::<ResolutionStateWire>(v1)
-            .expect("the v1 reader remains available for historical saves");
+    fn resolution_wire_keeps_all_legacy_readers_available() {
+        let state = GameState::new_two_player(57);
+        for version in 1..=LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION {
+            let mut value = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+                serde_json::to_value(&state).unwrap()
+            } else {
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap()
+            };
+            value["resolution_state_version"] = Value::from(version);
+            let restored = serde_json::from_value::<ResolutionStateWire>(value)
+                .expect("every historical reader remains available")
+                .into_game_state();
+            assert_eq!(restored.players, state.players);
+            assert!(restored.resolution_stack.is_empty());
+        }
     }
 
     #[test]
@@ -8040,6 +8088,7 @@ mod tests {
                 kind: PendingCoinFlipKind::Exactly { remaining: 0 },
                 chain_root_targets: Vec::new(),
                 branch_context: FlipBranchContext::default(),
+                trigger_context: None,
             },
         );
         apply_as_current(
@@ -9278,6 +9327,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);
@@ -9396,6 +9446,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         };
         let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
         multiple_direct["pending_coin_flip"] =
@@ -9573,6 +9624,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         }));
         assert!(
             serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
@@ -9690,10 +9742,7 @@ mod tests {
 
         let mut future = current;
         future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
-        let error = serde_json::from_value::<ResolutionStateWire>(future)
-            .expect_err("an unknown version is refused")
-            .to_string();
-        assert!(error.contains("1, 2, 3, 4, 5, 6, 7, 8, or 9"), "{error}");
+        assert!(serde_json::from_value::<ResolutionStateWire>(future).is_err());
     }
 
     /// A Krark's-Thumb-parked coin flip over `branch_context`.
@@ -9714,6 +9763,7 @@ mod tests {
             kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
             branch_context,
+            trigger_context: None,
         });
         state
     }
@@ -9796,7 +9846,7 @@ mod tests {
     /// An unversioned raw payload is dated by what its frames carry: a coin-flip
     /// `branch_context` is written only by version 9.
     #[test]
-    fn an_unversioned_coin_flip_branch_context_dates_the_payload_to_the_current_version() {
+    fn an_unversioned_coin_flip_branch_context_dates_the_payload_to_version_9() {
         let declared_version = |branch_context: FlipBranchContext| {
             let mut raw =
                 serde_json::to_value(state_with_parked_coin_flip(branch_context)).expect("raw");
@@ -9811,13 +9861,108 @@ mod tests {
 
         assert_eq!(
             declared_version(non_empty_branch_context(&GameState::new_two_player(42))),
-            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+            Value::from(LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION)
         );
         assert_eq!(
             declared_version(FlipBranchContext::default()),
             Value::from(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION),
             "the same frame without the key is not dated to the current version"
         );
+    }
+
+    #[test]
+    fn random_result_owned_scope_survives_current_legacy_and_raw_ingress() {
+        let retained = |state: &GameState, die| {
+            if die {
+                state
+                    .resolution_stack
+                    .active_die_roll()
+                    .unwrap()
+                    .trigger_context
+                    .clone()
+            } else {
+                state
+                    .active_coin_flip_frame()
+                    .unwrap()
+                    .trigger_context
+                    .clone()
+            }
+        };
+        for die in [false, true] {
+            for context in [
+                None,
+                Some(ResolvingTriggerContext {
+                    event: None,
+                    events: vec![],
+                    match_count: None,
+                    die_result: None,
+                }),
+                Some(ResolvingTriggerContext {
+                    event: None,
+                    events: vec![],
+                    match_count: Some(7),
+                    die_result: Some(13),
+                }),
+            ] {
+                let mut state = state_with_parked_coin_flip(FlipBranchContext::default());
+                state.active_coin_flip_frame_mut().unwrap().trigger_context = context.clone();
+                if die {
+                    state.take_active_coin_flip_frame().unwrap();
+                    state.push_die_roll_frame(PendingDieRoll {
+                        source_id: ObjectId(7),
+                        controller: PlayerId(0),
+                        roller: PlayerId(0),
+                        targets: vec![],
+                        sides: 1,
+                        results: vec![1, 1],
+                        ignore_rules: vec![crate::types::ability::DieRollIgnoreRule::Lowest],
+                        results_table: vec![],
+                        modifier: None,
+                        die_result: None,
+                        next_index: 0,
+                        running_total: 0,
+                        rolled_any: false,
+                        forced_ignored: vec![],
+                        chain_root_targets: vec![],
+                        trigger_context: context.clone(),
+                    });
+                    state.waiting_for = WaitingFor::DieKeepChoice {
+                        player: PlayerId(0),
+                        results: vec![1, 1],
+                        ignorable_indices: vec![0, 1],
+                        ignore_count: 1,
+                    };
+                }
+                let mut raw = serde_json::to_value(&state).unwrap();
+                declare_raw_resolution_wire(&mut raw).unwrap();
+                if context.is_some() {
+                    assert_eq!(
+                        raw["resolution_state_version"],
+                        RESOLUTION_STATE_WIRE_VERSION
+                    );
+                }
+                let restored = serde_json::from_value::<ResolutionStateWire>(raw)
+                    .unwrap()
+                    .into_game_state();
+                assert_eq!(retained(&restored, die), context);
+                let mut wire =
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                    .unwrap()
+                    .into_game_state();
+                assert_eq!(retained(&restored, die), context);
+                wire["resolution_state_version"] =
+                    Value::from(LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION);
+                wire["resolution_frames"]["frames"][0]["data"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("trigger_context");
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap()
+                    .into_game_state();
+                assert_eq!(retained(&restored, die), None);
+            }
+        }
     }
 
     /// `FlipBranchContext::from_ability` keeps a completed-but-empty forwarded

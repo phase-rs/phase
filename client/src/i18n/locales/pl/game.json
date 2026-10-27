@@ -1329,7 +1329,8 @@
     "passwordPrompt": "Ten pokój wymaga hasła:",
     "toasts": {
       "connectionFailed": "Połączenie nie powiodło się. Spróbuj ponownie lub zmień serwer w Ustawieniach.",
-      "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz."
+      "eliminatedSpectating": "Zostałeś wyeliminowany. Teraz obserwujesz.",
+      "retainedTerminalUnreadable": "Nie udało się odczytać zachowanego dostarczenia wyniku końcowego"
     },
     "resumeReset": {
       "appUpdated": "Aplikacja została zaktualizowana, a zapisana gra jest niezgodna z nową wersją.",
@@ -2706,6 +2707,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

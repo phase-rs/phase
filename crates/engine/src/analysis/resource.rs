@@ -5533,6 +5533,7 @@ fn floating_replacement_can_name_object(
         destination_zone: _,
         active_zones: _,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
@@ -26251,6 +26252,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         s

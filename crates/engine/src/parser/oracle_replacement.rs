@@ -38,7 +38,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_type_filter_word, parse_type_phrase, ControllerPhrase,
+    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
+    ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -1144,6 +1145,7 @@ fn parse_discard_to_library_top_replacement(
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
+            arranger: None,
         },
     );
     Some(
@@ -10499,6 +10501,17 @@ fn parse_attached_host_subject(input: &str) -> OracleResult<'_, TargetFilter> {
 }
 
 pub(crate) fn parse_damage_source_subject_filter(subject: &str) -> Option<TargetFilter> {
+    // CR 608.2c + CR 615.2: source-scoped prevention can name its own source
+    // with a deictic object phrase (Barbed Wire: "by this artifact"). The
+    // vocabulary is the shared `parse_self_reference` authority
+    // (oracle_nom::target), which now also covers "this source"; composing it
+    // here keeps every subject grammar in sync instead of maintaining a second
+    // phrase list. `all_consuming` keeps the contract that the whole subject
+    // must be consumed.
+    if all_consuming(parse_self_reference).parse(subject).is_ok() {
+        return Some(TargetFilter::SelfRef);
+    }
+
     // CR 301.5 + CR 702.6: host-relative subjects ("equipped creature",
     // "enchanted creature") resolve to the attached object before the generic
     // typed-source grammar, which would otherwise treat "creature" as a type.
@@ -36349,5 +36362,24 @@ mod damage_source_union {
             vec![TypeFilter::Subtype("Giant".to_string())]
         );
         assert_eq!(typed.controller, Some(ControllerRef::You));
+    }
+
+    /// CR 608.2c + CR 615.2: source deictics bind to the object hosting the
+    /// effect, including Barbed Wire's "this artifact" wording.
+    #[test]
+    fn source_deictics_bind_the_source_object() {
+        for phrase in [
+            "this artifact",
+            "this creature",
+            "this permanent",
+            "this source",
+            "~",
+        ] {
+            assert_eq!(
+                parse_damage_source_subject_filter(phrase),
+                Some(TargetFilter::SelfRef),
+                "{phrase}"
+            );
+        }
     }
 }

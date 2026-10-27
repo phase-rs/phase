@@ -1136,6 +1136,201 @@ fn bind_completed_forwarded_zone_result(state: &mut GameState, result: Forwarded
     bind_active_continuation_to_moved_objects(state, producer, &[], result);
 }
 
+/// CR 400.7j + CR 608.2c: the accepted optional move whose completed result a
+/// parked dependent continuation must read. Qualification is captured BEFORE
+/// the answer lowers optionality, from the state the prompt actually parked.
+struct AcceptedOptionalMove {
+    producer: ObjectId,
+    destination: Zone,
+    /// CR 400.7: the exact subject occurrences the producer selected. A stale
+    /// `SelfRef` selects nothing, so a same-id successor that returned to the
+    /// battlefield can never be mistaken for this move's result.
+    subjects: Vec<ObjectId>,
+}
+
+impl AcceptedOptionalMove {
+    /// The accepted instruction must be a single `SelfRef` `ChangeZone` to a
+    /// public zone whose immediately parked dependent is a bare `ParentTarget`
+    /// return gated by this acceptance. Anything else keeps its pre-existing
+    /// behavior.
+    fn qualify(state: &GameState, ability: &ResolvedAbility) -> Option<Self> {
+        let Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } = &ability.effect
+        else {
+            return None;
+        };
+        // CR 608.2d: a resolution-time selection has not chosen its subject at
+        // this prompt. Restrict this binder to SelfRef, whose subject is
+        // already determined; other producers keep their existing route.
+        if !matches!(target, TargetFilter::SelfRef) {
+            return None;
+        }
+        // CR 400.2: hand and library are hidden; battlefield arrivals have
+        // their own explicit `forward_result` contract; stack and command
+        // moves are not zone-move instructions of this class.
+        if !matches!(destination, Zone::Exile | Zone::Graveyard) {
+            return None;
+        }
+        // A producer-owned tail or repeat driver would add work of its own to
+        // the event slice this binder reads.
+        if ability.sub_ability.is_some()
+            || ability.else_ability.is_some()
+            || ability.repeat_for.is_some()
+            || ability.repeat_until.is_some()
+        {
+            return None;
+        }
+        let chain = state.active_ability_continuation()?.chain.as_ref();
+        if chain.source_id != ability.source_id
+            || chain.context.pending_forwarded_zone_result.is_some()
+            || chain.context.optional_effect_performed
+        {
+            return None;
+        }
+        if !matches!(
+            chain.condition.as_ref(),
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed
+            })
+        ) {
+            return None;
+        }
+        // CR 400.7j + CR 608.2c: only the bare "it" operand denotes this move's
+        // result. A declared ParentTargetSlot has its own root-slot authority;
+        // wrappers and other parent references are not this exact referent.
+        if !matches!(
+            &chain.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ) {
+            return None;
+        }
+        // A non-sibling sub is a resolution step of the dependent clause, so
+        // skipping the clause would have to skip it too.
+        if chain
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| !starts_independent_instruction(sub))
+        {
+            return None;
+        }
+        Some(Self {
+            producer: ability.source_id,
+            destination: *destination,
+            subjects: resolved_effect_object_ids(state, ability, target),
+        })
+    }
+}
+
+/// CR 400.7j + CR 608.2c + CR 609.3: publish the accepted optional move's own
+/// completed result onto exactly its parked dependent continuation.
+///
+/// The result is read only from this producer's event slice (`producer_events`),
+/// restricted to the occurrences it selected and its requested destination. A
+/// completed instruction that moved nothing consumes its immediate dependent
+/// return locally with `NoOp` and clears that node's forwarded context; an
+/// independent later sibling still resolves. An ineligible delivery (a
+/// replacement, or no completion witness) keeps its pre-existing route.
+///
+/// NODE-LOCAL by construction: only this parked node's targets, pins and
+/// forwarded result are written. Its continuation edges are left untouched, so
+/// an independently announced target or a separately printed sibling keeps its
+/// own authority.
+fn publish_accepted_optional_move_result(
+    state: &mut GameState,
+    accepted: &AcceptedOptionalMove,
+    producer_events: &[GameEvent],
+) {
+    if producer_events
+        .iter()
+        .any(|event| matches!(event, GameEvent::ReplacementApplied { .. }))
+    {
+        return;
+    }
+    if !producer_events.iter().any(
+        |event| matches!(event, GameEvent::EffectResolved { source_id, .. } if *source_id == accepted.producer),
+    ) {
+        return;
+    }
+    let moved: Vec<ObjectId> = accepted
+        .subjects
+        .iter()
+        .copied()
+        .filter(|object_id| {
+            let Some(object) = state.objects.get(object_id) else {
+                return false;
+            };
+            let last_destination = producer_events.iter().rev().find_map(|event| match event {
+                GameEvent::ZoneChanged {
+                    object_id: moved_id,
+                    to,
+                    ..
+                } if moved_id == object_id => Some(*to),
+                _ => None,
+            });
+            object.zone == accepted.destination && last_destination == Some(accepted.destination)
+        })
+        .collect();
+    let result = ForwardedResultContext::from_object_ids(state, &moved);
+    let Some(frame) = state.active_ability_continuation_frame_mut() else {
+        return;
+    };
+    let chain = &mut frame.pending.chain;
+    if chain.source_id != accepted.producer || chain.context.pending_forwarded_zone_result.is_some()
+    {
+        return;
+    }
+    chain.context.pending_forwarded_zone_result = None;
+    if result.targets.is_empty() {
+        // CR 608.2c + CR 609.3: the dependent move has no referent, so this
+        // instruction does nothing. Replacing the node's effect (rather than
+        // merely clearing its targets) keeps the unresolved-`ParentTarget`
+        // source fallback from rediscovering the returned permanent.
+        //
+        // Deliberately NOT `Some(empty)` on the surviving chain: the drain's
+        // completed-empty pruning walks every descendant and treats a declared
+        // `ParentTargetSlot` as a parent reference, so an empty marker here
+        // would prune a later independent declared-slot instruction
+        // (CR 115.1d) that names its own announced target. The producer's
+        // dependent node is consumed locally; nothing downstream names its
+        // missing result.
+        chain.replace_target_occurrences(Vec::new());
+        chain.effect = Effect::NoOp;
+        chain.context.forwarded_result_context = None;
+    } else {
+        // CR 400.7j + CR 608.2c: the dependent `ParentTarget` names the object
+        // this instruction itself moved to a public zone. Write that object as
+        // the node's OWN occurrence — with the producer-time incarnation pin
+        // (CR 400.7), so a later same-`ObjectId` incarnation cannot be mistaken
+        // for it — rather than leaving the node to rediscover a referent from
+        // the triggering spell's chosen targets or the ability source.
+        //
+        // The pin is kept because it is the correct producer-time identity, not
+        // because a test distinguishes it: the dependent consumes this node in
+        // the same resolution, so at this seam the pinned and the live
+        // incarnation always coincide today (mutation-tested: dropping it is
+        // currently unobservable).
+        //
+        // Replacing the occurrences is required, not merely filling empty ones:
+        // an inherited cast-event or declared-slot referent is a different
+        // object and must not keep precedence over the move's own result.
+        // Node-local: `replace_target_occurrences` writes only this node, so a
+        // following independent sibling keeps its own targets and pins.
+        let occurrences = result
+            .object_incarnations
+            .iter()
+            .map(|pin| (TargetRef::Object(pin.object_id), Some(*pin)))
+            .collect();
+        chain.replace_target_occurrences(occurrences);
+        chain.context.forwarded_result_context = Some(Box::new(result));
+    }
+}
+
 /// CR 400.7j: an accepted optional move binds its stashed rider from its own event slice.
 fn park_forwarded_zone_result_on_active_continuation(
     state: &mut GameState,
@@ -3457,6 +3652,9 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
                 // as before this field existed.
                 was_prepared: false,
                 attachments: Vec::new(),
+                // The reveal subject carries no intensity; no reader asks a
+                // revealed card's intensity.
+                intensity: 0,
             },
             incarnation: subject.identity.incarnation,
         }),
@@ -3524,6 +3722,9 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         // CR 701.3d), so carry it through rather than dropping it on the way into the
         // LKI.
         attachments: record.attachments.clone(),
+        // `ZoneChangeRecord` carries no intensity; the intensity readers
+        // (`QuantityRef::Intensity { Source }`) read the source's own LKI.
+        intensity: 0,
     }
 }
 
@@ -4452,6 +4653,13 @@ fn bind_forwarded_result_targets_for_legacy_effect(child: &mut ResolvedAbility) 
 ///     `engine_resolution_choices.rs` as `forwarded_result_context = Some([])`,
 ///     the same completed-but-empty vocabulary.
 ///
+/// A completed accepted optional public-zone move is deliberately NOT a third
+/// caller: `publish_accepted_optional_move_result` consumes its dependent node
+/// locally instead. This walk treats every descendant `ParentTargetSlot` as a
+/// parent reference, while a declared slot resolves through the root's
+/// announced targets, so feeding it the whole parked chain would prune an
+/// independent declared-slot instruction.
+///
 /// Prunes exactly the dependent nodes, re-stamps the completed-but-empty
 /// context so a nested consumer reads the same fact, and resumes at the first
 /// independent sibling rather than terminating the printed instruction. The
@@ -4920,6 +5128,20 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EmpowerJaceChoice { .. }
             | WaitingFor::SpellCopyOrderChoice { .. }
     )
+}
+
+/// CR 601.2a-h: the object of the spell whose casting is in progress, if any —
+/// its face election (`ModalFaceChoice`, before any `PendingCast` exists), or
+/// the announcement held by any live `PendingCastOwner`.
+fn spell_cast_in_flight(state: &GameState) -> Option<ObjectId> {
+    match &state.waiting_for {
+        WaitingFor::ModalFaceChoice { object_id, .. } => Some(*object_id),
+        _ => state
+            .live_pending_cast_owners()
+            .first()
+            .and_then(|owner| state.pending_cast_at(*owner))
+            .map(|pending| pending.object_id),
+    }
 }
 
 /// CR 603.10 + CR 608.2c: `next` is about to run inline. When it begins a later instruction,
@@ -5502,6 +5724,9 @@ fn resolve_optional_effect_decision_step(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
+    // CR 608.2c: qualification is read from the state the prompt parked, before
+    // the answer lowers optionality and strips the enclosing repeat driver.
+    let accepted_move = AcceptedOptionalMove::qualify(state, &ability);
     ability.optional = false;
     // CR 608.2c: the enclosing repeat driver owns progression. This answer
     // performs only its current iteration, retaining optionality on the parent.
@@ -5521,11 +5746,26 @@ fn resolve_optional_effect_decision_step(
             // performed, propagate the signal into the stashed continuation so
             // its `IfYouDo` gate evaluates true (e.g. Ral, Monsoon Mage:
             // "you may exile Ral. If you do, return him transformed").
+            // CR 118.12: acceptance records the CHOICE, not an object result;
+            // the accepted instruction still has to produce its own moved
+            // object (or produce none) before a dependent return can name it.
             if let Some(frame) = state.active_ability_continuation_frame_mut() {
                 frame
                     .pending
                     .chain
                     .set_optional_effect_performed_recursive(true);
+            }
+            // CR 400.7j: a completed public-zone move publishes its own object
+            // result to the dependent continuation it parked. Waiting/Queued
+            // work is not a completed result.
+            if progress == ResolutionProgress::Complete {
+                if let Some(accepted) = accepted_move.as_ref() {
+                    publish_accepted_optional_move_result(
+                        state,
+                        accepted,
+                        &events[producer_events_start..],
+                    );
+                }
             }
             park_forwarded_zone_result_on_active_continuation(
                 state,
@@ -8958,7 +9198,9 @@ fn effect_fields_read_filter_population(
         Effect::Discover { player, .. } => has_filter(player),
         Effect::PhysicalContest { contestant, .. } => has_filter(contestant),
         Effect::Heist { target, .. } => has_filter(target),
-        Effect::PutAtLibraryPosition { target, .. } => has_filter(target),
+        Effect::PutAtLibraryPosition {
+            target, arranger, ..
+        } => has_filter(target) || arranger.as_ref().is_some_and(has_filter),
         Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => has_filter(player),
         Effect::PutOnTopOrBottom { target, chooser } => has_filter(target) || has_filter(chooser),
         Effect::Goad { target } => has_filter(target),
@@ -9507,6 +9749,7 @@ fn replacement_matchers_read_filter_population(
         damage_modification,
         damage_source_filter,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
@@ -12104,6 +12347,7 @@ struct LegacyEffectBoundary {
     frame_count: usize,
     continuation: Option<PendingContinuation>,
     discard: Option<DiscardFrameId>,
+    cast_in_flight: Option<ObjectId>,
 }
 
 impl LegacyEffectBoundary {
@@ -12143,11 +12387,23 @@ impl LegacyEffectBoundary {
                 .resolution_stack
                 .active_discard()
                 .map(|frame| frame.id),
+            cast_in_flight: spell_cast_in_flight(state),
         }
     }
 
     fn classify(self, state: &GameState, ability: &ResolvedAbility) -> ResolutionProgress {
         if waits_for_resolution_choice(&state.waiting_for) {
+            return ResolutionProgress::Waiting;
+        }
+        // CR 608.2g + CR 601.2c + CR 608.2c: a spell this invocation began
+        // casting during resolution (`casting::initiate_cast_during_resolution`)
+        // is still being cast while it asks its caster for a face, targets, or
+        // costs. Casting it is part of this instruction, so the next one ("Then
+        // put the exiled cards that weren't cast this way on the bottom" —
+        // Chaos Wand) waits until the spell is on the stack or the cast is
+        // withdrawn. A cast already in flight when this invocation began (a
+        // mana ability activated while paying for it) is not this invocation's.
+        if spell_cast_in_flight(state).is_some_and(|cast| Some(cast) != self.cast_in_flight) {
             return ResolutionProgress::Waiting;
         }
         // CR 701.9a + CR 608.2c: Recruit retains a settled domain result until
@@ -16200,6 +16456,7 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             mode,
             target,
             constraint,
+            driver,
             ..
         } => {
             // CR 608.2d: An optional exact "cast/play that card" instruction is
@@ -16221,11 +16478,26 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // lands never enter the cast path, fixed permission constraints use
             // the casting pipeline's typed offer-time authority, and the cloned
             // resolver retains all other CR 601 legality checks. Dynamic/X
-            // constraints remain deferred by that shared authority. `Play`
-            // permits lands, so this probe is Cast-only. An empty bound set
-            // retains the original whole-ability dry-run, which keeps successful
-            // zone-selection fallbacks feasible while preserving other errors.
-            if matches!(mode, CardPlayMode::Cast) {
+            // constraints remain deferred by that shared authority. An empty
+            // bound set retains the original whole-ability dry-run, which keeps
+            // successful zone-selection fallbacks feasible while preserving
+            // other errors.
+            //
+            // CR 701.18b + CR 608.2d + CR 305.2b + CR 305.3: a `Play`
+            // instruction that resolves now (`DuringResolution`) is probed too,
+            // per card through `cast_from_zone::resolution_play_route` — the
+            // route `resolve` takes — so a land the player cannot play right now
+            // (allowance reached, not their turn) is not offered. A lingering
+            // `Play` grant is always grantable and stays unprobed.
+            let resolves_play_now = mode.is_play() && driver.is_during_resolution();
+            if matches!(mode, CardPlayMode::Cast) || resolves_play_now {
+                // CR 608.2d: an untargeted free graveyard pick with nothing
+                // castable is impossible whatever follows it, so an "If you do"
+                // rider (Jarsyl, Dark Age Scion) does not run on a no-op.
+                if let Some(true) = cast_from_zone::graveyard_pick_eligible_is_empty(state, ability)
+                {
+                    return true;
+                }
                 // CR 608.2d: An optional hand-pick cast ("you may cast a permanent
                 // spell … from your hand") with no eligible card is impossible.
                 // This only needs to be treated as infeasible up front when the
@@ -16237,17 +16509,18 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 // offerable — its empty pick simply resolves as a no-op — so the
                 // whole-ability dry-run below still governs it. The predicate
                 // returns `None` for pre-bound / non-hand `CastFromZone` classes.
-                if ability
-                    .sub_ability
-                    .as_deref()
-                    .is_some_and(should_resolve_subability_on_optional_decline)
+                if matches!(mode, CardPlayMode::Cast)
+                    && ability
+                        .sub_ability
+                        .as_deref()
+                        .is_some_and(should_resolve_subability_on_optional_decline)
                 {
                     if let Some(true) = cast_from_zone::hand_pick_eligible_is_empty(state, ability)
                     {
                         return true;
                     }
                 }
-                let bound_objects: Vec<_> = ability
+                let mut bound_objects: Vec<_> = ability
                     .targets
                     .iter()
                     .filter_map(|target| match target {
@@ -16255,24 +16528,67 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                         TargetRef::Player(_) => None,
                     })
                     .collect();
+                // CR 406.6 + CR 607.2a: an unbound "the exiled card" Play binds
+                // through the same authority `resolve` uses, so the per-card
+                // probe below asks about the card resolution would play. The
+                // private looked-at-library pick keeps the whole-ability dry run.
+                if bound_objects.is_empty()
+                    && resolves_play_now
+                    && target.references_exiled_by_source()
+                {
+                    bound_objects = match cast_from_zone::exiled_by_source_fallback_binding(
+                        state, ability, target,
+                    ) {
+                        cast_from_zone::ExiledBySourceBinding::LinkedExile(ids) => ids,
+                        cast_from_zone::ExiledBySourceBinding::LookedAtLibrary(_) => Vec::new(),
+                    };
+                }
                 if bound_objects.is_empty() {
                     let mut simulated = state.clone();
                     return cast_from_zone::resolve(&mut simulated, ability, &mut Vec::new())
                         .is_err();
+                }
+                // CR 608.2g + CR 701.18b: a multi-card binding is not played
+                // now — `resolve` grants lingering permissions for it (same
+                // cardinality authority), which is always grantable, so the
+                // resolve-now land legality below must not veto the offer.
+                if resolves_play_now
+                    && cast_from_zone::single_resolution_card(&bound_objects).is_none()
+                {
+                    return false;
                 }
 
                 return !bound_objects.into_iter().any(|id| {
                     let Some(object) = state.objects.get(&id) else {
                         return false;
                     };
-                    if object
+                    if resolves_play_now {
+                        match cast_from_zone::resolution_play_route(object) {
+                            cast_from_zone::ResolutionPlayRoute::PlayLand => {
+                                return crate::game::engine::resolution_land_play_is_legal(
+                                    state,
+                                    ability.controller,
+                                    id,
+                                );
+                            }
+                            // CR 712.12: the lingering land-face fallback grants
+                            // a permission, which is always grantable.
+                            cast_from_zone::ResolutionPlayRoute::LingeringFaceElection => {
+                                return true;
+                            }
+                            cast_from_zone::ResolutionPlayRoute::CastSpell => {}
+                        }
+                    } else if object
                         .card_types
                         .core_types
                         .contains(&crate::types::card_type::CoreType::Land)
-                        || !crate::game::casting::cast_permission_constraint_allows_cast(
-                            state, object, constraint, None,
-                        )
                     {
+                        // CR 305.9: a land is never cast.
+                        return false;
+                    }
+                    if !crate::game::casting::cast_permission_constraint_allows_cast(
+                        state, object, constraint, None,
+                    ) {
                         return false;
                     }
 
@@ -30836,6 +31152,7 @@ mod tests {
             target,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
+            arranger: None,
         })
     }
 
@@ -31568,6 +31885,7 @@ mod tests {
                         ),
                         count,
                         position: crate::types::ability::LibraryPosition::Bottom,
+                        arranger: None,
                     },
                     vec![],
                     source,
@@ -34618,6 +34936,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -34812,6 +35131,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             targets,
             source,
@@ -38708,6 +39028,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         let events = vec![
@@ -57764,6 +58085,314 @@ mod tests {
         }
     }
 
+    /// A Play instruction on `card`: bound (`ParentTarget`, `targets = [card]`)
+    /// or unbound (`ExiledBySource`, `targets = []`).
+    fn play_instruction(
+        source: ObjectId,
+        bound: Option<ObjectId>,
+        driver: crate::types::ability::CastFromZoneDriver,
+    ) -> ResolvedAbility {
+        use crate::types::ability::CardPlayMode;
+        let mut ability = ResolvedAbility::new(
+            Effect::CastFromZone {
+                target: if bound.is_some() {
+                    TargetFilter::ParentTarget
+                } else {
+                    TargetFilter::ExiledBySource
+                },
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Play,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+            bound.map(TargetRef::Object).into_iter().collect(),
+            source,
+            PlayerId(0),
+        );
+        ability.optional = true;
+        ability
+    }
+
+    /// P0's turn with a play source on the battlefield and one land card in
+    /// `zone`, optionally a land//land modal card (CR 712.12).
+    fn play_feasibility_board(
+        zone: Zone,
+        land_land_modal: bool,
+    ) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+        let source = create_object(
+            &mut state,
+            CardId(910),
+            PlayerId(0),
+            "Play Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land = create_object(
+            &mut state,
+            CardId(911),
+            PlayerId(0),
+            "Bound Land".to_string(),
+            zone,
+        );
+        let object = state.objects.get_mut(&land).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.base_card_types = object.card_types.clone();
+        if land_land_modal {
+            let mut back_types = crate::types::card_type::CardType::default();
+            back_types.core_types.push(CoreType::Land);
+            object.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Back Pathway".to_string(),
+                card_types: back_types,
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                ..Default::default()
+            });
+        }
+        (state, source, land)
+    }
+
+    fn at_land_allowance(state: &mut GameState) {
+        state.lands_played_this_turn = 1;
+        state.players[0].lands_played_this_turn = 1;
+    }
+
+    fn link_exiled(state: &mut GameState, source: ObjectId, exiled: ObjectId) {
+        state.exile_links.push(crate::types::game_state::ExileLink {
+            exiled_id: exiled,
+            source_id: source,
+            kind: crate::types::game_state::ExileLinkKind::TrackedBySource,
+        });
+    }
+
+    /// CR 608.2d + CR 305.2b + CR 305.3: a Play that resolves now is offered only
+    /// when its bound land can be played right now; a lingering Play grant is
+    /// always grantable and unprobed.
+    #[test]
+    fn optional_play_now_feasibility_tracks_land_play_legality() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let (state, source, land) = play_feasibility_board(Zone::Exile, false);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &now),
+            "a land P0 can play now is offered"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        at_land_allowance(&mut state);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &now),
+            "CR 305.2b: no land drop left, no offer"
+        );
+        let lingering =
+            play_instruction(source, Some(land), CastFromZoneDriver::LingeringPermission);
+        assert!(
+            !optional_effect_is_infeasible(&state, &lingering),
+            "a lingering Play grant is not probed"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        state.active_player = PlayerId(1);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &now),
+            "CR 305.3: not P0's turn, no offer"
+        );
+    }
+
+    /// CR 712.12: a bound land//land modal card in the LIBRARY takes the
+    /// lingering land-face fallback, which is always grantable; the same land
+    /// without a modal back face is probed as a land play.
+    #[test]
+    fn optional_play_now_feasibility_keeps_the_land_land_modal_fallback_offerable() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let (mut state, source, card) = play_feasibility_board(Zone::Library, true);
+        at_land_allowance(&mut state);
+        let now = play_instruction(source, Some(card), CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &now),
+            "the land//land fallback lingers, as at base"
+        );
+        state.active_player = PlayerId(1);
+        assert!(
+            !optional_effect_is_infeasible(&state, &now),
+            "the land//land fallback lingers on an opponent's turn too"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Library, false);
+        at_land_allowance(&mut state);
+        let now = play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &now),
+            "reach-guard: only the modal back face differs, and a plain land at the \
+             allowance is not offered"
+        );
+    }
+
+    /// CR 406.6 + CR 607.2a + CR 608.2d: an UNBOUND "the exiled card" Play is
+    /// probed on the card `resolve` would bind (the source's linked exile).
+    #[test]
+    fn optional_unbound_play_now_feasibility_binds_the_linked_exile() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        link_exiled(&mut state, source, land);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(
+            !optional_effect_is_infeasible(&state, &unbound),
+            "reach-guard: a playable linked land is offered"
+        );
+        at_land_allowance(&mut state);
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound),
+            "CR 305.2b: the linked land cannot be played, so no offer"
+        );
+
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        link_exiled(&mut state, source, land);
+        state.active_player = PlayerId(1);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound),
+            "CR 305.3: not P0's turn, no offer"
+        );
+
+        // CR 712.12: a linked land//land modal card lingers, so it stays offered.
+        let (mut state, source, card) = play_feasibility_board(Zone::Exile, true);
+        link_exiled(&mut state, source, card);
+        at_land_allowance(&mut state);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(!optional_effect_is_infeasible(&state, &unbound));
+
+        // No link and no look: the whole-ability dry run still governs, and
+        // `resolve` reports "nothing to cast".
+        let (state, source, _) = play_feasibility_board(Zone::Exile, false);
+        let unbound = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        assert!(!optional_effect_is_infeasible(&state, &unbound));
+    }
+
+    /// CR 608.2g + CR 701.18b: a MULTI-card Play binding is not played now —
+    /// `resolve` grants lingering permissions for it (the shared
+    /// `single_resolution_card` cardinality authority) — so resolve-now land
+    /// legality (CR 305.2b / CR 305.3) must not veto its offer. The paired
+    /// single-land rows stay infeasible.
+    #[test]
+    fn optional_play_now_feasibility_skips_the_land_probe_for_a_multi_card_binding() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        fn add_second_exiled_land(state: &mut GameState) -> ObjectId {
+            let land = create_object(
+                state,
+                CardId(913),
+                PlayerId(0),
+                "Second Land".to_string(),
+                Zone::Exile,
+            );
+            let object = state.objects.get_mut(&land).unwrap();
+            object.card_types.core_types.push(CoreType::Land);
+            object.base_card_types = object.card_types.clone();
+            land
+        }
+
+        // Unbound "the exiled card" over a linked exile holding two lands.
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        let second = add_second_exiled_land(&mut state);
+        link_exiled(&mut state, source, land);
+        let unbound_single = play_instruction(source, None, CastFromZoneDriver::DuringResolution);
+        at_land_allowance(&mut state);
+        assert!(
+            optional_effect_is_infeasible(&state, &unbound_single),
+            "reach-guard: one linked land at the allowance is not offered"
+        );
+        link_exiled(&mut state, source, second);
+        assert!(
+            !optional_effect_is_infeasible(&state, &unbound_single),
+            "CR 608.2g: two linked lands take the lingering grant, so the offer stands \
+             at the allowance"
+        );
+        state.active_player = PlayerId(1);
+        assert!(
+            !optional_effect_is_infeasible(&state, &unbound_single),
+            "CR 608.2g: two linked lands take the lingering grant on an opponent's turn too"
+        );
+        let mut simulated = state.clone();
+        assert!(
+            cast_from_zone::resolve(&mut simulated, &unbound_single, &mut Vec::new()).is_ok(),
+            "the offered multi-card binding resolves (lingering grant)"
+        );
+
+        // Bound plural binding (targets = [land, second]) at the allowance.
+        let (mut state, source, land) = play_feasibility_board(Zone::Exile, false);
+        let second = add_second_exiled_land(&mut state);
+        at_land_allowance(&mut state);
+        let mut bound_pair =
+            play_instruction(source, Some(land), CastFromZoneDriver::DuringResolution);
+        assert!(
+            optional_effect_is_infeasible(&state, &bound_pair),
+            "reach-guard: one bound land at the allowance is not offered"
+        );
+        bound_pair.set_unpinned_targets(vec![TargetRef::Object(land), TargetRef::Object(second)]);
+        assert!(
+            !optional_effect_is_infeasible(&state, &bound_pair),
+            "CR 608.2g: two bound lands take the lingering grant, so the offer stands"
+        );
+    }
+
+    /// CR 608.2c: Djinn of Wishes' "If you don't, exile it" is the printed
+    /// decline branch of the optional Play — declining still runs it.
+    #[test]
+    fn djinn_shaped_decline_branch_is_selected_on_decline() {
+        use crate::types::ability::CastFromZoneDriver;
+
+        let card = ObjectId(912);
+        let mut ability = play_instruction(
+            ObjectId(910),
+            Some(card),
+            CastFromZoneDriver::DuringResolution,
+        );
+        let mut exile_it = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            ObjectId(910),
+            PlayerId(0),
+        );
+        exile_it.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        });
+        ability.sub_ability = Some(Box::new(exile_it));
+        let state = GameState::new_two_player(42);
+        let branch = optional_decline_branch(&state, &ability).expect("the decline branch runs");
+        assert!(matches!(
+            branch.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                ..
+            }
+        ));
+    }
+
     /// CR 608.2d + CR 122.1: An optional chosen-counter placement is infeasible
     /// when its typed target predicate is false, and becomes feasible when the
     /// same target state makes the predicate true. The legacy condition-free
@@ -58169,6 +58798,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
         );
         let ability = build_resolved_from_def(&pure_peek_definition(put, 1), source, PlayerId(0));
@@ -60298,6 +60928,7 @@ mod entry_observation_settlement_tests {
                     rolled_any: false,
                     forced_ignored: Vec::new(),
                     chain_root_targets: Vec::new(),
+                    trigger_context: None,
                 })));
             state
         };

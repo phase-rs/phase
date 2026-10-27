@@ -1372,7 +1372,8 @@
     "passwordPrompt": "この部屋にはパスワードが必要です：",
     "toasts": {
       "connectionFailed": "接続に失敗しました。再試行するか、設定でサーバーを変更してください。",
-      "eliminatedSpectating": "あなたは敗北しました。観戦に移行します。"
+      "eliminatedSpectating": "あなたは敗北しました。観戦に移行します。",
+      "retainedTerminalUnreadable": "保存された最終結果の配信を読み取れませんでした"
     },
     "resumeReset": {
       "appUpdated": "アプリが更新され、保存したゲームは新しいバージョンと互換性がありません。",
@@ -2711,6 +2712,9 @@
     "player": "プレイヤー",
     "life": "ライフ",
     "setLife": "ライフを設定",
+    "gainLife": "ライフを得る",
+    "loseLife": "ライフを失う",
+    "amount": "量",
     "count": "枚数",
     "drawCards": "カードを引く",
     "mill": "切削",

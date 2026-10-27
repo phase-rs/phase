@@ -3119,6 +3119,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. }
         | GameEvent::VoteCast { .. }
+        | GameEvent::CardNamed { .. }
         | GameEvent::VoteResolved { .. }
         | GameEvent::PowerToughnessChanged { .. }
         | GameEvent::CascadeMissed { .. }

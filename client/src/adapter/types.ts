@@ -2894,7 +2894,7 @@ export type WaitingFor =
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
   // picks WHICH opponent makes the choice before the zone choice is presented.
-  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" } }
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
@@ -3226,6 +3226,8 @@ export type DebugAction =
   | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "SetLife"; data: { player_id: PlayerId; life: number } }
+  | { type: "GainLife"; data: { player_id: PlayerId; amount: number } }
+  | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
@@ -3631,6 +3633,7 @@ export type GameEvent =
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
   | { type: "CardPredicateGuessMade"; data: { player_id: PlayerId; source_id: ObjectId | null; choice: string } }
+  | { type: "CardNamed"; data: { player_id: PlayerId; source_id: ObjectId | null; name: string } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
@@ -4834,6 +4837,21 @@ export class AdapterError extends Error {
     this.recoverable = recoverable;
     this.panic = panic;
     this.rejection = rejection;
+  }
+}
+
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
   }
 }
 
