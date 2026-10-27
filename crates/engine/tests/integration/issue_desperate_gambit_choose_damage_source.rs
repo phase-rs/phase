@@ -4029,7 +4029,7 @@ fn inline_source_unsupported_actors_refuse_before_prompt_or_shield_even_when_bou
                     runner
                         .state_mut()
                         .stack
-                        .last_mut()
+                        .back_mut()
                         .unwrap()
                         .ability_mut()
                         .unwrap()
@@ -4086,7 +4086,7 @@ fn inline_source_lexical_none_and_empty_controller_keep_their_existing_meanings(
                 runner
                     .state_mut()
                     .stack
-                    .last_mut()
+                    .back_mut()
                     .unwrap()
                     .ability_mut()
                     .unwrap()
