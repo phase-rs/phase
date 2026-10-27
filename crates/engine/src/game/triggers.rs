@@ -11716,8 +11716,10 @@ pub enum LatchedScopePlan {
     And(Vec<LatchedScopePlan>),
     Not(Box<LatchedScopePlan>),
     Typed {
-        /// "you control": the watcher's latched controller is the doubler's.
-        you_control: bool,
+        /// The scope's controller clause, admitted only where the captured
+        /// controllers answer it: `None` or `You` (the watcher's latched
+        /// controller is the doubler's).
+        controller: Option<crate::types::ability::ControllerRef>,
         /// Source-relative properties, judged from the captured data.
         relative: Vec<LatchedRelativeProperty>,
         /// The rest of the scope reads only the watcher's characteristics.
@@ -11771,11 +11773,9 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
             LatchedScopePlan::Not(Box::new(latched_doubler_scope_plan(filter)?))
         }
         TargetFilter::Typed(typed) => {
-            let you_control = match &typed.controller {
-                None => false,
-                Some(crate::types::ability::ControllerRef::You) => true,
-                Some(_) => return None,
-            };
+            if !latched_controller_clause_is_judged(typed.controller.as_ref()) {
+                return None;
+            }
             let mut relative = Vec::new();
             let mut watcher_only = Vec::new();
             for property in &typed.properties {
@@ -11785,7 +11785,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
                 }
             }
             LatchedScopePlan::Typed {
-                you_control,
+                controller: typed.controller.clone(),
                 relative,
                 characteristics: TargetFilter::Typed(crate::types::ability::TypedFilter {
                     type_filters: typed.type_filters.clone(),
@@ -11847,6 +11847,50 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::AllPlayers => return None,
     })
+}
+
+/// Whether the captured controllers answer a scope's controller clause:
+/// none, or "you control" (exhaustive over `ControllerRef`).
+fn latched_controller_clause_is_judged(
+    controller: Option<&crate::types::ability::ControllerRef>,
+) -> bool {
+    use crate::types::ability::ControllerRef;
+    match controller {
+        None | Some(ControllerRef::You) => true,
+        Some(
+            ControllerRef::Opponent
+            | ControllerRef::ScopedPlayer
+            | ControllerRef::TargetPlayer
+            | ControllerRef::TargetOpponent
+            | ControllerRef::ParentTargetController
+            | ControllerRef::EventTargetController
+            | ControllerRef::ParentTargetOwner
+            | ControllerRef::DefendingPlayer
+            | ControllerRef::ChosenPlayer { .. }
+            | ControllerRef::DeclaredPlayer { .. }
+            | ControllerRef::SourceChosenPlayer
+            | ControllerRef::TriggeringPlayer
+            | ControllerRef::EnchantedPlayer
+            | ControllerRef::ActivePlayer
+            | ControllerRef::SpecificPlayer { .. },
+        ) => false,
+    }
+}
+
+/// CR 109.4: a judged controller clause, on the captured controllers.
+fn latched_controller_clause_matches(
+    controller: Option<&crate::types::ability::ControllerRef>,
+    watcher: &TriggerSourceContext,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    match controller {
+        None => true,
+        Some(crate::types::ability::ControllerRef::You) => {
+            watcher.lki.controller == doubler.controller()
+        }
+        // Never admitted by `latched_controller_clause_is_judged`.
+        Some(_) => false,
+    }
 }
 
 /// One scope property: `Some(Some(kind))` source-relative and judged from the
@@ -12019,11 +12063,11 @@ fn latched_scope_plan_matches(
             .all(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
         LatchedScopePlan::Not(plan) => !latched_scope_plan_matches(state, watcher, plan, doubler),
         LatchedScopePlan::Typed {
-            you_control,
+            controller,
             relative,
             characteristics,
         } => {
-            (!you_control || watcher.lki.controller == doubler.controller())
+            latched_controller_clause_matches(controller.as_ref(), watcher, doubler)
                 && relative
                     .iter()
                     .all(|property| latched_relative_matches(state, watcher, *property, doubler))
