@@ -32,6 +32,14 @@
 #
 # Default base-ref is the merge-base with origin/main. In CI, pass the PR target
 # branch's SHA explicitly.
+#
+# Exit status:
+#   0  no newly added load found.
+#   1  a newly added load found.
+#   1  the added-line helper's own test suite (scripts/lib/added_lines_tests.py)
+#      failed; no verdict.
+#   2  the added-line helper (scripts/lib/added-lines.py) could not read the
+#      diff; no verdict.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/added-lines.sh

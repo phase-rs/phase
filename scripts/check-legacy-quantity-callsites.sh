@@ -2,6 +2,10 @@
 # Gate legacy dynamic quantity parser calls while call sites migrate to
 # oracle_nom::quantity::parse_quantity_ref_complete.
 # Moved lines are not added: scripts/lib/added-lines.py.
+# Exit status: 0 clean; 1 a migrated seam or a new diff line calls a legacy
+# parser; 1 the added-line helper's own test suite
+# (scripts/lib/added_lines_tests.py) failed, no verdict; 2 the added-line helper
+# could not read the diff, no verdict.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/added-lines.sh

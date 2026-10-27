@@ -56,6 +56,8 @@
 #                         two apart while `Gate A PASS head=<sha> base=<sha>`
 #                         stays where contributor tooling reads it.
 #   1  Gate A/G FAIL    - violations found.
+#   1  SUITE RED        - the added-line helper's own test suite
+#                         (scripts/lib/added_lines_tests.py) failed; no verdict.
 #   2  INSTRUMENT FAILURE - the added-line helper could not read the diff
 #                         (scripts/lib/added-lines.py); no verdict.
 #   3  CANNOT ANSWER    - the window itself is unknowable: base == head AND the
@@ -73,8 +75,8 @@ CROSS_PRODUCT_DETECTOR="$SCRIPT_DIR/lib/detect-cross-product-alts.py"
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 BASE_SHA="$(git rev-parse "$BASE")"
 HEAD_SHA="$(git rev-parse HEAD)"
-# Later phases widen the view by appending a path; the path code moves *out of*
-# stays listed (its deletions are what exempt the moved lines).
+# When parser code moves to a new location, append that path here and keep the
+# old one listed: the old path's deletions are what exempt the moved lines.
 SCOPE=(crates/engine/src/parser)
 
 # When invoked as a pre-commit hook (GIT_INDEX_FILE is set, or no explicit base
@@ -218,6 +220,12 @@ if [ "$DIFF_MODE" = "--cached" ]; then
 else
     python3 -B "$RESIDUE_DETECTOR" --check
 fi
+
+# The added-line helper's own suite, like Gate H's above, runs before the
+# diff-only exits below: CI runs no separate step for it, so a change that
+# touches only the helper is still tested by this gate. Section (A0) then
+# reuses the pass instead of running the suite again.
+added_lines_check_suite
 
 # ---------------------------------------------------------------------------
 # DO NOT "harden" families (A), (B), (E), (F) by filtering them through the

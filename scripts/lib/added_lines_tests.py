@@ -329,6 +329,21 @@ class AddedLinesTests(unittest.TestCase):
             [("src/parser/e.rs", 3, "let y2 = 2;"), ("src/parser/e.rs", 10, "let y9 = 9;")],
         )
 
+    def test_textconv_config_cannot_rewrite_lines(self) -> None:
+        # A user-level attributes file can map `*.rs` to a textconv driver, and
+        # porcelain `git diff` applies it by default: every line would be matched
+        # as the driver's output, not as the source.
+        r = self.repo
+        attributes = r.root / ".git" / "textconv-attributes"
+        attributes.write_text("*.rs diff=rewrite\n")
+        r.git("config", "core.attributesFile", str(attributes))
+        r.git("config", "diff.rewrite.textconv", "sed 's/^/rewritten: /'")
+        r.write("src/parser/e.rs", ["fn a() {", "}"])
+        base = r.commit()
+        r.write("src/parser/e.rs", ["fn a() {", BAD, "}"])
+        r.commit()
+        self.assertEqual(r.added(base), [("src/parser/e.rs", 2, BAD)])
+
     # -- failure ------------------------------------------------------------
 
     def test_unknown_base_fails_closed(self) -> None:

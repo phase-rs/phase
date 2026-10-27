@@ -176,9 +176,10 @@ def main(argv: list[str]) -> int:
     #   --inter-hunk-context=0     diff.interHunkContext (merged hunks carry context lines)
     #   --no-renames               diff.renames=copies (a copy would hide its added lines)
     #   --no-color, --no-ext-diff  color.*, diff.external, GIT_EXTERNAL_DIFF
+    #   --no-textconv              diff.<driver>.textconv (rewrites both sides' lines)
     # GIT_DIFF_OPTS is dropped from the env instead: git lets it override -U.
     cmd = [
-        "git", "diff", "--no-color", "--no-ext-diff", "--no-renames", "--unified=0",
+        "git", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "--unified=0",
         "--inter-hunk-context=0", "--src-prefix=a/", "--dst-prefix=b/",
     ]
     if args.cached:
