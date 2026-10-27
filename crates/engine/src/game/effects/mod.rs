@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) use crate::types::ability::{
     effect_owns_resolution_zone_choice, effect_refs_parent_target,
-    effect_requires_parent_target_object, mass_population_target, mass_population_target_mut,
-    EVENT_SUBJECT_ANAPHORS,
+    effect_requires_parent_target_object, filter_refs_parent_or_event_subject,
+    mass_population_target, mass_population_target_mut, EVENT_SUBJECT_ANAPHORS,
 };
 use crate::types::ability::{
     effect_parent_ref_slots, effect_target_filter, filter_refs_event_subject,
@@ -22,12 +22,12 @@ use crate::types::ability::{
     effect_introduces_per_iteration_referent, effect_introduces_per_player_object_referent,
     effect_parks_reveal_card_choice, filter_refs_parent_target, graveyard_destination_rider,
     is_graveyard_exile_rider_subability, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AbilityUseTally, AttachmentReferent, CardPlayMode, CardTypeSetSource,
-    CastFromZoneDriver, ChosenAttribute, ChosenTargetSlots, CommanderOwnership,
-    ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient,
-    Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope,
-    ExtraPhaseRecipient, FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
+    AbilityKind, AbilityUseTally, CardPlayMode, CardTypeSetSource, CastFromZoneDriver,
+    ChosenAttribute, ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
+    CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
+    FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
     MassLibraryShuffleMode, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
     OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
     QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
