@@ -1,4 +1,5 @@
 import { createStore, del, get, set } from "idb-keyval";
+import type { GameState } from "../adapter/types";
 
 /**
  * Recipient-scoped terminal delivery issued by the Full server. This is kept
@@ -7,14 +8,15 @@ import { createStore, del, get, set } from "idb-keyval";
  */
 export interface FullTerminalDelivery {
   key: { game_code: string; generation: number };
-  terminal_revision: number;
-  delivery_id: string;
+  terminalRevision: number;
+  deliveryId: string;
   credential: string;
   display: {
     winner: number | null;
     reason: string;
-    ranked_result?: unknown;
+    rankedResult?: unknown;
   };
+  finalView?: GameState;
 }
 
 const FULL_TERMINAL_PREFIX = "phase-full-terminal:";
@@ -44,15 +46,17 @@ export function isValidFullTerminalDelivery(value: unknown): value is FullTermin
     && typeof key.generation === "number"
     && Number.isSafeInteger(key.generation)
     && key.generation > 0
-    && typeof delivery.terminal_revision === "number"
-    && Number.isSafeInteger(delivery.terminal_revision)
-    && delivery.terminal_revision >= 0
-    && typeof delivery.delivery_id === "string"
-    && delivery.delivery_id.length > 0
+    && typeof delivery.terminalRevision === "number"
+    && Number.isSafeInteger(delivery.terminalRevision)
+    && delivery.terminalRevision >= 0
+    && typeof delivery.deliveryId === "string"
+    && delivery.deliveryId.length > 0
     && typeof delivery.credential === "string"
     && delivery.credential.length > 0
     && typeof display.reason === "string"
-    && (typeof display.winner === "number" || display.winner === null);
+    && (typeof display.winner === "number" || display.winner === null)
+    && (delivery.finalView === undefined
+      || (typeof delivery.finalView === "object" && delivery.finalView !== null));
 }
 
 /**
@@ -68,7 +72,7 @@ export async function commitFullTerminalDelivery(
   try {
     const existing = await get<FullTerminalDelivery>(key, getTerminalStore());
     if (existing) {
-      return existing.delivery_id === delivery.delivery_id
+      return existing.deliveryId === delivery.deliveryId
         && existing.credential === delivery.credential;
     }
     await set(key, delivery, getTerminalStore());
@@ -95,7 +99,15 @@ export async function replaceFullTerminalDelivery(
 ): Promise<boolean> {
   if (!isValidFullTerminalDelivery(delivery)) return false;
   try {
-    await set(recordKey(delivery.key), delivery, getTerminalStore());
+    const key = recordKey(delivery.key);
+    const existing = await get<FullTerminalDelivery>(key, getTerminalStore());
+    const retainsSameAuthority = existing?.deliveryId === delivery.deliveryId
+      && existing.credential === delivery.credential;
+    const replacement = delivery.finalView === undefined && retainsSameAuthority
+      && existing.finalView !== undefined
+      ? { ...delivery, finalView: existing.finalView }
+      : delivery;
+    await set(key, replacement, getTerminalStore());
     return true;
   } catch {
     return false;

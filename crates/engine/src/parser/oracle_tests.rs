@@ -14465,6 +14465,188 @@ fn investigate_twice_uses_repeat_for() {
     assert!(def.sub_ability.is_none());
 }
 
+/// CR 608.2c + CR 608.2h + CR 701.16a: "investigate that many times" lowers the
+/// anaphoric repeat count onto the Investigate's `repeat_for` as
+/// `EventContextAmount`, read from the trigger's own event (combat damage dealt
+/// by the source / +1/+1 counters put on it). Verbatim Oracle text, full
+/// pipeline. Before the fix the one-word suffix splitter handed "many" to the
+/// count grammar, failed, and the clause lowered to a bare one-Clue Investigate.
+#[test]
+fn that_many_times_investigate_class_parses_repeat_for() {
+    let that_many = Some(QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    });
+    let investigate_execute = |trigger: &TriggerDefinition| -> AbilityDefinition {
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("the trigger must carry an execute body")
+            .clone();
+        assert!(
+            matches!(*execute.effect, Effect::Investigate),
+            "reach-guard: the trigger body must be a parsed Investigate, got {:?}",
+            execute.effect,
+        );
+        execute
+    };
+
+    // Piper Wright, Publick Reporter — combat damage to a player.
+    let piper = parse(
+        "Whenever Piper Wright deals combat damage to a player, investigate that many times. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nWhenever you sacrifice a Clue, put a +1/+1 counter on target creature you control.",
+        "Piper Wright, Publick Reporter",
+        &[],
+        &["Creature"],
+        &["Human", "Detective"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&piper),
+        "Piper Wright must parse without an Unimplemented effect: {piper:#?}"
+    );
+    let damage = piper
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+        .expect("Piper Wright must retain its combat-damage trigger");
+    assert_eq!(damage.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(damage.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(investigate_execute(damage).repeat_for, that_many);
+    // The sibling Clue-sacrifice trigger is unaffected.
+    let sacrificed = piper
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Sacrificed)
+        .expect("Piper Wright must retain its Clue-sacrifice trigger");
+    let sacrificed_execute = sacrificed
+        .execute
+        .as_deref()
+        .expect("the Clue-sacrifice trigger must carry an execute body");
+    assert!(
+        matches!(
+            &*sacrificed_execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "the Clue-sacrifice trigger still puts one +1/+1 counter, got {:?}",
+        sacrificed_execute.effect,
+    );
+
+    // Inquisitor Eisenhorn — same trigger shape (its first paragraph is out of
+    // scope, so only the combat-damage trigger is pinned).
+    let eisenhorn = parse(
+        "You may reveal the first card you draw each turn as you draw it. Whenever you reveal an instant or sorcery card this way, create Cherubael, a legendary 4/4 black Demon creature token with flying.\nWhenever Inquisitor Eisenhorn deals combat damage to a player, investigate that many times. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+        "Inquisitor Eisenhorn",
+        &[],
+        &["Creature"],
+        &["Human", "Inquisitor"],
+    );
+    let damage = eisenhorn
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+        .expect("Inquisitor Eisenhorn must retain its combat-damage trigger");
+    assert_eq!(damage.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(investigate_execute(damage).repeat_for, that_many);
+
+    // Lonis, Genetics Expert — +1/+1 counters put on it (a named counter kind,
+    // so the trigger fires per placement event, not per batch).
+    let lonis = parse(
+        "Evolve (Whenever a creature you control enters, if that creature has greater power or toughness than this creature, put a +1/+1 counter on this creature.)\nWhenever one or more +1/+1 counters are put on Lonis, investigate that many times.\nWhenever you sacrifice a Clue, put a +1/+1 counter on another target creature you control.",
+        "Lonis, Genetics Expert",
+        &[Keyword::Evolve],
+        &["Creature"],
+        &["Snake", "Elf", "Detective"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&lonis),
+        "Lonis must parse without an Unimplemented effect: {lonis:#?}"
+    );
+    let counters = lonis
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::CounterAdded)
+        .expect("Lonis must retain its counter-placement trigger");
+    assert_eq!(
+        counters
+            .counter_filter
+            .as_ref()
+            .map(|filter| filter.counter_type.clone()),
+        Some(CounterType::Plus1Plus1),
+    );
+    assert!(
+        !counters.batched,
+        "a named-kind counter trigger reads each placement event's own count"
+    );
+    assert_eq!(investigate_execute(counters).repeat_for, that_many);
+}
+
+/// SHAPE ONLY — Phyrexian Incubator's "incubate 2 that many times" now carries
+/// `repeat_for: EventContextAmount` on the Incubate (a side effect of the
+/// repeat-count suffix generalization; CR 608.2c + CR 701.53a). The card itself is
+/// out of scope: its search filter's "cards with phyrexian back faces" branch is a
+/// separate pre-existing misparse that keeps its coverage red, and the runtime
+/// count binding (the exiled-card count via `last_effect_count`) is not asserted
+/// here. The trailing "Then shuffle." stays a single sequential sibling outside the
+/// repeat.
+#[test]
+fn phyrexian_incubator_incubate_repeat_for_that_many_shape() {
+    let parsed = parse(
+        "{3}, {T}, Sacrifice Phyrexian Incubator: Search your library for any number of Phyrexian cards or cards with phyrexian back faces, exile them, then incubate 2 that many times. Then shuffle.",
+        "Phyrexian Incubator",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let search = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::SearchLibrary { .. }))
+        .expect("Phyrexian Incubator must retain its search ability");
+    let exile = search
+        .sub_ability
+        .as_deref()
+        .expect("search must chain into the exile");
+    assert!(
+        matches!(&*exile.effect, Effect::ChangeZone { .. }),
+        "reach-guard: search chains into ChangeZone, got {:?}",
+        exile.effect,
+    );
+    let incubate = exile
+        .sub_ability
+        .as_deref()
+        .expect("exile must chain into the incubate");
+    assert!(
+        matches!(
+            &*incubate.effect,
+            Effect::Incubate {
+                count: QuantityExpr::Fixed { value: 2 },
+            }
+        ),
+        "reach-guard: the incubate keeps its two counters, got {:?}",
+        incubate.effect,
+    );
+    assert_eq!(
+        incubate.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }),
+        "\"incubate 2 that many times\" repeats the incubate that many times",
+    );
+    let shuffle = incubate
+        .sub_ability
+        .as_deref()
+        .expect("incubate must chain into the shuffle");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "reach-guard: the trailing instruction is the shuffle, got {:?}",
+        shuffle.effect,
+    );
+    assert_eq!(shuffle.repeat_for, None);
+    assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
+}
+
 #[test]
 fn put_name_sticker_parses() {
     use crate::parser::oracle_effect::parse_effect;

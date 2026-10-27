@@ -1,5 +1,5 @@
 import { act } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { usePreferencesStore } from "../preferencesStore";
 import { emptyPoolSelection } from "../../services/randomPoolSelection";
@@ -70,6 +70,53 @@ describe("preferencesStore", () => {
     expect(state.priorityAlertTitle).toBe(false);
     expect(state.humanPoolSelection).toEqual(emptyPoolSelection());
     expect(state.aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  describe("card animation style on memory-constrained devices", () => {
+    const IPHONE_UA =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
+    const DESKTOP_UA =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+    const realUserAgent = navigator.userAgent;
+
+    function useUserAgent(userAgent: string): void {
+      Object.defineProperty(navigator, "userAgent", { value: userAgent, configurable: true });
+    }
+
+    afterEach(() => useUserAgent(realUserAgent));
+
+    it.each([
+      [IPHONE_UA, "classic"],
+      [DESKTOP_UA, "webgl"],
+    ] as const)("moves a v39 webgl store to the device default (%s)", (userAgent, expected) => {
+      useUserAgent(userAgent);
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardAnimationStyle: "webgl" },
+        version: 39,
+      }));
+      usePreferencesStore.persist.rehydrate();
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe(expected);
+    });
+
+    it("keeps a phone's webgl choice made after the migration", () => {
+      useUserAgent(IPHONE_UA);
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardAnimationStyle: "webgl" },
+        version: 40,
+      }));
+      usePreferencesStore.persist.rehydrate();
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+    });
+
+    it.each([
+      [IPHONE_UA, "classic"],
+      [DESKTOP_UA, "webgl"],
+    ] as const)("resets to the device default (%s)", (userAgent, expected) => {
+      useUserAgent(userAgent);
+      usePreferencesStore.setState({ cardAnimationStyle: expected === "classic" ? "webgl" : "classic" });
+      act(() => usePreferencesStore.getState().resetAllPreferences());
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe(expected);
+    });
   });
 
   beforeEach(() => {

@@ -3457,6 +3457,9 @@ fn reveal_until_object_context_from_events(events: &[GameEvent]) -> Option<CostP
                 // as before this field existed.
                 was_prepared: false,
                 attachments: Vec::new(),
+                // The reveal subject carries no intensity; no reader asks a
+                // revealed card's intensity.
+                intensity: 0,
             },
             incarnation: subject.identity.incarnation,
         }),
@@ -3524,6 +3527,9 @@ fn lki_snapshot_from_zone_change_record(record: &ZoneChangeRecord) -> LKISnapsho
         // CR 701.3d), so carry it through rather than dropping it on the way into the
         // LKI.
         attachments: record.attachments.clone(),
+        // `ZoneChangeRecord` carries no intensity; the intensity readers
+        // (`QuantityRef::Intensity { Source }`) read the source's own LKI.
+        intensity: 0,
     }
 }
 
@@ -4920,6 +4926,20 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::EmpowerJaceChoice { .. }
             | WaitingFor::SpellCopyOrderChoice { .. }
     )
+}
+
+/// CR 601.2a-h: the object of the spell whose casting is in progress, if any —
+/// its face election (`ModalFaceChoice`, before any `PendingCast` exists), or
+/// the announcement held by any live `PendingCastOwner`.
+fn spell_cast_in_flight(state: &GameState) -> Option<ObjectId> {
+    match &state.waiting_for {
+        WaitingFor::ModalFaceChoice { object_id, .. } => Some(*object_id),
+        _ => state
+            .live_pending_cast_owners()
+            .first()
+            .and_then(|owner| state.pending_cast_at(*owner))
+            .map(|pending| pending.object_id),
+    }
 }
 
 /// CR 603.10 + CR 608.2c: `next` is about to run inline. When it begins a later instruction,
@@ -9507,6 +9527,7 @@ fn replacement_matchers_read_filter_population(
         damage_modification,
         damage_source_filter,
         damage_target_filter: _,
+        target_recipient_incarnation: _,
         combat_scope: _,
         draw_scope: _,
         die_ignore_rule: _,
@@ -12104,6 +12125,7 @@ struct LegacyEffectBoundary {
     frame_count: usize,
     continuation: Option<PendingContinuation>,
     discard: Option<DiscardFrameId>,
+    cast_in_flight: Option<ObjectId>,
 }
 
 impl LegacyEffectBoundary {
@@ -12143,11 +12165,23 @@ impl LegacyEffectBoundary {
                 .resolution_stack
                 .active_discard()
                 .map(|frame| frame.id),
+            cast_in_flight: spell_cast_in_flight(state),
         }
     }
 
     fn classify(self, state: &GameState, ability: &ResolvedAbility) -> ResolutionProgress {
         if waits_for_resolution_choice(&state.waiting_for) {
+            return ResolutionProgress::Waiting;
+        }
+        // CR 608.2g + CR 601.2c + CR 608.2c: a spell this invocation began
+        // casting during resolution (`casting::initiate_cast_during_resolution`)
+        // is still being cast while it asks its caster for a face, targets, or
+        // costs. Casting it is part of this instruction, so the next one ("Then
+        // put the exiled cards that weren't cast this way on the bottom" —
+        // Chaos Wand) waits until the spell is on the stack or the cast is
+        // withdrawn. A cast already in flight when this invocation began (a
+        // mana ability activated while paying for it) is not this invocation's.
+        if spell_cast_in_flight(state).is_some_and(|cast| Some(cast) != self.cast_in_flight) {
             return ResolutionProgress::Waiting;
         }
         // CR 701.9a + CR 608.2c: Recruit retains a settled domain result until
@@ -16247,6 +16281,13 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
             // retains the original whole-ability dry-run, which keeps successful
             // zone-selection fallbacks feasible while preserving other errors.
             if matches!(mode, CardPlayMode::Cast) {
+                // CR 608.2d: an untargeted free graveyard pick with nothing
+                // castable is impossible whatever follows it, so an "If you do"
+                // rider (Jarsyl, Dark Age Scion) does not run on a no-op.
+                if let Some(true) = cast_from_zone::graveyard_pick_eligible_is_empty(state, ability)
+                {
+                    return true;
+                }
                 // CR 608.2d: An optional hand-pick cast ("you may cast a permanent
                 // spell … from your hand") with no eligible card is impossible.
                 // This only needs to be treated as infeasible up front when the
@@ -34643,6 +34684,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
 
@@ -38734,6 +38776,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         let events = vec![

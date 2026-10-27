@@ -20,8 +20,8 @@ use crate::types::ability::{
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
     ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally, VoteVisibility,
-    VoterScope,
+    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
+    VoteVisibility, VoterScope,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -17860,12 +17860,35 @@ fn parse_search_aura_with_mana_value_and_different_name() {
                     "Should have DifferentNameFrom, got {:?}",
                     properties
                 );
+                // CR 201.2a: "with a different name than each Aura you control"
+                // is NOT the "that doesn't have the same name as" grammar. The
+                // negated-name arm added for the Curse/Yenna/Folly class must
+                // not hijack it into a `SharesQuality` prop.
+                assert!(
+                    !properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::Name,
+                            ..
+                        }
+                    )),
+                    "the negated-name arm must not capture the different-name grammar, got {:?}",
+                    properties
+                );
             }
             other => panic!("Expected Typed filter, got {:?}", other),
         },
         other => panic!("Expected SearchLibrary, got {:?}", other),
     }
 }
+
+// Herald of Vengeance's affirmative filter-position name clause ("… that has
+// the same name as a permanent that dealt damage to you last turn") remains an
+// unsupported history-predicate gap; issue #10280 tracks it. The arm
+// deliberately refuses the affirmative frame, and
+// `parse_that_clause_suffix_refuses_affirmative_name_clause` pins that scoping
+// at the seam, so no full-card test records the swallowed restriction as
+// expected behavior.
 
 #[test]
 fn effect_create_colored_token() {
@@ -67526,8 +67549,7 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
 /// the single authority the stack-time slot builder consults.
 #[test]
 fn prevent_recipient_scope_classification() {
-    // (oracle clause, scope, mints a declared slot, expected announced count)
-    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
+    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 9] = [
         (
             "Prevent all damage that would be dealt to target creature this turn.",
             EffectScope::Single,
@@ -67548,6 +67570,12 @@ fn prevent_recipient_scope_classification() {
         ),
         (
             "Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent the next 2 damage that would be dealt to any target this turn.",
             EffectScope::Single,
             true,
             None,
@@ -80865,9 +80893,9 @@ fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_poo
 /// player's graveyard" (Wrexial, the Risen Deep) chooses its card in the
 /// graveyard of the player the trigger's event names, so the cast target
 /// carries `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell
-/// from that player's graveyard" (Sorcerous Squall, where "that player" is the
-/// spell's target opponent) is not bound this way, nor is the targeted
-/// sentence outside a trigger, nor a "from a graveyard" origin whose clause
+/// from that player's graveyard" (Sorcerous Squall) is bound to the player its
+/// first clause targeted instead (CR 608.2c). The targeted sentence outside a
+/// trigger stays unbound, and so does a "from a graveyard" origin whose clause
 /// mentions that player's graveyard only later.
 #[test]
 fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
@@ -80952,7 +80980,12 @@ fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
         &[],
     ));
     assert!(
-        !squall.properties.contains(&owned_by_triggering_player),
+        squall.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { .. }
+            }
+        )) && !squall.properties.contains(&owned_by_triggering_player),
         "{squall:?}"
     );
     let outside_a_trigger = parse_effect_chain(
@@ -80973,6 +81006,38 @@ fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
     assert!(
         !typed.properties.contains(&owned_by_triggering_player),
         "{typed:?}"
+    );
+}
+
+/// CR 400.1 + CR 608.2c: "cast a spell from each opponent's graveyard"
+/// (Jetsam) allows one cast per graveyard, which one resolution pick cannot
+/// carry, so the clause is a gap. The same clause from one graveyard parses.
+#[test]
+fn cast_a_spell_from_each_graveyard_is_a_gap() {
+    let cast_clause = |origin: &str| {
+        parse_effect_chain(
+            &format!("You may cast a spell from {origin} without paying its mana cost."),
+            AbilityKind::Spell,
+        )
+        .effect
+    };
+    for origin in ["each opponent's graveyard", "each graveyard"] {
+        assert!(
+            matches!(
+                &*cast_clause(origin),
+                Effect::Unimplemented { name, .. } if name == PER_GRAVEYARD_CAST_GAP
+            ),
+            "{origin}: {:?}",
+            cast_clause(origin)
+        );
+    }
+    assert!(
+        matches!(
+            &*cast_clause("an opponent's graveyard"),
+            Effect::CastFromZone { .. }
+        ),
+        "{:?}",
+        cast_clause("an opponent's graveyard")
     );
 }
 
@@ -94849,4 +94914,131 @@ fn only_that_player_binds_the_declared_player_as_zone_chooser() {
         );
         assert!(unimplemented, "{text}: {def:?}");
     }
+}
+
+/// CR 701.24c + CR 400.6: "Shuffle ~ and your graveyard into their owner's
+/// library" moves the source and the WHOLE graveyard (Elixir of Immortality),
+/// not a single chosen graveyard card.
+#[test]
+fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
+}
+
+/// CR 701.24c + CR 400.6: "Shuffle this artifact and your graveyard into their owner's library"
+/// recognizes "this artifact" via `nom_target::parse_self_reference` without requiring `~` normalization.
+#[test]
+fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle this artifact and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+}
+
+/// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's
+/// library" preserves the parsed possessor as `TargetFilter::Owner` in `ChangeZoneAll`.
+#[test]
+fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and its owner's graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Owner,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
 }

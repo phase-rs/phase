@@ -1208,8 +1208,11 @@ impl ChoiceType {
         matches!(self, Self::CardPredicateGuess { .. })
     }
 
+    /// CR 608.2d: a named card is announced while applying the effect, so a
+    /// dependent instruction ("discards a card with that name") reads it from
+    /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. })
+        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -35162,6 +35165,17 @@ pub struct ReplacementDefinition {
     /// None = any target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_target_filter: Option<DamageTargetFilter>,
+    /// CR 400.7 + CR 615.1: the incarnation of the object this object-hosted
+    /// prevention shield was installed on, recorded at install time. A shield
+    /// meant to protect one specific creature ("prevent the next damage to
+    /// target creature") must not protect that creature's replacement after a
+    /// blink: the object keeps its id but bumps its incarnation on every zone
+    /// change, so a new incarnation is a new object with no memory of the
+    /// departed one's shields. `None` for registry-hosted (population) shields
+    /// and for player recipients, which intentionally match whatever object is
+    /// damaged at event time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_recipient_incarnation: Option<u64>,
     /// CR 614.1a: Restricts to combat-only or noncombat-only damage.
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35515,6 +35529,7 @@ impl ReplacementDefinition {
             damage_modification: None,
             damage_source_filter: None,
             damage_target_filter: None,
+            target_recipient_incarnation: None,
             combat_scope: None,
             shield_kind: ShieldKind::None,
             quantity_modification: None,
@@ -38528,6 +38543,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.update_trigger_source_context_in_resolution_segment(source);
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: Publish a name announced while applying this
+    /// effect to every later instruction of the same resolution, including
+    /// independent sequential siblings ("Choose a card name. Target player
+    /// discards a card with that name."), which the segment-scoped update
+    /// above deliberately skips.
+    pub fn update_trigger_source_context_through_chain(&mut self, source: TriggerSourceContext) {
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.update_trigger_source_context_through_chain(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.update_trigger_source_context_through_chain(source);
         }
     }
 

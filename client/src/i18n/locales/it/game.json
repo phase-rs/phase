@@ -1329,7 +1329,8 @@
     "passwordPrompt": "Questa stanza richiede una password:",
     "toasts": {
       "connectionFailed": "Connessione fallita. Riprova o cambia server nelle Impostazioni.",
-      "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore."
+      "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore.",
+      "retainedTerminalUnreadable": "Impossibile leggere la consegna conservata del risultato finale"
     },
     "resumeReset": {
       "appUpdated": "L'app è stata aggiornata e la tua partita salvata è incompatibile con la nuova versione.",
@@ -2706,6 +2707,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

@@ -1603,6 +1603,9 @@ pub(crate) enum UtilityImperativeAst {
         /// `ctx.parent_target_available` at the one construction site where
         /// `ParseContext` is live (issue #1094).
         parent_target_available: bool,
+        /// CR 608.2k + CR 120.1: object named by the trigger condition (for
+        /// example, the damaged recipient). Parent targets remain nearer.
+        object_pronoun_ref: Option<TargetFilter>,
     },
     Regenerate {
         text: String,
@@ -1996,6 +1999,12 @@ pub(crate) enum ShuffleImperativeAst {
     },
     ChangeZoneAllToLibrary {
         origins: Vec<Zone>,
+    },
+    /// "shuffle ~ and {possessive} {zone} into {owner}'s library" — the source
+    /// object plus every card in the named zone(s) (Elixir of Immortality).
+    SelfAndZonesToLibrary {
+        origins: Vec<Zone>,
+        owner: TargetFilter,
     },
     /// "shuffle target card from {origin} into {owner}'s library" —
     /// targeted zone change + shuffle composition.

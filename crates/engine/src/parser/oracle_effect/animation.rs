@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_util::{parse_count_expr, split_around};
+use super::super::oracle_util::{parse_count_expr_combinator, split_around};
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
@@ -446,18 +446,12 @@ fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)
         nom::combinator::map(nom_quantity::parse_quantity_ref, |qty| QuantityExpr::Ref {
             qty,
         }),
-        parse_animation_count_expr,
+        parse_count_expr_combinator,
     ))
     .parse(rest)?;
     let (rest, _) = opt(tag(".")).parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
     Ok((rest, (descriptor, qty)))
-}
-
-fn parse_animation_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
-    parse_count_expr(input)
-        .map(|(expression, rest)| (rest, expression))
-        .ok_or_else(|| oracle_err(input))
 }
 
 fn split_animation_dynamic_pt_clause(text: &str) -> Option<(&str, QuantityExpr)> {

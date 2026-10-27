@@ -6,9 +6,10 @@ use crate::types::ability::{
     CombatRelationSubject, ContinuousModification, ControllerRef, CountBinding,
     CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PtValue,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
@@ -9030,6 +9031,21 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
     }
     match effect {
         Effect::DealDamage { target, .. } => is_any_target_filter(target),
+        // CR 115.4 + CR 615.7: a single, declared recipient for a finite
+        // "next N damage" shield uses the same creature/player/planeswalker/
+        // battle domain as any other damage target. Broadcast and source-scoped
+        // prevention do not declare a recipient slot.
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            recipient_scope: EffectScope::Single,
+            damage_source_filter: None,
+            target,
+            ..
+        } => {
+            (matches!(amount, PreventionAmount::Next(_)) || amount_dynamic.is_some())
+                && is_any_target_filter(target)
+        }
         // CR 609.7a + CR 614.9: only the role declared at THIS slot decides; a
         // declared source is never narrowed because a sibling recipient is `Any`.
         Effect::CreateDamageReplacement { .. } => match slot {
@@ -25774,6 +25790,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
