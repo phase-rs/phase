@@ -144,7 +144,11 @@ fn nashi_milled_choice_accepts_either_legendary_or_enchantment() {
     assert_eq!(runner.state().objects[&library[1]].zone, Zone::Hand);
     assert_eq!(runner.state().objects[&library[2]].zone, Zone::Graveyard);
     assert_eq!(
-        runner.counters(nashi, CounterType::Plus1Plus1),
+        runner.state().objects[&nashi]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
         1,
         "taking cards skips the no-cards counter branch"
     );

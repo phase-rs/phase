@@ -1630,15 +1630,9 @@ fn divine_sacrament_paid_source_tracks_both_graveyard_threshold_crossings() {
         .add_creature(P0, "Nonwhite decoy", 2, 2)
         .with_color(vec![ManaColor::Green])
         .id();
-    let sacrament = scenario
-        .add_real_card(P0, "Divine Sacrament", Zone::Hand, &db)
-        .id();
-    let bauble = scenario
-        .add_real_card(P0, "Mishra's Bauble", Zone::Battlefield, &db)
-        .id();
-    let ooze = scenario
-        .add_real_card(P0, "Scavenging Ooze", Zone::Battlefield, &db)
-        .id();
+    let sacrament = scenario.add_real_card(P0, "Divine Sacrament", Zone::Hand, &db);
+    let bauble = scenario.add_real_card(P0, "Mishra's Bauble", Zone::Battlefield, &db);
+    let ooze = scenario.add_real_card(P0, "Scavenging Ooze", Zone::Battlefield, &db);
     let mut runner = scenario.build();
     runner.cast(sacrament).resolve();
     for id in [white, opposing_white] {
@@ -1689,9 +1683,7 @@ fn diplomacy_paid_spell_keeps_the_revealed_opponent_as_the_life_loss_recipient()
             .add_spell_to_hand(P1, "Other opposing card", false)
             .id();
         let land = scenario.add_land_to_hand(P1, "Opposing land decoy").id();
-        let spell = scenario
-            .add_real_card(P0, "Diplomacy of the Wastes", Zone::Hand, &db)
-            .id();
+        let spell = scenario.add_real_card(P0, "Diplomacy of the Wastes", Zone::Hand, &db);
         let mut runner = scenario.build();
         runner
             .cast(spell)
@@ -1720,9 +1712,7 @@ fn sword_of_the_meek_returns_and_attaches_to_the_entering_creature() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, spell_pool(1, &[]));
-    let sword = scenario
-        .add_real_card(P0, "Sword of the Meek", Zone::Graveyard, &db)
-        .id();
+    let sword = scenario.add_real_card(P0, "Sword of the Meek", Zone::Graveyard, &db);
     let decoy = scenario.add_creature(P0, "Earlier 1/1", 1, 1).id();
     let entering = scenario
         .add_creature_to_hand(P0, "Paid entering 1/1", 1, 1)
@@ -1746,16 +1736,14 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
     let db = export_route_repair_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let kitten = scenario
-        .add_real_card(P0, "The Swamp Kitten", Zone::Battlefield, &db)
-        .id();
+    let kitten = scenario.add_real_card(P0, "The Swamp Kitten", Zone::Battlefield, &db);
     let swamp = scenario
-        .add_land(P0, "Selected Swamp")
+        .add_land_from_oracle(P0, "Selected Swamp", "{T}: Add {B}.")
         .with_subtypes(vec!["Swamp"])
-        .as_artifact()
+        .as_artifact_land()
         .id();
     let other = scenario
-        .add_land(P0, "Non-Swamp decoy")
+        .add_land_from_oracle(P0, "Non-Swamp decoy", "{T}: Add {G}.")
         .with_subtypes(vec!["Forest"])
         .id();
     let mut runner = scenario.build();
@@ -1787,9 +1775,7 @@ fn rowan_paid_color_scoped_grant_snapshots_life_lost_at_resolution() {
         P0,
         spell_pool(2, &[ManaType::Red, ManaType::Red, ManaType::Black]),
     );
-    let rowan = scenario
-        .add_real_card(P0, "Rowan, Scion of War", Zone::Battlefield, &db)
-        .id();
+    let rowan = scenario.add_real_card(P0, "Rowan, Scion of War", Zone::Battlefield, &db);
     let first = scenario
         .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
         .with_mana_cost(printed_cost("{R}"))
@@ -1827,10 +1813,8 @@ fn wrenn_paid_loyalty_emblem_grants_retrace_after_its_source_leaves() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(P0, spell_pool(0, &[ManaType::Red]));
-    let wrenn = scenario
-        .add_real_card(P0, "Wrenn and Six", Zone::Battlefield, &db)
-        .as_planeswalker_with_loyalty("Wrenn", 7)
-        .id();
+    let wrenn = scenario.add_real_card(P0, "Wrenn and Six", Zone::Battlefield, &db);
+    scenario.with_counter(wrenn, engine::types::counter::CounterType::Loyalty, 4);
     let shock = scenario
         .add_spell_to_graveyard(P0, "Shock", true)
         .from_oracle_text("Shock deals 2 damage to any target.")
@@ -1838,6 +1822,12 @@ fn wrenn_paid_loyalty_emblem_grants_retrace_after_its_source_leaves() {
         .id();
     let land = scenario.add_land_to_hand(P0, "Retrace land payment").id();
     let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&wrenn]
+            .counters
+            .get(&engine::types::counter::CounterType::Loyalty),
+        Some(&7)
+    );
     runner.activate(wrenn, 2).resolve();
     assert_eq!(runner.state().objects[&wrenn].zone, Zone::Graveyard);
     let emblems: Vec<_> = runner
@@ -1931,7 +1921,7 @@ fn per_player_graveyard_choices_reanimate_the_complete_selected_set() {
         let foreign_decoy = scenario
             .add_creature_to_graveyard(P1, "Unselected opposing card", 5, 5)
             .id();
-        let spell = scenario.add_real_card(P0, name, Zone::Hand, &db).id();
+        let spell = scenario.add_real_card(P0, name, Zone::Hand, &db);
         let mut runner = scenario.build();
         runner.cast(spell).resolve();
         let mut picks = 0;
@@ -1985,12 +1975,8 @@ fn scour_the_scene_offers_both_hand_and_battlefield_creatures() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_library_top(P1, &["Observed card", "Reserve"]);
-        let source = scenario
-            .add_real_card(P0, "Scour the Scene", Zone::Battlefield, &db)
-            .id();
-        let bauble = scenario
-            .add_real_card(P0, "Mishra's Bauble", Zone::Battlefield, &db)
-            .id();
+        let source = scenario.add_real_card(P0, "Scour the Scene", Zone::Battlefield, &db);
+        let bauble = scenario.add_real_card(P0, "Mishra's Bauble", Zone::Battlefield, &db);
         let hand = scenario
             .add_creature_to_hand(P0, "Eligible hand card", 2, 2)
             .id();
@@ -2044,9 +2030,7 @@ fn armored_skyhunter_keeps_the_selected_equipment_and_explicit_creature_host() {
     let db = export_route_repair_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let skyhunter = scenario
-        .add_real_card(P0, "Armored Skyhunter", Zone::Battlefield, &db)
-        .id();
+    let skyhunter = scenario.add_real_card(P0, "Armored Skyhunter", Zone::Battlefield, &db);
     let chosen_host = scenario
         .add_creature(P0, "Chosen attachment host", 2, 2)
         .id();
@@ -2054,9 +2038,7 @@ fn armored_skyhunter_keeps_the_selected_equipment_and_explicit_creature_host() {
         .add_creature(P0, "Unchosen attachment host", 3, 3)
         .id();
     let foreign = scenario.add_creature(P1, "Foreign host decoy", 4, 4).id();
-    let equipment = scenario
-        .add_real_card(P0, "Sword of the Meek", Zone::Library, &db)
-        .id();
+    let equipment = scenario.add_real_card(P0, "Sword of the Meek", Zone::Library, &db);
     let mut runner = scenario.build();
     runner.advance_to_combat();
     runner
@@ -2117,9 +2099,7 @@ fn ghostfire_full_colorless_source_can_damage_a_creature_with_protection_from_re
     let decoy = scenario
         .add_creature(P1, "Unselected damage decoy", 2, 5)
         .id();
-    let spell = scenario
-        .add_real_card(P0, "Ghostfire", Zone::Hand, &db)
-        .id();
+    let spell = scenario.add_real_card(P0, "Ghostfire", Zone::Hand, &db);
     let mut runner = scenario.build();
     runner.cast(spell).target_object(recipient).resolve();
     assert_eq!(

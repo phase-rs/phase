@@ -7923,7 +7923,17 @@ fn complete_actual_owner_refusals_and_explicit_operands_survive_both_normal_load
             "the drawn-card type predicate has no represented event matcher"
         );
         for trigger in &whelp.triggers {
-            assert!(!engine::game::coverage::ability_tree_any(trigger.execute.as_deref().unwrap(), &|ability| matches!(*ability.effect, Effect::ApplyPerpetual { .. })), "an unsupported typed draw/source-and-seek dependency cannot publish a guessed source edit");
+            let walk = engine::types::ability_visit::visit_ability_def(
+                trigger.execute.as_deref().unwrap(),
+                &mut |effect| {
+                    if matches!(effect, Effect::ApplyPerpetual { .. }) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                },
+            );
+            assert!(walk.is_continue(), "an unsupported typed draw/source-and-seek dependency cannot publish a guessed source edit");
         }
         let skyline = db.get_face_by_name("Skyline Savior").unwrap();
         let body = skyline.triggers[0].execute.as_deref().unwrap();
@@ -7943,16 +7953,40 @@ fn complete_actual_owner_refusals_and_explicit_operands_survive_both_normal_load
         assert!(!unity.triggers.is_empty());
         for trigger in &unity.triggers {
             assert!(
-                !engine::game::coverage::ability_tree_any(
+                engine::types::ability_visit::visit_ability_def(
                     trigger.execute.as_deref().unwrap(),
-                    &|ability| matches!(*ability.effect, Effect::ApplyPerpetual { .. })
-                ),
+                    &mut |effect| if matches!(effect, Effect::ApplyPerpetual { .. }) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                )
+                .is_continue(),
                 "an unsupported party hand choice publishes no event/source edit"
             );
         }
         for name in ["Armored Skyhunter", "Vault 101: Birthday Party"] {
             let face = db.get_face_by_name(name).unwrap();
-            assert!(face.triggers.iter().any(|trigger| trigger.execute.as_deref().is_some_and(|body| engine::game::coverage::ability_tree_any(body, &|ability| matches!(ability.effect.as_ref(), Effect::Attach { attachment: TargetFilter::ParentTarget, target: TargetFilter::Typed(_), .. })))), "an explicit selected Equipment and creature host remain represented: {name}: {face:#?}");
+            let has_explicit_attachment = face.triggers.iter().any(|trigger| {
+                trigger.execute.as_deref().is_some_and(|body| {
+                    engine::types::ability_visit::visit_ability_def(body, &mut |effect| {
+                        if matches!(
+                            effect,
+                            Effect::Attach {
+                                attachment: TargetFilter::ParentTarget,
+                                target: TargetFilter::Typed(_),
+                                ..
+                            }
+                        ) {
+                            std::ops::ControlFlow::Break(())
+                        } else {
+                            std::ops::ControlFlow::Continue(())
+                        }
+                    })
+                    .is_break()
+                })
+            });
+            assert!(has_explicit_attachment, "an explicit selected Equipment and creature host remain represented: {name}: {face:#?}");
         }
         let dragon = db.get_face_by_name("Dragonstorm Globe").unwrap();
         let definition = dragon
@@ -7978,23 +8012,39 @@ fn complete_actual_owner_refusals_and_explicit_operands_survive_both_normal_load
         for name in ["Breach the Multiverse", "Ghouls' Night Out"] {
             let face = db.get_face_by_name(name).unwrap();
             assert!(
-                engine::game::coverage::ability_tree_any(&face.abilities[0], &|ability| matches!(
-                    ability.effect.as_ref(),
-                    Effect::ChooseFromZone {
-                        zone_owner: engine::types::ability::ZoneOwner::Each(_),
-                        ..
+                engine::types::ability_visit::visit_ability_def(
+                    &face.abilities[0],
+                    &mut |effect| if matches!(
+                        effect,
+                        Effect::ChooseFromZone {
+                            zone_owner: engine::types::ability::ZoneOwner::Each(_),
+                            ..
+                        }
+                    ) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
                     }
-                )),
+                )
+                .is_break(),
                 "per-player choice reach guard: {name}"
             );
             assert!(
-                engine::game::coverage::ability_tree_any(&face.abilities[0], &|ability| matches!(
-                    ability.effect.as_ref(),
-                    Effect::ChangeZoneAll {
-                        target: TargetFilter::TrackedSet { .. },
-                        ..
+                engine::types::ability_visit::visit_ability_def(
+                    &face.abilities[0],
+                    &mut |effect| if matches!(
+                        effect,
+                        Effect::ChangeZoneAll {
+                            target: TargetFilter::TrackedSet { .. },
+                            ..
+                        }
+                    ) {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
                     }
-                )),
+                )
+                .is_break(),
                 "the accumulated selected set remains the mass move authority: {name}"
             );
         }

@@ -156,7 +156,7 @@ fn paid_hand_choice_perpetual_edits_keep_the_newly_selected_card() {
         let opposing = scenario
             .add_creature_to_hand(P1, "Opponent hand decoy", 4, 4)
             .id();
-        let source = scenario.add_real_card(P0, name, Zone::Hand, &db).id();
+        let source = scenario.add_real_card(P0, name, Zone::Hand, &db);
         let mut runner = scenario.build();
         if name == "Sap Vitality" {
             runner.cast(source).target_object(victim).resolve();
@@ -207,9 +207,7 @@ fn unsavory_kitchen_empty_hand_cannot_replace_the_selected_card_with_the_damage_
             P0,
             vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
         );
-        let kitchen = scenario
-            .add_real_card(P0, "Unsavory Kitchen", Zone::Battlefield, &db)
-            .id();
+        let kitchen = scenario.add_real_card(P0, "Unsavory Kitchen", Zone::Battlefield, &db);
         let victim = scenario
             .add_creature(P1, "Damaged creature decoy", 2, 8)
             .id();

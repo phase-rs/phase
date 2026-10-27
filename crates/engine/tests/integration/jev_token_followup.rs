@@ -84,9 +84,7 @@ fn delayed_local_and_conditional_creation_keep_result_ownership_across_restore()
             let delayed = AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::CreateDelayedTrigger {
-                    condition: DelayedTriggerCondition::AtNextPhase {
-                        phase: Phase::EndStep,
-                    },
+                    condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
                     effect: Box::new(body),
                     uses_tracked_set: false,
                 },

@@ -2503,7 +2503,7 @@ fn static_preservation_tarelily_paid_soulbond_keeps_complete_independent_reach()
         .id();
     let mut runner = scenario.build();
     fund(&mut runner, 1, &[ManaType::Green, ManaType::White]);
-    runner.cast(tarelily).stop_at_optional().resolve();
+    runner.cast(tarelily).commit().stop_at_optional().resolve();
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalEffectChoice { .. }
@@ -2553,18 +2553,21 @@ fn static_preservation_ghostfire_paid_damage_retains_colorless_cda() {
         .with_mana_cost(cost("{2}{R}"))
         .id();
     let mut runner = scenario.build();
-    assert!(runner.state().objects[&spell]
-        .static_definitions
-        .iter()
+    assert!(
+        engine::game::functioning_abilities::active_static_definitions(
+            runner.state(),
+            &runner.state().objects[&spell]
+        )
         .any(|definition| definition.characteristic_defining
             && definition.active_zones.contains(&Zone::Hand)
-            && definition.active_zones.contains(&Zone::Graveyard)));
-    assert!(runner.state().objects[&spell].colors.is_empty());
+            && definition.active_zones.contains(&Zone::Graveyard))
+    );
+    assert!(runner.state().objects[&spell].color.is_empty());
     fund(&mut runner, 2, &[ManaType::Red]);
     runner.cast(spell).target_player(P1).resolve();
     assert_eq!(runner.state().players[1].life, 17);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
-    assert!(runner.state().objects[&spell].colors.is_empty());
+    assert!(runner.state().objects[&spell].color.is_empty());
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     settled(&runner);
 }
