@@ -8575,10 +8575,11 @@ fn handle_resolution_choice_in_occurrence(
                         "damage source choice does not match its private candidate".to_string(),
                     )
                 })?;
-            pending.pending.chain.context.damage_source_choice = Some(ChosenDamageSource {
-                source: Some(capture),
-                candidate_filter: source_filter,
-            });
+            pending.pending.chain.context.damage_source_choice =
+                Some(Box::new(ChosenDamageSource {
+                    source: Some(capture),
+                    candidate_filter: source_filter,
+                }));
             pending.pending.damage_source_candidates.clear();
             set_priority(state, player);
             super::engine::resume_pending_continuation_if_priority(state, events)

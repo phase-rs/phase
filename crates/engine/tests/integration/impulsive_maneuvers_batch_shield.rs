@@ -418,7 +418,7 @@ fn chosen_source_one_shot_damage_replacement_doubles_every_trample_recipient() {
         attacker,
         P0,
     );
-    ability.context.damage_source_choice = Some(selected_choice);
+    ability.context.damage_source_choice = Some(Box::new(selected_choice));
     let mut events = Vec::new();
     create_damage_replacement::resolve(runner.state_mut(), &ability, &mut events)
         .expect("resolve the chosen-source one-shot damage replacement");

@@ -933,6 +933,7 @@ impl CreateTokenDelivery {
         matches!(self, CreateTokenDelivery::Completed { .. })
     }
 
+    #[cfg(test)]
     pub(crate) fn primary_ids(&self) -> &[ObjectId] {
         match self {
             CreateTokenDelivery::Completed { primary_ids }

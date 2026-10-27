@@ -1126,7 +1126,7 @@ mod tests {
             PlayerId(0),
         );
         let mut events = Vec::new();
-        ability.context.damage_source_choice = Some(selected_choice);
+        ability.context.damage_source_choice = Some(Box::new(selected_choice));
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.pending_damage_replacements.len(), 1);

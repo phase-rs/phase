@@ -35840,7 +35840,7 @@ pub struct SpellContext {
     pub chosen_group_targets: ChosenGroupTargets,
     /// CR 609.7a: completed selection owned by this producer and its descendants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub damage_source_choice: Option<crate::types::game_state::ChosenDamageSource>,
+    pub damage_source_choice: Option<Box<crate::types::game_state::ChosenDamageSource>>,
     /// Consumed definitions belong only to an explicitly parked damage remainder.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_opportunity: Option<DamageOpportunity>,

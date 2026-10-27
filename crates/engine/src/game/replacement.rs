@@ -10387,6 +10387,7 @@ fn optional_decline_is_noop(
 
 // clippy::result_large_err: see `apply_shield_counter_replacement` — the Err
 // arm carries an inherent `ProposedEvent` from the shared replacement pipeline.
+#[cfg(test)]
 #[allow(clippy::result_large_err)]
 fn apply_single_replacement(
     state: &mut GameState,

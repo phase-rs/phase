@@ -627,19 +627,6 @@ pub(crate) fn install_creation(
     id
 }
 
-pub(crate) fn enqueue_creation_expansion(
-    state: &mut GameState,
-    id: TokenCreationFrameId,
-    work: TokenCreationBatch,
-) {
-    state
-        .resolution_stack
-        .token_creation_mut(id)
-        .expect("expansion must name its resident instruction")
-        .work
-        .push_front(TokenCreationWork::Proposed(work));
-}
-
 /// Store a settled primary behind the expansion work queued by its replacements.
 pub(crate) fn approve_creation_batch(
     state: &mut GameState,

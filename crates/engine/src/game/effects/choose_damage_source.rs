@@ -276,10 +276,10 @@ pub(crate) fn open_source_choice(
     let candidates = damage_source_options(state, ability, source_filter);
     let mut resumed = ability.clone();
     if candidates.is_empty() {
-        resumed.context.damage_source_choice = Some(ChosenDamageSource {
+        resumed.context.damage_source_choice = Some(Box::new(ChosenDamageSource {
             source: None,
             candidate_filter: source_filter.clone(),
-        });
+        }));
         // Transfer the entire owned chain just as a nonempty prompt does.
         // Resolving it recursively here would let the caller run its tail twice.
         state.park_ability_continuation(PendingContinuation::new(Box::new(resumed), state));

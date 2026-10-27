@@ -28340,9 +28340,11 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         .and_then(|rider| rider.context.damage_source_choice.clone());
                     if owner.context.damage_source_choice.is_none() {
                         owner.context.damage_source_choice =
-                            unmoved_installed_source().map(|source| ChosenDamageSource {
-                                source: Some(source),
-                                candidate_filter: TargetFilter::Any,
+                            unmoved_installed_source().map(|source| {
+                                Box::new(ChosenDamageSource {
+                                    source: Some(source),
+                                    candidate_filter: TargetFilter::Any,
+                                })
                             });
                     }
                 }
@@ -59545,10 +59547,10 @@ mod damage_source_canonical_admission_tests {
             PlayerId(0),
         );
         if selected {
-            program.context.damage_source_choice = Some(ChosenDamageSource {
+            program.context.damage_source_choice = Some(Box::new(ChosenDamageSource {
                 source: Some(capture),
                 candidate_filter: TargetFilter::Any,
-            });
+            }));
         }
         crate::game::effects::prevent_damage::resolve(&mut state, &program, &mut Vec::new())
             .unwrap();

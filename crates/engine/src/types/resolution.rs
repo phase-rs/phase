@@ -145,7 +145,7 @@ pub struct FlipBranchContext {
     )]
     pub chosen_group_targets: crate::types::ability::ChosenGroupTargets,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub damage_source_choice: Option<crate::types::game_state::ChosenDamageSource>,
+    pub damage_source_choice: Option<Box<crate::types::game_state::ChosenDamageSource>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_players: Vec<PlayerId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1581,7 +1581,7 @@ mod tests {
             .expect("fixture cannot consume a buried continuation")
             .expect("self-continuation stashed");
         let mut events = Vec::new();
-        frame.pending.chain.context.damage_source_choice = Some(selected_choice);
+        frame.pending.chain.context.damage_source_choice = Some(Box::new(selected_choice));
         resolve(&mut state, &frame.pending.chain, &mut events).unwrap();
         state.last_chosen_damage_source = None; // mirror the handler clearing it.
 
@@ -1657,7 +1657,7 @@ mod tests {
             PlayerId(0),
         );
         let mut events = Vec::new();
-        ability.context.damage_source_choice = Some(selected_choice);
+        ability.context.damage_source_choice = Some(Box::new(selected_choice));
         resolve(&mut state, &ability, &mut events).unwrap();
         state.last_chosen_damage_source = None;
 
@@ -1688,7 +1688,7 @@ mod tests {
         };
         let mut ability = chosen_source_redirect_ability(host, PlayerId(0));
         let mut events = Vec::new();
-        ability.context.damage_source_choice = Some(selected_choice);
+        ability.context.damage_source_choice = Some(Box::new(selected_choice));
         resolve(&mut state, &ability, &mut events).unwrap();
         state.last_chosen_damage_source = None;
 
@@ -1948,7 +1948,7 @@ mod tests {
             PlayerId(0),
         );
         let mut events = Vec::new();
-        ability.context.damage_source_choice = Some(selected_choice);
+        ability.context.damage_source_choice = Some(Box::new(selected_choice));
         resolve(&mut state, &ability, &mut events).unwrap();
         state.last_chosen_damage_source = None;
 
