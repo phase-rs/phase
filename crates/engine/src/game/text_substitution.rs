@@ -739,7 +739,12 @@ mod tests {
         ));
         assert!(runner.state().stack.is_empty());
         assert!(runner.state().resolution_stack.is_empty());
-        assert!(runner.state().continuation_stack.is_empty());
+        assert!(runner
+            .state()
+            .resolution_stack
+            .ability_continuations()
+            .next()
+            .is_none());
         assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     }
 

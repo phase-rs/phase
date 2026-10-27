@@ -2790,7 +2790,7 @@ fn non_balance_text_is_not_intercepted() {
         parse_balance_equalization_ir(
             "Each player draws a card.",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .is_none(),
         "interceptor must only match the Balance equalization shape"
@@ -2808,7 +2808,7 @@ fn balance_arm_b_rejects_non_equalization_quantity() {
             parse_balance_equalization_ir(
                 "Each player chooses a number of lands they control equal to the number of cards in their hand, then sacrifices the rest. Players discard cards and sacrifice creatures the same way.",
                 AbilityKind::Spell,
-                &ParseContext::default(),
+                &mut ParseContext::default(),
             )
             .is_none(),
             "interceptor must reject inputs whose inner quantity is not the equalization shape"

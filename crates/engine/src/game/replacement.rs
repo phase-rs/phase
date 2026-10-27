@@ -14924,7 +14924,7 @@ mod tests {
     use crate::types::proposed_event::{AppliedReplacementKey, EtbTapState, TokenSpec};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::triggers::TriggerMode;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
         ReplacementDefinition::new(event)
@@ -14971,6 +14971,7 @@ mod tests {
         original.mana_cost = crate::types::mana::ManaCost::generic(3);
         original.base_mana_cost = original.mana_cost.clone();
         let copy = CopyTokenSpec {
+            donor: None,
             values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
                 &original,
             )),
@@ -15160,6 +15161,7 @@ mod tests {
             entry_ref,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: vec![],
+            enter_with_choices: vec![],
             applied: HashSet::new(),
         };
         state.pending_damage_replacements = vec![tap.clone(), untap.clone()];

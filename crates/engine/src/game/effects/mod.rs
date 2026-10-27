@@ -30199,7 +30199,9 @@ mod tests {
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
                     && runner.state().resolution_stack.is_empty()
             );
         }
@@ -30310,7 +30312,9 @@ mod tests {
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
                     && runner.state().resolution_stack.is_empty()
             );
         }
@@ -61469,7 +61473,9 @@ mod tests {
         assert!(runner.state().active_optional_effect_frame().is_none());
         assert!(
             runner.state().stack.is_empty()
-                && runner.state().trigger_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger.is_none()
+                && runner.state().pending_trigger_order.is_none()
                 && runner.state().resolution_stack.is_empty()
         );
         let library = runner.state().players[0].library.len();
@@ -66415,7 +66421,9 @@ mod untargeted_target_only_choice_tests {
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
                     && runner.state().resolution_stack.is_empty()
             );
             assert!(runner.state().owed_spell_final_part().is_none());
@@ -66968,6 +66976,7 @@ mod untargeted_target_only_choice_tests {
 mod selected_damage_capture_population_tests {
     use super::*;
     use crate::types::ability::ReplacementDefinition;
+    use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;
 
     #[test]

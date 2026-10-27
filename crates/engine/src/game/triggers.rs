@@ -18054,6 +18054,7 @@ pub mod tests {
     fn source_scoped_prevent_recipient_scope_is_not_a_target() {
         let prevent =
             |recipient_scope, damage_source_filter: Option<TargetFilter>| Effect::PreventDamage {
+                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Player,
@@ -35496,6 +35497,7 @@ pub mod tests {
     fn extract_target_keeps_prevent_damage_with_any_target_and_single_recipient_scope() {
         let effect = Effect::PreventDamage {
             amount: crate::types::ability::PreventionAmount::Next(2),
+            lifetime: crate::types::ability::RedirectionLifetime::OneOpportunity,
             amount_dynamic: None,
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
@@ -35516,6 +35518,7 @@ pub mod tests {
     fn extract_target_skips_prevent_damage_with_all_recipient_scope() {
         let effect = Effect::PreventDamage {
             amount: crate::types::ability::PreventionAmount::All,
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount_dynamic: None,
             target: TargetFilter::Any,
             recipient_scope: EffectScope::All,
@@ -35535,6 +35538,7 @@ pub mod tests {
     fn extract_target_skips_prevent_damage_with_all_amount() {
         let effect = Effect::PreventDamage {
             amount: crate::types::ability::PreventionAmount::All,
+            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
             amount_dynamic: None,
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,

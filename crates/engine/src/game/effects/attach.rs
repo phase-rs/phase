@@ -6291,7 +6291,7 @@ mod player_enchant_legality_tests {
             .valid_card(TargetFilter::SelfRef)
             .mode(ReplacementMode::Optional { decline: None })
             .execute(AbilityDefinition::new(
-                AbilityKind::Triggered,
+                AbilityKind::Spell,
                 Effect::GainLife {
                     amount: QuantityExpr::Fixed { value: 1 },
                     player: TargetFilter::Controller,
@@ -6399,7 +6399,7 @@ mod player_enchant_legality_tests {
             let rider = ReplacementDefinition::new(ReplacementEvent::Attached)
                 .valid_card(TargetFilter::SelfRef)
                 .execute(AbilityDefinition::new(
-                    AbilityKind::Triggered,
+                    AbilityKind::Spell,
                     Effect::GainLife {
                         amount: QuantityExpr::Fixed { value: 1 },
                         player: TargetFilter::Controller,

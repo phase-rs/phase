@@ -31073,7 +31073,9 @@ mod tests {
 mod coin_target_custody_tests {
     use super::*;
     use crate::types::ability::{ChosenGroupId, CoinFlipResult, CoinFlipRun};
-    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::game_state::{
+        ResolvingTriggerContext, StackEntry, StackEntryKind, WaitingFor,
+    };
     use crate::types::resolution::{FlipBranchContext, ResolutionStateWire};
 
     pub(super) fn recorded_coin(id: u64, birth: u64) -> ResolvedAbility {
@@ -31415,6 +31417,12 @@ mod coin_target_custody_tests {
         use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
         let empty = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(10), PlayerId(0));
         let frame = |child: ResolvedAbility| PendingCoinFlip {
+            trigger_context: Some(ResolvingTriggerContext {
+                event: None,
+                events: Vec::new(),
+                match_count: None,
+                die_result: None,
+            }),
             return_result_occurrence: None,
             expected_return_result_process: None,
             source_id: child.source_id,

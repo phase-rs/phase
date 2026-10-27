@@ -1003,7 +1003,7 @@ fn relative_collision_firebolt_and_stoke_keep_complete_spell_vectors() {
     let mode1 = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Destroy {
-            target: TargetFilter::Typed(TypedFilter::artifact()),
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             cant_regenerate: false,
         },
     )
@@ -2722,7 +2722,12 @@ fn reciprocal_graveyard_choice_accepts_descriptor_matrix() {
 fn reciprocal_graveyard_choice_near_miss_falls_through_honestly() {
     let text = "Choose a creature card in an opponent's graveyard, then that player chooses a creature card in your graveyard. You may return those cards to your hand.";
     assert!(
-        parse_reciprocal_graveyard_choice_ir(text, AbilityKind::Spell).is_none(),
+        parse_reciprocal_graveyard_choice_ir(
+            text,
+            AbilityKind::Spell,
+            &mut ParseContext::default()
+        )
+        .is_none(),
         "a non-owner-controlled return destination must not enter reciprocal lowering"
     );
 
@@ -73117,7 +73122,7 @@ fn a_non_open_booster_sentence_is_not_swallowed() {
         parse_open_booster_pack_ir(
             "Draw a card for each booster pack you own.",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .is_none(),
         "the recognizer must require the open-a-pack head"
@@ -73128,7 +73133,7 @@ fn a_non_open_booster_sentence_is_not_swallowed() {
         parse_open_booster_pack_ir(
             "Open a sealed Magic booster pack, reveal the cards, and put one of them into your hand.",
             AbilityKind::Spell,
-            &ParseContext::default(),
+            &mut ParseContext::default(),
         )
         .is_some(),
         "the printed sentence must reach the recognizer"
@@ -79887,7 +79892,7 @@ fn choose_ast_in_chain(chunk: &str, chain_lower: &str) -> Option<ChooseImperativ
         effect_chain_full_lower: Some(chain_lower.to_owned()),
         ..ParseContext::default()
     };
-    super::imperative::parse_choose_ast(chunk, &lower, &mut ctx)
+    super::imperative::parse_choose_ast(chunk, &lower, &mut ctx).expect("well-formed choice clause")
 }
 
 const COMPOUND_CHOICE_GAMBLE: &str = "Choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.";
@@ -79911,7 +79916,7 @@ fn compound_choice_c1_creature_and_opponent_ast() {
     };
     assert!(matches!(
         super::imperative::parse_choose_ast(chunk, chunk, &mut ctx),
-        Some(ChooseImperativeAst::ObjectAndPlayer { .. })
+        Ok(Some(ChooseImperativeAst::ObjectAndPlayer { .. }))
     ));
     assert_eq!(
         ctx.declared_target_choice_timing,
@@ -80361,7 +80366,7 @@ fn gate_a_requires_chain_context_head_and_reader() {
                 "choose a creature an opponent controls",
                 &mut bare_ctx,
             ),
-            Some(ChooseImperativeAst::BattlefieldObject { .. })
+            Ok(Some(ChooseImperativeAst::BattlefieldObject { .. }))
         ),
         "without chain context Gate A must decline (fail-closed)"
     );

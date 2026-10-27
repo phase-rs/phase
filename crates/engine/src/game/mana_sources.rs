@@ -4725,6 +4725,7 @@ mod tests {
                 &ManaProduction::Colorless {
                     count: QuantityExpr::Fixed { value: 1 },
                 },
+                None,
             ),
             vec![ManaType::Colorless],
             "reach guard: the surveyed Wastes really could produce {{C}}"

@@ -1,4 +1,5 @@
 use super::anthem::*;
+use crate::types::keywords::ProtectionTarget;
 
 #[test]
 fn complete_keyword_removal_keeps_parameterized_kinds_and_refuses_unknown_members() {
@@ -484,7 +485,9 @@ fn grant_relative_list_boundary_uses_shared_legs_and_separators() {
             let relative = format!("that are instant cards{separator}have {payload}");
             let boundary = "that are instant cards".len() + separator.len();
             assert!(
-                super::oracle_target::relative_card_predicate_owns_boundary(&relative, boundary),
+                crate::parser::oracle_target::relative_card_predicate_owns_boundary(
+                    &relative, boundary
+                ),
                 "{relative}"
             );
             let source = format!("This spell costs {{X}} less to cast, where X is the number of cards in your graveyard {relative}");
@@ -496,7 +499,7 @@ fn grant_relative_list_boundary_uses_shared_legs_and_separators() {
     }
     let relative = "that are instant cards and have an Adventure has flashback {2}.";
     let outer = "that are instant cards and have an Adventure ".len();
-    assert!(!super::oracle_target::relative_card_predicate_owns_boundary(relative, outer));
+    assert!(!crate::parser::oracle_target::relative_card_predicate_owns_boundary(relative, outer));
     let no_relative = "Each card in your graveyard and/or has nonsense.";
     assert!(
         matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(no_relative), Some(Err(original)) if original == no_relative)
@@ -545,7 +548,7 @@ fn grant_head_owns_outer_predicate_not_relative_has_have() {
             "Each creature card in your graveyard that has a fate counter on it",
             "has",
             FilterProp::Counters {
-                counters: crate::types::ability::CounterMatch::OfType(CounterType::Generic(
+                counters: crate::types::counter::CounterMatch::OfType(CounterType::Generic(
                     "fate".into(),
                 )),
                 comparator: Comparator::GE,

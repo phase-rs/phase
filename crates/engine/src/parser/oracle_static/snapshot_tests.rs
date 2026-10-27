@@ -5,6 +5,7 @@ use super::prelude::*;
 use super::support::*;
 use super::type_change::*;
 use super::*;
+use crate::types::ability::Effect;
 
 #[test]
 fn defining_modifier_full_static_route_ir_geometry_and_complete_lowered() {

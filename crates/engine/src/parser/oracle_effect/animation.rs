@@ -950,7 +950,7 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
 fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
     const NEEDLE: &str = " with ";
     let lower = text.to_lowercase();
-    let Some((before, _)) = split_around(&lower, NEEDLE) else {
+    let Some((before, _)) = crate::parser::oracle_util::split_around(&lower, NEEDLE) else {
         return (text, Vec::new());
     };
 

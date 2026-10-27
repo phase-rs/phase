@@ -27836,6 +27836,8 @@ mod intensity_tests {
         );
         state.objects.get_mut(&id).unwrap().intensity = 4;
         let lki = state.objects[&id].snapshot_public_characteristics();
+        let snapshot =
+            crate::types::ability::CostPaidObjectSnapshot::capture(&state.objects[&id], lki);
         state.objects.remove(&id);
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
@@ -27846,11 +27848,7 @@ mod intensity_tests {
             ObjectId(1),
             PlayerId(0),
         );
-        ability.set_cost_paid_object_recursive(crate::types::ability::CostPaidObjectSnapshot {
-            object_id: id,
-            lki,
-            incarnation: 0,
-        });
+        ability.set_cost_paid_object_recursive(snapshot);
         let intensity = QuantityExpr::Ref {
             qty: QuantityRef::Intensity {
                 scope: ObjectScope::CostPaidObject,

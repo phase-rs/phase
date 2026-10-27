@@ -11829,7 +11829,9 @@ mod tests {
             ),
             (
                 "the discarded card",
-                TargetFilter::CostPaidObject,
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
                 cost_ctx(vec![
                     vec![CostCategory::ManaOnly],
                     vec![CostCategory::Discards],
@@ -11837,7 +11839,9 @@ mod tests {
             ),
             (
                 "the sacrificed creature",
-                TargetFilter::CostPaidObject,
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected,
+                },
                 cost_ctx(vec![
                     vec![CostCategory::ManaOnly],
                     vec![CostCategory::SacrificesPermanent],
@@ -11889,7 +11893,9 @@ mod tests {
             condition,
             Some(AbilityCondition::ObjectsShareQuality {
                 subject: TargetFilter::ParentTarget,
-                reference: TargetFilter::CostPaidObject,
+                reference: TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Selected
+                },
                 quality: SharedQuality::ManaValue,
             })
         );
@@ -11922,7 +11928,9 @@ mod tests {
         };
         let claimed = Some(AbilityCondition::ObjectsShareQuality {
             subject: TargetFilter::ParentTarget,
-            reference: TargetFilter::CostPaidObject,
+            reference: TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
             quality: SharedQuality::ManaValue,
         });
 
@@ -12178,7 +12186,9 @@ mod tests {
                 condition,
                 Some(AbilityCondition::ObjectsShareQuality {
                     subject: TargetFilter::ParentTarget,
-                    reference: TargetFilter::CostPaidObject,
+                    reference: TargetFilter::CostPaidObject {
+                        reference: crate::types::ability::CostPaidObjectRef::Selected
+                    },
                     quality: SharedQuality::ManaValue,
                 }),
                 "{text}"

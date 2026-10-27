@@ -152,7 +152,7 @@ use super::oracle_util::{
 };
 
 /// Collected parsed abilities from Oracle text.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedAbilities {
     pub abilities: Vec<AbilityDefinition>,

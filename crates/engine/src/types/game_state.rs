@@ -56760,6 +56760,9 @@ mod tests {
 
     fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
         PendingReplacement {
+            // Life gain has no damage event or consumed damage-source opportunity.
+            damage_opportunity: Default::default(),
+            damage_source_context: None,
             proposed: ProposedEvent::LifeGain {
                 player_id: PlayerId(0),
                 amount: 1,
@@ -57290,7 +57293,10 @@ mod restored_exact_attack_authority_tests {
     use super::*;
     use crate::game::combat::{AttackTarget, CombatParticipation};
     use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::types::ability::Effect;
+    use crate::types::ability::{
+        classify_instruction_result_invocation, Effect, InstructionResultEntry,
+        InstructionResultProcess,
+    };
     use crate::types::resolution::{AbilityContinuationFrame, OptionalEffectFrame};
 
     fn queued() -> (GameState, ObjectId, ObjectId) {
@@ -57310,6 +57316,18 @@ mod restored_exact_attack_authority_tests {
         r.declare_attackers(&[(attacker, AttackTarget::Planeswalker(walker))])
             .unwrap();
         assert_eq!(r.state().stack.len(), 1);
+        // These attack-context fixtures do not produce or import instruction
+        // results, so their retained wrappers intentionally have no result owner.
+        for entry in r.state().stack.iter() {
+            assert_eq!(
+                classify_instruction_result_invocation(
+                    entry.ability().unwrap(),
+                    InstructionResultEntry::Independent,
+                )
+                .unwrap(),
+                InstructionResultProcess::Unused,
+            );
+        }
         assert!(r
             .state()
             .combat
@@ -57355,6 +57373,17 @@ mod restored_exact_attack_authority_tests {
                 .unwrap();
         }
         assert_eq!(r.state().stack.len(), 2);
+        for entry in r.state().stack.iter() {
+            assert_eq!(
+                classify_instruction_result_invocation(
+                    entry.ability().unwrap(),
+                    InstructionResultEntry::Independent,
+                )
+                .unwrap(),
+                InstructionResultProcess::Unused,
+                "observer continuations retain attack events without result owners",
+            );
+        }
         let own = r.state().stack.iter().find(|entry| matches!(&entry.kind,
             StackEntryKind::TriggeredAbility { trigger_event: Some(GameEvent::AttackersDeclared { attacks, .. }), .. }
                 if attacks.iter().any(|(id, _)| *id == attacker))).unwrap().clone();
@@ -57591,6 +57620,8 @@ mod restored_exact_attack_authority_tests {
                     state
                         .resolution_stack
                         .insert_parent_of_active(ResolutionFrame::ChooseOneOf(PendingChooseOneOf {
+                            return_result_occurrence: None,
+                            expected_return_result_process: None,
                             controller: P0,
                             source_id: entry.source_id,
                             branches,
@@ -57604,6 +57635,8 @@ mod restored_exact_attack_authority_tests {
                         .unwrap();
                 } else {
                     state.waiting_for = WaitingFor::ChooseOneOfBranch {
+                        return_result_occurrence: None,
+                        expected_return_result_process: None,
                         player: P0,
                         controller: P0,
                         source_id: entry.source_id,
@@ -57919,6 +57952,7 @@ mod restored_exact_attack_authority_tests {
             };
             let frame = match carrier {
                 0 => ResolutionFrame::RepeatFor(PendingRepeatIteration {
+                    return_result_occurrence: None,
                     ability: node.clone(),
                     tracked_members: vec![],
                     iterated_counter_kinds: vec![],
@@ -57927,11 +57961,13 @@ mod restored_exact_attack_authority_tests {
                     copy_order_fixed: None,
                 }),
                 1 => ResolutionFrame::RepeatUntil(PendingRepeatUntil {
+                    return_result_occurrence: None,
                     ability: node.clone(),
                     stop_progress: None,
                     iteration_progress: None,
                 }),
                 2 => ResolutionFrame::PerPlayerZoneChoice(PendingPerPlayerZoneChoice {
+                    return_result_occurrence: None,
                     ability: node.clone(),
                     remaining_players: vec![P1],
                     accumulated: false,
@@ -57940,12 +57976,15 @@ mod restored_exact_attack_authority_tests {
                 }),
                 3 => ResolutionFrame::PerCategoryZoneChoice(PerCategoryZoneChoiceFrame {
                     pending: PendingPerCategoryZoneChoice {
+                        return_result_occurrence: None,
                         ability: node.clone(),
                         pool: vec![],
                         remaining_member_filters: vec![],
                     },
                 }),
                 4 => ResolutionFrame::ChooseOneOf(PendingChooseOneOf {
+                    return_result_occurrence: None,
+                    expected_return_result_process: None,
                     controller: P0,
                     source_id: attacker,
                     branches: vec![],
@@ -58046,6 +58085,7 @@ mod restored_exact_attack_authority_tests {
             let mut state = state.clone();
             state.waiting_for = match carrier {
                 0 => WaitingFor::ChooseTokenHost {
+                    return_result_occurrence: None,
                     player: P0,
                     source_id: attacker,
                     legal_targets: vec![],
@@ -58149,6 +58189,7 @@ mod restored_exact_attack_authority_tests {
             batch_siblings: Vec::new(),
         };
         let effect_pay_cost = ManaAbilityResume::EffectPayCost {
+            return_result_occurrence: None,
             payer: P0,
             return_to: P0,
             ability: node.clone(),
@@ -58161,6 +58202,7 @@ mod restored_exact_attack_authority_tests {
             ManaCost::default(),
         );
         let token_host = || WaitingFor::ChooseTokenHost {
+            return_result_occurrence: None,
             player: P0,
             source_id: attacker,
             legal_targets: vec![],
@@ -58206,6 +58248,7 @@ mod restored_exact_attack_authority_tests {
                     source_id: attacker,
                     pending_mana_ability: Some(Box::new(mana_pending(
                         ManaAbilityResume::UnlessPayment {
+                            return_result_occurrence: None,
                             outer_player: None,
                             cost: Box::new(AbilityCost::Tap),
                             pending_effect: node.clone(),
@@ -58235,6 +58278,7 @@ mod restored_exact_attack_authority_tests {
                 4 => {
                     state.pending_cost_move_resume =
                         Some(PendingCostMoveResume::UnlessBouncePayment {
+                            return_result_occurrence: None,
                             player: P0,
                             moved: attacker,
                             permanents: vec![],
@@ -58262,6 +58306,7 @@ mod restored_exact_attack_authority_tests {
                         exile_tracking: ZoneDeliveryExileTracking::None,
                         library_placement: None,
                         completion: Some(BatchCompletion::ForEachCategoryExileComplete {
+                            return_result_occurrence: None,
                             ability: node.clone(),
                             pool: vec![],
                             remaining_member_filters: vec![],
@@ -58279,6 +58324,7 @@ mod restored_exact_attack_authority_tests {
                 6 => {
                     state.pending_player_scope_unless_payment =
                         Some(Box::new(PendingPlayerScopeUnlessPayment {
+                            return_result_occurrence: None,
                             pending_effect: node.clone(),
                             remaining_players: vec![],
                             declining_players: vec![],
@@ -58305,6 +58351,7 @@ mod restored_exact_attack_authority_tests {
                 // A mana color choice for a mana ability whose resume root holds
                 // the rider.
                 8 => WaitingFor::ChooseManaColor {
+                    return_result_occurrence: None,
                     player: P0,
                     choice: ManaChoicePrompt::SingleColor { options: vec![] },
                     context: ManaChoiceContext::ManaAbility(Box::new(mana_pending(
@@ -58313,6 +58360,7 @@ mod restored_exact_attack_authority_tests {
                 },
                 // A mana color choice for the resolving effect itself.
                 9 => WaitingFor::ChooseManaColor {
+                    return_result_occurrence: None,
                     player: P0,
                     choice: ManaChoicePrompt::SingleColor { options: vec![] },
                     context: ManaChoiceContext::ResolvingEffect(node.clone()),
@@ -58416,6 +58464,7 @@ mod restored_exact_attack_authority_tests {
                 // A scoped library search's own ability.
                 15 => {
                     state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+                        return_result_occurrence: None,
                         ability: node.clone(),
                         phase: ScopedLibrarySearchPhase::CollectAcceptance {
                             remaining_players: vec![],
@@ -58431,6 +58480,7 @@ mod restored_exact_attack_authority_tests {
                 16 => {
                     state.pending_library_search_delivery =
                         Some(LibrarySearchDeliveryResume::Scoped {
+                            return_result_occurrence: None,
                             player: P0,
                             source_id: attacker,
                             search_keys: vec![],
@@ -58443,6 +58493,7 @@ mod restored_exact_attack_authority_tests {
                 17 => {
                     state.pending_player_scope_sacrifice_choice =
                         Some(PendingPlayerScopeSacrificeChoice {
+                            return_result_occurrence: None,
                             ability: node.clone(),
                             remaining_players: vec![],
                             selections: vec![],
@@ -58465,6 +58516,7 @@ mod restored_exact_attack_authority_tests {
                 19 => {
                     state.pending_cost_move_resume =
                         Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+                            return_result_occurrence: None,
                             cost: AbilityCost::Tap,
                             pending_effect: node.clone(),
                             trigger_event: trigger_event.clone(),
@@ -58487,6 +58539,7 @@ mod restored_exact_attack_authority_tests {
                             cascade_cast_transformed: false,
                             resolution_success_waiting_for: Some(Box::new(
                                 WaitingFor::ChooseTokenHost {
+                                    return_result_occurrence: None,
                                     player: P0,
                                     source_id: attacker,
                                     legal_targets: vec![],
@@ -58803,6 +58856,7 @@ mod restored_exact_attack_authority_tests {
             stage: TriggeredManaStage::ChoosingModes,
         };
         let unless = || WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: P0,
             cost: AbilityCost::Tap,
             pending_effect: node.clone(),
@@ -58898,6 +58952,7 @@ mod restored_exact_attack_authority_tests {
                     state.payment_transaction = Some(Box::new(transaction(
                         harmless.clone(),
                         WaitingFor::ChooseTokenHost {
+                            return_result_occurrence: None,
                             player: P0,
                             source_id,
                             legal_targets: vec![],

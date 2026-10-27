@@ -35556,7 +35556,7 @@ mod snapshot_tests {
                     assert_eq!(target, TargetFilter::Any, "{text:?}");
                     assert_eq!(
                         damage_source_filter,
-                        Some(TargetFilter::ChosenDamageSource { filter: None }),
+                        Some(TargetFilter::ChosenDamageSource { chooser: Some(crate::types::ability::Chooser::Controller), filter: None }),
                         "{text:?}"
                     );
                 }
@@ -36446,14 +36446,18 @@ mod local_source_nominal_tests {
     use super::*;
     #[test]
     fn source_owns_nominal_qualities_without_relaxing_ordinary_creature_grammar() {
-        let red = TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasColor {
-            color: ManaColor::Red,
-        }));
+        let red =
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }]),
+            );
         let land = TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Land));
-        let legendary =
-            TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasSupertype {
-                supertype: Supertype::Legendary,
-            }));
+        let legendary = TargetFilter::Typed(TypedFilter::default().properties(vec![
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ]));
         for (source, expected) in [
             ("a source", TargetFilter::Any),
             ("a red source", red.clone()),

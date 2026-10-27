@@ -4815,7 +4815,7 @@ mod tests {
         assert!(!mana_sources::activatable_mana_options(&state, inner, P0).is_empty());
         assert_eq!(
             mana_sources::opponent_land_color_options(&state, P1),
-            vec![ManaType::Green]
+            vec![ManaColor::Green]
         );
         let ordinary_aura = crate::game::zones::create_object(
             &mut state,

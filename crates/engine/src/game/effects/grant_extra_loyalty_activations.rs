@@ -135,6 +135,7 @@ mod tests {
 
     fn make_ability(amount: QuantityExpr, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branch_target_abilities: Vec::new(),
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,

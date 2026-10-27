@@ -884,7 +884,7 @@ mod contextual_hand_publication {
             assert_eq!(&face, expected);
             if expected.name == "Dread Fugue" {
                 let cleave_source = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it . That player discards that card.";
-                assert_eq!(prepared.cleave_oracle_text.as_deref(), Some(cleave_source));
+                assert_eq!(prepared.cleave_oracle_text(), Some(cleave_source));
                 assert!(prepared.has_cleave_variant);
                 let mut cleave_doc = parse_oracle_ir(
                     cleave_source,
@@ -905,7 +905,7 @@ mod contextual_hand_publication {
                     serde_json::to_value(expected_cleave).unwrap()
                 );
             } else {
-                assert_eq!(prepared.cleave_oracle_text, None);
+                assert_eq!(prepared.cleave_oracle_text(), None);
                 assert!(!prepared.has_cleave_variant);
             }
             let mut entry = serde_json::to_value(&face).unwrap();
@@ -1415,8 +1415,7 @@ mod relative_population_publication {
     use super::*;
     use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, SpanPrecision};
     use crate::types::ability::{
-        AggregateFunction, CardSelectionMode, ModalChoice, PlayerScope, PtValue, PtValueScope,
-        TriggerConstraint,
+        AggregateFunction, CardSelectionMode, ModalChoice, PlayerScope, PtValue, TriggerConstraint,
     };
     use crate::types::card::{CardFace, LayoutKind, PrintedCardRef};
     use crate::types::card_type::{CardType, Supertype};
@@ -1499,7 +1498,7 @@ mod relative_population_publication {
         let damage = spell(Effect::DealDamage { amount: population(TypeFilter::Permanent, vec![TypeFilter::Creature, TypeFilter::Subtype("Vehicle".into())]), target: TargetFilter::Typed(TypedFilter::creature()), damage_source: None, excess: None })
             .description("~ deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.".into());
         let destroy = spell(Effect::Destroy {
-            target: TargetFilter::Typed(TypedFilter::artifact()),
+            target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             cant_regenerate: false,
         })
         .description("Destroy target artifact.".into());
@@ -1595,7 +1594,7 @@ mod relative_population_publication {
             .execute(spell(Effect::Draw {
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
-                        scope: PtValueScope::Anaphoric,
+                        scope: ObjectScope::Anaphoric,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -1987,7 +1986,7 @@ mod retained_spell_publication {
 
     fn expected_counter(count: i32) -> AbilityDefinition {
         expected_spell(Effect::PutCounter {
-            counter_type: crate::types::counter::CounterType::P1P1,
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
             count: QuantityExpr::Fixed { value: count },
             target: TargetFilter::SelfRef,
         })
@@ -2535,7 +2534,7 @@ mod retained_spell_publication {
                 let execute = trigger.execute.as_deref().expect("complete phase payoff");
                 let one = QuantityExpr::Fixed { value: 1 };
                 let counter = |value| Effect::PutCounter {
-                    counter_type: crate::types::counter::CounterType::P1P1,
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
                     count: QuantityExpr::Fixed { value },
                     target: TargetFilter::SelfRef,
                 };
@@ -2905,7 +2904,7 @@ mod retained_spell_publication {
             let flying = doc.items.iter().find(|item| item.source.fragment() == Some("Flying")).unwrap();
             assert_eq!(flying.source.span().start_byte, source.len() + 1);
             let parsed = lower_oracle_ir(&mut doc);
-            assert!(parsed.keywords.contains(&Keyword::Flying));
+            assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
             let unsupported = parsed.abilities.iter().find(|ability| super::has_unimplemented(ability)).expect("whole refused operation");
             assert_eq!(unsupported.description.as_deref(), Some(source));
         }
@@ -3720,7 +3719,15 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
             );
             assert!(food.sub_ability.is_none());
             let expected_etb: Effect = serde_json::from_str(r###"{"type":"Dig","player":{"type":"Controller"},"count":{"type":"Fixed","value":6},"destination":"Battlefield","keep_count":1,"up_to":true,"filter":{"type":"Typed","type_filters":["Land"],"controller":null,"properties":[]},"rest_destination":"Library","rest_order":"random","reveal":false,"enter_tapped":true,"enters_attacking":false}"###).unwrap();
-            assert_eq!(face.triggers[0].execute.effect.as_ref(), &expected_etb);
+            assert_eq!(
+                face.triggers[0]
+                    .execute
+                    .as_ref()
+                    .expect("complete ETB ability")
+                    .effect
+                    .as_ref(),
+                &expected_etb
+            );
         }
         // Every newly delegated line is paired with the complete positive body.
         let normalized = super::super::oracle_util::normalize_card_name_refs(text, &card.name);
@@ -44981,7 +44988,7 @@ fn duration_repair_same_is_true_keeps_each_keyword_condition_and_recipient() {
                 })
             );
             let Some(StaticCondition::IsPresent {
-                filter: TargetFilter::Typed(filter),
+                filter: Some(TargetFilter::Typed(filter)),
             }) = &definition.condition
             else {
                 panic!("{definition:#?}")
@@ -45193,7 +45200,7 @@ pub(crate) mod population_relation_publication {
                 let mut second = spell(json!({"type":"TargetOnly","target":{"type":"Typed",
                     "type_filters":["Creature"],"properties":[]}}));
                 second.declares_chosen_group = Some(ChosenGroupId(1));
-                second.target_chooser = Some(ControllerRef::ParentTargetController);
+                second.target_chooser = Some(TargetFilter::ParentTargetController);
                 let mut win = spell(json!({"type":"Destroy","target":{"type":"ParentTarget"}}));
                 win.reads_chosen_group = Some(ChosenGroupId(0));
                 let mut lose = spell(json!({"type":"Destroy","target":{"type":"ParentTarget"}}));
@@ -46343,8 +46350,8 @@ pub(crate) mod defining_modifier_publication {
                     "Serra's Liturgy" => (
                         TargetFilter::Or {
                             filters: vec![
-                                TargetFilter::Typed(TypedFilter::artifact()),
-                                TargetFilter::Typed(TypedFilter::enchantment()),
+                                TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                                TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
                             ],
                         },
                         "{W}",
@@ -46426,7 +46433,7 @@ pub(crate) mod defining_modifier_publication {
                     json!({"type":"Destroy","target":{"type":"Typed","type_filters":["Creature"],"properties":[]}}),
                 ));
                 let mut second = first.clone();
-                second.target_chooser = Some(ControllerRef::Opponent);
+                second.target_chooser = Some(TargetFilter::Opponent);
                 let mut body = chain(vec![first, second]);
                 body.kind = AbilityKind::Activated;
                 body.cost = Some(AbilityCost::Tap);
@@ -46450,7 +46457,7 @@ pub(crate) mod defining_modifier_publication {
                         .into_iter()
                         .map(|color| {
                             TargetFilter::Typed(TypedFilter::creature().properties(vec![
-                                FilterProp::Attacking,
+                                FilterProp::Attacking { defender: None },
                                 FilterProp::HasColor { color },
                             ]))
                         })
@@ -47022,7 +47029,8 @@ pub(crate) mod defining_modifier_publication {
                     let attackers = QuantityExpr::Ref {
                         qty: QuantityRef::ObjectCount {
                             filter: TargetFilter::Typed(
-                                TypedFilter::creature().properties(vec![FilterProp::Attacking]),
+                                TypedFilter::creature()
+                                    .properties(vec![FilterProp::Attacking { defender: None }]),
                             ),
                         },
                     };
@@ -47253,8 +47261,8 @@ pub(crate) mod defining_modifier_publication {
                 let mut destroy = spell(Effect::Destroy {
                     target: TargetFilter::Or {
                         filters: vec![
-                            TargetFilter::Typed(TypedFilter::artifact()),
-                            TargetFilter::Typed(TypedFilter::enchantment()),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
                         ],
                     },
                     cant_regenerate: false,
@@ -47515,7 +47523,7 @@ pub(crate) mod defining_modifier_publication {
                         ]),
                         spell(Effect::unimplemented(
                             "targeted_emblem_creation",
-                            &printed_line(name, 3).split_once(": ").unwrap().1,
+                            printed_line(name, 3).split_once(": ").unwrap().1,
                         )),
                     ]
                 } else {
@@ -47536,7 +47544,7 @@ pub(crate) mod defining_modifier_publication {
                         }),
                         spell(Effect::unimplemented(
                             "targeted_emblem_creation",
-                            &printed_line(name, 2).split_once(": ").unwrap().1,
+                            printed_line(name, 2).split_once(": ").unwrap().1,
                         )),
                     ]
                 };
@@ -47564,13 +47572,14 @@ pub(crate) mod defining_modifier_publication {
                         ContinuousModification::AddSubtype { subtype: "Elk".into() },
                     ]).description("loses all abilities and becomes a green Elk creature with base power and toughness 3/3".into())],
                     duration: Some(Duration::Permanent), target: Some(TargetFilter::Or { filters: vec![
-                        TargetFilter::Typed(TypedFilter::artifact()), TargetFilter::Typed(TypedFilter::creature())] }), end_cost: None });
+                        TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)), TargetFilter::Typed(TypedFilter::creature())] }), end_cost: None });
                 change.duration = Some(Duration::Permanent);
                 let exchange = spell(Effect::ExchangeControl {
                     target_a: TargetFilter::Or {
                         filters: vec![
                             TargetFilter::Typed(
-                                TypedFilter::artifact().controller(ControllerRef::You),
+                                TypedFilter::new(TypeFilter::Artifact)
+                                    .controller(ControllerRef::You),
                             ),
                             own_creature(),
                         ],
@@ -47818,7 +47827,11 @@ pub(crate) mod defining_modifier_publication {
                 remove.kind = AbilityKind::Activated;
                 remove.cost = Some(AbilityCost::Tap);
                 remove.duration = Some(Duration::UntilEndOfTurn);
-                remove.activation_restrictions = vec![ActivationRestriction::DuringAnyUpkeep];
+                remove.activation_restrictions = vec![ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::CurrentPhaseIs {
+                        phases: vec![Phase::Upkeep],
+                    }),
+                }];
                 remove.description = Some(printed_line(name, 1));
                 out.abilities = vec![add, remove];
             }
@@ -48167,7 +48180,7 @@ pub(crate) mod defining_modifier_publication {
                             TypeFilter::Subtype("Warrior".into()),
                             TypeFilter::Subtype("Wizard".into()),
                         ]))
-                        .properties(vec![FilterProp::Attacking]),
+                        .properties(vec![FilterProp::Attacking { defender: None }]),
                 );
                 let mut protection = spell(Effect::GenericEffect {
                     static_abilities: vec![StaticDefinition::continuous()

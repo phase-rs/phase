@@ -11977,14 +11977,14 @@ mod selected_damage_capture_axis_tests {
             "independently live sink formula still reads its resource"
         );
         def.damage_modification = None;
-        let live = TargetFilter::Typed(TypedFilter::default().prop(FilterProp::Cmc {
+        let live = TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
             comparator: crate::types::ability::Comparator::LT,
             value: QuantityExpr::Ref {
                 qty: QuantityRef::LifeTotal {
                     player: PlayerScope::Controller,
                 },
             },
-        }));
+        }]));
         def.damage_source_filter = Some(live.clone());
         assert!(
             replacement_definition_axes(&def, ScanMode::LoopFirewall).projected,

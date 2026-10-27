@@ -871,7 +871,7 @@ mod tests {
         PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{ChosenDamageSource, StackEntry, StackEntryKind};
+    use crate::types::game_state::{ChosenDamageSource, StackEntry, StackEntryKind, WaitingFor};
     use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;

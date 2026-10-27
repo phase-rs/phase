@@ -291,6 +291,7 @@ mod tests {
         count: QuantityExpr,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branch_target_abilities: Vec::new(),
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,

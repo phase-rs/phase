@@ -54,6 +54,13 @@ pub struct OracleParserInput {
     cleave_oracle_text: Option<String>,
 }
 
+#[cfg(test)]
+impl OracleParserInput {
+    pub(crate) fn cleave_oracle_text(&self) -> Option<&str> {
+        self.cleave_oracle_text.as_deref()
+    }
+}
+
 /// Prepare the single primary parse performed by `build_oracle_face_inner`.
 pub fn prepare_oracle_parser_input(
     mtgjson: &AtomicCard,

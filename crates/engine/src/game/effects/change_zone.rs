@@ -3801,7 +3801,7 @@ mod tests {
         ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
             qty: QuantityRef::Variable { name: "X".into() },
         }));
-        state.last_named_choice = Some("0".into());
+        state.last_named_choice = Some(crate::types::ability::ChoiceValue::Number(0));
         assert_eq!(
             optional_private_zone_selection_is_infeasible(&state, &ability),
             None
@@ -9910,6 +9910,7 @@ mod tests {
                 candidates,
                 ability,
                 purpose: ZoneOpponentChooserPurpose::SubstituteArranger,
+                ..
             } => (*player, candidates.clone(), ability.source_id),
             other => panic!("expected a substitute-arranger election, got {other:?}"),
         }
