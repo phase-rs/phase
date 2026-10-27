@@ -4,8 +4,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{eof, opt, peek, recognize, value};
-use nom::multi::{many0, separated_list1};
-use nom::sequence::{pair, preceded};
+use nom::multi::separated_list1;
+use nom::sequence::preceded;
 use nom::Parser;
 
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};

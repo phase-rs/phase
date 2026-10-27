@@ -327,7 +327,7 @@ mod prior_controller_population_tests {
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
-use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::many0;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
