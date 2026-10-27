@@ -107,6 +107,170 @@ fn rune_of_protection_lands_parses_type_qualifier_and_keeps_cycling_separate() {
 }
 
 #[test]
+fn paid_circle_can_choose_a_departed_target_referred_to_by_an_unresolved_coin_branch() {
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::TargetRef;
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{CastPaymentMode, WaitingFor};
+    use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Verbatim Oracle text from pinned MTGJSON 2026-10-04.
+    let bangchuckers = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Goblin Bangchuckers",
+            2,
+            2,
+            "{T}: Flip a coin. If you win the flip, this creature deals 2 damage to any target. If you lose the flip, this creature deals 2 damage to itself.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+            generic: 2,
+        })
+        .id();
+    let target = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Raging Goblin",
+            1,
+            1,
+            "Haste (This creature can attack and {T} as soon as it comes under your control.)",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let circle = scenario
+        .add_enchantment_from_oracle(P0, "Circle of Protection: Red", COP_RED)
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Unsummon",
+            true,
+            "Return target creature to its owner's hand.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        [ManaType::Blue, ManaType::Colorless]
+            .into_iter()
+            .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let announced_target = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
+
+    // CR 602.2b: choose the target and pay the tap cost at activation,
+    // before any coin result exists or a response resolves.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: bangchuckers,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::TargetSelection { player: P0, .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(target)),
+        })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(runner.state().objects[&bangchuckers].tapped);
+
+    runner.cast(bounce).target_object(target).commit();
+    assert_eq!(runner.state().stack.len(), 2);
+    runner.resolve_top();
+    assert_eq!(runner.state().objects[&bounce].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&target].zone, Zone::Hand);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the coin ability is still on the stack"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    // CR 400.7: the returned card is a different object from the referred target.
+    let returned_card = ObjectIncarnationRef::from_object(&runner.state().objects[&target]);
+    assert_ne!(returned_card, announced_target);
+
+    runner.activate(circle, 0).resolve();
+    let WaitingFor::DamageSourceChoice {
+        player, options, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the paid Circle activation must open its public source choice");
+    };
+    assert_eq!(*player, P0);
+    // CR 609.7a: the stack ability still refers to the exact departed target,
+    // including when its announcement is held only by an unresolved coin branch.
+    let selected_identity = options
+        .iter()
+        .find(|option| option.identity.reference == announced_target)
+        .expect("the departed coin-branch target remains a legal damage source")
+        .identity;
+    assert_eq!(selected_identity.expected_zone, Zone::Battlefield);
+    assert!(options
+        .iter()
+        .all(|option| option.identity.reference != returned_card));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    runner
+        .act(GameAction::ChooseDamageSource {
+            source: announced_target,
+        })
+        .unwrap();
+    assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+    assert_eq!(
+        runner.state().pending_damage_replacements[0]
+            .selected_damage_source
+            .as_ref()
+            .expect("the public answer installs the selected source shield")
+            .identity,
+        selected_identity,
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().pending_damage_replacements[0]
+            .selected_damage_source
+            .as_ref()
+            .unwrap()
+            .identity,
+        selected_identity,
+        "completing the stack must not rebind the shield to the card's new birth",
+    );
+    // CR 608.2b: the coin ability's only announced target is now illegal.
+    assert_eq!(runner.state().objects[&bangchuckers].damage_marked, 0);
+    assert_eq!((runner.life(P0), runner.life(P1)), (20, 20));
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().owed_spell_final_part().is_none());
+}
+
+#[test]
 fn paid_pilgrim_protects_the_entire_wumpus_opportunity_then_expires_on_use() {
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::actions::GameAction;

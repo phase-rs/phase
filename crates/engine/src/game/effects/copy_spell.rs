@@ -273,6 +273,7 @@ pub fn resolve(
                 .map(ObjectIncarnationRef::from_object);
             if let Some(copy_ability) = state.stack.back_mut().and_then(|e| e.ability_mut()) {
                 rewrite_copy_spell_object_targets(copy_ability, member, member_pin);
+                crate::game::ability_utils::restamp_chosen_group_targets(copy_ability);
             }
         }
     }
@@ -1069,6 +1070,9 @@ fn rewrite_copy_spell_object_targets(
         })
         .collect();
     ability.replace_target_occurrences(occurrences);
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        rewrite_copy_spell_object_targets(child, new_target, new_target_pin);
+    }
     if let Some(sub) = ability.sub_ability.as_mut() {
         rewrite_copy_spell_object_targets(sub, new_target, new_target_pin);
     }

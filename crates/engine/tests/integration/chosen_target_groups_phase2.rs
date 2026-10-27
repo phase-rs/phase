@@ -800,9 +800,53 @@ fn automatic_zada_copy_rewrite_rebinds_chosen_return_to_each_member() {
     runner.state_mut().active_player = P0;
     runner.state_mut().priority_player = P0;
 
-    let outcome = runner.cast(spell).target_object(zada).resolve();
-    let copied = outcome
-        .events()
+    runner.cast(spell).target_object(zada).commit();
+    let mut events = vec![];
+    for _ in 0..2 {
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert_eq!(runner.state().stack.len(), 3);
+    let mut members = vec![];
+    for entry in &runner.state().stack {
+        let ability = entry.ability().expect("original or copied chosen return");
+        let targets = engine::game::ability_utils::declared_targets_in_chain(ability);
+        assert_eq!(targets.len(), 1);
+        let member = match targets[0] {
+            TargetRef::Object(id) => id,
+            TargetRef::Player(_) => panic!("creature target required"),
+        };
+        let expected = vec![(
+            TargetRef::Object(member),
+            Some(
+                engine::types::identifiers::ObjectIncarnationRef::from_object(
+                    &runner.state().objects[&member],
+                ),
+            ),
+        )];
+        let group = ability.declares_chosen_group.expect("chosen producer");
+        let reader = ability
+            .sub_ability
+            .as_deref()
+            .expect("chosen return reader");
+        for node in [ability, reader] {
+            assert_eq!(node.target_occurrences(), expected);
+            assert_eq!(
+                node.context.chosen_group_targets,
+                vec![(group, expected.clone())]
+            );
+        }
+        if entry.id == spell {
+            assert_eq!(member, zada);
+        } else {
+            members.push(member);
+        }
+    }
+    members.sort();
+    let mut expected_members = vec![first, second];
+    expected_members.sort();
+    assert_eq!(members, expected_members);
+    events.extend(pass_mogg_priority(&mut runner));
+    let copied = events
         .iter()
         .filter(|event| {
             matches!(
@@ -814,8 +858,147 @@ fn automatic_zada_copy_rewrite_rebinds_chosen_return_to_each_member() {
         copied, 2,
         "Zada must directly rewrite two real spell copies"
     );
-    outcome.assert_zone(&[zada, first, second], Zone::Hand);
-    outcome.assert_zone(&[opponent_owned], Zone::Battlefield);
+    for member in [zada, first, second] {
+        assert_eq!(runner.state().objects[&member].zone, Zone::Hand);
+    }
+    assert_eq!(
+        runner.state().objects[&opponent_owned].zone,
+        Zone::Battlefield
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
+#[test]
+fn automatic_zada_copy_rewrite_retargets_announced_aleatory_coin_branch() {
+    use engine::types::ability::CoinFlipResult;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{ManaCostShard, ManaType, ManaUnit};
+
+    // Pinned Oracle: the target is chosen on announcement, before the coin.
+    // CR 707.10d requires each copy's announced target to be its own ally.
+    const ALEATORY: &str = "Cast this spell only during combat after blockers are declared.\nFlip a coin. If you win the flip, target creature gets +1/+1 until end of turn.\nDraw a card at the beginning of the next turn's upkeep.";
+    for won in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::EndCombat);
+        let zada = scenario
+            .add_creature_from_oracle(P0, "Zada, Hedron Grinder", 3, 3, ZADA)
+            .id();
+        let first = scenario.add_creature(P0, "First Ally", 2, 4).id();
+        let second = scenario.add_creature(P0, "Second Ally", 4, 2).id();
+        let opponent = scenario.add_creature(P1, "Opponent decoy", 5, 5).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Aleatory", true, ALEATORY)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            [ManaType::Red, ManaType::Colorless]
+                .into_iter()
+                .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        pin_mogg(&mut runner, &[won, won, won]);
+        runner.cast(spell).target_object(zada).commit();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(
+            runner.state().stack.len(),
+            2,
+            "spell plus real Zada trigger"
+        );
+        let mut events = vec![];
+        for _ in 0..2 {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        assert_eq!(runner.state().stack.len(), 3, "original plus two copies");
+        let mut members = vec![];
+        for entry in &runner.state().stack {
+            let ability = entry.ability().expect("actual Aleatory spell");
+            assert!(matches!(ability.effect, Effect::FlipCoins { .. }));
+            assert_eq!(ability.coin_branch_target_abilities.len(), 1);
+            let (result, child) = &ability.coin_branch_target_abilities[0];
+            assert_eq!(*result, CoinFlipResult::Won);
+            let targets = engine::game::ability_utils::declared_targets_in_chain(ability);
+            assert_eq!(targets.len(), 1);
+            let member = match targets[0] {
+                TargetRef::Object(id) => id,
+                TargetRef::Player(_) => panic!("Aleatory must target a creature"),
+            };
+            assert_eq!(
+                child.target_occurrences(),
+                vec![(
+                    TargetRef::Object(member),
+                    Some(ObjectIncarnationRef::from_object(
+                        &runner.state().objects[&member]
+                    )),
+                )],
+                "coin custody pins the exact copy target"
+            );
+            assert!(ability.context.chosen_group_targets.is_empty());
+            assert!(child.context.chosen_group_targets.is_empty());
+            if entry.id == spell {
+                assert_eq!(member, zada, "original announcement remains unchanged");
+            } else {
+                members.push(member);
+            }
+        }
+        members.sort();
+        let mut expected_members = vec![first, second];
+        expected_members.sort();
+        assert_eq!(
+            members, expected_members,
+            "each copy targets a different ally"
+        );
+        events.extend(pass_mogg_priority(&mut runner));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                GameEvent::SpellCopied { original_id, .. } if *original_id == spell))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                GameEvent::CoinFlipped { player_id: P0, won: actual } if *actual == won))
+                .count(),
+            3,
+            "all three spells use real controlled RNG outcomes"
+        );
+        let pump = i32::from(won);
+        for (member, power, toughness) in [
+            (zada, 3, 3),
+            (first, 2, 4),
+            (second, 4, 2),
+            (opponent, 5, 5),
+        ] {
+            let bonus = if member == opponent { 0 } else { pump };
+            let object = &runner.state().objects[&member];
+            assert_eq!(
+                (object.power, object.toughness),
+                (Some(power + bonus), Some(toughness + bonus))
+            );
+            assert_eq!(object.zone, Zone::Battlefield);
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().resolving_stack_entry.is_none());
+    }
 }
 
 // Full printed Mogg text. Two occurrences of "target" permit the same object

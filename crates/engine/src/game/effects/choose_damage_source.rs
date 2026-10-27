@@ -165,11 +165,10 @@ pub(crate) fn referred_by_ability_with(
     {
         out.extend(capture(*reference));
     }
-    if let Some(sub) = &ability.sub_ability {
-        referred_by_ability_with(sub, out, capture);
-    }
-    if let Some(other) = &ability.else_ability {
-        referred_by_ability_with(other, out, capture);
+    // CR 609.7a: announced references include coin-branch target custody,
+    // even before the branch that will execute has been determined.
+    for (_, child) in ability.target_children() {
+        referred_by_ability_with(child, out, capture);
     }
 }
 
