@@ -1496,6 +1496,11 @@ pub struct ParkedTargets<'a> {
     /// answers directly; `None` (pre-capture frames and frames written
     /// before the field existed) reconstructs from the lists below.
     pub declared_player: Option<DeclaredPlayerTarget>,
+    /// The ability's scoped-player binding captured at park time. `Some`
+    /// answers `ControllerRef::ScopedPlayer` member reads directly; `None`
+    /// (pre-capture frames and frames written before the field existed)
+    /// keeps the legacy triggering-player/printed-controller fallback.
+    pub scoped_player: Option<PlayerId>,
 }
 
 /// Context bundle passed into filter evaluation.

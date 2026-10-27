@@ -61160,6 +61160,7 @@ mod entry_observation_settlement_tests {
                     controller: PlayerId(0),
                     roller: PlayerId(0),
                     quantity_controller: None,
+                    scoped_player: None,
                     targets: Vec::new(),
                     sides: 6,
                     results: vec![3, 4],

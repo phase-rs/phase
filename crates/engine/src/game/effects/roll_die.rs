@@ -235,6 +235,10 @@ pub(crate) fn resolve_step(
         // reads — captured independently of the roller so a scoped seat
         // keeps reading "you" as the printed player after a suspension.
         quantity_controller: Some(ability.original_controller.unwrap_or(ability.controller)),
+        // CR 109.5 + CR 706.2: the ability's scoped-player binding, captured
+        // alongside the printed controller so a resumed ScopedPlayer member
+        // read measures the same seat the inline path measured.
+        scoped_player: ability.scoped_player,
         targets: ability.targets.clone(),
         results_table: results.clone(),
         modifier: modifier.cloned(),
@@ -398,6 +402,7 @@ fn execute_roll(
         keyed_target_incarnations,
         declared_player,
         quantity_controller,
+        scoped_player,
     } = instruction;
 
     let pending = PendingDieRoll {
@@ -428,6 +433,7 @@ fn execute_roll(
         keyed_target_incarnations,
         declared_player,
         quantity_controller,
+        scoped_player,
     };
 
     // CR 706.6: when the ignored set is fully determined the roller has no
@@ -669,6 +675,7 @@ pub(crate) fn resume_after_ignore(
         keyed_target_incarnations,
         declared_player,
         quantity_controller,
+        scoped_player,
     } = pending;
 
     // Clear any resolving keep choice so a re-suspension below is unambiguous
@@ -723,6 +730,7 @@ pub(crate) fn resume_after_ignore(
                 declared_capture: declared_capture.as_ref(),
                 keyed_target_incarnations: &keyed_target_incarnations,
                 declared_player,
+                scoped_player,
             },
         );
 
@@ -788,6 +796,7 @@ pub(crate) fn resume_after_ignore(
                     controller,
                     roller,
                     quantity_controller,
+                    scoped_player,
                     targets: targets.clone(),
                     sides,
                     results: results.clone(),
@@ -1695,6 +1704,7 @@ mod tests {
             controller: PlayerId(0),
             roller: PlayerId(0),
             quantity_controller: None,
+            scoped_player: None,
             targets: vec![],
             sides: 20,
             results: vec![4, 17],

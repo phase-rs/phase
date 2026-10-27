@@ -600,6 +600,7 @@ fn resumed_keep_choice_modifier_reads_the_parked_targets() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(oak), TargetRef::Object(elm)],
         sides: 20,
         results: vec![3, 3],
@@ -704,6 +705,7 @@ fn parked_indexed_roll_resolves_slot_against_chain_root_despite_earlier_illegal_
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         // Local slice holds only the roller's own target; declared slot 1
         // still names the brute through the declared list.
         targets: vec![TargetRef::Object(brute)],
@@ -772,6 +774,7 @@ fn parked_indexed_roll_drops_selected_slot_stamped_illegal() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -864,6 +867,7 @@ fn parked_indexed_roll_reads_departure_lki_for_selected_slot_with_stale_pin() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -955,6 +959,7 @@ fn parked_indexed_roll_does_not_judge_local_fallback_by_root_pins() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -1014,6 +1019,7 @@ fn parked_indexed_roll_root_only_frame_keeps_legacy_selection() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -1078,6 +1084,7 @@ fn parked_indexed_roll_resolves_modal_slot_against_its_base() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -1171,6 +1178,7 @@ fn parked_indexed_roll_reads_repeated_id_through_its_own_pin() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute), TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -1273,6 +1281,7 @@ fn parked_unslotted_roll_reads_departed_member_from_departure_lki() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(brute)],
         sides: 20,
         results: vec![10],
@@ -1331,6 +1340,7 @@ fn parked_indexed_roll_counts_player_slots_in_declared_numbering() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![
             TargetRef::Player(engine::game::scenario::P1),
             TargetRef::Object(brute),
@@ -1420,6 +1430,7 @@ fn parked_max_aggregate_resolves_target_opponent_axis_from_declared_player() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         // No local player: the recorded verdict below is the only thing
         // naming P1, so list reconstruction would answer Undeclared (1).
         targets: vec![],
@@ -1478,6 +1489,7 @@ fn parked_declared_player_prefers_local_over_root() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Player(P1)],
         sides: 20,
         results: vec![1],
@@ -1532,6 +1544,7 @@ fn parked_declared_player_honors_chain_illegal_stamp() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![],
         sides: 20,
         results: vec![1],
@@ -1592,6 +1605,7 @@ fn parked_declared_player_recorded_illegal_ignores_lists() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![],
         sides: 20,
         results: vec![1],
@@ -1642,6 +1656,7 @@ fn parked_declared_player_ignores_root_numbered_stamp_on_local() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Player(P1)],
         sides: 20,
         results: vec![1],
@@ -1691,6 +1706,7 @@ fn parked_declared_player_absent_matches_nothing() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![],
         sides: 20,
         results: vec![1],
@@ -2496,6 +2512,7 @@ fn legacy_frame_without_capture_still_falls_back_to_local() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![TargetRef::Object(held)],
         sides: 1,
         results: vec![1, 1],
@@ -2639,6 +2656,28 @@ fn you_power_sum_modifier() -> DieRollModifier {
                         filter: TargetFilter::Typed(TypedFilter {
                             type_filters: vec![TypeFilter::Creature],
                             controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        }),
+                    },
+                )
+                .expect("statically valid property aggregate"),
+            ),
+        },
+    }
+}
+
+/// R4-B1 — power sum over creatures the SCOPED seat controls.
+fn scoped_power_sum_modifier() -> DieRollModifier {
+    DieRollModifier::Add {
+        value: QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::Objects {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::ScopedPlayer),
                             properties: vec![],
                         }),
                     },
@@ -2929,6 +2968,7 @@ fn snapshot_pause_illegal_player_contributes_nothing() {
         controller: P0,
         roller: P0,
         quantity_controller: None,
+        scoped_player: None,
         targets: vec![],
         sides: 1,
         results: vec![1],
@@ -3057,5 +3097,105 @@ fn scoped_inline_roll_reads_printed_controller() {
         d1_total(&events),
         10,
         "inline survivor 1 + P0's 9, matching the paused read"
+    );
+}
+
+/// R4-B1 PAUSE — the R3-B seat shape (printed P0, acting + scoped seat P1)
+/// with a ScopedPlayer-sum modifier over asymmetric populations (P0 9, P1
+/// 5) must add P1's 5 after a production keep pause, exactly like the
+/// inline path. Pre-fix the resumed read dropped the scoped binding and
+/// fell back to the printed controller: totals 10 vs 6.
+#[test]
+fn scoped_pause_reads_scoped_seat_not_printed_controller() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    let own = scenario.add_creature(P0, "Own Brute", 9, 9).id();
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    // Barbarian sits with the SEAT (P1): the rebound roll belongs to P1, so
+    // only P1's replacement opens the production keep prompt.
+    scenario.add_enchantment_from_oracle(P1, "Barbarian Class", BARBARIAN_CLASS_L1);
+    let mut runner = scenario.build();
+
+    let mut ability = ResolvedAbility::new(
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            results: vec![],
+            modifier: Some(scoped_power_sum_modifier()),
+        },
+        vec![],
+        own,
+        P0,
+    );
+    ability.set_original_controller_recursive(P0);
+    ability.set_controller_recursive(P1);
+    ability.set_scoped_player_recursive(P1);
+    let mut events = Vec::new();
+    engine::game::effects::roll_die::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("the raised roll proposes");
+    let WaitingFor::DieKeepChoice { player, .. } = &runner.state().waiting_for else {
+        panic!(
+            "REACH-GUARD: d1 plus Barbarian must open the keep prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P1, "the P1 seat answers the keep choice");
+    let outcome = runner
+        .act(GameAction::SelectDieRolls {
+            ignore_indices: vec![0],
+        })
+        .expect("the seat may ignore a tied-lowest roll");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: priority resumes, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        d1_total(&outcome.events),
+        6,
+        "survivor 1 + P1's 5; a dropped scoped binding falls back to P0's 9 and emits 10"
+    );
+}
+
+/// R4-B1 INLINE control — the same seat-bound roll without Barbarian
+/// resolves live (no suspension), so the total must carry the same scoped
+/// addend. The two tests agree if and only if pause and live read the same
+/// scoped seat.
+#[test]
+fn scoped_inline_roll_reads_scoped_seat() {
+    use engine::game::scenario::P1;
+    let mut scenario = GameScenario::new_n_player(2, 49);
+    scenario.at_phase(Phase::PreCombatMain);
+    let own = scenario.add_creature(P0, "Own Brute", 9, 9).id();
+    scenario.add_creature(P1, "Foe Brute", 5, 5);
+    let mut runner = scenario.build();
+
+    let mut ability = ResolvedAbility::new(
+        Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            results: vec![],
+            modifier: Some(scoped_power_sum_modifier()),
+        },
+        vec![],
+        own,
+        P0,
+    );
+    ability.set_original_controller_recursive(P0);
+    ability.set_controller_recursive(P1);
+    ability.set_scoped_player_recursive(P1);
+    let mut events = Vec::new();
+    engine::game::effects::roll_die::resolve(runner.state_mut(), &ability, &mut events)
+        .expect("the raised roll resolves");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no Barbarian means no pause, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        d1_total(&events),
+        6,
+        "inline survivor 1 + P1's 5, matching the paused read"
     );
 }

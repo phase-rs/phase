@@ -288,6 +288,13 @@ pub struct PendingDieRoll {
     /// acting controller (the legacy read). Skipped on the wire when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity_controller: Option<PlayerId>,
+    /// CR 109.5 + CR 706.2: the ability's scoped-player binding, captured
+    /// independently of the roller so a resumed `ControllerRef::ScopedPlayer`
+    /// member read measures the same seat the inline path measured instead
+    /// of falling back to the triggering player or printed controller.
+    /// `None` on pre-field frames, which keep the legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub sides: u8,
     /// CR 706.2 + CR 706.6: the NATURAL results — "the number indicated on the
@@ -454,6 +461,14 @@ pub struct PendingDieRollInstruction {
     /// without a capture. Skipped on the wire when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity_controller: Option<PlayerId>,
+    /// CR 109.5 + CR 706.2: the ability's scoped-player binding, carried
+    /// across the CR 616.1 choice so a resumed `ControllerRef::ScopedPlayer`
+    /// member read measures the same seat the inline path measured instead
+    /// of falling back to the triggering player or printed controller.
+    /// `None` for frames built without a capture. Skipped on the wire when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub results_table: Vec<DieResultBranch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -10033,6 +10048,7 @@ mod tests {
                         controller: PlayerId(0),
                         roller: PlayerId(0),
                         quantity_controller: None,
+                        scoped_player: None,
                         targets: vec![],
                         sides: 1,
                         results: vec![1, 1],

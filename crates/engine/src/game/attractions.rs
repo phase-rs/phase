@@ -217,6 +217,7 @@ pub fn roll_to_visit_attractions(
         // so resume keeps the legacy path.
         declared_capture: None,
         quantity_controller: None,
+        scoped_player: None,
         local_target_pins: Vec::new(),
         keyed_target_incarnations: Vec::new(),
         declared_player: None,

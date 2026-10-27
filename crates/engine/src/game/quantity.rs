@@ -4711,6 +4711,11 @@ pub fn resolve_quantity_with_targets_slice(
 /// live path; the ordinary `targets` slice stays empty so every other arm
 /// reads exactly as the ability-blind entry would. The combat-tax slice
 /// entry keeps its own meaning and is untouched.
+///
+/// CR 109.5 + CR 706.2: the scoped-player binding rides the same parked
+/// channel (captured at park, `None` on pre-field frames) so a resumed
+/// `ControllerRef::ScopedPlayer` member read measures the same seat the
+/// inline path measured instead of falling back.
 pub fn resolve_quantity_with_parked_targets(
     state: &GameState,
     expr: &QuantityExpr,
@@ -4729,7 +4734,7 @@ pub fn resolve_quantity_with_parked_targets(
                 source: source_id,
                 trigger_source: None,
                 recipient: None,
-                scoped_player: None,
+                scoped_player: parked.scoped_player,
                 damage_source: None,
                 spell: None,
                 event_amount: None,
@@ -22491,6 +22496,7 @@ mod tests {
             controller: PlayerId(0),
             roller: PlayerId(0),
             quantity_controller: None,
+            scoped_player: None,
             targets: ability.targets.clone(),
             sides: 20,
             results: vec![10],
@@ -22682,6 +22688,7 @@ mod tests {
             controller: PlayerId(0),
             roller: PlayerId(0),
             quantity_controller: None,
+            scoped_player: None,
             targets: ability.targets.clone(),
             sides: 20,
             results: vec![10],
@@ -22837,6 +22844,7 @@ mod tests {
                 controller: PlayerId(0),
                 roller: PlayerId(0),
                 quantity_controller: None,
+                scoped_player: None,
                 targets: ability.targets.clone(),
                 sides: 20,
                 results: vec![10],
@@ -22948,6 +22956,7 @@ mod tests {
                 controller: PlayerId(0),
                 roller: PlayerId(0),
                 quantity_controller: None,
+                scoped_player: None,
                 targets: ability.targets.clone(),
                 sides: 20,
                 results: vec![10],
@@ -23119,6 +23128,7 @@ mod tests {
             controller: PlayerId(0),
             roller: PlayerId(0),
             quantity_controller: None,
+            scoped_player: None,
             targets: ability.targets.clone(),
             sides: 20,
             results: vec![10],
@@ -27867,6 +27877,7 @@ mod tests {
             controller: root.controller,
             roller: root.controller,
             quantity_controller: None,
+            scoped_player: None,
             targets: Vec::new(),
             sides: 6,
             // Die 0 already resolved (skipped by next_index below); die 1 is
