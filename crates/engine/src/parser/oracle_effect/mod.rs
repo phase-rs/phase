@@ -43313,7 +43313,7 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
 /// `None` is reserved for ability-root entries, including
 /// `parse_effect_chain_ir_ability_root` and `parse_effect_chain_with_context_ability_root`.
 /// Spell/activated roots, trigger bodies, granted activated-ability bodies, and
-/// the exert-reflexive body start independent bodies and use that default.
+/// the linked exert-payoff trigger body start independent bodies and use that default.
 ///
 /// The nested entries `parse_effect_chain_ir`, `parse_effect_chain_with_context`,
 /// and `parse_effect_chain_ir_after_player_choices` keep the withheld default for

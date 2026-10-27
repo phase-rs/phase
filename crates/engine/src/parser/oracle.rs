@@ -6889,8 +6889,8 @@ fn parse_normalized_oracle_ir(
             }) {
                 ctx.subject = None;
                 ctx.actor = None;
-                // CR 603.12: "When you do" starts a separate reflexive ability,
-                // not a continuation of the optional attack-cost instruction.
+                // CR 701.43d + CR 607.2h: the linked exert-payoff trigger has its own
+                // ability body, separate from the optional attack cost.
                 trigger = trigger.execute(parse_effect_chain_with_context_ability_root(
                     effect_rest.trim(),
                     AbilityKind::Spell,
