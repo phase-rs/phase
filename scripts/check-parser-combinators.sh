@@ -27,6 +27,10 @@
 #       the name-is-a-category-key contract the coverage report depends on.
 #       Match-arm destructuring (`Effect::Unimplemented { name, .. } =>`) is
 #       not flagged.
+#   (H) Whole-production-tree residue syntax ceilings, before diff-only exits.
+#       Selected helper tuple bindings/projections/whole-result drops and exact
+#       TargetFilter defaults; not proof against arbitrary unread-text loss.
+#       See scripts/residue-ratchet.txt for baseline and tightening policy.
 #
 # Exempt: lines (or the line immediately above) with
 #     // allow-noncombinator: <reason>
@@ -174,6 +178,38 @@ if [ "$arch_fail" -ne 0 ]; then
     exit 1
 fi
 printf 'Gate G PASS (router/grant architecture: strict router vs permissive grant boundary intact)\n'
+
+# (H) Selected helper-result discard syntax: whole-tree, snapshot-owned ceiling.
+# Use the executing tooling; never execute arbitrary staged detector code.
+RESIDUE_DETECTOR="$SCRIPT_DIR/lib/detect-residue-discards.py"
+RESIDUE_TESTS="$SCRIPT_DIR/lib/detect_residue_discards_tests.py"
+RESIDUE_LEDGER="$SCRIPT_DIR/residue-ratchet.txt"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Gate H FAIL: python3 is required for the residue census." >&2
+    exit 1
+fi
+for required in "$RESIDUE_DETECTOR" "$RESIDUE_TESTS"; do
+    if [ ! -f "$required" ]; then
+        echo "Gate H FAIL: required residue gate file missing: $required" >&2
+        exit 1
+    fi
+done
+# Ledger availability belongs to the selected snapshot, not another worker's
+# unstaged filesystem. The detector checks the index blob in cached mode.
+if [ "$DIFF_MODE" != "--cached" ] && [ ! -f "$RESIDUE_LEDGER" ]; then
+    echo "Gate H FAIL: required residue gate file missing: $RESIDUE_LEDGER" >&2
+    exit 1
+fi
+if ! residue_tests_output="$(python3 -B "$RESIDUE_TESTS" 2>&1)"; then
+    echo "Gate H FAIL: residue detector self-tests failed; repair the detector before proceeding." >&2
+    printf '%s\n' "$residue_tests_output" >&2
+    exit 1
+fi
+if [ "$DIFF_MODE" = "--cached" ]; then
+    python3 -B "$RESIDUE_DETECTOR" --check --index
+else
+    python3 -B "$RESIDUE_DETECTOR" --check
+fi
 
 # ---------------------------------------------------------------------------
 # DO NOT "harden" families (A), (B), (E), (F) by filtering them through the

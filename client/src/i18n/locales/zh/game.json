@@ -1623,7 +1623,8 @@
     },
     "toasts": {
       "connectionFailed": "连接失败。请在设置中重试或更改服务器。",
-      "eliminatedSpectating": "你已被淘汰。现在进入观战。"
+      "eliminatedSpectating": "你已被淘汰。现在进入观战。",
+      "retainedTerminalUnreadable": "无法读取已保留的终局投递"
     }
   },
   "gameSetup": {
@@ -2715,6 +2716,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

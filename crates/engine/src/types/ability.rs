@@ -1208,8 +1208,11 @@ impl ChoiceType {
         matches!(self, Self::CardPredicateGuess { .. })
     }
 
+    /// CR 608.2d: a named card is announced while applying the effect, so a
+    /// dependent instruction ("discards a card with that name") reads it from
+    /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. })
+        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -2425,7 +2428,11 @@ pub enum CastFromZoneDriver {
     /// last-time-counter trigger (CR 702.62a) so a suspended sorcery recast at
     /// upkeep is not blocked by the sorcery-speed gate (issue #1520), and by
     /// Rebound's next-upkeep arming hook (CR 702.88a) for the same reason
-    /// (issue #6461).
+    /// (issue #6461). Also set by a free, no-duration single-card PLAY
+    /// instruction (Hideaway's "you may play the exiled card without paying its
+    /// mana cost", Djinn of Wishes' "you may play that card …"): CR 701.18b +
+    /// CR 305.2a, the card is cast during resolution if it is a spell, or played
+    /// as a land during resolution if it is a land.
     DuringResolution,
     /// CR 608.2g: Open a RESOLUTION-SCOPED free-cast window over the batch of
     /// cards the same resolution just produced ("… from among them") — the
@@ -2542,11 +2549,17 @@ impl ResolutionCastWindow {
 /// construct a `CastFromZoneDriver` for a `from among` batch by any other route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CastMechanism {
-    /// CR 118.9 / CR 611.2a: a per-object permission exercised at a LATER
-    /// priority window. Chosen for paid batch casts (the free-cast window
-    /// primitive models no mana payment), CR 305.1 land plays (no
-    /// during-resolution mechanism exists), and any clause that states a
-    /// durational scope.
+    /// A per-object permission exercised at a LATER priority window. Chosen
+    /// for:
+    /// - paid batch casts — CR 118.9: the free-cast window primitive models no
+    ///   mana payment, so a cast paying a cost lingers;
+    /// - batch land plays — CR 305.1: playing a land is a special action, and
+    ///   no resolution-scoped window plays lands;
+    /// - any clause that states a durational scope — CR 611.2a: the permission
+    ///   lasts as long as the instruction states.
+    ///
+    /// At runtime a land//land modal DFC bound outside the graveyard also keeps
+    /// a lingering grant (CR 712.12 election — follow-up).
     LingeringPermission,
     /// CR 608.2g: cast exactly ONE card as the granting ability resolves. The
     /// self-library-peek form ("look at the top four cards of your library. You
@@ -35162,6 +35175,17 @@ pub struct ReplacementDefinition {
     /// None = any target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_target_filter: Option<DamageTargetFilter>,
+    /// CR 400.7 + CR 615.1: the incarnation of the object this object-hosted
+    /// prevention shield was installed on, recorded at install time. A shield
+    /// meant to protect one specific creature ("prevent the next damage to
+    /// target creature") must not protect that creature's replacement after a
+    /// blink: the object keeps its id but bumps its incarnation on every zone
+    /// change, so a new incarnation is a new object with no memory of the
+    /// departed one's shields. `None` for registry-hosted (population) shields
+    /// and for player recipients, which intentionally match whatever object is
+    /// damaged at event time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_recipient_incarnation: Option<u64>,
     /// CR 614.1a: Restricts to combat-only or noncombat-only damage.
     /// None = all damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35515,6 +35539,7 @@ impl ReplacementDefinition {
             damage_modification: None,
             damage_source_filter: None,
             damage_target_filter: None,
+            target_recipient_incarnation: None,
             combat_scope: None,
             shield_kind: ShieldKind::None,
             quantity_modification: None,
@@ -38460,6 +38485,37 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 400.7 + CR 113.7a: carry a random-result branch's source identity
+    /// without changing its actor, targets, pins, or other resolution context.
+    /// Different-source nodes bound the traversal, including their descendants;
+    /// nested definition payloads inherit only when they are materialized.
+    pub(crate) fn set_result_branch_source_identity_recursive(
+        &mut self,
+        source_id: ObjectId,
+        trigger_source: Option<&TriggerSourceContext>,
+        source_incarnation: u64,
+    ) {
+        if self.source_id != source_id {
+            return;
+        }
+        self.trigger_source = trigger_source.cloned();
+        self.source_incarnation = Some(source_incarnation);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_result_branch_source_identity_recursive(
+                source_id,
+                trigger_source,
+                source_incarnation,
+            );
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_result_branch_source_identity_recursive(
+                source_id,
+                trigger_source,
+                source_incarnation,
+            );
+        }
+    }
+
     /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity
     /// over this entire ability chain. Writes `source_id` ONLY — controller,
     /// `original_controller`, `trigger_source`, incarnation pins untouched, so
@@ -38528,6 +38584,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.update_trigger_source_context_in_resolution_segment(source);
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: Publish a name announced while applying this
+    /// effect to every later instruction of the same resolution, including
+    /// independent sequential siblings ("Choose a card name. Target player
+    /// discards a card with that name."), which the segment-scoped update
+    /// above deliberately skips.
+    pub fn update_trigger_source_context_through_chain(&mut self, source: TriggerSourceContext) {
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.update_trigger_source_context_through_chain(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.update_trigger_source_context_through_chain(source);
         }
     }
 

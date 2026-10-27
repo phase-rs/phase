@@ -3393,6 +3393,9 @@ impl GameObject {
             // snapshots that use this method never ask an attachment predicate, so an
             // empty set here is the same fail-closed answer they got before.
             attachments: Vec::new(),
+            // CR 608.2h: the trigger-time copy a latched source falls back to
+            // when no exit record survives for its incarnation.
+            intensity: self.intensity,
         }
     }
 
@@ -3431,6 +3434,7 @@ impl GameObject {
         self.counters = lki.counters.clone();
         self.tapped = lki.tapped;
         self.is_suspected = lki.is_suspected;
+        self.intensity = lki.intensity;
         // Relationships.
         self.attachments = context
             .attachments

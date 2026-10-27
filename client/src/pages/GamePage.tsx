@@ -701,7 +701,8 @@ export function GamePage() {
         break;
       case "terminalResult":
         clearPromptOverlayState();
-        if (gameId) void clearGame(gameId);
+        // Display is independent of native guest convergence. The provider /
+        // adapter owns deletion after durable cleanup ownership is established.
         setTerminalReason(event.result.display.reason);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.result.display.winner } },

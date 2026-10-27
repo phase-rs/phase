@@ -35,6 +35,7 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
@@ -261,6 +262,13 @@ export class EngineWorkerClient {
 
   async canonicalCardNames(names: string[]): Promise<unknown> {
     return this.request<unknown>({ type: "canonicalCardNames", names });
+  }
+
+  async query<K extends EngineQueryName>(
+    name: K,
+    args: EngineQueryArgs<K>,
+  ): Promise<EngineQueryResult<K>> {
+    return this.request<EngineQueryResult<K>>({ type: "query", name, args });
   }
 
   async initializeGame(

@@ -24664,6 +24664,7 @@ fn try_parse_compound_shuffle(text: &str) -> Option<ParsedEffectClause> {
         if matches!(
             ast,
             ShuffleImperativeAst::ChangeZoneAllToLibrary { .. }
+                | ShuffleImperativeAst::SelfAndZonesToLibrary { .. }
                 | ShuffleImperativeAst::TargetedChangeZoneToLibrary { all: true, .. }
         ) {
             return Some(lower_shuffle_ast(ast));
@@ -27219,6 +27220,18 @@ fn chain_has_prior_typed_referent(clauses: &[ClauseIr], skip_first_conditional: 
 
 fn effect_is_parent_target_carrier(effect: &Effect) -> bool {
     matches!(effect.target_filter(), Some(TargetFilter::ParentTarget))
+        // CR 115.1c + CR 608.2c: a declared "any target" prevention recipient
+        // (Elvish Healer) is a chosen referent later "instead" shorthand binds to.
+        || matches!(
+            effect,
+            Effect::PreventDamage {
+                target: TargetFilter::Any,
+                recipient_scope: EffectScope::Single,
+                damage_source_filter: None,
+                amount: PreventionAmount::Next(_),
+                ..
+            }
+        )
         || matches!(
             effect,
             Effect::GenericEffect {
@@ -31622,7 +31635,7 @@ impl FromAmongBatchLowering {
 /// is lowered.
 ///
 /// Scoped to a FREE cast (`without_paying`) in `Cast` mode: CR 305.1 land plays
-/// are a special action with no during-resolution mechanism, and a PAID batch
+/// are a special action and no resolution-scoped batch window can play a land, and a PAID batch
 /// cast (Sanwell, Avenger Ace: "you may cast a Vehicle or artifact creature
 /// spell from among them") needs a mana-payment window the free-cast window
 /// primitive does not model, so both ask for the established permission path.
@@ -31663,7 +31676,7 @@ fn from_among_batch_cast_driver(
     // priority window". A PAID batch cast (Sanwell, Avenger Ace: "you may cast a
     // Vehicle or artifact creature spell from among them") needs a mana-payment
     // window the free-cast window primitive does not model, and a CR 305.1 land
-    // play is a special action with no during-resolution mechanism. A duration
+    // play is a special action no resolution-scoped batch window can play. A duration
     // stated INSIDE the clause is the third: Ral, Leyline Prodigy states it
     // mid-clause — "you may cast instant and sorcery spells from among them THIS
     // TURN without paying their mana costs" — where no positional strip seam
@@ -33208,11 +33221,27 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // resolution-only free cast (Bring to Light tutors a card into the
         // controller's own exile, then casts it AS this effect resolves — issue
         // #2880). The card goes on the stack now; no standing `ExileWithAltCost`
-        // permission lingers afterward. Restricted to `mode == Cast`: CR 305.1
-        // land plays are a special action, not a cast, and have no
-        // during-resolution casting mechanism — the Play-mode hideaway/wish
-        // cards (Mosswort Bridge, Djinn of Wishes, etc.) must stay on the
-        // lingering-permission path. An `alt_ability_cost` or an explicit
+        // permission lingers afterward.
+        //
+        // CR 701.18b + CR 608.2g + CR 305.2a: a FREE single-card "play the
+        // exiled card / that card / it" with no duration resolves now too
+        // (Hideaway: Shelldock Isle, Mosswort Bridge, Fight Rigging; Djinn of
+        // Wishes): playing a card means casting it or playing it as a land,
+        // whichever is appropriate, and the play happens as the ability
+        // resolves ("You can't play it later in the turn"). The resolver plays a
+        // land during resolution under the land-play allowance and own-turn
+        // rules (CR 305.2b / CR 305.3) and casts a spell as usual. A PAID Play
+        // stays lingering (the paid resolution offer has no land arm), and the
+        // batch anaphors ("cards exiled …", "one of those N cards") are excluded
+        // (no resolution-scoped batch window plays lands); the plural `Other`
+        // anaphors ("them", "those cards") select the driver and rely on the
+        // runtime single-card gate (`single_resolution_card`) to keep a
+        // multi-card binding on the lingering grant. CR 712.12: a
+        // land//land modal card, bound anywhere but the graveyard, keeps the
+        // lingering grant at runtime (`ResolutionPlayRoute::LingeringFaceElection`)
+        // — that covers Hideaway exile and Djinn-class library cards, which the
+        // grant delivers to exile; a spell//land MDFC is cast by its front face
+        // (CR 712.8a). An `alt_ability_cost` or an explicit
         // `duration` likewise keeps the lingering grant (Cruelclaw's discard
         // alt cost; Rebound-style durational recasts). A `constraint` (a
         // conditional free-cast such as Beseech the Mirror's "you may cast the
@@ -33246,7 +33275,14 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
         // batch an earlier instruction of this resolution produced (Invasion of
         // Alara's two exiled cards). The same during-resolution cast, offered as a
         // one-cast window over that batch rather than as a cast of each member.
-        let resolves_now = mode == CardPlayMode::Cast
+        let mode_resolves_now = match mode {
+            CardPlayMode::Cast => true,
+            CardPlayMode::Play => match matched_anaphor {
+                CastAnaphor::SingularExiledCard | CastAnaphor::Other => without_paying,
+                CastAnaphor::PluralCardsExiled | CastAnaphor::OneOfBatch => false,
+            },
+        };
+        let resolves_now = mode_resolves_now
             && alt_ability_cost.is_none()
             && duration.is_none()
             && constraint.is_none()
@@ -33802,27 +33838,37 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     });
     if cast_filter_has_typed_leaf(&filter) {
         apply_cast_target_suffixes(&mut filter, rest);
-        // CR 400.3 + CR 115.1: in a triggered ability, "cast target … card from
-        // that player's graveyard" (Tinybones, the Pickpocket; Wrexial, the
-        // Risen Deep) chooses the card as the trigger goes on the stack, in the
-        // graveyard of the player its event names — and a graveyard holds only
-        // its owner's cards. `scan_zone_phrase` reads the possessive as a bare
-        // `InZone { Graveyard }`, so the owner is bound here, read off the same
-        // origin phrase the zone came from; without it any graveyard's card is a
-        // legal target. (`relative_player_scope` does not name that player here:
+        // CR 400.3 + CR 115.1: "cast … from that player's graveyard" casts from
+        // the graveyard of the player "that player" names, and a graveyard
+        // holds only its owner's cards. `scan_zone_phrase` reads the possessive
+        // as a bare `InZone { Graveyard }`, so the owner is bound here, read off
+        // the same origin phrase the zone came from; without it any graveyard's
+        // card matches. After a declared player target ("Target opponent mills
+        // nine cards, then you may cast … from that player's graveyard" —
+        // Sorcerous Squall) that player is the declared one (CR 608.2c). In a
+        // triggered ability that declares none, "cast target … card" (Tinybones,
+        // the Pickpocket; Wrexial, the Risen Deep) names the player the event
+        // names. (`relative_player_scope` does not name that player here:
         // `relative_player_scope_for_condition` reads a "~ deals combat damage
         // to a player" head as `TargetPlayer`.)
-        if ctx.in_trigger
-            && cast_target_is_chosen_graveyard_card(rest, &filter)
-            && cast_origin_is_that_players_graveyard(rest)
-        {
-            add_cast_target_props(
-                &mut filter,
-                &[FilterProp::Owned {
-                    controller: ControllerRef::TriggeringPlayer,
-                }],
-                None,
-            );
+        // CR 400.1 + CR 608.2c: "cast a spell from each opponent's graveyard"
+        // (Jetsam) allows one cast per graveyard; one pick across them all would
+        // allow only one, so the clause stays unsupported.
+        if cast_origin_names_each_graveyard(rest) {
+            return Some(Effect::unimplemented(PER_GRAVEYARD_CAST_GAP, rest));
+        }
+        if cast_origin_is_that_players_graveyard(rest) {
+            let owner = ctx.declared_player_scope.clone().or_else(|| {
+                (ctx.in_trigger && cast_target_is_chosen_graveyard_card(rest, &filter))
+                    .then_some(ControllerRef::TriggeringPlayer)
+            });
+            if let Some(owner) = owner {
+                add_cast_target_props(
+                    &mut filter,
+                    &[FilterProp::Owned { controller: owner }],
+                    None,
+                );
+            }
         }
         let alt_ability_cost = parse_alt_ability_cost_rider(lower);
         // CR 608.2g vs CR 611.2: shared filter-form driver authority. `mode` and
@@ -34014,6 +34060,25 @@ fn parse_additional_mana_cost_rider(rest: &str) -> Option<crate::types::mana::Ma
     .ok()?;
     eof::<_, E>(tail.trim_end_matches('.')).ok()?;
     Some(cost)
+}
+
+/// The parser gap name for a cast of one spell from EACH of several graveyards
+/// (`cast_origin_names_each_graveyard`).
+const PER_GRAVEYARD_CAST_GAP: &str = "per_graveyard_cast";
+
+/// The cast target's origin phrase is "from each [opponent's] graveyard".
+fn cast_origin_names_each_graveyard(rest: &str) -> bool {
+    type E<'a> = OracleError<'a>;
+    super::oracle_target::scan_zone_phrase_span(rest).is_some_and(|(span, ..)| {
+        (
+            opt(alt((tag::<_, _, E>("cards "), tag("card ")))),
+            tag("from each "),
+            alt((tag::<_, _, E>("opponent's graveyard"), tag("graveyard"))),
+            eof,
+        )
+            .parse(span)
+            .is_ok()
+    })
 }
 
 /// The origin phrase `apply_cast_target_suffixes` took the cast target's zone

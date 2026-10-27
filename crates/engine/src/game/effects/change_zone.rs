@@ -239,6 +239,13 @@ pub(crate) fn change_zone_all_player_scope(
 ) -> Option<PlayerId> {
     match target_filter {
         TargetFilter::Controller => Some(ability.controller),
+        // CR 400.3: "its owner's" resolves to the owner of source_id.
+        TargetFilter::Owner => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.owner)
+            .or_else(|| state.lki_cache.get(&ability.source_id).map(|lki| lki.owner))
+            .or(Some(ability.controller)),
         TargetFilter::Player => ability
             .targets
             .iter()
@@ -254,9 +261,12 @@ pub(crate) fn change_zone_all_player_scope(
         // CR 608.2c: "that player" names the player an earlier instruction of this ability declared.
         TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
-        | TargetFilter::ScopedPlayer
         | TargetFilter::DeclaredPlayer { .. } => {
             crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+        }
+        TargetFilter::ScopedPlayer => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, target_filter)
+                .or(Some(ability.controller))
         }
         _ => None,
     }
@@ -585,12 +595,32 @@ fn append_effect_resolved_after_counter_pause(
     );
 }
 
-fn publish_finalized_owner_library_subjects(
+pub(super) fn publish_finalized_owner_library_subjects(
     state: &mut GameState,
     ability: &ResolvedAbility,
     objects: &[ObjectId],
 ) {
-    let participants = super::prospective_subject_participants(state, ability, objects);
+    let mut participants = super::prospective_subject_participants(state, ability, objects);
+    // CR 701.24d: even when the zone is empty, the owner must be a recorded
+    // participant so the terminal owner-library shuffle includes their
+    // (empty) library in the shuffle. `collect_filter_participants` does not
+    // add players for a bare `TargetFilter::Controller` target, so an empty
+    // zone would otherwise publish nobody and the owner's shuffle would be
+    // dropped.
+    if objects.is_empty() {
+        if let Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            target,
+            ..
+        } = &ability.effect
+        {
+            if let Some(player) = change_zone_all_player_scope(state, ability, target) {
+                participants.push(player);
+            }
+        }
+    }
+    participants.sort_unstable();
+    participants.dedup();
     super::publish_tracked_set_for_resolution(
         state,
         ability,

@@ -691,6 +691,7 @@ pub fn parse_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         value(TargetFilter::SelfRef, tag("this artifact")),
         value(TargetFilter::SelfRef, tag("this land")),
         value(TargetFilter::SelfRef, tag("this attraction")),
+        value(TargetFilter::SelfRef, tag("this source")),
     ))
     .parse(input)
 }
@@ -2071,6 +2072,10 @@ mod tests {
         let (rest4, f4) = parse_self_reference("this card from your graveyard").unwrap();
         assert_eq!(rest4, " from your graveyard");
         assert_eq!(f4, TargetFilter::SelfRef);
+
+        let (rest5, f5) = parse_self_reference("this source this turn").unwrap();
+        assert_eq!(rest5, " this turn");
+        assert_eq!(f5, TargetFilter::SelfRef);
     }
 
     #[test]
