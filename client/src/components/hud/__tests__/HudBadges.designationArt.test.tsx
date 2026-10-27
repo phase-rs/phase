@@ -106,6 +106,49 @@ describe("HudBadges designation art", () => {
     expect(imgInside("Monarch")).toBe(img);
   });
 
+  it("keeps the glyph until the art finishes loading", async () => {
+    render(<MonarchBadge />);
+    const badge = screen.getByLabelText("Monarch");
+    const img = (await screen.findByRole("presentation", {
+      hidden: true,
+    })) as HTMLImageElement;
+    // URL resolved but bytes pending: glyph stays, image hidden.
+    expect(badge).toHaveTextContent("👑");
+    expect(img).toHaveClass("hidden");
+    fireEvent.load(img);
+    // Load confirmed: art revealed, glyph gone.
+    expect(img).not.toHaveClass("hidden");
+    expect(badge).not.toHaveTextContent("👑");
+  });
+
+  it("falls back to the glyph while the day/night art switches", async () => {
+    act(() => {
+      useGameStore.setState({ gameState: buildGameState({ day_night: "Day" }) });
+    });
+    render(<DayNightBadge />);
+    const dayImg = (await screen.findByRole("presentation", {
+      hidden: true,
+    })) as HTMLImageElement;
+    fireEvent.load(dayImg);
+    expect(screen.getByLabelText("Day")).not.toHaveTextContent("☀");
+    act(() => {
+      useGameStore.setState({ gameState: buildGameState({ day_night: "Night" }) });
+    });
+    // New src pending: moon glyph back until the night art loads.
+    expect(screen.getByLabelText("Night")).toHaveTextContent("🌙");
+    const nightImg = (await screen.findByRole("presentation", {
+      hidden: true,
+    })) as HTMLImageElement;
+    expect(nightImg).toHaveAttribute(
+      "src",
+      "https://img.example/ref/Night.jpg",
+    );
+    expect(nightImg).toHaveClass("hidden");
+    fireEvent.load(nightImg);
+    expect(nightImg).not.toHaveClass("hidden");
+    expect(screen.getByLabelText("Night")).not.toHaveTextContent("🌙");
+  });
+
   it("keeps the Monarch glyph when art fails", async () => {
     fetchTokenImageUrl.mockRejectedValueOnce(new Error("offline"));
     render(<MonarchBadge />);

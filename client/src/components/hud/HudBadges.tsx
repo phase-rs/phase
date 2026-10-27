@@ -69,8 +69,28 @@ export function DesignationArt({
   className?: string;
 }) {
   const src = useDesignationTokenArt(art);
-  if (!src) return <>{fallback}</>;
-  return <img src={src} alt="" aria-hidden draggable={false} className={className} />;
+  // The hook resolves when the URL is known, not when the bytes arrive — and
+  // a failed download never recovers. Keep the glyph until `onLoad` confirms
+  // the CURRENT src, so a slow or broken image degrades to the fallback
+  // instead of an empty shell. No `onError` handler: the fallback simply
+  // stays when a load never succeeds.
+  const [loadedSrc, setLoadedSrc] = useState<string | null>(null);
+  const artReady = src !== null && loadedSrc === src;
+  return (
+    <>
+      {artReady ? null : fallback}
+      {src && (
+        <img
+          src={src}
+          alt=""
+          aria-hidden
+          draggable={false}
+          className={artReady ? className : "hidden"}
+          onLoad={() => setLoadedSrc(src)}
+        />
+      )}
+    </>
+  );
 }
 
 export function MonarchBadge() {
