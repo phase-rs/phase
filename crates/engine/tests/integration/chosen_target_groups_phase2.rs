@@ -3338,6 +3338,220 @@ fn unrelated_earlier_target_cannot_supply_dependent_mogg_style_announcer_or_bran
 }
 
 #[test]
+fn current_inherited_map_only_coin_body_keeps_distinct_flat_target_at_both_readers() {
+    use engine::types::ability::{
+        AbilityKind, ChosenGroupId, QuantityExpr, TargetFilter, TypedFilter,
+    };
+
+    // Secondary typed class composition of the ordinary two-target producer
+    // and bare GainLife -> Destroy program below, not printed Oracle text.
+    // The first declaration supplies only inherited group input; the second
+    // supplies the distinct flat ParentTarget used by the selected body.
+    for thumb in [false, true] {
+        for codec in [0, 3] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let thumb_id = thumb.then(|| {
+                scenario
+                    .add_artifact_from_oracle(P0, "Krark's Thumb", THUMB)
+                    .id()
+            });
+            let anchor = scenario.add_creature(P0, "Inherited map anchor", 2, 3).id();
+            let victim = scenario
+                .add_creature(P1, "Current flat recipient", 2, 3)
+                .id();
+            let decoy = scenario
+                .add_creature(P1, "Unselected current decoy", 2, 3)
+                .id();
+            let win = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::Controller,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::ParentTarget,
+                    cant_regenerate: false,
+                },
+            ));
+            let bare = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            );
+            let mut prefix = bare.clone();
+            prefix.declares_chosen_group = Some(ChosenGroupId(0));
+            let program = prefix.sub_ability(bare.sub_ability(nested_flip(
+                win,
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+            )));
+            let spell = scenario
+                .add_spell_to_hand(P0, "Constructed current inherited-input coin program", true)
+                .with_mana_cost(ManaCost::generic(1))
+                .with_ability_definition(program)
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![engine::types::mana::ManaUnit::new(
+                    engine::types::mana::ManaType::Colorless,
+                    ObjectId(0),
+                    false,
+                    vec![],
+                )],
+            );
+            let mut runner = scenario.build();
+            pin_mogg(&mut runner, if thumb { &[false, true] } else { &[true] });
+            runner
+                .cast(spell)
+                .target_objects(&[anchor, victim])
+                .commit();
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+            let root = runner.state().stack.back().unwrap().ability().unwrap();
+            let flip = root
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .sub_ability
+                .as_ref()
+                .unwrap();
+            // CR 601.2c: the two actual announcements own separate targets.
+            assert_eq!(root.targets, vec![TargetRef::Object(anchor)]);
+            assert_eq!(
+                root.sub_ability.as_ref().unwrap().targets,
+                vec![TargetRef::Object(victim)]
+            );
+            assert!(
+                flip.targets.is_empty(),
+                "flat input arrives during chain execution"
+            );
+            let inherited = flip.context.chosen_group_targets.clone();
+            assert_eq!(inherited.len(), 1);
+            assert_eq!(inherited[0].0, ChosenGroupId(0));
+            assert_eq!(inherited[0].1, root.target_occurrences());
+            assert!(inherited[0].1[0].1.is_some());
+            let captured = flip.coin_branch_target_abilities.clone();
+            assert_eq!(captured.len(), 2);
+            for (_, child) in &captured {
+                let mut cursor = Some(child.as_ref());
+                while let Some(node) = cursor {
+                    assert!(node.declares_chosen_group.is_none());
+                    assert!(node.reads_chosen_group.is_none());
+                    assert!(node.targets.is_empty() && node.target_pins.is_empty());
+                    assert!(node.chosen_target_slots.slots().is_empty());
+                    assert_eq!(node.context.chosen_group_targets, inherited);
+                    assert_eq!(node.source_id, spell);
+                    assert_eq!(node.controller, P0);
+                    assert_eq!(node.cast_occurrence, root.cast_occurrence);
+                    assert!(node.cast_occurrence.is_some());
+                    assert_eq!(node.source_incarnation, root.source_incarnation);
+                    cursor = node.sub_ability.as_deref();
+                }
+            }
+            // Both canonical readers retain this current, meaningful capture.
+            runner = nested_roundtrip(runner, codec);
+            let restored = runner.state().stack.back().unwrap().ability().unwrap();
+            assert_eq!(
+                restored
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .coin_branch_target_abilities,
+                captured
+            );
+            let mut events = pass_mogg_priority(&mut runner);
+            if thumb {
+                let WaitingFor::CoinFlipKeepChoice {
+                    player,
+                    results,
+                    keep_count,
+                } = &runner.state().waiting_for
+                else {
+                    panic!("actual Thumb keep pause");
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(results, &vec![false, true]);
+                assert_eq!(*keep_count, 1);
+                let frame = runner.state().active_coin_flip_frame().unwrap();
+                assert_eq!(frame.targets, vec![TargetRef::Object(victim)]);
+                assert_eq!(frame.branch_context.chosen_group_targets, inherited);
+                assert_eq!(frame.branch_context.coin_branch_target_abilities.len(), 2);
+                for (_, child) in &frame.branch_context.coin_branch_target_abilities {
+                    assert_eq!(child.context.chosen_group_targets, inherited);
+                    assert!(child.cast_occurrence.is_some());
+                    assert_eq!(child.source_id, spell);
+                    assert_eq!(child.controller, P0);
+                    assert!(child.targets.is_empty() && child.target_pins.is_empty());
+                }
+                assert!(!frame.branch_context.is_empty());
+                assert_eq!(
+                    serde_json::to_value(frame).unwrap()["branch_context"],
+                    serde_json::to_value(&frame.branch_context).unwrap(),
+                    "current writer must retain the owed capture"
+                );
+                let context = frame.branch_context.clone();
+                runner.state_mut().capture_rng_word_pos();
+                let pos = runner.state().rng_word_pos;
+                runner = nested_roundtrip(runner, codec);
+                assert_eq!(
+                    runner
+                        .state()
+                        .active_coin_flip_frame()
+                        .unwrap()
+                        .branch_context,
+                    context
+                );
+                // CR 705.2: keep the nondefault winning result through apply.
+                events.extend(
+                    runner
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![1],
+                        })
+                        .unwrap()
+                        .events,
+                );
+                runner.state_mut().capture_rng_word_pos();
+                assert_eq!(runner.state().rng_word_pos, pos, "Keep must not reflip");
+            }
+            runner.advance_until_stack_empty();
+            // CR 608.2c: the selected body gains life and then affects its
+            // genuine flat target; the inherited named map is a separate input.
+            assert!(events.iter().any(|event| matches!(
+                event,
+                GameEvent::CoinFlipped {
+                    player_id: P0,
+                    won: true
+                }
+            )));
+            assert_eq!(runner.state().players[0].life, 22);
+            assert_eq!(runner.state().players[1].life, 20);
+            assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&anchor].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&decoy].zone, Zone::Battlefield);
+            if let Some(thumb_id) = thumb_id {
+                assert_eq!(runner.state().objects[&thumb_id].zone, Zone::Battlefield);
+            }
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().active_ability_continuation().is_none());
+        }
+    }
+}
+
+#[test]
 fn authentic_old_coin_kinds_with_no_external_reader_keep_encoded_program_at_both_readers() {
     use engine::types::ability::{
         AbilityKind, CoinFlipRun, QuantityExpr, TargetFilter, TypedFilter,

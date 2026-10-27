@@ -209,8 +209,28 @@ fn run_flip_branch(
         // Meaningful inherited inputs must survive even when this canonical
         // body owns no targets. Reset only the allowed input projection on a
         // temporary view to distinguish that case from captured local targets,
-        // empty declarations, groups or pins. The actual inputs stay intact.
+        // empty declarations, readers or pins. The actual inputs stay intact.
         let input_only_custody = custody.is_some_and(|child| {
+            fn normalize_inherited_groups(
+                node: &mut ResolvedAbility,
+                inherited: &crate::types::ability::ChosenGroupTargets,
+            ) {
+                // Ordinary restamping puts the enclosing map on every node.
+                // Only an exact inherited entry is an input; retain distinct
+                // local bindings and all declaration/reader/occurrence state.
+                node.context
+                    .chosen_group_targets
+                    .retain(|entry| !inherited.contains(entry));
+                for (_, child) in &mut node.coin_branch_target_abilities {
+                    normalize_inherited_groups(child, inherited);
+                }
+                if let Some(child) = node.sub_ability.as_deref_mut() {
+                    normalize_inherited_groups(child, inherited);
+                }
+                if let Some(child) = node.else_ability.as_deref_mut() {
+                    normalize_inherited_groups(child, inherited);
+                }
+            }
             let mut target_view = child.clone();
             let defaults = ResolvedAbility::new(
                 child.effect.clone(),
@@ -219,6 +239,7 @@ fn run_flip_branch(
                 child.controller,
             );
             target_view.inherit_coin_target_inputs(&defaults);
+            normalize_inherited_groups(&mut target_view, &branch_context.chosen_group_targets);
             crate::game::ability_utils::coin_target_custody_is_empty(&target_view)
         });
         let mut sub =
