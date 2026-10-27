@@ -3939,7 +3939,9 @@ mod tests {
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{
+        CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef,
+    };
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
@@ -6845,12 +6847,17 @@ mod tests {
             };
             state.waiting_for = caller_wait.clone();
             state.install_ready_continuation(continuation);
+            let event_source_identity = ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&state.objects[&damage_source]),
+                Zone::Battlefield,
+            );
             let drain = state
                 .active_post_replacement_drains_mut()
                 .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
                 .expect("replacement context is resident");
             drain.source = Some(shield);
             drain.event_source = Some(damage_source);
+            drain.event_source_identity = Some(event_source_identity);
             drain.event_target = Some(TargetRef::Object(recipient));
             let mut events = Vec::new();
             let waiting = apply_pending_post_replacement_effect(
@@ -7176,12 +7183,17 @@ mod tests {
         state.install_ready_continuation(PostReplacementContinuation::Template(Box::new(
             draw_then_context_draw,
         )));
+        let event_source_identity = ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&state.objects[&damage_source]),
+            Zone::Battlefield,
+        );
         let drain = state
             .active_post_replacement_drains_mut()
             .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
             .expect("general drain is resident");
         drain.source = Some(shield);
         drain.event_source = Some(damage_source);
+        drain.event_source_identity = Some(event_source_identity);
 
         let mut events = Vec::new();
         let waiting = apply_pending_post_replacement_effect(

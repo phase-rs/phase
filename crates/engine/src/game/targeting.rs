@@ -4712,8 +4712,8 @@ mod tests {
     #[test]
     fn post_replacement_source_controller_resolves_to_event_source_controller() {
         // CR 615.5 + CR 609.7: When `state.post_replacement_event_source` is
-        // populated (set by the prevention applier's Prevented arm), the new
-        // filter resolves to the controller of that object — NOT to the
+        // captured with its occurrence (by the prevention applier's Prevented
+        // arm), the filter resolves to that source's controller — NOT to the
         // ability source's controller. Swans of Bryn Argoll's regression test:
         // damage was prevented from a P1-controlled source, so P1 (the source's
         // controller) draws the cards, not Swans's controller (P0).
@@ -4729,7 +4729,10 @@ mod tests {
                 source: None,
                 applied: HashSet::new(),
                 event_source: Some(c0),
-                event_source_identity: None,
+                event_source_identity: Some(ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(&state.objects[&c0]),
+                    Zone::Battlefield,
+                )),
                 event_target: None,
                 controller: None,
             },
@@ -4741,6 +4744,20 @@ mod tests {
             ObjectId(999), // arbitrary ability source — unused for this filter
         );
         assert_eq!(result, Some(TargetRef::Player(PlayerId(0))));
+        state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            .unwrap()
+            .event_source_identity = None;
+        assert_eq!(
+            resolve_event_context_target(
+                &state,
+                &TargetFilter::PostReplacementSourceController,
+                ObjectId(999),
+            ),
+            None,
+            "an unproved source occurrence cannot fall back to its live storage id"
+        );
     }
 
     #[test]

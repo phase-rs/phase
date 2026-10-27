@@ -5952,6 +5952,9 @@ fn referent_exists_without_gated_action(
         | TargetFilter::Player
         | TargetFilter::Controller
         | TargetFilter::SourceController
+        // CR 109.5: the controller who began this resolution exists regardless
+        // of whether a preceding optional instruction was performed.
+        | TargetFilter::OriginalController
         | TargetFilter::Opponent
         | TargetFilter::AllPlayers => true,
         TargetFilter::Typed(TypedFilter {
@@ -6026,7 +6029,6 @@ fn referent_exists_without_gated_action(
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
         | TargetFilter::SourceChosenPlayer
-        | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageSource
@@ -16899,7 +16901,22 @@ fn resolve_chain_body(
     let (ability, random_choice_resolved) = if random_is_choose || random_is_choose_from_zone {
         let mut owned = ability.clone();
         if random_is_choose {
+            let chosen_players_before = owned.chosen_players.len();
             choose::resolve_random_in_chain(state, &mut owned, events);
+            // CR 101.3 + CR 608.2c: an exhausted player-choice pool supplies
+            // no new player to this instruction's continuation. Earlier picks
+            // remain earlier picks; only the next independent instruction runs.
+            if matches!(
+                &owned.effect,
+                Effect::Choose {
+                    choice_type: crate::types::ability::ChoiceType::Player { .. }
+                        | crate::types::ability::ChoiceType::Opponent { .. },
+                    ..
+                }
+            ) && owned.chosen_players.len() == chosen_players_before
+            {
+                return skip_instruction_and_dependents(state, &owned, events, depth);
+            }
         } else {
             choose_from_zone::resolve_random_in_chain(state, &mut owned, events);
         }
@@ -16911,14 +16928,7 @@ fn resolve_chain_body(
 
     if effect_depends_on_missing_chosen_player(ability) {
         state.cost_payment_failed_flag = true;
-        if let Some(ref next) = ability.sub_ability {
-            if next.sub_link == SubAbilityLink::SequentialSibling {
-                let mut sibling = next.as_ref().clone();
-                apply_parent_chain_context(&mut sibling, ability, None, state);
-                resolve_ability_chain(state, &sibling, events, depth + 1)?;
-            }
-        }
-        return Ok(());
+        return skip_instruction_and_dependents(state, ability, events, depth);
     }
 
     // CR 608.2c + CR 608.2d + CR 109.4: Resolution-time target binding for a
@@ -23075,7 +23085,9 @@ mod tests {
             );
             if let Some(expected) = expected {
                 assert!(
-                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == expected)
+                    matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player, .. } if player == expected),
+                    "actor={actor:?}, expected={expected:?}, wait={:?}",
+                    runner.state().waiting_for
                 );
                 let frame = runner.state().active_optional_effect_frame().unwrap();
                 assert_eq!(frame.ability.controller, expected);
@@ -32402,7 +32414,6 @@ mod tests {
             let source = if same_id { returned } else { original_source };
             let mut grant = forwarded_test_grant(source, Keyword::Haste);
             grant.set_test_trigger_source_recursive(900, CardId(100));
-            let source_stamp = grant.source_incarnation;
             let trigger_source = grant.trigger_source.clone();
             grant.targets = vec![TargetRef::Object(other)];
             bind_moved_objects_to_child(
@@ -32412,7 +32423,17 @@ mod tests {
                 &[],
                 ForwardedResultContext::from_object_ids(&state, &[returned, other]),
             );
-            assert_eq!(grant.source_incarnation, source_stamp);
+            assert_eq!(
+                grant.source_incarnation,
+                Some(state.objects[&returned].incarnation)
+            );
+            assert_eq!(
+                grant.context.source_identity,
+                Some(crate::types::identifiers::ObjectIdentityBinding::new(
+                    ObjectIncarnationRef::from_object(&state.objects[&returned]),
+                    Zone::Battlefield,
+                ))
+            );
             assert_eq!(grant.trigger_source, trigger_source);
             assert!(
                 !grant.source_is_current(&state),
@@ -49077,7 +49098,7 @@ mod tests {
                 for _ in 0..depth {
                     node = node.sub_ability.as_deref_mut().unwrap();
                 }
-                node.instruction_actor = (actor).map(Into::into);
+                node.instruction_actor = (actor.clone()).map(Into::into);
             }
             if prior_choice {
                 let mut prior = AbilityDefinition::new(
@@ -49155,7 +49176,8 @@ mod tests {
             }
             assert_eq!(
                 runner.life(P0),
-                if referential && !missing { 31 } else { 21 }
+                if referential && !missing { 31 } else { 21 },
+                "marked={marked_node:?}, actor={actor:?}, prior_choice={prior_choice}"
             );
             assert_eq!(
                 runner.life(P1),

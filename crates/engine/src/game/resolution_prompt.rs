@@ -856,9 +856,9 @@ mod tests {
                 |reference| match reference {
                     crate::types::ability::ControllerRef::You
                     | crate::types::ability::ControllerRef::ActivePlayer => Some(PlayerId(0)),
-                    crate::types::ability::ControllerRef::Opponent => Some(PlayerId(1)),
                     crate::types::ability::ControllerRef::SpecificPlayer { id } => Some(*id),
-                    crate::types::ability::ControllerRef::ScopedPlayer
+                    crate::types::ability::ControllerRef::Opponent
+                    | crate::types::ability::ControllerRef::ScopedPlayer
                     | crate::types::ability::ControllerRef::TargetPlayer
                     | crate::types::ability::ControllerRef::TargetOpponent
                     | crate::types::ability::ControllerRef::DeclaredPlayer { .. }

@@ -2340,7 +2340,7 @@ mod tests {
                 assert_eq!(
                     runner.life(P1),
                     if referential && !missing { 25 } else { 5 },
-                    "missing actor skips its dependent instruction and does not select else"
+                    "missing actor skips its dependent instruction and does not select else: targeted={targeted}, actor={actor:?}, prior_choice={prior_choice}"
                 );
                 assert!(runner.state().active_draw_sequence().is_none());
                 assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), if referential && !missing { 3 } else { 1 });
@@ -2376,6 +2376,7 @@ mod tests {
         let mut seats = legacy.clone();
         seats[0].1.instruction_actor =
             (Some(crate::types::ability::ControllerRef::ScopedPlayer)).map(Into::into);
+        seats[0].1.scoped_player = None;
         assert!(
             plan_simultaneous_draw(&state, &seats).is_none(),
             "target fan-out cannot invent a scoped seat"

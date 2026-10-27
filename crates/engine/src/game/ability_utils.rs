@@ -363,13 +363,21 @@ pub(crate) fn bind_instruction_actor(
     let printed_controller = ability.original_controller.unwrap_or(ability.controller);
     let actor = actor.classify(
         |reference| {
-            super::filter::controller_ref_player(
-                state,
-                ability.source_id,
-                Some(printed_controller),
-                Some(ability),
-                reference,
-            )
+            // CR 608.2c + CR 101.3: an instruction naming its scoped player
+            // requires that player; the legacy filter's "you" fallback is
+            // not an independently established instruction actor.
+            match reference {
+                ControllerRef::ScopedPlayer => ability
+                    .scoped_player
+                    .or_else(|| super::quantity::triggering_event_player(state)),
+                reference => super::filter::controller_ref_player(
+                    state,
+                    ability.source_id,
+                    Some(printed_controller),
+                    Some(ability),
+                    reference,
+                ),
+            }
         },
         |reference| {
             let target = if *reference == TargetFilter::TriggeringSpellController {

@@ -43699,10 +43699,14 @@ mod tests {
             .begin_dispatch()
             .expect("ready drain starts its exact dispatch");
         assert!(drains.pause_dispatch(dispatch));
-        drains
+        let drain = drains
             .resident_mut()
-            .expect("paused drain remains resident")
-            .event_source = Some(event_source);
+            .expect("paused drain remains resident");
+        drain.event_source = Some(event_source);
+        drain.event_source_identity = Some(ObjectIdentityBinding::new(
+            ObjectIncarnationRef::from_object(&state.objects[&event_source]),
+            Zone::Battlefield,
+        ));
         state.resolution_stack.push_post_replacement(drains);
         state.resolution_stack.push_multi_draw(MultiDrawFrame {
             draw_sequences: DrawSequenceStack::default(),

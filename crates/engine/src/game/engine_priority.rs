@@ -146,6 +146,15 @@ fn run_post_action_pipeline_core(
     drain_policy: DeferredTriggerDrainPolicy,
     carried_priority_recipient: Option<PlayerId>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 608.2n: a spell leaves the stack after its final instruction, including
+    // instructions resumed by a player choice. Deliver it before collecting the
+    // resulting zone-change triggers in this action's ordinary event batch.
+    if state.deferred_spell_delivery.is_some()
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && super::engine::resolution_instructions_are_done(state)
+    {
+        super::stack::deliver_deferred_spell(state, events);
+    }
     // CR 117.3c + CR 117.5: the wait a completed no-choice pass hands back. With
     // no carried recipient this is exactly baseline's active-player wait.
     let settled_priority_wait = WaitingFor::Priority {

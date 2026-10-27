@@ -36680,13 +36680,13 @@ impl ResolvedAbility {
 
     /// CR 113.7a + CR 608.2h: capture the same source before costs can move it.
     /// Previously captured nodes and independently sourced children keep their authority.
+    /// CR 400.7j: this pre-cost information pin is separate from the source
+    /// incarnation used by SelfRef, which is captured after public-zone costs.
     pub(crate) fn capture_source_identity_recursive(&mut self, identity: ObjectIdentityBinding) {
         if self.source_id != identity.reference.object_id {
             return;
         }
         self.context.source_identity.get_or_insert(identity);
-        self.source_incarnation
-            .get_or_insert(identity.reference.incarnation);
         if let Some(sub) = self.sub_ability.as_deref_mut() {
             sub.capture_source_identity_recursive(identity);
         }
@@ -38616,6 +38616,27 @@ mod tests {
                 serde_json::from_value::<ResolvedAbility>(malformed).is_err(),
                 "{key}"
             );
+        }
+    }
+
+    #[test]
+    fn source_information_capture_preserves_the_post_cost_self_reference_boundary() {
+        let before_cost =
+            ObjectIdentityBinding::new(ObjectIncarnationRef::of(ObjectId(1), 4), Zone::Graveyard);
+        let mut root = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        root.sub_ability = Some(Box::new(root.clone()));
+        root.capture_source_identity_recursive(before_cost);
+        for node in [&root, root.sub_ability.as_deref().unwrap()] {
+            assert_eq!(node.context.source_identity, Some(before_cost));
+            assert_eq!(node.source_incarnation, None);
+        }
+        root.set_source_incarnation_recursive(Some(5));
+        let after_cost =
+            ObjectIdentityBinding::new(ObjectIncarnationRef::of(ObjectId(1), 5), Zone::Exile);
+        root.capture_source_identity_recursive(after_cost);
+        for node in [&root, root.sub_ability.as_deref().unwrap()] {
+            assert_eq!(node.context.source_identity, Some(before_cost));
+            assert_eq!(node.source_incarnation, Some(5));
         }
     }
 

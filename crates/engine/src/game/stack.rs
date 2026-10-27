@@ -203,6 +203,11 @@ fn push_to_stack_with_firing(
         if let Some(identity) = source_identity {
             ability.capture_source_identity_recursive(identity);
         }
+        // CR 400.7j: the effect can find the public-zone object its own cost
+        // moved. Own-source information above keeps the pre-cost occurrence.
+        if ability.source_incarnation.is_none() {
+            ability.set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
+        }
     }
     // CR 701.27f: an activated or triggered ability of a permanent may
     // transform that permanent only if it has not transformed/converted since
@@ -212,16 +217,6 @@ fn push_to_stack_with_firing(
         entry.kind,
         StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
     ) {
-        if let Some(ability) = entry.ability_mut() {
-            // CR 400.7 + CR 113.7a: Capture the source incarnation for every
-            // activated or triggered ability, including non-transforming
-            // permanents. The transformation guard below has a narrower scope.
-            if ability.source_incarnation.is_none() {
-                ability
-                    .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
-            }
-        }
-
         let source = state
             .objects
             .get(&entry.source_id)
@@ -306,6 +301,7 @@ pub(crate) fn push_copy_to_stack(
             ability.set_cast_occurrence_recursive(None);
             if let Some(identity) = source_identity {
                 ability.capture_source_identity_recursive(identity);
+                ability.set_source_incarnation_recursive(Some(identity.reference.incarnation));
             }
         }
     }
@@ -10861,7 +10857,12 @@ mod tests {
                 );
                 let saved = serde_json::to_string(runner.state()).unwrap();
                 let restored: GameState = serde_json::from_str(&saved).unwrap();
-                assert_eq!(restored, *runner.state());
+                // Runtime layer/index caches, display dirtiness and the public
+                // revision are rebuilt after decoding rather than persisted.
+                assert_eq!(
+                    serde_json::to_value(&restored).unwrap(),
+                    serde_json::to_value(runner.state()).unwrap()
+                );
                 runner = GameRunner::from_state(restored);
                 events.extend(
                     runner

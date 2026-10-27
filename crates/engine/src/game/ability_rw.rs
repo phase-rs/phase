@@ -7677,7 +7677,11 @@ mod tests {
                 exact.reads_member_bound = true;
                 assert_eq!(profile, exact);
                 assert!(
-                    profiles_conflict(&profile, &batch_uniform()),
+                    !profiles_conflict(&profile, &batch_uniform()),
+                    "read-only authorities cannot feed a sibling write"
+                );
+                assert!(
+                    profiles_conflict(&profile, &se()),
                     "each member's owning replacement event remains a distinct authority"
                 );
                 profile.writes_reentry_hazard = true;

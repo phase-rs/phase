@@ -12526,6 +12526,9 @@ fn finalize_cast_with_phyrexian_choices_inner(
                         Zone::Stack,
                     ),
                 );
+                // CR 400.7: the finalized spell also pins SelfRef to its
+                // actual stack occurrence rather than a later same-id object.
+                ability.set_source_incarnation_recursive(Some(source.incarnation));
             }
             Box::new(ability)
         }),
