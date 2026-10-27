@@ -28,7 +28,7 @@ use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, EntwineCost, Keyword, PartnerType,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -2998,9 +2998,15 @@ pub fn synthesize_entwine(face: &mut CardFace) {
         None => return,
     };
 
+    // Convert EntwineCost to AbilityCost
+    let ability_cost = match cost {
+        EntwineCost::Mana(mc) => AbilityCost::Mana { cost: mc },
+        EntwineCost::NonMana(ac) => ac,
+    };
+
     // Set entwine_cost on the face's modal choice + allow all-mode selection
     if let Some(ref mut modal) = face.modal {
-        modal.entwine_cost = Some(cost);
+        modal.entwine_cost = Some(Box::new(ability_cost));
         // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
         modal.max_choices = modal.mode_count;
     }

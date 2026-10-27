@@ -2094,6 +2094,7 @@ mod ripple_reveal_choice_interaction;
 mod ripple_stolen_spell_controller;
 mod siphon_insight_mana_rider;
 mod slow_motion_upkeep_sacrifice_return;
+mod solar_tide_entwine_non_mana;
 mod static_provider_layer_reference;
 mod uba_mask_draw_to_exile_play;
 mod ultimate_magic_meteor_per_opponent_destroy;

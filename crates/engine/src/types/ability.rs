@@ -18746,6 +18746,25 @@ where
     Ok(legacy.into_ability_cost())
 }
 
+/// CR 702.42a: `ModalChoice::entwine_cost` was previously a bare `ManaCost`;
+/// previously exported card data still carries that form. Read it as
+/// `AbilityCost::Mana` so only the current `AbilityCost` shape is ever held.
+fn deserialize_entwine_cost_compat<'de, D>(d: D) -> Result<Option<Box<AbilityCost>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+        Current(Box<AbilityCost>),
+        LegacyMana(ManaCost),
+    }
+    Ok(Option::<Wire>::deserialize(d)?.map(|wire| match wire {
+        Wire::Current(cost) => cost,
+        Wire::LegacyMana(cost) => Box::new(AbilityCost::Mana { cost }),
+    }))
+}
+
 /// CR 118.12: Legacy shadow type used ONLY by `deserialize_ability_cost_compat`
 /// to accept pre-fold serialized JSON. The variants and field names mirror the
 /// pre-2026-05-09 `UnlessCost` enum exactly. New code must NOT construct this
@@ -31502,8 +31521,12 @@ pub struct ModalChoice {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_pawprints: Vec<u8>,
     /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entwine_cost: Option<ManaCost>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_entwine_cost_compat"
+    )]
+    pub entwine_cost: Option<Box<AbilityCost>>,
     /// CR 700.2e: The player who chooses the mode(s). Defaults to the
     /// controller (CR 700.2a) for all standard modal spells/abilities.
     #[serde(default = "default_player_filter_controller")]

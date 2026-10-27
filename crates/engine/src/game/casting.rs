@@ -2659,10 +2659,13 @@ fn mayhem_castable_from_graveyard(
 }
 
 fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
-    if let Some(existing) = keywords
-        .iter_mut()
-        .find(|existing| existing.kind() == keyword.kind())
-    {
+    // CR 113.2c: keywords without a dedicated `KeywordKind` (Conspire, Casualty)
+    // all report `KeywordKind::Unknown`; sharing that bucket must not let one
+    // distinct keyword replace another, so they match only on equality.
+    if let Some(existing) = keywords.iter_mut().find(|existing| {
+        existing.kind() == keyword.kind()
+            && (keyword.kind() != KeywordKind::Unknown || **existing == keyword)
+    }) {
         *existing = keyword;
     } else {
         keywords.push(keyword);

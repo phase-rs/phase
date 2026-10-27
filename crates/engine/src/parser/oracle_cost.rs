@@ -994,10 +994,17 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
                         };
                     }
                 }
-                // Flat "Pay N life" — no " for each " tail.
-                return AbilityCost::PayLife {
-                    amount: QuantityExpr::Fixed { value: n as i32 },
-                };
+                // Flat "Pay N life" — no " for each " tail and no unparsed trailing text within sentence.
+                let flat_life = preceded(
+                    tag::<_, _, E<'_>>("life"),
+                    alt((nom::combinator::eof::<&str, E<'_>>, tag::<_, _, E<'_>>("."))),
+                )
+                .parse(after_n.trim());
+                if flat_life.is_ok() {
+                    return AbilityCost::PayLife {
+                        amount: QuantityExpr::Fixed { value: n as i32 },
+                    };
+                }
             }
         }
         // Pay speed: "pay x speed" / "pay N speed"
