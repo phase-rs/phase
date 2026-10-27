@@ -9576,6 +9576,19 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
             }
         }
     }
+    let registered_lower = text.to_lowercase();
+    let registered_tp = TextPair::new(text, &registered_lower);
+    let mut registered_ctx = ctx.clone();
+    let registered = try_parse_whenever_this_turn(registered_tp)
+        .or_else(|| try_parse_reflexive_this_way_trigger(registered_tp))
+        .or_else(|| try_parse_when_next_event(registered_tp))
+        .or_else(|| try_parse_lose_control_delayed_trigger(registered_tp, &mut registered_ctx))
+        .or_else(|| try_parse_copy_next_spell_when_cast(registered_tp))
+        .or_else(|| try_parse_inline_delayed_trigger(registered_tp, &mut registered_ctx));
+    if let Some(registered) = registered {
+        *ctx = registered_ctx;
+        return attach_unless_slots(registered, unless_condition, unless_pay_deferred);
+    }
     let (peeled_text, peel_ctx) = super::clause_shell::peel_clause(text);
     // CR 608.2c + CR 109.5: a peeled player subject ("target opponent may",
     // "that creature's controller may", "each opponent …") names who acts, and
@@ -9702,7 +9715,7 @@ pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedE
     if duration_is_unset_sentinel(&clause.duration) {
         if let Some(duration) = peel_ctx.duration().cloned() {
             spread_duration_over_exile_conjuncts(&mut clause, &duration);
-            clause = with_clause_duration(clause, duration);
+            clause = with_clause_chain_duration(clause, duration);
         }
     }
     // Condition: assign onto `clause.condition` when the inner parse
@@ -21621,7 +21634,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     if duration_is_unset_sentinel(&clause.duration) {
         if let Some(duration) = duration {
             spread_duration_over_exile_conjuncts(&mut clause, &duration);
-            clause = with_clause_duration(clause, duration);
+            clause = with_clause_chain_duration(clause, duration);
         }
     }
     // CR 611.2a + CR 608.2g: the trailing-duration seam of the shared cast-mechanism
@@ -27322,10 +27335,11 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
     if let Effect::ChooseFromZone {
         count: 1,
         filter: Some(filter),
+        zone_owner,
         ..
     } = effect
     {
-        return filter_introduces_typed_object(filter);
+        return !matches!(zone_owner, ZoneOwner::Each(_)) && filter_introduces_typed_object(filter);
     }
     let target = match effect {
         Effect::PutCounter { target, .. }
@@ -43793,6 +43807,7 @@ fn parse_effect_chain_ir_body(
     ctx: &mut ParseContext,
     already_chosen_players: u8,
 ) -> EffectChainIr {
+    let chain_source_text = text;
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
@@ -44019,6 +44034,34 @@ fn parse_effect_chain_ir_body(
         refuse_untargeted_dynamic_graveyard_windows(full_text, chunks);
     let (chunks, refused_relations) =
         refuse_unrepresentable_relation_units(full_text, chunks, refused_graveyard_windows);
+    // Digital perpetual type addition has no persistent-baseline installer.
+    // Refuse the complete dependent sentence, rather than install its first
+    // pump and let later conjuncts become ordinary source statics.
+    let mut refused_perpetual_type_sentences = vec![None; chunks.len()];
+    let mut sentence_start = 0;
+    for sentence_end in 0..chunks.len() {
+        if chunks[sentence_end].boundary_after != Some(ClauseBoundary::Sentence)
+            && sentence_end + 1 != chunks.len()
+        {
+            continue;
+        }
+        let sentence = &chunks[sentence_start..=sentence_end];
+        let has_perpetual = sentence
+            .iter()
+            .any(|chunk| split_perpetual_get_clause(&chunk.text.to_lowercase()).is_some());
+        let has_additive_type = sentence.iter().any(|chunk| {
+            nom_primitives::scan_contains(
+                &chunk.text.to_lowercase(),
+                "in addition to its other types",
+            )
+        });
+        if has_perpetual && has_additive_type {
+            for index in sentence_start..=sentence_end {
+                refused_perpetual_type_sentences[index] = Some(index == sentence_start);
+            }
+        }
+        sentence_start = sentence_end + 1;
+    }
     // CR 107.3i: "Normally, all instances of X on an object have the same value."
     // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
     // one clause in a sentence binds X ("... and you gain X life, where X is <expr>"),
@@ -44165,6 +44208,17 @@ fn parse_effect_chain_ir_body(
             pending_trailing_guard.take(),
             &mut trailing_guard_released,
         );
+        if let Some(first) = refused_perpetual_type_sentences[chunk_idx] {
+            if first {
+                unimplemented_clause(
+                    &mut builder,
+                    "perpetual_type_addition",
+                    full_text,
+                    Some(ClauseBoundary::Sentence),
+                );
+            }
+            continue;
+        }
         if let Some(gap) = refused_relations[chunk_idx] {
             unimplemented_clause(&mut builder, gap, &chunk.text, chunk.boundary_after);
             continue;
@@ -47223,7 +47277,11 @@ fn parse_effect_chain_ir_body(
         // The complete perpetual owner needs its recipient population intact;
         // stripping it here can turn an unresolved scope into a global static.
         let leading_subject_application =
-            if split_quoted_perpetual_gain_clause(&text.to_lowercase()).is_some() {
+            if nom_primitives::scan_split_at_phrase(&text.to_lowercase(), |input| {
+                tag::<_, _, OracleError<'_>>("perpetually ").parse(input)
+            })
+            .is_some()
+            {
                 None
             } else {
                 subject::parse_leading_subject_application(&text, ctx)
@@ -47669,7 +47727,11 @@ fn parse_effect_chain_ir_body(
         } else {
             let (suffix_repeat_for, stripped_text_no_qty) =
                 strip_for_each_repeat_suffix(&text_no_qty);
-            let mut stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+            // The suffix probe is speculative. Only the selected stripped
+            // CopySpell arm commits it; the fallback parses the complete clause
+            // once, with the original player-declaration cursor.
+            let mut stripped_ctx = ctx.clone();
+            let mut stripped_clause = parse_effect_clause(&stripped_text_no_qty, &mut stripped_ctx);
             // CR 701.16a + CR 608.2c: a fieldless Investigate (no count slot) drops a
             // trailing "[once] for each <set>" multiplier. Precompute the lift,
             // gated to Investigate + no prior repeat_for, so ONLY the repeatable-for-each
@@ -47687,6 +47749,7 @@ fn parse_effect_chain_ir_body(
             if suffix_repeat_for.is_some()
                 && matches!(stripped_clause.effect, Effect::CopySpell { .. })
             {
+                *ctx = stripped_ctx;
                 let zada_distinct_copy_targets = chain_zada_distinct_copy_targets
                     || suffix_repeat_for
                         .as_ref()
@@ -47810,6 +47873,22 @@ fn parse_effect_chain_ir_body(
         // carries the caster default (Controller). Per D-04, this is parse-time
         // pronoun resolution that belongs in IR production.
         let mut clause = clause;
+        if nom_primitives::scan_contains(&text_no_qty_lower, "perpetually ")
+            && builder.clauses().last().is_some_and(|previous| {
+                previous
+                    .parsed
+                    .effect
+                    .unimplemented_description()
+                    .is_some_and(|description| {
+                        parse_hand_choice_command(&description.to_lowercase()).is_ok()
+                    })
+            })
+        {
+            clause = parsed_clause(Effect::unimplemented(
+                "perpetual_choice_antecedent",
+                normalized_text,
+            ));
+        }
         // Nested chains the clause parse ran may have minted groups.
         chain_declared_groups = ctx.next_declared_player_group;
         // CR 608.2c: Bind a bare anaphoric "the difference" count placeholder in
@@ -48394,6 +48473,31 @@ fn parse_effect_chain_ir_body(
                 ..
             }
         );
+        if tag::<_, _, OracleError<'_>>("return that card ")
+            .parse(recipient_anaphor_lower.as_str())
+            .is_ok()
+            && builder.clauses().last().is_some_and(|previous| {
+                matches!(
+                    previous.parsed.effect,
+                    Effect::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        ..
+                    }
+                )
+            })
+        {
+            return EffectChainIr::single_clause(
+                chain_source_text,
+                kind,
+                parsed_clause(Effect::unimplemented(
+                    "sacrificed_source_event_card",
+                    chain_source_text,
+                )),
+                None,
+                ctx.actor.clone(),
+                ctx.in_trigger,
+            );
+        }
         if (typed_trigger_subject
             || exile_then_return_transformed
             || attach_anaphor_after_self_ref_transform

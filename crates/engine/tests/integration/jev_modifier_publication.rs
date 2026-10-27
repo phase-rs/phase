@@ -2686,3 +2686,547 @@ fn static_preservation_cavernous_maw_paid_animation_retains_cave_artifact_land_u
     assert_eq!(object.card_types.subtypes, vec!["Cave".to_owned()]);
     settled(&runner);
 }
+
+// Exact pinned AtomicCards input; expected behavior is specified independently.
+const MODIFIER_OWNER_PRINTED: &str = r#####"[{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"7e8f5b34-fd16-4307-9104-17b584b25b14"},"layout":"normal","manaCost":"{2}{G}","manaValue":3.0,"name":"Awakener Druid","power":"1","subtypes":["Human","Druid"],"supertypes":[],"text":"When this creature enters, target Forest becomes a 4/5 green Treefolk creature for as long as this creature remains on the battlefield. It's still a land.","toughness":"1","type":"Creature — Human Druid","types":["Creature"]},{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"5c326102-005d-463c-b9f7-14b034b66baa"},"layout":"normal","manaCost":"{3}{G}{G}","manaValue":5.0,"name":"Awakening of Vitu-Ghazi","subtypes":[],"supertypes":[],"text":"Put nine +1/+1 counters on target land you control. It becomes a legendary 0/0 Elemental creature with haste named Vitu-Ghazi. It's still a land.","type":"Instant","types":["Instant"]},{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"8da29533-f389-4bc2-ab9b-b469f893a362"},"layout":"normal","manaValue":0.0,"name":"Cactus Preserve","subtypes":["Desert"],"supertypes":[],"text":"This land enters tapped.\n{T}: Add one mana of any type that a land you control could produce.\n{3}: Until end of turn, this land becomes an X/X green Plant creature with reach, where X is the greatest mana value among your commanders. It's still a land.","type":"Land — Desert","types":["Land"]},{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"7dd189f8-a23f-4b43-b0ef-fb174a9664ba"},"layout":"normal","manaCost":"{1}{G}","manaValue":2.0,"name":"Destiny Spinner","power":"2","subtypes":["Human"],"supertypes":[],"text":"Creature and enchantment spells you control can't be countered.\n{3}{G}: Target land you control becomes an X/X Elemental creature with trample and haste until end of turn, where X is the number of enchantments you control. It's still a land.","toughness":"3","type":"Enchantment Creature — Human","types":["Enchantment","Creature"]},{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"923b2a1b-d7b6-439d-9681-c7ba88165c31"},"keywords":["Collect evidence"],"layout":"normal","manaCost":"{G}","manaValue":1.0,"name":"Hedge Whisperer","power":"0","subtypes":["Elf","Druid","Detective"],"supertypes":[],"text":"You may choose not to untap this creature during your untap step.\n{3}{G}, {T}, Collect evidence 4: Target land you control becomes a 5/5 green Plant Boar creature with haste for as long as this creature remains tapped. It's still a land. Activate only as a sorcery. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)","toughness":"3","type":"Creature — Elf Druid Detective","types":["Creature"]},{"colorIdentity":["G","U"],"colors":["G","U"],"identifiers":{"scryfallOracleId":"65e4fbd1-4935-495e-9897-bad5a0cfd935"},"layout":"normal","manaCost":"{2}{G}{U}","manaValue":4.0,"name":"Jolrael, Voice of Zhalfir","power":"3","subtypes":["Human","Druid"],"supertypes":["Legendary"],"text":"At the beginning of combat on your turn, up to one target land you control becomes an X/X green and blue Bird creature with flying and haste until end of turn, where X is the number of cards in your hand. It's still a land.\nWhenever a land creature you control deals combat damage to a player, draw a card.","toughness":"3","type":"Legendary Creature — Human Druid","types":["Creature"]},{"colorIdentity":["G","R","W"],"colors":["G","R","W"],"identifiers":{"scryfallOracleId":"28fcf855-6372-4d6b-b3fd-76f85247f309"},"keywords":["Landfall"],"layout":"normal","manaCost":"{1}{R}{G}{W}","manaValue":4.0,"name":"Obuun, Mul Daya Ancestor","power":"3","subtypes":["Elf","Spirit"],"supertypes":["Legendary"],"text":"At the beginning of combat on your turn, up to one target land you control becomes an X/X Elemental creature with trample and haste until end of turn, where X is Obuun's power. It's still a land.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on target creature.","toughness":"3","type":"Legendary Creature — Elf Spirit","types":["Creature"]},{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"0b331f27-0d78-4d22-b546-36c5dec37606"},"layout":"normal","manaCost":"{2}{G}","manaValue":3.0,"name":"Vastwood Animist","power":"1","subtypes":["Elf","Shaman","Ally"],"supertypes":[],"text":"{T}: Target land you control becomes an X/X Elemental creature until end of turn, where X is the number of Allies you control. It's still a land.","toughness":"1","type":"Creature — Elf Shaman Ally","types":["Creature"]},{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"6ca06048-7c84-49a0-95db-dca4ce4cb95c"},"layout":"normal","manaCost":"{4}{U}{U}","manaValue":6.0,"name":"Blufferfish","power":"3","subtypes":["Fish"],"supertypes":[],"text":"{3}{U}: An opponent tells you a statement about themselves and secretly notes whether it's true or false. You guess which it is. If you guessed correctly, this creature gets +2/+0 and can't be blocked this turn.","toughness":"6","type":"Creature — Fish","types":["Creature"]},{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"184d4672-05a9-4182-8b3f-3561fb33ed62"},"layout":"normal","loyalty":"5","manaCost":"{3}{G}{G}","manaValue":5.0,"name":"Garruk, Curse Breaker","subtypes":["Garruk"],"supertypes":["Legendary"],"text":"Whenever a creature you control with power 4 or greater enters, draw a card.\n[+2]: Untap up to two target lands.\n[−3]: Create a 4/4 green Beast creature token with trample.\n[−4]: Until your next turn, whenever one or more creatures attack one of your opponents, those creatures get +2/+2 and gain trample until end of turn.","type":"Legendary Planeswalker — Garruk","types":["Planeswalker"]},{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"1ce7f356-1f9b-44dc-9b05-f7b1ecc5d755"},"layout":"normal","manaCost":"{1}{B}","manaValue":2.0,"name":"Giant Slug","power":"1","subtypes":["Slug"],"supertypes":[],"text":"{5}: At the beginning of your next upkeep, choose a basic land type. This creature gains landwalk of the chosen type until the end of that turn. (It can't be blocked as long as defending player controls a land of that type.)","toughness":"1","type":"Creature — Slug","types":["Creature"]},{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"689cd6a8-8be0-49a6-9758-a81cc9f55cc8"},"layout":"normal","manaCost":"{2}{B}","manaValue":3.0,"name":"Haunted One","subtypes":["Background"],"supertypes":["Legendary"],"text":"Commander creatures you own have \"Whenever this creature becomes tapped, it and other creatures you control that share a creature type with it each get +2/+0 and gain undying until end of turn.\" (When a creature with undying dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)","type":"Legendary Enchantment — Background","types":["Enchantment"]},{"colorIdentity":["G","R","U","W"],"colors":["W"],"identifiers":{"scryfallOracleId":"085016ee-4429-453f-b7f3-d61065f1214e"},"layout":"normal","manaCost":"{2}{W}","manaValue":3.0,"name":"Invisible Woman","power":"3","subtypes":["Human","Hero"],"supertypes":["Legendary"],"text":"At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a 0/3 colorless Wall creature token with defender and reach.\nWhenever you attack, you may pay {R}{G}{W}{U}. When you do, target creature gets +1/+0 until end of turn for each creature you control and can't be blocked this turn.","toughness":"3","type":"Legendary Creature — Human Hero","types":["Creature"]},{"colorIdentity":["U"],"colors":["U"],"identifiers":{"scryfallOracleId":"4e420f43-a4a3-44bb-9a4e-a943f93a3534"},"keywords":["Goad"],"layout":"saga","manaCost":"{3}{U}","manaValue":4.0,"name":"Kang Dynasty","subtypes":["Saga"],"supertypes":[],"text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — For each opponent, tap up to one target creature that player controls. Goad those creatures. Until your next turn, whenever any of those creatures deals combat damage to a player, draw a card.\nIII — Target creature you control gets +1/+1 until end of turn for each card in your hand and can't be blocked this turn.","type":"Enchantment — Saga","types":["Enchantment"]},{"colorIdentity":["G","W"],"colors":["G","W"],"identifiers":{"scryfallOracleId":"8fbfc5b1-2146-4d07-a5fe-5f025da31bd6"},"layout":"normal","manaCost":"{2}{G}{W}","manaValue":4.0,"name":"Okoye, Mighty and Adored","power":"3","subtypes":["Human","Warrior","Hero"],"supertypes":["Legendary"],"text":"When Okoye enters, you become the monarch.\nAt the beginning of combat on your turn, put a +1/+1 counter on target creature. Whenever that creature attacks the monarch this turn, it gains double strike and trample until end of turn.","toughness":"3","type":"Legendary Creature — Human Warrior Hero","types":["Creature"]},{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"295fe873-ecb5-4d5e-a73c-3af6c478afc5"},"keywords":["Gift"],"layout":"normal","manaCost":"{4}{W}{W}","manaValue":6.0,"name":"Perch Protection","subtypes":[],"supertypes":[],"text":"Gift an extra turn (You may promise an opponent a gift as you cast this spell. If you do, they take an extra turn after this one.)\nCreate four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything.\nExile Perch Protection.","type":"Instant","types":["Instant"]},{"colorIdentity":["R","U","W"],"colors":["R","U","W"],"identifiers":{"scryfallOracleId":"680a8e14-053f-4cde-a060-e1b36873cf14"},"layout":"saga","manaCost":"{U}{R}{W}","manaValue":3.0,"name":"Rediscover the Way","subtypes":["Saga"],"supertypes":[],"text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order.\nIII — Whenever you cast a noncreature spell this turn, target creature you control gains double strike until end of turn.","type":"Enchantment — Saga","types":["Enchantment"]},{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"bab5e9ce-6d55-4d1e-a9ac-c2b954191be9"},"layout":"saga","manaCost":"{1}{R}","manaValue":2.0,"name":"Summon: Brynhildr","power":"2","subtypes":["Saga","Knight"],"supertypes":[],"text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Chain — Exile the top card of your library. During any turn you put a lore counter on this Saga, you may play that card.\nII, III — Gestalt Mode — When you next cast a creature spell this turn, it gains haste until end of turn.","toughness":"1","type":"Enchantment Creature — Saga Knight","types":["Enchantment","Creature"]},{"colorIdentity":["B","G"],"colors":["B","G"],"identifiers":{"scryfallOracleId":"e1865bec-1744-40c2-9031-7d6363be5333"},"keywords":["Mill"],"layout":"saga","manaCost":"{4}{B}{G}","manaValue":6.0,"name":"The Last Ronin","subtypes":["Saga"],"supertypes":[],"text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Destroy all creatures.\nII — Mill four cards. When you do, return target creature card from your graveyard to your hand.\nIII — Whenever a creature you control attacks alone this turn, put three +1/+1 counters on it. It gains trample, lifelink, and indestructible until end of turn.","type":"Enchantment — Saga","types":["Enchantment"]},{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"64296644-70f3-4698-923f-0794fe5d0d2b"},"keywords":["Flashback"],"layout":"normal","manaCost":"{4}{B}","manaValue":5.0,"name":"Traitor's Clutch","subtypes":[],"supertypes":[],"text":"Target creature gets +1/+0, becomes black, and gains shadow until end of turn. (It can block or be blocked by only creatures with shadow.)\nFlashback {1}{B} (You may cast this card from your graveyard for its flashback cost. Then exile it.)","type":"Instant","types":["Instant"]},{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"fc80380c-7d75-4556-aaf2-bf7b2c757e75"},"keywords":["Goad"],"layout":"normal","manaCost":"{1}{R}{R}","manaValue":3.0,"name":"Besmirch","subtypes":[],"supertypes":[],"text":"Until end of turn, gain control of target creature and it gains haste. Untap and goad that creature. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)","type":"Sorcery","types":["Sorcery"]},{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"3ceda405-8175-416a-beda-9a95f5acc60c"},"keywords":["Entwine"],"layout":"normal","manaCost":"{3}{R}","manaValue":4.0,"name":"Grab the Reins","subtypes":[],"supertypes":[],"text":"Choose one —\n• Until end of turn, you gain control of target creature and it gains haste.\n• Sacrifice a creature. Grab the Reins deals damage equal to that creature's power to any target.\nEntwine {2}{R} (Choose both if you pay the entwine cost.)","type":"Instant","types":["Instant"]},{"colorIdentity":["R","W"],"colors":["R","W"],"faceName":"Legion Leadership","identifiers":{"scryfallOracleId":"ad225ec2-ff3a-48f6-81a7-dfdd1b75e1f7"},"keywords":["Double"],"layout":"modal_dfc","manaCost":"{1}{R/W}","manaValue":2.0,"name":"Legion Leadership // Legion Stronghold","side":"a","subtypes":[],"supertypes":[],"text":"Until end of turn, double target creature's power and it gains first strike.","type":"Instant","types":["Instant"]},{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"0d4ecdb1-ec90-497f-a7a4-1c68092b8757"},"layout":"normal","manaCost":"{2}{W}","manaValue":3.0,"name":"Teferi's Protection","subtypes":[],"supertypes":[],"text":"Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.","type":"Instant","types":["Instant"]},{"colorIdentity":["G"],"colors":["G"],"identifiers":{"scryfallOracleId":"8c4da760-8913-46ca-b00c-bba6d877d482"},"keywords":["Double"],"layout":"saga","manaCost":"{3}{G}{G}","manaValue":5.0,"name":"World War Hulk","subtypes":["Saga"],"supertypes":[],"text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — The next red or green creature spell you cast this turn can be cast without paying its mana cost.\nII — Put three +1/+1 counters on target creature you control.\nIII — Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.","type":"Enchantment — Saga","types":["Enchantment"]},{"colorIdentity":["R"],"colors":["R"],"identifiers":{"scryfallOracleId":"35b2b172-5fbc-4e4d-a011-390ee1b6c848"},"keywords":["Celebration","Flying","Haste"],"layout":"normal","manaCost":"{1}{R}{R}","manaValue":3.0,"name":"Goddric, Cloaked Reveler","power":"3","subtypes":["Human","Noble"],"supertypes":["Legendary"],"text":"Haste\nCelebration — As long as two or more nonland permanents entered the battlefield under your control this turn, Goddric is a Dragon with base power and toughness 4/4, flying, and \"{R}: Dragons you control get +1/+0 until end of turn.\" (He loses all other creature types.)","toughness":"3","type":"Legendary Creature — Human Noble","types":["Creature"]}]"#####;
+
+fn modifier_owner_atomic(name: &str) -> engine::database::mtgjson::AtomicCard {
+    serde_json::from_str::<Vec<engine::database::mtgjson::AtomicCard>>(MODIFIER_OWNER_PRINTED)
+        .unwrap()
+        .into_iter()
+        .find(|card| card.face_name.as_deref().unwrap_or(&card.name) == name)
+        .unwrap()
+}
+
+fn modifier_owner_nodes(value: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let mut nodes = Vec::new();
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        nodes.push(value);
+        match value {
+            serde_json::Value::Object(fields) => pending.extend(fields.values()),
+            serde_json::Value::Array(elements) => pending.extend(elements),
+            _ => {}
+        }
+    }
+    nodes
+}
+
+#[test]
+fn modifier_owner_full_faces_keep_retention_and_each_registered_child_window_in_both_loaders() {
+    use engine::database::{
+        synthesis::{build_oracle_face, build_oracle_face_multi},
+        CardDatabase,
+    };
+    let records: Vec<engine::database::mtgjson::AtomicCard> =
+        serde_json::from_str(MODIFIER_OWNER_PRINTED).unwrap();
+    let mut export = serde_json::Map::new();
+    for atomic in &records {
+        let face = if atomic.face_name.is_some() {
+            build_oracle_face_multi(atomic, atomic.identifiers.scryfall_oracle_id.clone())
+        } else {
+            build_oracle_face(atomic, atomic.identifiers.scryfall_oracle_id.clone())
+        };
+        let mut value = serde_json::to_value(&face).unwrap();
+        value["layout"] = serde_json::json!(atomic.layout);
+        value["face_index"] = serde_json::json!(usize::from(atomic.side.as_deref() == Some("b")));
+        export.insert(face.name.to_lowercase(), value);
+    }
+    let json = serde_json::to_string(&export).unwrap();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &json).unwrap();
+    for db in [
+        CardDatabase::from_json_str(&json).unwrap(),
+        CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        for atomic in &records {
+            let name = atomic.face_name.as_deref().unwrap_or(&atomic.name);
+            let face = db.get_face_by_name(name).unwrap();
+            assert_eq!(face.oracle_text.as_deref(), atomic.text.as_deref());
+            let value = serde_json::to_value(face).unwrap();
+            let nodes = modifier_owner_nodes(&value);
+            let tagged = |tag: &str| {
+                nodes
+                    .iter()
+                    .filter(|node| node["type"].as_str() == Some(tag))
+                    .copied()
+                    .collect::<Vec<_>>()
+            };
+            if atomic
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("It's still a land")
+            {
+                assert!(
+                    tagged("SetCardTypes").is_empty(),
+                    "{name}: retained types must never be replaced: {value}"
+                );
+                assert!(
+                    tagged("RemoveAllAbilities").is_empty(),
+                    "{name}: printed abilities survive"
+                );
+                assert!(
+                    tagged("RemoveAllSubtypes").is_empty(),
+                    "{name}: every prior subtype is retained"
+                );
+                assert!(
+                    tagged("AddType")
+                        .iter()
+                        .any(|node| node["core_type"] == "Creature"),
+                    "{name}: animation reach guard: {value}"
+                );
+                assert!(
+                    tagged("Unimplemented").is_empty(),
+                    "{name}: complete represented program: {value}"
+                );
+                let (subtypes, keywords, fixed, quantity, window): (
+                    &[&str],
+                    &[&str],
+                    Option<(i32, i32)>,
+                    Option<&str>,
+                    serde_json::Value,
+                ) = match name {
+                    "Awakener Druid" => (
+                        &["Treefolk"],
+                        &[],
+                        Some((4, 5)),
+                        None,
+                        serde_json::json!("WhileHostOnBattlefield"),
+                    ),
+                    "Awakening of Vitu-Ghazi" => (
+                        &["Elemental"],
+                        &["Haste"],
+                        Some((0, 0)),
+                        None,
+                        serde_json::json!("Permanent"),
+                    ),
+                    "Cactus Preserve" => (
+                        &["Plant"],
+                        &["Reach"],
+                        None,
+                        Some("PropertyAggregate"),
+                        serde_json::json!("UntilEndOfTurn"),
+                    ),
+                    "Destiny Spinner" => (
+                        &["Elemental"],
+                        &["Trample", "Haste"],
+                        None,
+                        Some("ObjectCount"),
+                        serde_json::json!("UntilEndOfTurn"),
+                    ),
+                    "Hedge Whisperer" => (
+                        &["Plant", "Boar"],
+                        &["Haste"],
+                        Some((5, 5)),
+                        None,
+                        serde_json::json!({"ForAsLongAs":{"condition":{"type":"SourceIsTapped"}}}),
+                    ),
+                    "Jolrael, Voice of Zhalfir" => (
+                        &["Bird"],
+                        &["Flying", "Haste"],
+                        None,
+                        Some("HandSize"),
+                        serde_json::json!("UntilEndOfTurn"),
+                    ),
+                    "Obuun, Mul Daya Ancestor" => (
+                        &["Elemental"],
+                        &["Trample", "Haste"],
+                        None,
+                        Some("Power"),
+                        serde_json::json!("UntilEndOfTurn"),
+                    ),
+                    "Vastwood Animist" => (
+                        &["Elemental"],
+                        &[],
+                        None,
+                        Some("ObjectCount"),
+                        serde_json::json!("UntilEndOfTurn"),
+                    ),
+                    _ => unreachable!(),
+                };
+                for subtype in subtypes {
+                    assert!(
+                        tagged("AddSubtype")
+                            .iter()
+                            .any(|node| node["subtype"] == *subtype),
+                        "{name}: {subtype}"
+                    );
+                }
+                for keyword in keywords {
+                    assert!(
+                        tagged("AddKeyword")
+                            .iter()
+                            .any(|node| node["keyword"] == *keyword),
+                        "{name}: {keyword}"
+                    );
+                }
+                if let Some((power, toughness)) = fixed {
+                    assert!(tagged("SetPower").iter().any(|node| node["value"] == power));
+                    assert!(tagged("SetToughness")
+                        .iter()
+                        .any(|node| node["value"] == toughness));
+                }
+                if let Some(quantity) = quantity {
+                    for tag in ["SetPowerDynamic", "SetToughnessDynamic"] {
+                        assert!(
+                            tagged(tag)
+                                .iter()
+                                .any(|node| node["value"]["qty"]["type"] == quantity),
+                            "{name}: the printed X authority survives: {value}"
+                        );
+                    }
+                    assert!(
+                        !nodes.iter().any(|node| node["type"] == "CostXPaid"),
+                        "{name}: X is not a paid cost"
+                    );
+                }
+                for animation in tagged("GenericEffect") {
+                    assert_eq!(
+                        animation["duration"], window,
+                        "{name}: retain the exact animation lifetime"
+                    );
+                }
+                if name == "Awakening of Vitu-Ghazi" {
+                    assert!(
+                        tagged("SetTextName")
+                            .iter()
+                            .any(|node| node["name"] == "Vitu-Ghazi"),
+                        "retention is not part of the new name"
+                    );
+                }
+                continue;
+            }
+            if name == "Goddric, Cloaked Reveler" {
+                let mods = &face.static_abilities[0].modifications;
+                use engine::types::ability::ContinuousModification as Modification;
+                let reset = mods
+                    .iter()
+                    .position(|m| matches!(m, Modification::RemoveAllSubtypes { .. }))
+                    .unwrap();
+                let dragon = mods.iter().position(|m| matches!(m, Modification::AddSubtype { subtype } if subtype == "Dragon")).unwrap();
+                assert!(
+                    reset < dragon,
+                    "replacement type survives its one subtype reset"
+                );
+                assert!(mods
+                    .iter()
+                    .any(|m| matches!(m, Modification::SetPower { value: 4 })));
+                assert!(mods
+                    .iter()
+                    .any(|m| matches!(m, Modification::SetToughness { value: 4 })));
+                assert!(mods.iter().any(|m| matches!(
+                    m,
+                    Modification::AddKeyword {
+                        keyword: Keyword::Flying
+                    }
+                )));
+                assert!(mods
+                    .iter()
+                    .any(|m| matches!(m, Modification::GrantAbility { .. })));
+                assert_eq!(
+                    face.static_abilities[0]
+                        .modifications
+                        .iter()
+                        .filter(|m| matches!(
+                            m,
+                            engine::types::ability::ContinuousModification::RemoveAllSubtypes { .. }
+                        ))
+                        .count(),
+                    1
+                );
+                continue;
+            }
+            if name == "Giant Slug" {
+                assert!(
+                    !tagged("CreateDelayedTrigger").is_empty(),
+                    "paid delayed setup retained"
+                );
+                assert!(
+                    tagged("Choose")
+                        .iter()
+                        .any(|node| node["choice_type"] == "BasicLandType"),
+                    "real delayed choice retained"
+                );
+                assert!(
+                    tagged("Unimplemented")
+                        .iter()
+                        .any(|node| node["name"] == "chosen_landwalk"),
+                    "unbound grant honestly unsupported: {value}"
+                );
+                assert!(!serde_json::to_string(&value)
+                    .unwrap()
+                    .contains("\"Landwalk\""));
+                continue;
+            }
+            let expected = if matches!(name, "Perch Protection" | "Teferi's Protection") {
+                serde_json::json!({"UntilNextTurnOf":{"player":{"type":"Controller"}}})
+            } else {
+                serde_json::json!("UntilEndOfTurn")
+            };
+            let grants = tagged("GenericEffect");
+            assert!(
+                !grants.is_empty(),
+                "{name}: positive grant reach guard: {value}"
+            );
+            for grant in grants {
+                assert_eq!(
+                    grant["duration"], expected,
+                    "{name}: each child's own stated window: {value}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn modifier_owner_destiny_spinner_paid_where_x_animation_keeps_artifact_land_and_mana_ability() {
+    let atomic = modifier_owner_atomic("Destiny Spinner");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(P0, "Destiny Spinner", 2, 3, atomic.text.as_deref().unwrap())
+        .as_enchantment()
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Second enchantment", "");
+    let land = scenario
+        .add_land_from_oracle(P0, "Artifact Forest recipient", "{T}: Add {G}.")
+        .as_artifact_land()
+        .with_subtypes(vec!["Forest", "Cave"])
+        .id();
+    let decoy = scenario
+        .add_land_from_oracle(P0, "Unselected land", "{T}: Add {G}.")
+        .id();
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    fund(&mut runner, 3, &[ManaType::Green]);
+    runner.activate(source, 0).target_object(land).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(pt(&mut runner, land), (2, 2));
+    let object = &runner.state().objects[&land];
+    for core in [CoreType::Artifact, CoreType::Land, CoreType::Creature] {
+        assert!(object.card_types.core_types.contains(&core));
+    }
+    for subtype in ["Forest", "Cave", "Elemental"] {
+        assert!(object.card_types.subtypes.contains(&subtype.to_owned()));
+    }
+    assert!(object.keywords.contains(&Keyword::Trample));
+    assert!(object.keywords.contains(&Keyword::Haste));
+    assert!(!object.abilities.is_empty());
+    runner.activate(land, 0).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    assert!(!runner.state().objects[&decoy]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    settled(&runner);
+    runner.advance_to_upkeep();
+    let object = &runner.state().objects[&land];
+    assert!(!object.card_types.core_types.contains(&CoreType::Creature));
+    assert!(object.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(object.card_types.core_types.contains(&CoreType::Land));
+    assert!(!object.keywords.contains(&Keyword::Haste));
+    settled(&runner);
+}
+
+#[test]
+fn modifier_owner_traitors_clutch_paid_cast_keeps_every_axis_on_foreign_target_until_cleanup() {
+    let atomic = modifier_owner_atomic("Traitor's Clutch");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let recipient = scenario
+        .add_creature(P1, "Foreign recipient", 2, 4)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let decoy = scenario.add_creature(P1, "Untouched sibling", 4, 4).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Traitor's Clutch",
+            true,
+            atomic.text.as_deref().unwrap(),
+        )
+        .with_mana_cost(cost(atomic.mana_cost.as_deref().unwrap()))
+        .id();
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    fund(&mut runner, 4, &[ManaType::Black]);
+    runner.cast(spell).target_object(recipient).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(pt(&mut runner, recipient), (3, 4));
+    assert_eq!(
+        runner.state().objects[&recipient].color,
+        vec![ManaColor::Black]
+    );
+    assert!(runner.state().objects[&recipient]
+        .keywords
+        .contains(&Keyword::Shadow));
+    assert!(!runner.state().objects[&decoy]
+        .keywords
+        .contains(&Keyword::Shadow));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    settled(&runner);
+    runner.advance_to_upkeep();
+    assert_eq!(pt(&mut runner, recipient), (2, 4));
+    assert_eq!(
+        runner.state().objects[&recipient].color,
+        vec![ManaColor::White]
+    );
+    assert!(!runner.state().objects[&recipient]
+        .keywords
+        .contains(&Keyword::Shadow));
+    settled(&runner);
+}
+
+#[test]
+fn modifier_owner_goddric_two_real_paid_entries_keep_dragon_and_its_own_granted_activation() {
+    let atomic = modifier_owner_atomic("Goddric, Cloaked Reveler");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let goddric = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Goddric, Cloaked Reveler",
+            3,
+            3,
+            atomic.text.as_deref().unwrap(),
+        )
+        .with_subtypes(vec!["Human", "Peasant"])
+        .id();
+    let other = scenario
+        .add_creature(P1, "Opponent Dragon", 2, 2)
+        .with_subtypes(vec!["Dragon"])
+        .id();
+    let arrivals = ["First arrival", "Second arrival"].map(|name| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, name, false, "")
+            .as_artifact()
+            .with_mana_cost(cost("{1}"))
+            .id()
+    });
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    assert_eq!(pt(&mut runner, goddric), (3, 3));
+    for (index, arrival) in arrivals.into_iter().enumerate() {
+        fund(&mut runner, 1, &[]);
+        runner.cast(arrival).resolve();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(
+            pt(&mut runner, goddric),
+            if index == 0 { (3, 3) } else { (4, 4) }
+        );
+        settled(&runner);
+    }
+    assert_eq!(
+        runner.state().objects[&goddric].card_types.subtypes,
+        vec!["Dragon".to_owned()]
+    );
+    assert!(runner.state().objects[&goddric]
+        .keywords
+        .contains(&Keyword::Flying));
+    fund(&mut runner, 0, &[ManaType::Red]);
+    runner.activate(goddric, 0).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(pt(&mut runner, goddric), (5, 4));
+    assert_eq!(pt(&mut runner, other), (2, 2));
+    settled(&runner);
+    runner.advance_to_upkeep();
+    assert_eq!(pt(&mut runner, goddric), (3, 3));
+    assert_eq!(
+        runner.state().objects[&goddric].card_types.subtypes,
+        vec!["Human".to_owned(), "Peasant".to_owned()]
+    );
+    assert!(!runner.state().objects[&goddric]
+        .keywords
+        .contains(&Keyword::Flying));
+    settled(&runner);
+}
+
+#[test]
+fn modifier_owner_awakening_paid_cast_names_and_retains_the_same_countered_land() {
+    let atomic = modifier_owner_atomic("Awakening of Vitu-Ghazi");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario
+        .add_land_from_oracle(P0, "Original artifact land", "{T}: Add {G}.")
+        .as_artifact_land()
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Awakening of Vitu-Ghazi",
+            true,
+            atomic.text.as_deref().unwrap(),
+        )
+        .with_mana_cost(cost(atomic.mana_cost.as_deref().unwrap()))
+        .id();
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    fund(&mut runner, 3, &[ManaType::Green, ManaType::Green]);
+    runner.cast(spell).target_object(land).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(pt(&mut runner, land), (9, 9));
+    let object = &runner.state().objects[&land];
+    assert_eq!(object.name, "Vitu-Ghazi");
+    assert_eq!(object.counters.get(&CounterType::Plus1Plus1), Some(&9));
+    for core in [CoreType::Artifact, CoreType::Land, CoreType::Creature] {
+        assert!(object.card_types.core_types.contains(&core));
+    }
+    assert!(object.card_types.subtypes.contains(&"Forest".to_owned()));
+    assert!(object.keywords.contains(&Keyword::Haste));
+    assert!(!object.abilities.is_empty());
+    settled(&runner);
+    runner.advance_to_upkeep();
+    assert_eq!(pt(&mut runner, land), (9, 9));
+    assert_eq!(runner.state().objects[&land].name, "Vitu-Ghazi");
+    settled(&runner);
+}
+
+#[test]
+fn modifier_owner_giant_slug_paid_delayed_choice_keeps_the_unbound_grant_honest() {
+    let atomic = modifier_owner_atomic("Giant Slug");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let slug = scenario
+        .add_creature_from_oracle(P0, "Giant Slug", 1, 1, atomic.text.as_deref().unwrap())
+        .id();
+    scenario.with_library_top(P0, &["draw buffer", "draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer", "draw buffer"]);
+    let mut runner = scenario.build();
+    let serialized = serde_json::to_value(&runner.state().objects[&slug].abilities).unwrap();
+    assert!(modifier_owner_nodes(&serialized)
+        .iter()
+        .any(|node| node["type"] == "Unimplemented" && node["name"] == "chosen_landwalk"));
+    fund(&mut runner, 5, &[]);
+    runner.activate(slug, 0).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+    runner.advance_to_upkeep();
+    runner.advance_to_phase(Phase::PreCombatMain);
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let WaitingFor::NamedChoice {
+        player, options, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("actual delayed basic land choice");
+    };
+    assert_eq!(*player, P0);
+    let choice = options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case("Forest"))
+        .unwrap()
+        .clone();
+    runner.act(GameAction::ChooseOption { choice }).unwrap();
+    runner.advance_until_stack_empty();
+    assert!(!runner.state().objects[&slug]
+        .keywords
+        .iter()
+        .any(|keyword| matches!(keyword, Keyword::Landwalk(_))));
+    settled(&runner);
+}

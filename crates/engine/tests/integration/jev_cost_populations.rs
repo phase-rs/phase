@@ -7432,6 +7432,12 @@ fn pending_population_reader_authorities() {
 // Exact Oracle and face metadata from AtomicCards 2026-10-04, SHA256
 // EE8B89375A0328A534153B1121E4272050AEF69CD49C58387AEF0877D34E4F8E.
 const EXPORT_ROUTE_PRINTED: &[&str] = &[
+    r####"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"f86bcdde-8b1f-4efa-a01d-39e09dc826d0"},"layout":"normal","manaCost":"{1}{W}","manaValue":2.0,"name":"Angelic Renewal","subtypes":[],"supertypes":[],"text":"Whenever a creature is put into your graveyard from the battlefield, you may sacrifice this enchantment. If you do, return that card to the battlefield.","type":"Enchantment","types":["Enchantment"]}"####,
+    r####"{"colorIdentity":[],"colors":[],"identifiers":{"scryfallOracleId":"f6de5bd7-7704-4a0c-a27a-9e565e49f5e9"},"layout":"normal","manaCost":"{3}","manaValue":3.0,"name":"Dragonstorm Globe","subtypes":[],"supertypes":[],"text":"Each Dragon you control enters with an additional +1/+1 counter on it.\n{T}: Add one mana of any color.","type":"Artifact","types":["Artifact"]}"####,
+    r####"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"b4dbbf56-d7df-4183-bb48-cfc6b4d0468f"},"keywords":["Flying"],"layout":"normal","manaCost":"{3}{W}","manaValue":4.0,"name":"Armored Skyhunter","power":"3","subtypes":["Cat","Knight"],"supertypes":[],"text":"Flying\nWhenever this creature attacks, look at the top six cards of your library. You may put an Aura or Equipment card from among them onto the battlefield. If an Equipment is put onto the battlefield this way, you may attach it to a creature you control. Put the rest of those cards on the bottom of your library in a random order.","toughness":"3","type":"Creature — Cat Knight","types":["Creature"]}"####,
+    r####"{"colorIdentity":["W"],"colors":["W"],"identifiers":{"scryfallOracleId":"77322d69-330e-4b00-b984-62c6d45c9540"},"keywords":["Food"],"layout":"saga","manaCost":"{3}{W}","manaValue":4.0,"name":"Vault 101: Birthday Party","subtypes":["Saga"],"supertypes":[],"text":"(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — Create a 1/1 white Human Soldier creature token and a Food token. (A Food token is an artifact with \"{2}, {T}, Sacrifice this token: You gain 3 life.\")\nII, III — You may put an Aura or Equipment card from your hand or graveyard onto the battlefield. If an Equipment is put onto the battlefield this way, you may attach it to a creature you control.","type":"Enchantment — Saga","types":["Enchantment"]}"####,
+    r####"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"ebbd5b9c-07ff-4b42-81c2-ba09539f3a42"},"keywords":["Mill"],"layout":"normal","manaCost":"{5}{B}{B}","manaValue":7.0,"name":"Breach the Multiverse","subtypes":[],"supertypes":[],"text":"Each player mills ten cards. For each player, choose a creature or planeswalker card in that player's graveyard. Put those cards onto the battlefield under your control. Then each creature you control becomes a Phyrexian in addition to its other types.","type":"Sorcery","types":["Sorcery"]}"####,
+    r####"{"colorIdentity":["B"],"colors":["B"],"identifiers":{"scryfallOracleId":"cc9f9f14-a11c-4e33-9e11-8bf6ef13cf2b"},"layout":"normal","manaCost":"{3}{B}{B}","manaValue":5.0,"name":"Ghouls' Night Out","subtypes":[],"supertypes":[],"text":"For each player, choose a creature card in that player's graveyard. Put those cards onto the battlefield under your control. They're black Zombies in addition to their other colors and types and they gain decayed. (A creature with decayed can't block. When it attacks, sacrifice it at end of combat.)","type":"Sorcery","types":["Sorcery"]}"####,
     r###"{"name":"Abandoned Campground","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":["U","W"],"layout":"normal","text":"This land enters tapped unless a player has 13 or less life.\n{T}: Add {W} or {U}.","identifiers":{"scryfallOracleId":"0eec9984-cd11-4a52-9234-469c6a5fb9aa"}}"###,
     r###"{"name":"Arlinn, Voice of the Pack","manaCost":"{4}{G}{G}","manaValue":6.0,"type":"Legendary Planeswalker — Arlinn","types":["Planeswalker"],"subtypes":["Arlinn"],"supertypes":["Legendary"],"colors":["G"],"colorIdentity":["G"],"loyalty":"7","layout":"normal","text":"Each creature you control that's a Wolf or a Werewolf enters with an additional +1/+1 counter on it.\n[−2]: Create a 2/2 green Wolf creature token.","identifiers":{"scryfallOracleId":"a15b83df-91b7-49f0-9bec-5776a3dac8bd"}}"###,
     r###"{"name":"Ashling's Prerogative","manaCost":"{1}{R}","manaValue":2.0,"type":"Enchantment","types":["Enchantment"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","text":"As this enchantment enters, choose odd or even. (Zero is even.)\nEach creature with mana value of the chosen quality has haste.\nEach creature without mana value of the chosen quality enters tapped.","identifiers":{"scryfallOracleId":"b68bc097-482a-4fe5-9fca-df5941f3dc5c"}}"###,
@@ -7877,6 +7883,119 @@ fn complete_selected_and_self_perpetual_subjects_survive_normal_export() {
             assert!(
                 choices > 0,
                 "the selected hand authority must survive: {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn complete_actual_owner_refusals_and_explicit_operands_survive_both_normal_loaders() {
+    let serialized = export_route_repair_json();
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), &serialized).unwrap();
+    for db in [
+        CardDatabase::from_json_str(&serialized).unwrap(),
+        CardDatabase::from_export(file.path()).unwrap(),
+    ] {
+        let angelic = db.get_face_by_name("Angelic Renewal").unwrap();
+        assert_eq!(
+            angelic.triggers.len(),
+            1,
+            "the complete death trigger is retained"
+        );
+        let body = angelic.triggers[0].execute.as_deref().unwrap();
+        assert!(
+            matches!(*body.effect, Effect::Unimplemented { .. }),
+            "the complete source-payment/death-card dependency must remain honest: {body:#?}"
+        );
+        assert!(body.sub_ability.is_none());
+        let whelp = db.get_face_by_name("Darigaaz's Whelp").unwrap();
+        assert_eq!(
+            whelp.triggers.len(),
+            2,
+            "both printed triggers are retained"
+        );
+        assert!(
+            matches!(
+                whelp.triggers[0].mode,
+                engine::types::triggers::TriggerMode::Unknown(_)
+            ),
+            "the drawn-card type predicate has no represented event matcher"
+        );
+        for trigger in &whelp.triggers {
+            assert!(!engine::game::coverage::ability_tree_any(trigger.execute.as_deref().unwrap(), &|ability| matches!(*ability.effect, Effect::ApplyPerpetual { .. })), "an unsupported typed draw/source-and-seek dependency cannot publish a guessed source edit");
+        }
+        let skyline = db.get_face_by_name("Skyline Savior").unwrap();
+        let body = skyline.triggers[0].execute.as_deref().unwrap();
+        assert!(
+            matches!(*body.effect, Effect::Bounce { .. }),
+            "the independent return survives"
+        );
+        assert!(
+            matches!(
+                *body.sub_ability.as_deref().unwrap().effect,
+                Effect::Unimplemented { .. }
+            ),
+            "all dependent perpetual/type conjuncts stay refused"
+        );
+        assert!(body.sub_ability.as_deref().unwrap().sub_ability.is_none());
+        let unity = db.get_face_by_name("Angel of Unity").unwrap();
+        assert!(!unity.triggers.is_empty());
+        for trigger in &unity.triggers {
+            assert!(
+                !engine::game::coverage::ability_tree_any(
+                    trigger.execute.as_deref().unwrap(),
+                    &|ability| matches!(*ability.effect, Effect::ApplyPerpetual { .. })
+                ),
+                "an unsupported party hand choice publishes no event/source edit"
+            );
+        }
+        for name in ["Armored Skyhunter", "Vault 101: Birthday Party"] {
+            let face = db.get_face_by_name(name).unwrap();
+            assert!(face.triggers.iter().any(|trigger| trigger.execute.as_deref().is_some_and(|body| engine::game::coverage::ability_tree_any(body, &|ability| matches!(ability.effect.as_ref(), Effect::Attach { attachment: TargetFilter::ParentTarget, target: TargetFilter::Typed(_), .. })))), "an explicit selected Equipment and creature host remain represented: {name}: {face:#?}");
+        }
+        let dragon = db.get_face_by_name("Dragonstorm Globe").unwrap();
+        let definition = dragon
+            .static_abilities
+            .iter()
+            .find(|definition| {
+                matches!(
+                    definition.mode,
+                    engine::types::statics::StaticMode::EntersWithAdditionalCounters { .. }
+                )
+            })
+            .unwrap();
+        let Some(TargetFilter::Typed(filter)) = definition.affected.as_ref() else {
+            panic!("controlled Dragon population must be typed")
+        };
+        assert!(filter
+            .type_filters
+            .contains(&TypeFilter::Subtype("Dragon".into())));
+        assert!(
+            !filter.type_filters.contains(&TypeFilter::Creature),
+            "a bare subtype includes noncreature Kindreds"
+        );
+        for name in ["Breach the Multiverse", "Ghouls' Night Out"] {
+            let face = db.get_face_by_name(name).unwrap();
+            assert!(
+                engine::game::coverage::ability_tree_any(&face.abilities[0], &|ability| matches!(
+                    ability.effect.as_ref(),
+                    Effect::ChooseFromZone {
+                        zone_owner: engine::types::ability::ZoneOwner::Each(_),
+                        ..
+                    }
+                )),
+                "per-player choice reach guard: {name}"
+            );
+            assert!(
+                engine::game::coverage::ability_tree_any(&face.abilities[0], &|ability| matches!(
+                    ability.effect.as_ref(),
+                    Effect::ChangeZoneAll {
+                        target: TargetFilter::TrackedSet { .. },
+                        ..
+                    }
+                )),
+                "the accumulated selected set remains the mass move authority: {name}"
             );
         }
     }

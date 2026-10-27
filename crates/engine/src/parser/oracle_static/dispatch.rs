@@ -2031,6 +2031,14 @@ pub(crate) fn parse_static_line_inner(
             }
         }
     }
+    // CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Self-scoped
+    // characteristic-defining color line ("~ is colorless.",
+    // "~ is white and blue."). CDAs function in all zones and define the
+    // source object's own color characteristic.
+    if let Some(def) = parse_self_subject_is_color_cda(&tp, &text) {
+        return Some(def);
+    }
+
     if let Some(def) = parse_subject_continuous_static(&text) {
         return Some(def);
     }
@@ -2095,14 +2103,6 @@ pub(crate) fn parse_static_line_inner(
                 .modifications(modifications)
                 .description(text.to_string()),
         );
-    }
-
-    // CR 604.3 + CR 604.3a + CR 105.2c + CR 613.1e: Self-scoped
-    // characteristic-defining color line ("~ is colorless.",
-    // "~ is white and blue."). CDAs function in all zones and define the
-    // source object's own color characteristic.
-    if let Some(def) = parse_self_subject_is_color_cda(&tp, &text) {
-        return Some(def);
     }
 
     // CR 613.1e + CR 105.2 / CR 105.3: "[subject] is/are [color expression]" for
@@ -4171,11 +4171,24 @@ fn parse_enters_with_additional_counters(
         .parse(predicate_lower.trim_end())
         .ok()?;
 
-    // CR 109.5: the subject must be a controller-scoped ("you control") creature
-    // phrase. Recover the original-case slice so the shared subject parser sees
+    // CR 109.5: the subject must be controller-scoped ("you control").
+    // Bare subtype nouns include noncreature permanents with that subtype.
+    // Recover the original-case slice so the shared subject parser sees
     // the printed capitalization (subtypes/supertypes are capitalized in Oracle).
     let subject_original = tp.original[..subject_lower.len()].trim();
-    let affected = parse_continuous_subject_filter(subject_original)?;
+    let subject_lower = subject_original.to_lowercase();
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("each "))
+        .parse(subject_lower.as_str())
+        .ok()?;
+    let (permanent_filter, remainder) =
+        crate::parser::oracle_target::parse_type_phrase_folding(rest);
+    let affected = if remainder.trim().is_empty()
+        && !matches!(permanent_filter, TargetFilter::Any | TargetFilter::None)
+    {
+        permanent_filter
+    } else {
+        parse_continuous_subject_filter(subject_original)?
+    };
     if !filter_is_controller_you(&affected) {
         return None;
     }

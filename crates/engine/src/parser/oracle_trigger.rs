@@ -5166,19 +5166,7 @@ fn split_reflexive_optional_payment_with_context<'a>(
                     ..
                 }
             )
-        )
-        && parse_effect_chain_ir(body_text, AbilityKind::Spell, &mut ctx.clone())
-            .clauses
-            .first()
-            .is_some_and(|clause| {
-                matches!(
-                    clause.parsed.effect,
-                    Effect::ChangeZone {
-                        target: TargetFilter::SelfRef,
-                        ..
-                    }
-                )
-            });
+        );
     if unbound_event_card_return {
         return Some(Err(effect_text));
     }

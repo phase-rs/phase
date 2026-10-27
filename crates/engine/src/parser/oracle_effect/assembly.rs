@@ -4427,7 +4427,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         );
         let continues_unbound_cohort =
             unbound_search_cohort && starts_with_plural_subject_anaphor(&lower_fragment);
-        unbound_search_cohort = names_search_cohort || continues_unbound_cohort;
+        // Explicit operands retain the selected Dig result and its distinct host.
+        let represented_attachment = current_defs.iter().any(|definition| {
+            matches!(definition.effect.as_ref(), Effect::Attach { attachment: TargetFilter::ParentTarget, target, .. }
+                if !matches!(target, TargetFilter::Any | TargetFilter::None | TargetFilter::SelfRef))
+        });
+        unbound_search_cohort =
+            (names_search_cohort && !represented_attachment) || continues_unbound_cohort;
         if unbound_search_cohort {
             current_defs.truncate(1);
             if let Some(current) = current_defs.first_mut() {

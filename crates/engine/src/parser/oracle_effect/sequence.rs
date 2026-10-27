@@ -1785,6 +1785,9 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // correct `affected` filter inherited from the subject.
                         let have_base_pt_continuation =
                             starts_have_base_power_toughness(remainder_trimmed);
+                        let complete_continuous_conjunct = complete_continuous_sentence(&format!(
+                            "{before_and} and {remainder_trimmed}"
+                        ));
                         let continuous_modifier_conjunct = (starts_you_control_subject_predicate(&before_lower)
                                 // CR 611.2c: become plus grant is one frozen
                                 // continuous population, with one duration.
@@ -1913,6 +1916,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || inside_otherwise_body
                         || have_base_pt_continuation
                         || continuous_modifier_conjunct
+                        || complete_continuous_conjunct
                         || roll_die_modifier_continuation
                         || bare_becomes_continuation
                         || mass_exile_union_continuation
@@ -2291,7 +2295,22 @@ fn continues_mass_exile_union(current_lower: &str, next_lower: &str) -> bool {
     }
 }
 
+// CR 608.2c + CR 611.2a: coordinated continuous predicates share the printed
+// subject and final window. Keep the sentence only when the existing complete
+// modification owner accepts every member; imperative actions still split.
+fn complete_continuous_sentence(text: &str) -> bool {
+    let Some(start) = super::subject::find_predicate_start(text) else {
+        return false;
+    };
+    let predicate = &text[start..];
+    let (predicate, _) = super::strip_trailing_duration(predicate);
+    crate::parser::oracle_static::parse_complete_continuous_modifications(predicate).is_some()
+}
+
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
+    if complete_continuous_sentence(&format!("{current},{remainder}")) {
+        return None;
+    }
     let current_lower = current.trim().to_ascii_lowercase();
     let trimmed = remainder.trim_start();
     let whitespace_len = remainder.len() - trimmed.len();

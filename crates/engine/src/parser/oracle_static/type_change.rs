@@ -40,9 +40,18 @@ pub(crate) fn parse_inverted_base_pt_type_grant(
 
     let grants = tail.trim().trim_start_matches(',').trim();
     if !grants.is_empty() {
-        modifications.extend(super::keyword_grant::parse_continuous_modifications(
-            &format!("has {grants}"),
-        ));
+        let mut grants =
+            super::keyword_grant::parse_continuous_modifications(&format!("has {grants}"));
+        // CR 205.1a: the parenthetical loss qualifies this type setter. Apply
+        // each subtype-set reset once, before adding the replacement subtypes;
+        // a second reset after AddSubtype would erase the newly granted type.
+        grants.retain(|modification| {
+            !matches!(modification, ContinuousModification::RemoveAllSubtypes { set }
+                if modifications.iter().any(|existing| matches!(existing,
+                    ContinuousModification::RemoveAllSubtypes { set: existing_set }
+                        if existing_set == set)))
+        });
+        modifications.extend(grants);
     }
     if modifications.is_empty() {
         return None;

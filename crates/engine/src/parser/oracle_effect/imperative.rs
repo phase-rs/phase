@@ -4126,6 +4126,9 @@ pub(super) fn parse_hand_reveal_ast<'a>(
         let (after, _) = alt((tag::<_, _, OracleError<'_>>("reveal "), tag("reveals ")))
             .parse(lower)
             .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?;
+        // Revalidate from the entry context: the first parse is speculative and
+        // may have allocated the same player declaration already.
+        trial = ctx.clone();
         let (target, card_filter) = parse_hand_reveal_target_and_card_filter(after, &mut trial)
             .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?;
         ast = Some(HandRevealImperativeAst::RevealAll {
@@ -5876,6 +5879,50 @@ fn try_parse_choose_from_zone(
     };
     let bare_filter_text = bare_filter_text.to_string();
     let suffix = zone_suffix.trim();
+    // One selection may draw from two differently qualified zone populations.
+    // Keep the zone predicate on each alternative, so a hand card need not be
+    // controlled and a battlefield permanent need not be owned by the chooser.
+    if zones == vec![Zone::Hand] && zone_owner == ZoneOwner::Controller {
+        if let Ok((body, _)) =
+            preceded(tag::<_, _, E>("or "), opt(alt((tag("a "), tag("an "))))).parse(suffix)
+        {
+            let (battlefield_filter, remainder) =
+                parse_type_phrase_folding_with_ctx(body, &mut ctx.clone());
+            if terminal_punctuation_only(remainder)
+                && matches!(&battlefield_filter, TargetFilter::Typed(filter) if filter.controller == Some(ControllerRef::You))
+            {
+                let hand_filter = super::search::parse_search_filter(&bare_filter_text, ctx)?;
+                return Ok(Some(ChooseImperativeAst::FromZone {
+                    count: 1,
+                    zones: vec![Zone::Hand, Zone::Battlefield],
+                    zone_owner: ZoneOwner::AllOwners,
+                    filter: TargetFilter::Or {
+                        filters: vec![
+                            add_filter_prop(
+                                add_filter_prop(
+                                    hand_filter,
+                                    FilterProp::InZone { zone: Zone::Hand },
+                                ),
+                                FilterProp::Owned {
+                                    controller: ControllerRef::You,
+                                },
+                            ),
+                            add_filter_prop(
+                                battlefield_filter,
+                                FilterProp::InZone {
+                                    zone: Zone::Battlefield,
+                                },
+                            ),
+                        ],
+                    },
+                    chooser: Chooser::Controller,
+                    up_to: false,
+                    selection,
+                    candidate_source: ZoneChoiceCandidateSource::Direct,
+                }));
+            }
+        }
+    }
     let filter_text = if suffix.is_empty() {
         bare_filter_text
     } else {
@@ -7834,12 +7881,17 @@ fn parse_attach_recipient<'a>(
     // retain the event/parent host authority rather than inherit the moved
     // attachment's bare-pronoun binding.
     if target == TargetFilter::SelfRef
-        && attachment == Some(&TargetFilter::SelfRef)
+        && matches!(
+            attachment,
+            Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+        )
         && ctx.in_trigger
         && super::validated_that_subject_rest(&text.to_lowercase())
             .is_some_and(|rest| rest.trim().is_empty())
     {
-        return parse_target_with_ctx(text, &mut ctx.clone_player_antecedents());
+        let mut host_ctx = ctx.clone_player_antecedents();
+        host_ctx.demonstrative_object_ref = Some(TargetFilter::TriggeringSource);
+        return parse_target_with_ctx(text, &mut host_ctx);
     }
     if matches!(target, TargetFilter::ParentTarget) {
         let trimmed = text.trim_start();

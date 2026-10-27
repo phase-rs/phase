@@ -7653,9 +7653,13 @@ fn parse_normalized_oracle_ir(
         // original text to its semantic owner (including loyalty/emblem grants).
         let static_classify_view =
             crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower);
+        let prepared_static =
+            strip_ability_word(&line).map(|body| normalize_self_refs_for_static(&body, card_name));
         if !defer_to_effect_parser
             && (is_static_pattern(&static_classify_view)
-                || (!is_spell && parse_static_line(&static_line).is_some()))
+                || (!is_spell
+                    && parse_static_line(prepared_static.as_deref().unwrap_or(&static_line))
+                        .is_some()))
         {
             if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
                 i += 1;
@@ -9055,8 +9059,10 @@ fn parse_normalized_oracle_ir(
                 }
             }
             // Try as static
-            if is_static_pattern(&effect_lower) {
-                let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
+            let effect_static = normalize_self_refs_for_static(&effect_text, card_name);
+            if is_static_pattern(&effect_lower)
+                || (!is_spell && parse_static_line(&effect_static).is_some())
+            {
                 let mut defs = parse_static_line_with_graveyard_keyword_continuation(
                     &effect_static,
                     None,

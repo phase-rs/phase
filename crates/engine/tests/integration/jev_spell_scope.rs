@@ -1861,3 +1861,274 @@ fn wrenn_paid_loyalty_emblem_grants_retrace_after_its_source_leaves() {
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     assert_spell_complete(runner.state());
 }
+
+#[test]
+fn dragonstorm_globe_additional_counter_includes_noncreature_kindred_dragons() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    use engine::types::counter::CounterType;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(2, &[]));
+    scenario.add_real_card(P0, "Dragonstorm Globe", Zone::Battlefield, &db);
+    let kindred = scenario
+        .add_artifact_to_hand_from_oracle(P0, "Noncreature Kindred Dragon", "")
+        .with_subtypes(vec!["Dragon"])
+        .with_mana_cost(printed_cost("{1}"))
+        .id();
+    let creature = scenario
+        .add_creature_to_hand(P0, "Creature Dragon", 2, 2)
+        .with_subtypes(vec!["Dragon"])
+        .with_mana_cost(printed_cost("{1}"))
+        .id();
+    let decoy = scenario.add_creature(P0, "Non-Dragon decoy", 2, 2).id();
+    let mut runner = scenario.build();
+    let object = runner.state_mut().objects.get_mut(&kindred).unwrap();
+    object.card_types.core_types.push(CoreType::Kindred);
+    object.base_card_types = object.card_types.clone();
+    runner.cast(kindred).resolve();
+    runner.cast(creature).resolve();
+    for id in [kindred, creature] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&id]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&1)
+        );
+    }
+    assert!(!runner.state().objects[&kindred]
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert!(runner.state().objects[&decoy].counters.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn per_player_graveyard_choices_reanimate_the_complete_selected_set() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    for (name, generic, black) in [("Breach the Multiverse", 5, 2), ("Ghouls' Night Out", 4, 1)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(generic, &vec![ManaType::Black; black]));
+        for player in [P0, P1] {
+            scenario.with_library_top(player, &["Noncreature mill filler"; 11]);
+        }
+        let own = scenario
+            .add_creature_to_graveyard(P0, "Selected own card", 2, 2)
+            .id();
+        let foreign = scenario
+            .add_creature_to_graveyard(P1, "Selected opposing card", 3, 3)
+            .id();
+        let own_decoy = scenario
+            .add_creature_to_graveyard(P0, "Unselected own card", 4, 4)
+            .id();
+        let foreign_decoy = scenario
+            .add_creature_to_graveyard(P1, "Unselected opposing card", 5, 5)
+            .id();
+        let spell = scenario.add_real_card(P0, name, Zone::Hand, &db).id();
+        let mut runner = scenario.build();
+        runner.cast(spell).resolve();
+        let mut picks = 0;
+        for _ in 0..16 {
+            let cards = match &runner.state().waiting_for {
+                WaitingFor::ChooseFromZoneChoice { cards, .. }
+                | WaitingFor::EffectZoneChoice { cards, .. } => cards.clone(),
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().resolution_stack.is_empty() =>
+                {
+                    break
+                }
+                other => panic!("expected the next real per-player choice on {name}: {other:?}"),
+            };
+            let selected = [own, foreign]
+                .into_iter()
+                .find(|id| cards.contains(id))
+                .expect("each player's pool must contain its selected card");
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![selected],
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            picks += 1;
+        }
+        assert_eq!(picks, 2, "both player choices completed: {name}");
+        for id in [own, foreign] {
+            assert_eq!(
+                runner.state().objects[&id].zone,
+                Zone::Battlefield,
+                "the mass continuation reads every selected card: {name}"
+            );
+            assert_eq!(runner.state().objects[&id].controller, P0);
+        }
+        for id in [own_decoy, foreign_decoy] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_spell_complete(runner.state());
+    }
+}
+
+#[test]
+fn scour_the_scene_offers_both_hand_and_battlefield_creatures() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    for choose_hand in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P1, &["Observed card", "Reserve"]);
+        let source = scenario
+            .add_real_card(P0, "Scour the Scene", Zone::Battlefield, &db)
+            .id();
+        let bauble = scenario
+            .add_real_card(P0, "Mishra's Bauble", Zone::Battlefield, &db)
+            .id();
+        let hand = scenario
+            .add_creature_to_hand(P0, "Eligible hand card", 2, 2)
+            .id();
+        let battlefield = scenario
+            .add_creature(P0, "Eligible controlled creature", 3, 3)
+            .id();
+        let opponent = scenario
+            .add_creature(P1, "Opponent creature decoy", 4, 4)
+            .id();
+        let opposing_hand = scenario
+            .add_creature_to_hand(P1, "Opponent hand decoy", 5, 5)
+            .id();
+        let noncreature = scenario
+            .add_spell_to_hand(P0, "Noncreature hand decoy", true)
+            .id();
+        let mut runner = scenario.build();
+        runner.activate(bauble, 0).target_player(P1).resolve();
+        let WaitingFor::ChooseFromZoneChoice { cards, .. } = &runner.state().waiting_for else {
+            panic!("the sacrifice trigger must reach its printed union choice")
+        };
+        assert!(cards.contains(&hand) && cards.contains(&battlefield));
+        for id in [opponent, opposing_hand, noncreature, source] {
+            assert!(!cards.contains(&id));
+        }
+        let selected = if choose_hand { hand } else { battlefield };
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&selected].perpetual_mods.len(), 1);
+        for id in [
+            source,
+            opponent,
+            opposing_hand,
+            noncreature,
+            if choose_hand { battlefield } else { hand },
+        ] {
+            assert!(runner.state().objects[&id].perpetual_mods.is_empty());
+        }
+        assert_eq!(runner.state().objects[&bauble].zone, Zone::Graveyard);
+        assert_spell_complete(runner.state());
+    }
+}
+
+#[test]
+fn armored_skyhunter_keeps_the_selected_equipment_and_explicit_creature_host() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let skyhunter = scenario
+        .add_real_card(P0, "Armored Skyhunter", Zone::Battlefield, &db)
+        .id();
+    let chosen_host = scenario
+        .add_creature(P0, "Chosen attachment host", 2, 2)
+        .id();
+    let other_host = scenario
+        .add_creature(P0, "Unchosen attachment host", 3, 3)
+        .id();
+    let foreign = scenario.add_creature(P1, "Foreign host decoy", 4, 4).id();
+    let equipment = scenario
+        .add_real_card(P0, "Sword of the Meek", Zone::Library, &db)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(skyhunter, AttackTarget::Player(P1))])
+        .unwrap();
+    let mut dig_seen = false;
+    let mut host_seen = false;
+    for _ in 0..32 {
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if dig_seen && runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty() => break,
+            WaitingFor::Priority { .. } => { runner.act(GameAction::PassPriority).unwrap(); }
+            WaitingFor::OptionalEffectChoice { .. } => { runner.act(GameAction::DecideOptionalEffect { accept: true }).unwrap(); }
+            WaitingFor::DigChoice { selectable_cards, .. } => {
+                assert!(selectable_cards.contains(&equipment));
+                runner.act(GameAction::SelectCards { cards: vec![equipment] }).unwrap();
+                dig_seen = true;
+            }
+            WaitingFor::EffectZoneChoice { cards, .. } => {
+                assert!(cards.contains(&chosen_host) && cards.contains(&other_host));
+                assert!(!cards.contains(&foreign));
+                runner.act(GameAction::SelectCards { cards: vec![chosen_host] }).unwrap();
+                host_seen = true;
+            }
+            other => panic!("the attack trigger must complete its represented Equipment/host choices: {other:?}"),
+        }
+    }
+    assert!(
+        dig_seen && host_seen,
+        "both printed choices must be reached"
+    );
+    assert_eq!(runner.state().objects[&equipment].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(chosen_host))
+    );
+    assert_eq!(runner.state().objects[&chosen_host].power, Some(3));
+    assert_eq!(runner.state().objects[&other_host].power, Some(3));
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn ghostfire_full_colorless_source_can_damage_a_creature_with_protection_from_red() {
+    use super::jev_cost_populations::export_route_repair_db;
+    use engine::game::scenario_db::GameScenarioDbExt;
+    let db = export_route_repair_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(2, &[ManaType::Red]));
+    let recipient = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Protection from red recipient",
+            2,
+            5,
+            "Protection from red",
+        )
+        .id();
+    let decoy = scenario
+        .add_creature(P1, "Unselected damage decoy", 2, 5)
+        .id();
+    let spell = scenario
+        .add_real_card(P0, "Ghostfire", Zone::Hand, &db)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(recipient).resolve();
+    assert_eq!(
+        runner.state().objects[&recipient].damage_marked,
+        3,
+        "the complete printed colorless source and damage instruction resolve together"
+    );
+    assert_eq!(runner.state().objects[&decoy].damage_marked, 0);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}

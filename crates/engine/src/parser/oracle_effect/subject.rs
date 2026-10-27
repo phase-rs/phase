@@ -5797,6 +5797,28 @@ fn build_continuous_clause(
     names_deferred: bool,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
+    // CR 702.14a + CR 608.2d: a chosen landwalk parameter needs the basic-land
+    // choice bound by the resolving ability. A literal Landwalk(String) cannot
+    // carry that binding, and must not absorb its duration as a subtype name.
+    if (
+        alt((tag::<_, _, OracleError<'_>>("gain "), tag("have "))),
+        tag("landwalk "),
+        tag("of "),
+        tag("the chosen type"),
+        peek(alt((
+            value((), tag(" ")),
+            value((), tag(".")),
+            value((), eof),
+        ))),
+    )
+        .parse(normalized.to_lowercase().as_str())
+        .is_ok()
+    {
+        return Some(super::parsed_clause(Effect::unimplemented(
+            "chosen_landwalk",
+            predicate,
+        )));
+    }
 
     // B15: Guard against "becomes" predicates routing through continuous clause parsing.
     // Creature-land animations ("becomes a 3/3 Dinosaur creature with trample") must
@@ -6230,8 +6252,15 @@ fn strip_continuous_duration(predicate: &str) -> (std::borrow::Cow<'_, str>, Opt
             .trim_end()
             .trim_end_matches('.')
             .trim_end();
-        let (body, duration) = super::strip_trailing_duration(descriptor);
+        let descriptor_lower = descriptor.to_lowercase();
+        let (without_where, where_x) =
+            super::strip_trailing_where_x(TextPair::new(descriptor, &descriptor_lower));
+        let (body, duration) = super::strip_trailing_duration(without_where.original);
         if duration.is_some() {
+            let body = match where_x {
+                Some(expression) => format!("{body}, where X is {expression}"),
+                None => body.to_owned(),
+            };
             return (
                 std::borrow::Cow::Owned(format!("{body}. {}", predicate[descriptor_end..].trim())),
                 duration,
@@ -6277,7 +6306,10 @@ fn build_become_clause(
     // of the game, so an undurated "becomes" is permanent. (611.2b governs "for
     // as long as …" windows, which is a different clause of the same rule and
     // is what the attachment rewrite in `oracle_ir::ast` keys off.)
-    let duration = stated_duration.clone().or(Some(Duration::Permanent));
+    let duration = stated_duration
+        .clone()
+        .or_else(|| ctx.stated_clause_duration.clone())
+        .or(Some(Duration::Permanent));
 
     // CR 119.5: "life total becomes N" — set life total to a specific number.
     // Must intercept before parse_animation_spec which tokenizes each word as a subtype.
@@ -6794,9 +6826,16 @@ fn take_until_name_terminator(input: &str) -> OracleResult<'_, &str> {
     // UTF-8-safe word-boundary scan: never indexes mid-codepoint, unlike a raw
     // byte-increment loop. The captured prefix includes the trailing space
     // before "and" (e.g. "Fenric "); the caller trims it.
-    nom_primitives::scan_split_at_phrase(input, and_clause_verb)
-        .map(|(name, rest)| (rest, name))
-        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::TakeUntil)))
+    nom_primitives::scan_split_at_phrase(input, |candidate| {
+        alt((
+            and_clause_verb,
+            value((), tag::<_, _, OracleError<'_>>("it's still ")),
+            value((), tag("it is still ")),
+        ))
+        .parse(candidate)
+    })
+    .map(|(name, rest)| (rest, name))
+    .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::TakeUntil)))
 }
 
 fn try_parse_become_and_attack_if_able(
@@ -10261,7 +10300,7 @@ mod tests {
         );
         assert_eq!(name.as_deref(), Some("Fenric"));
         assert_eq!(
-            before, "becomes a 6/6 Horror creature",
+            before, "becomes a 6/6 Horror creature and loses all abilities",
             "the ' named ...' clause must be removed from the residual"
         );
     }
@@ -13955,6 +13994,33 @@ mod retained_shipping_member_tests {
             let clause = build_continuous_clause(application.clone(), predicate, &ParseContext::default(), false).unwrap();
             assert_eq!(clause.duration, Some(expected.clone()));
             assert!(matches!(clause.effect, Effect::GenericEffect { duration: Some(ref actual), .. } if actual == &expected));
+        }
+    }
+
+    // SHAPE: paired owner-admission coverage supplements the paid delayed
+    // Giant Slug production-path test in jev_modifier_publication.
+    #[test]
+    fn chosen_landwalk_refusal_composes_with_every_normalized_grant_verb() {
+        for verb in ["gain", "gains", "have", "has"] {
+            let ordinary = format!("This creature {verb} forestwalk until end of turn");
+            let ordinary =
+                try_parse_subject_continuous_clause(&ordinary, &mut ParseContext::default())
+                    .unwrap();
+            assert_eq!(ordinary.duration, Some(Duration::UntilEndOfTurn));
+            assert!(
+                matches!(ordinary.effect, Effect::GenericEffect { ref static_abilities, .. }
+                if static_abilities.iter().any(|definition| definition.modifications.iter().any(|modification|
+                    matches!(modification, ContinuousModification::AddKeyword { keyword: Keyword::Landwalk(land) } if land == "Forest"))))
+            );
+
+            let chosen = format!(
+                "This creature {verb} landwalk of the chosen type until the end of that turn"
+            );
+            let chosen =
+                try_parse_subject_continuous_clause(&chosen, &mut ParseContext::default()).unwrap();
+            assert!(
+                matches!(chosen.effect, Effect::Unimplemented { ref name, .. } if name == "chosen_landwalk")
+            );
         }
     }
 

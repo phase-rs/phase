@@ -7324,6 +7324,13 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     let text = text.trim();
     let duration_text = text.trim_end_matches('.').trim();
     let lower = duration_text.to_lowercase();
+    // CR 205.1b: a retained-type sentence belongs to the animation descriptor.
+    // A borrowed prefix cannot carry that suffix after a duration is removed.
+    // Leave this transaction to the complete descriptor's Cow-based owner.
+    let unquoted = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
+    if crate::parser::oracle_static::split_type_retention_clause(&unquoted).is_some() {
+        return (text, None);
+    }
     if target_relative_clause_owns_suffix(lower.as_str())
         || bare_dealt_damage_relative_clause_owns_suffix(lower.as_str())
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
@@ -11226,6 +11233,13 @@ pub(super) fn compute_sentence_leading_duration(chunks: &[ClauseChunk]) -> Vec<O
 }
 
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
+    // CR 205.1b + CR 107.3: the complete animation owns both the quantity
+    // definition and the following retention sentence. Returning only `before`
+    // here would discard the retention policy before type modification emission.
+    let unquoted = nom_primitives::mask_double_quoted_spans_preserving_len(tp.lower);
+    if crate::parser::oracle_static::split_type_retention_clause(&unquoted).is_some() {
+        return (tp, None);
+    }
     // CR 106.6 + CR 603.7a: a spend-trigger body's X belongs to the
     // registered later ability. Keep its entire defining clause together so
     // the spend-trigger owner can bind it or refuse it atomically.
