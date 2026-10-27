@@ -3777,6 +3777,100 @@ mod complete_source_choice_publication_tests {
     }
 
     #[test]
+    fn normal_loaders_preserve_complete_recursive_coin_source_entries_and_metadata() {
+        use crate::types::ability::*;
+        let mut front = source_program_face();
+        front.scryfall_oracle_id = Some("recursive-loader-fixture".into());
+        let reader = front.abilities[0].sub_ability.take().unwrap();
+        front.abilities[0].sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(reader.clone()),
+                lose_effect: Some(reader),
+                flipper: TargetFilter::Controller,
+            },
+        )));
+        let back = CardFace {
+            name: "Typed source ownership back".into(),
+            abilities: vec![front.abilities[1].clone()],
+            ..front.clone()
+        };
+        let expected: HashMap<String, CardExportEntry> = [front.clone(), back]
+            .into_iter()
+            .enumerate()
+            .map(|(index, face)| {
+                (
+                    face.name.to_lowercase(),
+                    CardExportEntry {
+                        face,
+                        legalities: HashMap::from([
+                            ("commander".into(), "Legal".into()),
+                            ("vintage".into(), "Restricted".into()),
+                        ]),
+                        layout: Some("transform".into()),
+                        face_index: Some(index),
+                        printings: vec!["TST".into(), "TST2".into()],
+                        rulings: vec![Ruling {
+                            date: "2026-10-04".into(),
+                            text: format!("Loader metadata fixture, face {index}."),
+                        }],
+                        bracket_signals: BracketSignals {
+                            game_changer: index == 0,
+                            mass_land_denial: index == 1,
+                            extra_turn: true,
+                            efficient_tutor: false,
+                        },
+                    },
+                )
+            })
+            .collect();
+        for old in [None, Some(false), Some(true)] {
+            let mut raw = serde_json::to_value(&expected).unwrap();
+            if let Some(unit) = old {
+                omit_source_choosers(&mut raw, unit);
+            }
+            let json = serde_json::to_string(&raw).unwrap();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), &json).unwrap();
+            for db in [
+                CardDatabase::from_json_str(&json).unwrap(),
+                CardDatabase::from_export(file.path()).unwrap(),
+                CardDatabase::from_export_reader(json.as_bytes()).unwrap(),
+            ] {
+                assert_eq!(db.face_index.len(), expected.len());
+                for (key, entry) in &expected {
+                    assert_eq!(db.face_index.get(key), Some(&entry.face));
+                    assert_eq!(db.face_order_index.get(key), entry.face_index.as_ref());
+                    assert_eq!(db.printings_for_key(key), entry.printings.as_slice());
+                    assert_eq!(db.rulings_for(key), entry.rulings.as_slice());
+                    assert_eq!(db.bracket_signals_by_name[key], entry.bracket_signals);
+                    assert_eq!(
+                        db.get_legalities(key),
+                        Some(&HashMap::from([
+                            (LegalityFormat::Commander, LegalityStatus::Legal),
+                            (LegalityFormat::Vintage, LegalityStatus::Restricted),
+                        ]))
+                    );
+                }
+                assert_eq!(
+                    db.get_face_by_oracle_id("recursive-loader-fixture"),
+                    Some(&front)
+                );
+                assert_eq!(
+                    db.get_layout_kind("recursive-loader-fixture"),
+                    Some(LayoutKind::Transform)
+                );
+                assert_source_program_public_flow(
+                    db.get_face_by_name(&front.name).unwrap(),
+                    None,
+                    false,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn both_canonical_legacy_readers_keep_later_fresh_choice_and_genuine_own_reader() {
         for wire in [false, true] {
             assert_source_program_public_flow(&source_program_face(), Some(wire), false);

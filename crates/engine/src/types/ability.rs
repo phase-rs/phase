@@ -2374,6 +2374,12 @@ pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Val
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned);
                 for (key, child) in object.iter_mut() {
+                    // A tagged node's discriminator is not a child program.
+                    // Rewriting it as a legacy unit filter would create another
+                    // tagged node and recurse into the same discriminator forever.
+                    if key == "type" {
+                        continue;
+                    }
                     // Own-resolution descendants and actual flip branches inherit
                     // the producer. Match the registered payload boundaries of
                     // ability_visit::visit_effect_scoped, not all of the creator's
@@ -2400,6 +2406,54 @@ pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Val
 mod legacy_damage_source_scope_tests {
     use super::normalize_legacy_damage_source_program;
     use serde_json::{json, Value};
+
+    #[test]
+    fn tagged_and_legacy_source_nodes_keep_scalar_discriminants_and_are_idempotent() {
+        for own_resolution in [false, true] {
+            let inferred_chooser = if own_resolution {
+                Value::Null
+            } else {
+                json!("Controller")
+            };
+            for (input, expected) in [
+                (
+                    json!({"type":"ChosenDamageSource", "chooser":null, "filter":{"type":"Any"}}),
+                    json!({"type":"ChosenDamageSource", "chooser":null, "filter":{"type":"Any"}}),
+                ),
+                (
+                    json!({"type":"ChosenDamageSource", "chooser":"Controller", "filter":{"type":"Any"}}),
+                    json!({"type":"ChosenDamageSource", "chooser":"Controller", "filter":{"type":"Any"}}),
+                ),
+                (
+                    json!({"type":"ChosenDamageSource", "filter":{"type":"Any"}}),
+                    json!({"type":"ChosenDamageSource", "chooser":inferred_chooser, "filter":{"type":"Any"}}),
+                ),
+                (
+                    json!("ChosenDamageSource"),
+                    json!({"type":"ChosenDamageSource", "chooser":inferred_chooser}),
+                ),
+            ] {
+                let program = |filter: Value| {
+                    let reader = json!({"type":"PreventDamage", "damage_source_filter":filter});
+                    let effect = if own_resolution {
+                        reader
+                    } else {
+                        json!({"type":"CreateDrawReplacement", "replacement_effect":reader})
+                    };
+                    json!({"effect":{"type":"ChooseDamageSource"}, "sub_ability":{"effect":effect}})
+                };
+                let mut actual = program(input);
+                let expected = program(expected);
+                normalize_legacy_damage_source_program(&mut actual);
+                assert_eq!(actual, expected, "own resolution: {own_resolution}");
+                normalize_legacy_damage_source_program(&mut actual);
+                assert_eq!(
+                    actual, expected,
+                    "a second normalization must preserve the whole program"
+                );
+            }
+        }
+    }
 
     #[test]
     fn all_registered_payloads_reset_legacy_ownership_while_own_resolution_branches_inherit() {
