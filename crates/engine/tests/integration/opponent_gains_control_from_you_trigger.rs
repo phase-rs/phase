@@ -2914,12 +2914,13 @@ fn roaming_throne_board(chosen: &str, aftermath: ThroneAftermath) -> usize {
 
 /// R2-2: the Throne's chosen type is latched with it, and judged as it was
 /// when Zidane's ability triggered. A Human Throne: 2 whether it stays, is
-/// sacrificed in the same resolution (in the graveyard, it no longer has a
-/// chosen type) or is blinked. An Elf Throne: 1.
+/// sacrificed in the same resolution or is blinked. An Elf Throne: 1.
 ///
-/// The blinked leg is documentation only: the returned Throne's as-enters
-/// choice is a boundary at which the pending triggers are collected, before
-/// it chooses again, so it doesn't discriminate (the sacrificed leg does).
+/// Production documentation, not a discriminator: the blinked Throne's
+/// as-enters choice is a boundary at which the pending triggers are collected
+/// before it chooses again, and the sacrificed Throne's departed object still
+/// answers its chosen type. The doubling seam is discriminated by
+/// `the_doubling_seam_reads_the_latched_doublers_chosen_type`.
 #[test]
 fn a_latched_doubler_keeps_its_chosen_type() {
     use ThroneAftermath::*;
@@ -3016,4 +3017,166 @@ fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
         zidane_triggers, 2,
         "Zidane's trigger and its additional trigger from the latched Human Throne"
     );
+}
+
+/// A labelled synthetic "triggers an additional time" static with scope
+/// `affected` (CR 603.2d).
+fn double_triggers(affected: TargetFilter) -> engine::types::ability::StaticDefinition {
+    engine::types::ability::StaticDefinition::new(
+        engine::types::statics::StaticMode::DoubleTriggers {
+            cause: engine::types::statics::TriggerCause::Any,
+        },
+    )
+    .affected(affected)
+}
+
+/// Labelled synthetic: a steal that pumps what it takes.
+const STEAL_AND_PUMP: &str = "Gain control of target creature. It gets +4/+4 until end of turn.";
+
+/// Casts `spell` (P1) on `target` and resolves it alone, returning its events.
+fn resolve_targeted(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) -> Vec<GameEvent> {
+    give_priority(runner, P1);
+    runner.cast(spell).target_object(target).commit();
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == spell)
+        {
+            if let Ok(result) = runner.act(GameAction::PassPriority) {
+                events.extend(result.events);
+            }
+        }
+    }
+    events
+}
+
+/// R2-2 residual (CR 603.2d + CR 603.10d): a latched doubler's scope is
+/// judged with its characteristics as they were. P0 controls Zidane (3/3) and
+/// a labelled synthetic 2/2 doubler whose scope is "creatures you control with
+/// power greater than this's". P1 steals the doubler, pumping it to 6/6 with
+/// `pump`. Zidane's trigger for that loss is P0's and, as things stood then,
+/// Zidane (3) had greater power than the doubler (2): P0 gets 2 either way.
+#[test]
+fn a_latched_doubler_is_judged_with_its_power_then() {
+    use engine::types::ability::{ControllerRef, FilterProp, TypedFilter};
+    for pump in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let zidane = add_zidane(&mut scenario, P0);
+        let doubler = scenario
+            .add_creature(P0, "Relative Doubler", 2, 2)
+            .with_static_definition(double_triggers(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::PowerGTSource]),
+            )))
+            .id();
+        let spell = if pump {
+            add_free_spell(&mut scenario, P1, "Steal and Pump", STEAL_AND_PUMP)
+        } else {
+            add_free_spell(&mut scenario, P1, "Act of Treason", ACT_OF_TREASON)
+        };
+        let mut runner = scenario.build();
+        let before = treasures(&runner, P0);
+
+        let events = resolve_targeted(&mut runner, spell, doubler);
+        let observed: Vec<_> = controller_changes(&events)
+            .into_iter()
+            .filter(|(_, evidence)| !evidence.is_unrecorded())
+            .collect();
+        assert_eq!(observed.len(), 1, "REACH: one observed control change");
+        let observation = runner
+            .state()
+            .control_change_observation(observed[0].1)
+            .expect("REACH: Zidane's pending trigger keeps the observation");
+        let latched = observation
+            .doublers
+            .iter()
+            .find(|latched| latched.source_id() == doubler)
+            .expect("REACH: the doubler is latched");
+        assert_eq!(
+            (latched.controller(), latched.source.lki.power),
+            (P0, Some(2)),
+            "REACH: latched as P0's 2-power doubler"
+        );
+        assert!(
+            observation.watchers.iter().any(|watcher| {
+                watcher.identity.reference.object_id == zidane && watcher.lki.power == Some(3)
+            }),
+            "REACH: Zidane latched with power 3"
+        );
+        assert_eq!(controller(&runner, doubler), P1, "REACH: P1 took it");
+        if pump {
+            assert_eq!(
+                runner.state().objects[&doubler].power,
+                Some(6),
+                "REACH: the live doubler is a 6/6"
+            );
+        }
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            treasures(&runner, P0) - before,
+            2,
+            "pump {pump}: doubled, judged as things stood"
+        );
+    }
+}
+
+/// R2-3 (CR 603.2d): a doubler whose scope is itself ("~", `SelfRef`) is
+/// judged by exact identity against the latched watcher. A labelled synthetic
+/// "If a triggered ability of ~ triggers, it triggers an additional time" on:
+/// - Zidane, with Zidane stolen (Word of Seizing): 2;
+/// - Zidane, with P0's bear stolen instead: 2;
+/// - the bear, with a second P0 bear stolen: 1 (the scope names the bear, not
+///   Zidane).
+///
+/// A doubler naming itself by id (`SpecificObject`) isn't printed (the parser
+/// emits `SelfRef` for "~"); the shared self-exclusion
+/// (`filter_references_self`) leaves it undoubled on every path.
+#[test]
+fn a_self_scoped_doubler_is_judged_by_identity() {
+    for (doubler_on_zidane, steal_zidane, expected) in
+        [(true, true, 2), (true, false, 2), (false, false, 1)]
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let zidane = add_zidane(&mut scenario, P0);
+        let bear = scenario.add_vanilla(P0, 2, 2);
+        let other_bear = scenario.add_vanilla(P0, 2, 2);
+        let word = scenario
+            .add_spell_to_hand_from_oracle(P1, "Word of Seizing", true, "")
+            .from_oracle_text_with_keywords(&["Split second"], WORD_OF_SEIZING)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        let carrier = if doubler_on_zidane { zidane } else { bear };
+        {
+            let object = runner.state_mut().objects.get_mut(&carrier).unwrap();
+            object
+                .static_definitions
+                .push(double_triggers(TargetFilter::SelfRef));
+            std::sync::Arc::make_mut(&mut object.base_static_definitions)
+                .push(double_triggers(TargetFilter::SelfRef));
+        }
+        engine::game::layers::flush_layers(runner.state_mut());
+        let before = treasures(&runner, P0);
+        let stolen = match (steal_zidane, doubler_on_zidane) {
+            (true, _) => zidane,
+            (false, true) => bear,
+            (false, false) => other_bear,
+        };
+
+        resolve_targeted(&mut runner, word, stolen);
+        assert_eq!(controller(&runner, stolen), P1, "REACH: P1 took it");
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            treasures(&runner, P0) - before,
+            expected,
+            "doubler on Zidane {doubler_on_zidane}, Zidane stolen {steal_zidane}"
+        );
+    }
 }

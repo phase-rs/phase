@@ -11683,10 +11683,13 @@ fn control_change_doubling_authority<'a>(
         .then_some((observation.doublers.as_slice(), source))
 }
 
-/// CR 603.2d + CR 603.10d: match a look-back trigger's latched source against
-/// a latched doubler's scope: the source's snapshot from immediately before the
-/// change, judged from the doubler as observed then ("you" is its controller,
-/// and source-relative scope reads its observed facts, such as a chosen type).
+/// CR 603.2d + CR 603.10d: match a look-back trigger's latched source (the
+/// watcher, `source`) against a latched doubler's scope, entirely as both
+/// stood immediately before the change: no live object, no
+/// `TriggerSourceContext::source_read`. `None` is a scope this evaluator can't
+/// judge from the captured data alone; the trigger is then not doubled (fail
+/// closed; no printed doubler's scope is in that class: see
+/// `latched_doubler_scope`).
 fn latched_source_matches_doubler_filter(
     state: &GameState,
     source: &TriggerSourceContext,
@@ -11698,13 +11701,316 @@ fn latched_source_matches_doubler_filter(
     {
         return false;
     }
-    matches_target_filter_on_lki_snapshot(
-        state,
-        source.identity.reference.object_id,
-        &source.lki,
-        filter,
-        &FilterContext::from_trigger_source(&doubler.source),
-    )
+    latched_doubler_scope(state, source, filter, doubler).unwrap_or(false)
+}
+
+/// The exhaustive scope evaluator for a latched doubler (no wildcard arm: a
+/// new `TargetFilter` or `FilterProp` variant fails to compile until it's
+/// classified). Source-relative reads are modelled exactly from the captured
+/// data: the doubler's identity, controller, chosen attributes, attachment and
+/// power, and the watcher's identity, controller, attachments and
+/// characteristics. Watcher-only properties are judged on the watcher's
+/// snapshot with a neutral context (no source). Everything else is `None`.
+///
+/// Every printed `DoubleTriggers` scope is judgeable here (census at this
+/// change: `You`, `Another`, `SelfRef`, `IsChosenCreatureType`,
+/// `AttachedTo { Source }`, `EquippedBy`, plus watcher-only types, subtypes,
+/// supertypes, a fixed power comparison and color count).
+fn latched_doubler_scope(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    filter: &TargetFilter,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> Option<bool> {
+    let watcher_id = watcher.identity.reference.object_id;
+    match filter {
+        TargetFilter::Any => Some(true),
+        TargetFilter::SelfRef => {
+            Some(watcher.identity.reference == doubler.source.identity.reference)
+        }
+        TargetFilter::SpecificObject { id } => Some(watcher_id == *id),
+        TargetFilter::Or { filters } => filters.iter().try_fold(false, |any, filter| {
+            Some(any | latched_doubler_scope(state, watcher, filter, doubler)?)
+        }),
+        TargetFilter::And { filters } => filters.iter().try_fold(true, |all, filter| {
+            Some(all & latched_doubler_scope(state, watcher, filter, doubler)?)
+        }),
+        TargetFilter::Not { filter } => {
+            latched_doubler_scope(state, watcher, filter, doubler).map(|matched| !matched)
+        }
+        TargetFilter::Typed(typed) => {
+            let controller_matches = match &typed.controller {
+                None => true,
+                Some(crate::types::ability::ControllerRef::You) => {
+                    watcher.lki.controller == doubler.controller()
+                }
+                Some(_) => return None,
+            };
+            let mut watcher_only = Vec::new();
+            for property in &typed.properties {
+                match latched_doubler_property(state, watcher, property, doubler)? {
+                    LatchedScopeProperty::Judged(matched) => {
+                        if !matched {
+                            return Some(false);
+                        }
+                    }
+                    LatchedScopeProperty::WatcherOnly => watcher_only.push(property.clone()),
+                }
+            }
+            let characteristics = TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: typed.type_filters.clone(),
+                controller: None,
+                properties: watcher_only,
+            });
+            Some(
+                controller_matches
+                    && matches_target_filter_on_lki_snapshot(
+                        state,
+                        watcher_id,
+                        &watcher.lki,
+                        &characteristics,
+                        &FilterContext::neutral(),
+                    ),
+            )
+        }
+        TargetFilter::None
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::AllPlayers => None,
+    }
+}
+
+/// How one property of a latched doubler's scope is judged.
+enum LatchedScopeProperty {
+    /// A source-relative property, judged here from the captured data.
+    Judged(bool),
+    /// Reads only the watcher's own characteristics: judged on its snapshot.
+    WatcherOnly,
+}
+
+/// `None`: not judgeable from the captured data (fail closed).
+fn latched_doubler_property(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    property: &crate::types::ability::FilterProp,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> Option<LatchedScopeProperty> {
+    use crate::types::ability::{AttachmentKind, AttachmentReferent, FilterProp, QuantityExpr};
+    use LatchedScopeProperty::{Judged, WatcherOnly};
+    let doubler_id = doubler.source_id();
+    let watcher_id = watcher.identity.reference.object_id;
+    let doubler_lki = &doubler.source.lki;
+    Some(match property {
+        // CR 109.1: "another" excludes the doubler itself.
+        FilterProp::Another => Judged(watcher_id != doubler_id),
+        // CR 205.3e + CR 702.73a: the doubler's chosen creature type, as chosen
+        // then.
+        FilterProp::IsChosenCreatureType => Judged(doubler_lki.chosen_attributes.iter().any(
+            |attribute| match attribute {
+                crate::types::ability::ChosenAttribute::CreatureType(chosen) => {
+                    super::filter::subtype_matches_with_changeling(
+                        chosen,
+                        &watcher.lki.subtypes,
+                        &watcher.lki.keywords,
+                        &state.all_creature_types,
+                    )
+                }
+                _ => false,
+            },
+        )),
+        // CR 301.5 + CR 303.4: the watcher was attached to the doubler.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Source,
+        } => Judged(watcher.attached_to.and_then(|target| target.as_object()) == Some(doubler_id)),
+        // CR 301.5 + CR 301.5f: equipped by the doubler (an attached
+        // Equipment names its own host; an unattached one names nothing; a
+        // non-Equipment doubler asks for any Equipment), as attached then.
+        FilterProp::EquippedBy => Judged(match doubler.source.attached_to {
+            Some(target) => target.as_object() == Some(watcher_id),
+            None if doubler_lki.subtypes.iter().any(|s| s == "Equipment") => false,
+            None => watcher
+                .attachments
+                .iter()
+                .any(|attachment| attachment.kind == AttachmentKind::Equipment),
+        }),
+        // Relative power ("greater power than ~"), both as they were.
+        FilterProp::PowerGTSource => Judged(match (watcher.lki.power, doubler_lki.power) {
+            (Some(watcher_power), Some(doubler_power)) => watcher_power > doubler_power,
+            _ => false,
+        }),
+        // The watcher's own characteristics, on its snapshot.
+        FilterProp::HasSupertype { .. }
+        | FilterProp::NotSupertype { .. }
+        | FilterProp::HasColor { .. }
+        | FilterProp::NotColor { .. }
+        | FilterProp::ColorCount { .. }
+        | FilterProp::ToughnessGTPower
+        | FilterProp::WithKeyword { .. }
+        | FilterProp::WithoutKeyword { .. }
+        | FilterProp::HasKeywordKind { .. }
+        | FilterProp::WithoutKeywordKind { .. } => WatcherOnly,
+        FilterProp::PtComparison { value, .. } => {
+            if matches!(value, QuantityExpr::Fixed { .. }) {
+                WatcherOnly
+            } else {
+                return None;
+            }
+        }
+        FilterProp::AnyOf { props } => {
+            let mut judged = Vec::new();
+            for prop in props {
+                judged.push(latched_doubler_property(state, watcher, prop, doubler)?);
+            }
+            if judged
+                .iter()
+                .all(|property| matches!(property, WatcherOnly))
+            {
+                WatcherOnly
+            } else {
+                return None;
+            }
+        }
+        FilterProp::Not { prop } => {
+            match latched_doubler_property(state, watcher, prop, doubler)? {
+                Judged(matched) => Judged(!matched),
+                WatcherOnly => WatcherOnly,
+            }
+        }
+        // Not judgeable from the captured data: live state, ledgers, other
+        // players' choices, zones, stack or event context.
+        FilterProp::Token
+        | FilterProp::NonToken
+        | FilterProp::RepresentedByCard
+        | FilterProp::ControllerChoseLabel { .. }
+        | FilterProp::ControllerMatches { .. }
+        | FilterProp::WasPlayed { .. }
+        | FilterProp::Attacking { .. }
+        | FilterProp::Blocking
+        | FilterProp::BlockingSource
+        | FilterProp::CombatRelation { .. }
+        | FilterProp::BlockStatus { .. }
+        | FilterProp::AttackingAlone
+        | FilterProp::BlockingAlone
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::IsSaddled
+        | FilterProp::SaddledSource
+        | FilterProp::CrewedThisTurn { .. }
+        | FilterProp::ConvokedSource
+        | FilterProp::ProtectorMatches { .. }
+        | FilterProp::HasHasteOrControlledSinceTurnBegan
+        | FilterProp::CanEnchant { .. }
+        | FilterProp::Counters { .. }
+        | FilterProp::Cmc { .. }
+        | FilterProp::ManaValueParity { .. }
+        | FilterProp::ManaCostIn { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::Foretold
+        | FilterProp::HasAdventure
+        | FilterProp::EnchantedBy
+        | FilterProp::AttachedTo { .. }
+        | FilterProp::HasAttachment { .. }
+        | FilterProp::HasAnyAttachmentOf { .. }
+        | FilterProp::Unpaired
+        | FilterProp::OtherThanTriggerObject
+        | FilterProp::ManaSymbolCount { .. }
+        | FilterProp::MostPrevalentCreatureTypeIn { .. }
+        | FilterProp::IsChosenColor
+        | FilterProp::IsChosenCardType
+        | FilterProp::MatchesLastChosenCardPredicate
+        | FilterProp::HasSingleTarget
+        | FilterProp::Modal
+        | FilterProp::PrepareSpell
+        | FilterProp::Suspected
+        | FilterProp::Renowned
+        | FilterProp::Goaded
+        | FilterProp::Prepared
+        | FilterProp::PowerExceedsBase
+        | FilterProp::InTrackedSet { .. }
+        | FilterProp::Modified
+        | FilterProp::Historic
+        | FilterProp::NotHistoric
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::DistinctFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::DealtDamageThisTurn { .. }
+        | FilterProp::EnteredThisTurn
+        | FilterProp::ControlledContinuouslySinceTurnBegan
+        | FilterProp::ZoneChangedThisTurn { .. }
+        | FilterProp::AttackedThisTurn { .. }
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::CountersPutOnThisTurn { .. }
+        | FilterProp::FaceDown
+        | FilterProp::Transformed
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::CouldBeTargetedByTriggeringSpell
+        | FilterProp::HasXInManaCost
+        | FilterProp::HasXInActivationCost
+        | FilterProp::WasKicked { .. }
+        | FilterProp::HasManaAbility
+        | FilterProp::HasNoAbilities
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
+        | FilterProp::SameNameAsExiledBySource
+        | FilterProp::NameMatchesAnyPermanent { .. }
+        | FilterProp::IsCommander
+        | FilterProp::SharesCreatureTypeWithCommander
+        | FilterProp::Other { .. } => return None,
+    })
 }
 
 /// CR 603.2d: whether `doubler` makes `trigger` trigger an additional time.
@@ -18422,6 +18728,112 @@ pub mod tests {
         assert!(
             state.stack.is_empty(),
             "the delayed fallback must not push it"
+        );
+    }
+
+    /// CR 603.2d + CR 603.10d: every printed "triggers an additional time"
+    /// scope (one row per distinct parsed `affected` filter in the card export,
+    /// named by one card that has it) is judgeable by the latched evaluator,
+    /// so no printed doubler is declined on the look-back path.
+    #[test]
+    fn every_printed_doubler_scope_is_judged_on_the_latched_path() {
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        let doubler = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Doubler".to_string(),
+            Zone::Battlefield,
+        );
+        let watcher = trigger_source_context_for_latch(&state, &state.objects[&watcher]);
+        let doubler = crate::types::events::LatchedTriggerDoubler {
+            source: trigger_source_context_for_latch(&state, &state.objects[&doubler]),
+            cause: TriggerCause::Any,
+            affected: None,
+        };
+        for (card, shape) in [
+            (
+                "Ancient Greenwarden",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": ["Permanent"]}"#,
+            ),
+            (
+                "Annie Joins Up",
+                r#"{"controller": "You", "properties": [{"type": "HasSupertype", "value": "Legendary"}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+            (
+                "Bifur, Melodic Rider",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Dwarf"}]}"#,
+            ),
+            (
+                "Chief of the Wilds",
+                r#"{"filters": [{"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Wolf"}]}, {"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": ["Battle"]}], "type": "Or"}"#,
+            ),
+            (
+                "Clara Oswald",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Doctor"}]}"#,
+            ),
+            (
+                "Cloud, Midgar Mercenary",
+                r#"{"filters": [{"type": "SelfRef"}, {"controller": null, "properties": [{"to": {"type": "Source"}, "type": "AttachedTo"}], "type": "Typed", "type_filters": [{"Subtype": "Equipment"}]}], "type": "Or"}"#,
+            ),
+            (
+                "Delney, Streetwise Lookout",
+                r#"{"controller": "You", "properties": [{"comparator": "LE", "scope": "Current", "stat": "Power", "type": "PtComparison", "value": {"type": "Fixed", "value": 2}}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+            (
+                "Echoes of Eternity",
+                r#"{"filters": [{"controller": "You", "properties": [{"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Card"]}, {"controller": "You", "properties": [{"type": "Another"}, {"comparator": "EQ", "count": 0, "type": "ColorCount"}], "type": "Typed", "type_filters": ["Permanent"]}], "type": "Or"}"#,
+            ),
+            (
+                "Harmonic Prodigy",
+                r#"{"filters": [{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Shaman"}]}, {"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Wizard"}]}], "type": "Or"}"#,
+            ),
+            (
+                "Katara, the Fearless",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": [{"Subtype": "Ally"}]}"#,
+            ),
+            (
+                "Roaming Throne",
+                r#"{"controller": "You", "properties": [{"type": "Another"}, {"type": "IsChosenCreatureType"}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+            (
+                "Sanctum of All",
+                r#"{"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Shrine"}]}"#,
+            ),
+            (
+                "Splinter, Radical Rat",
+                r#"{"controller": "You", "properties": [], "type": "Typed", "type_filters": ["Creature", {"Subtype": "Ninja"}]}"#,
+            ),
+            (
+                "Twinflame Travelers",
+                r#"{"controller": "You", "properties": [{"type": "Another"}], "type": "Typed", "type_filters": [{"Subtype": "Elemental"}]}"#,
+            ),
+            (
+                "Wizard's Staff",
+                r#"{"controller": null, "properties": [{"type": "EquippedBy"}], "type": "Typed", "type_filters": ["Creature"]}"#,
+            ),
+        ] {
+            let filter: TargetFilter = serde_json::from_str(shape).expect("census shape decodes");
+            assert!(
+                latched_doubler_scope(&state, &watcher, &filter, &doubler).is_some(),
+                "{card}: its scope must be judgeable from the captured data"
+            );
+        }
+        // A scope that reads live state is declined (fail closed).
+        let live = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::creature()
+                .properties(vec![crate::types::ability::FilterProp::Tapped]),
+        );
+        assert_eq!(
+            latched_doubler_scope(&state, &watcher, &live, &doubler),
+            None
         );
     }
 
