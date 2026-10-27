@@ -11708,7 +11708,7 @@ fn doubler_applies(
         return false;
     }
     // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
-    // triggered abilities ? Panharmonicon/Yarok/Isshin/Wayta all scope to
+    // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
     // OTHER permanents. The carve-out: when the doubler's `affected` filter
     // references the source itself (`~`, e.g. Cloud's "a triggered ability
     // of Cloud or an Equipment attached to it"), CR 603.2d makes its own

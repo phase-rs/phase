@@ -3739,7 +3739,7 @@ pub(super) fn match_taps_for_mana(
 ///     is the source), otherwise the source context's controller, which must be
 ///     the new controller.
 ///   * `valid_target` judges the other participant relative to that "you": the
-///     gaining player on the lose side ("an opponent gains control ? from you",
+///     gaining player on the lose side ("an opponent gains control … from you",
 ///     CR 102.2 / CR 102.3), the losing player on the gain side.
 pub(super) fn match_changes_controller(
     event: &GameEvent,

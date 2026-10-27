@@ -11967,7 +11967,7 @@ pub(crate) fn fan_out_control_boundary(template: &ResolvedAbility) -> FanOutCont
 /// Each entry partitions the action's members by recipient on its own (each
 /// seat takes what that seat owns), so a seat's population is exactly what the
 /// printed text hands that seat. A population that drops the selected
-/// recipient (Aminatou's ?6 "controlled by the next player in the chosen
+/// recipient (Aminatou's −6 "controlled by the next player in the chosen
 /// direction", Scrambleverse's "for which they were chosen") would publish
 /// changes no printed instruction makes, so those producers stay unsupported
 /// (CR 608.2c, CR 608.2e).

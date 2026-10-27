@@ -66,7 +66,7 @@ fn zidane_cost() -> ManaCost {
     }
 }
 
-/// Zidane as printed: Legendary Creature ? Human Mutant Scout, 3/3.
+/// Zidane as printed: Legendary Creature — Human Mutant Scout, 3/3.
 fn add_zidane(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
     scenario
         .add_creature_from_oracle(player, "Zidane, Tantalus Thief", 3, 3, ZIDANE)
@@ -2111,7 +2111,7 @@ fn r7_1_unless_sacrifice_head_fails_closed() {
     }
 }
 
-/// R7-2 synthetic, hand-built (the parsed "if you control ?" binds "you" to the
+/// R7-2 synthetic, hand-built (the parsed "if you control …" binds "you" to the
 /// seat, a separate parse defect): "If you control three or more creatures,
 /// each player may gain control of all nontoken permanents they own."
 fn r7_2_conditional_return(scenario: &mut GameScenario, owner: PlayerId) -> ObjectId {
@@ -2503,9 +2503,9 @@ const AMINATOU: &str = "+1: Draw a card, then put a card from your hand on top o
     direction.\nAminatou, the Fateshifter can be your commander.";
 
 /// F2 (maintainer round 2; CR 102.3 + CR 608.2c + CR 608.2e): Two-Headed
-/// Giant, P0/P1 against P2/P3. Aminatou's parsed ?6 population drops "the
+/// Giant, P0/P1 against P2/P3. Aminatou's parsed −6 population drops "the
 /// next player in the chosen direction", so a seat's population isn't the
-/// permanents the printed text hands it, and a P1?P0 handoff (teammates, never
+/// permanents the printed text hands it, and a P1→P0 handoff (teammates, never
 /// an opponent's gain) can't be told from an opponent's gain. Not an
 /// allowlisted shape: every change it publishes is `Unrecorded`, and P1's
 /// Zidane creates nothing, in either direction.
@@ -2537,11 +2537,11 @@ fn aminatous_unpartitioned_team_handoff_does_not_fire() {
         let changes = controller_changes(&events);
         assert!(
             changes.iter().any(|(id, _)| *id == zidane),
-            "REACH ({direction}): the ?6 moved P1's Zidane: {changes:?}"
+            "REACH ({direction}): the −6 moved P1's Zidane: {changes:?}"
         );
         assert!(
             changes.iter().all(|(_, evidence)| evidence.is_unrecorded()),
-            "{direction}: Aminatou's ?6 publishes no observed change: {changes:?}"
+            "{direction}: Aminatou's −6 publishes no observed change: {changes:?}"
         );
         assert_eq!(
             treasures(&runner, P1) - before,
