@@ -383,6 +383,7 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
         assert_eq!(runner.state().objects[&peer].damage_marked, 0);
         assert!(!disabled(&runner), "this-turn restriction expires");
         add_mana(&mut runner, P0, ManaType::Red, 1);
+        priority(&mut runner, P0);
         runner
             .cast(expired_shield_shock)
             .target_object(target)
@@ -396,6 +397,7 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
         );
 
         add_mana(&mut runner, P0, ManaType::White, 1);
+        priority(&mut runner, P0);
         runner
             .cast(fresh_blessing)
             .target_object(target)
@@ -403,6 +405,7 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
             .assert_zone(&[fresh_blessing], Zone::Graveyard);
         finished(&runner);
         add_mana(&mut runner, P0, ManaType::Red, 1);
+        priority(&mut runner, P0);
         runner
             .cast(fresh_shield_shock)
             .target_object(target)
