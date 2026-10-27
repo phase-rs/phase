@@ -3800,6 +3800,94 @@ mod complete_publication_finalization_tests {
     use super::*;
 
     #[test]
+    fn complete_restrictions_lower_mixed_case_subtypes_on_both_entry_points() {
+        let subtype = |name: &str| {
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Subtype(name.to_string())],
+                ..Default::default()
+            })
+        };
+        for (predicate, filter) in [
+            ("can't be blocked by Walls", subtype("Wall")),
+            ("can't be blocked by Dragons", subtype("Dragon")),
+        ] {
+            let expected = vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBeBlockedBy { filter },
+            }];
+            assert_eq!(
+                super::super::keyword_grant::parse_complete_continuous_modifications(predicate),
+                Some(expected.clone()),
+                "{predicate}"
+            );
+            assert_eq!(
+                super::super::keyword_grant::parse_complete_continuous_members(predicate),
+                Some(vec![(expected, None, None, None)]),
+                "{predicate}"
+            );
+        }
+    }
+
+    #[test]
+    fn graaz_full_oracle_retains_wall_restriction_and_controller_scope() {
+        let text = "Juggernauts you control attack each combat if able.\nJuggernauts you control can't be blocked by Walls.\nOther creatures you control have base power and toughness 5/3 and are Juggernauts in addition to their other creature types.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Graaz, Unstoppable Juggernaut",
+            &[],
+            &[
+                "Legendary".to_string(),
+                "Artifact".to_string(),
+                "Creature".to_string(),
+            ],
+            &["Juggernaut".to_string()],
+        );
+        let wall = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Wall".to_string())],
+            ..Default::default()
+        });
+        let restriction = parsed
+            .statics
+            .iter()
+            .find(|definition| {
+                definition.modifications.iter().any(|modification| {
+                    *modification
+                        == ContinuousModification::AddStaticMode {
+                            mode: StaticMode::CantBeBlockedBy {
+                                filter: wall.clone(),
+                            },
+                        }
+                })
+            })
+            .expect("the complete predicate publishes the Wall restriction");
+        assert_eq!(
+            restriction.affected,
+            Some(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Juggernaut".to_string()),
+                ],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            }))
+        );
+        assert_eq!(
+            restriction.description.as_deref(),
+            Some("Juggernauts you control can't be blocked by Walls.")
+        );
+        let face = crate::types::card::CardFace {
+            abilities: parsed.abilities,
+            triggers: parsed.triggers,
+            static_abilities: parsed.statics,
+            replacements: parsed.replacements,
+            ..Default::default()
+        };
+        assert_eq!(
+            crate::game::coverage::card_face_gaps(&face),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
     fn complete_publication_denial_finalization_is_idempotent_and_keyword_specific() {
         let source = "Creatures your opponents control lose flying and can't have or gain trample.";
         let mut definitions = parse_static_line_multi_dispatch(source);

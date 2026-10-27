@@ -2777,7 +2777,7 @@ fn complete_modification_clause(
         return Some((vec![modification], verb));
     }
     // Restriction parsing already requires its complete clause.
-    if let Some(modes) = parse_restriction_modes(text) {
+    if let Some(modes) = parse_restriction_modes(lower.as_str()) {
         let mods: Vec<_> = modes
             .into_iter()
             .filter(static_mode_needs_grant_propagation)
