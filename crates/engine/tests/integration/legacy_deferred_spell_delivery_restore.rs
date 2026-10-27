@@ -67,7 +67,10 @@ fn gunzip_fixture(gz: &[u8]) -> Value {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    serde_json::from_str(&json).expect("fixture is JSON")
+    let mut fixture: Value = serde_json::from_str(&json).expect("fixture is JSON");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut fixture);
+    fixture
 }
 
 fn taigam_raw() -> Value {

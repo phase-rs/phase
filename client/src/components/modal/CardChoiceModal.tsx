@@ -464,6 +464,9 @@ export function CardChoiceModal() {
       );
     case "ChooseObjectsSelection":
       if (!canActForWaitingState) return null;
+      // CR 608.2d: a single pick is answered on the board via TargetingOverlay;
+      // only multi-pick selections need the list.
+      if (waitingFor.data.max === 1) return null;
       return (
         <ProliferateModal data={waitingFor.data} variant="chooseObjects" />
       );

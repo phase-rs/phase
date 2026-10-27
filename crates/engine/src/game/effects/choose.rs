@@ -191,6 +191,8 @@ pub(crate) fn resolve_random_in_chain(
                     ability.controller,
                 );
             }
+        } else if matches!(choice_type, ChoiceType::CardName) {
+            ability.update_trigger_source_context_through_chain(context);
         } else {
             ability.update_trigger_source_context_in_resolution_segment(context);
         }
@@ -275,6 +277,16 @@ pub(crate) fn bind_named_choice(
     let updated_context = source.as_deref_mut().and_then(|source| {
         let context = source.context.as_mut()?;
         if !choice_type.is_resolution_scoped_card_predicate_choice() {
+            // CR 608.2d + CR 201.2a: the resolution context answers "the name
+            // announced while applying THIS effect", so a fresh naming replaces
+            // the snapshot's earlier answers (a recast spell's prior casts).
+            // The source object's own history is untouched (CR 607.2d readers).
+            if matches!(choice_type, ChoiceType::CardName) {
+                context
+                    .lki
+                    .chosen_attributes
+                    .retain(|attribute| !matches!(attribute, ChosenAttribute::CardName(_)));
+            }
             apply_choice_attributes(&mut context.lki.chosen_attributes, choice_type, choice);
         }
         Some(context.clone())

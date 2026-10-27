@@ -3,9 +3,9 @@ use std::ops::ControlFlow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{all_consuming, eof, map, not, opt, peek, rest, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, rest, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -26,11 +26,13 @@ use super::super::oracle_quantity::{
     parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_bare_was_dealt_damage_suffix, parse_target, parse_target_with_ctx,
-    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_bare_was_dealt_damage_suffix, parse_source_blocked_history_clause, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
-use super::super::oracle_util::{parse_comparator_prefix, parse_count_expr, strip_after, TextPair};
+use super::super::oracle_util::{
+    parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
+};
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -39,13 +41,13 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
-    ConjureSource, ContinuousModification, ControllerRef, CountBinding, DamageChannel,
-    DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope, ExiledSpellRider,
-    FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec, NameStickerSet, ObjectProperty,
-    ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount, PreventionScope,
-    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope, RoundingMode,
-    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
+    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
+    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
+    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
+    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PreventionAmount,
+    PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef, RestrictionPlayerScope,
+    RoundingMode, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -905,6 +907,7 @@ pub(super) fn normalize_linked_exile_cast_bottom_cleanup(effect: &mut Effect) {
         ref mut target,
         ref mut count,
         position,
+        arranger: _,
     } = effect
     {
         if matches!(position, LibraryPosition::Bottom) {
@@ -976,6 +979,7 @@ pub(super) fn normalize_exile_until_cast_bottom_cleanup(effect: &mut Effect) {
         ref mut target,
         ref mut count,
         position,
+        arranger: _,
     } = effect
     {
         if matches!(position, LibraryPosition::Bottom) {
@@ -1023,6 +1027,7 @@ pub(super) fn attach_graveyard_redirect_rider_to_prior_cast_from_zone(
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position,
+            arranger: None,
         },
         SpellStackToGraveyardReplacement::Hand => Effect::ChangeZone {
             destination: Zone::Hand,
@@ -1438,6 +1443,7 @@ mod linked_exile_cleanup_tests {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         }
     }
 
@@ -2387,6 +2393,9 @@ pub(super) fn target_choice_timing_for_parsed(
     // printed text, so its lowercased fragment is computed once and shared.
     let lower = fragment.to_ascii_lowercase();
     let has_untargeted_resolution_choice = match &parsed.effect {
+        // CR 115.10a + CR 608.2d: a described sticker recipient is chosen
+        // during this instruction, independently of later printed targets.
+        Effect::PutSticker { target, .. } if !target.is_context_ref() => true,
         // CR 115.1d + CR 608.2d: an Attach instruction whose ATTACHMENT operand
         // is itself an untargeted choice ("attach an Equipment", "cast that
         // card") resolves that choice while the effect resolves; its explicit
@@ -3241,6 +3250,7 @@ impl ReflexiveGateParent {
             | Effect::SkipNextStep { .. }
             | Effect::AdditionalPhase { .. }
             | Effect::Double { .. }
+            | Effect::ModifyAnnouncedX { .. }
             | Effect::RuntimeHandled { .. }
             | Effect::Incubate { .. }
             | Effect::Amass { .. }
@@ -4234,6 +4244,7 @@ fn ability_reads_last_created(def: &AbilityDefinition) -> bool {
             | TargetFilter::PostReplacementDamageTarget
             | TargetFilter::PostReplacementDamageTargetOwner
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::HasChosenName
             | TargetFilter::Named { .. }
             | TargetFilter::Owner
@@ -4336,6 +4347,7 @@ pub(super) fn filter_tree_has_chosen_card(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -4573,11 +4585,16 @@ fn rebind_self_ref_grant_to_last_created(effect: &mut Effect) {
 /// whichever level it appears. Recurses into `CreateDelayedTrigger.effect` so
 /// the "sacrifice it" pattern inside a delayed trigger also rewrites.
 fn rewrite_populated_anaphor_in_def(def: &mut AbilityDefinition, token_is_attachable: bool) {
-    if let Some(new_effect) =
-        rewrite_token_created_this_way_unimplemented(&def.effect, def.duration.clone())
+    if let Some((new_effect, onset)) =
+        rewrite_token_anaphor_with_onset(&def.effect, def.duration.clone())
     {
         *def.effect = new_effect;
         def.duration = None;
+        // CR 611.2e + CR 111.3: the rewritten node is an instruction of this chain, so it
+        // carries the onset its verb phrase states — "The tokens have \"…\"" defines the
+        // tokens as they enter; "The token gains haste" applies after they are on the
+        // battlefield.
+        def.entry_onset = onset;
         return;
     }
 
@@ -4741,6 +4758,16 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
     effect: &Effect,
     clause_duration: Option<Duration>,
 ) -> Option<Effect> {
+    rewrite_token_anaphor_with_onset(effect, clause_duration).map(|(effect, _)| effect)
+}
+
+/// [`rewrite_token_created_this_way_unimplemented`], also returning the CR 611.2e onset the
+/// anaphor's verb phrase states, read by the subject-predicate authority
+/// [`subject::predicate_onset`].
+fn rewrite_token_anaphor_with_onset(
+    effect: &Effect,
+    clause_duration: Option<Duration>,
+) -> Option<(Effect, ContinuousEffectOnset)> {
     let Effect::Unimplemented { description, .. } = effect else {
         return None;
     };
@@ -4769,12 +4796,13 @@ pub(crate) fn rewrite_token_created_this_way_unimplemented(
         .affected(TargetFilter::LastCreated)
         .modifications(mods)
         .description(text.to_string());
-    Some(Effect::GenericEffect {
+    let effect = Effect::GenericEffect {
         static_abilities: vec![static_def],
         duration: duration.or(clause_duration).or(Some(Duration::Permanent)),
         target: Some(TargetFilter::LastCreated),
         end_cost: None,
-    })
+    };
+    Some((effect, subject::predicate_onset(rest.trim())))
 }
 
 /// CR 608.2c + CR 701.20: True when this effect publishes a revealed or
@@ -5345,10 +5373,11 @@ pub(super) fn strip_optional_effect_prefix(
 /// much as possible" rule. On success returns the suffix-free head; the
 /// match itself confirms the difference-repeat pattern.
 ///
-/// `strip_repeat_count_suffix` only recognizes numeric / `twice` / `three
-/// times` repeats via `parse_count_expr`, so this dedicated combinator owns
-/// the difference variant — it both detects and consumes the full suffix in
-/// one `terminated(take_until(..), tag(..))` operation.
+/// `strip_repeat_count_suffix` only peels a clause-final `twice` /
+/// `<count> times` repeat (any `parse_count_expr` count before "times"); this
+/// suffix ends in "the difference", not "times", so this dedicated combinator
+/// owns the difference variant — it both detects and consumes the full suffix
+/// in one `terminated(take_until(..), tag(..))` operation.
 pub(super) fn split_difference_repeat_suffix(text: &str) -> Option<&str> {
     const SUFFIX: &str = " a number of times equal to the difference";
     nom::sequence::terminated(take_until::<_, _, OracleError<'_>>(SUFFIX), tag(SUFFIX))
@@ -5568,13 +5597,20 @@ fn parse_flip_win_quantifier(input: &str) -> OracleResult<'_, ()> {
 /// (the game uses only integers), so this is plain count templating, not the
 /// CR 609.3 "do as much as possible" rule.
 ///
-/// Single authority for "attach trailing for-each multiplier", shared across
-/// quantity-taking verbs whose own quantity parser has already returned the
-/// exact remainder where the multiplier is allowed. The count parser leaves
-/// quantity nouns such as `card`/`cards` in the remainder, so this accepts that
-/// draw-count noun axis before the marker. Returns `None` when the remainder
-/// does not begin with an allowed multiplier shape or the clause does not parse
-/// — never silently substitutes `Fixed(1)`.
+/// `for every` is only a marker spelling of `for each`. The whole clause after
+/// the marker, numbered or not, goes to `parse_for_each_clause_expr`. That is
+/// the single grouped-quantity authority: "for every three cards in your
+/// graveyard" counts complete groups of three through
+/// `parse_for_each_grouped_clause_expr_with_parser`, which defines the group
+/// size once (N >= 2) and builds the floor `DivideRounded` (CR 107.1a). This
+/// seam does not parse group sizes itself.
+///
+/// Called by `counter::parse_counter_for_each_suffix` on the exact remainder its
+/// own quantity parser returned, where the multiplier is allowed. The count
+/// parser leaves quantity nouns such as `card`/`cards` in the remainder, so this
+/// accepts that noun axis before the marker. Returns `None` when the remainder
+/// does not begin with an allowed marker or the clause does not parse — never
+/// silently substitutes `Fixed(1)`.
 pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExpr> {
     let lower = text.to_lowercase();
     let ((), for_each_clause) = nom_on_lower(text, &lower, |input| {
@@ -5587,8 +5623,7 @@ pub(super) fn parse_for_each_multiplier_prefix(text: &str) -> Option<QuantityExp
             multispace1,
         ))
         .parse(rest)?;
-        let (rest, _) = tag("for each ").parse(rest)?;
-        Ok((rest, ()))
+        value((), alt((tag("for each "), tag("for every ")))).parse(rest)
     })?;
     let clause_lower = for_each_clause.to_lowercase();
     parse_for_each_clause_expr(clause_lower.trim_end_matches('.').trim())
@@ -5885,48 +5920,46 @@ pub(super) fn for_each_repeatable_repeat_for(text: &str) -> Option<QuantityExpr>
     }
 }
 
-/// CR 107.1: Strip "twice" / "three times" / "N times" suffix to produce a
-/// `repeat_for` count — an integer repeat multiplier (count templating), not the
-/// CR 609.3 "do as much as possible" rule. Unified with `strip_for_each_prefix`
-/// at the chain level so the base action is parsed normally and the resolver
-/// loops it N times.
+/// CR 608.2c + CR 608.2h + CR 107.1: Strip a trailing "twice" / "<count> times"
+/// repeat count to produce a `repeat_for` count, where `<count>` is any
+/// [`parse_count_expr`] phrase — a literal ("three times"), `X` ("X times"), the
+/// anaphoric "that many" (→ `EventContextAmount`, "investigate that many
+/// times"), or a composition ("twice that many times"). The count is an integer
+/// repeat multiplier (count templating), not the CR 609.3 "do as much as
+/// possible" rule; it is determined once when the effect applies (CR 608.2h).
+/// Unified with `strip_for_each_prefix` at the chain level so the base action is
+/// parsed normally and the resolver loops it N times.
+///
+/// The clause must end immediately after "times" / "twice" (no trailing period
+/// or rider), and an empty base ("three times" on its own) is not a repeat.
 pub(crate) fn strip_repeat_count_suffix(text: &str) -> (Option<QuantityExpr>, String) {
     let lower = text.to_lowercase();
-    let suffixes: &[(&str, i32)] = &[
-        (" twice", 2),
-        (" three times", 3),
-        (" four times", 4),
-        (" five times", 5),
-    ];
-    for &(suffix, count) in suffixes {
-        if let Ok((_, base)) = terminated(
-            take_until::<_, _, OracleError<'_>>(suffix),
-            nom::combinator::all_consuming(tag(suffix)),
-        )
-        .parse(lower.as_str())
-        {
-            return (
-                Some(QuantityExpr::Fixed { value: count }),
-                text[..base.len()].to_string(),
-            );
-        }
+    let Some((before, quantity, _)) =
+        nom_primitives::scan_preceded(lower.as_str(), parse_repeat_count_tail)
+    else {
+        return (None, text.to_string());
+    };
+    // Lowercasing preserves byte length for the Oracle corpus (as in
+    // `split_for_each_suffix`), so the lowercase prefix length indexes the
+    // original-case text; `get` keeps a non-boundary offset from panicking.
+    match text.get(..before.len()).map(str::trim_end) {
+        Some(base) if !base.is_empty() => (Some(quantity), base.to_string()),
+        _ => (None, text.to_string()),
     }
-    if let Ok((_, base)) = terminated(
-        take_until::<_, _, OracleError<'_>>(" times"),
-        nom::combinator::all_consuming(tag(" times")),
-    )
-    .parse(lower.as_str())
-    {
-        if let Some(space_idx) = base.rfind(' ') {
-            let qty_text = text[space_idx + 1..text.len() - " times".len()].trim();
-            if let Some((qty, remainder)) = parse_count_expr(qty_text) {
-                if remainder.trim().is_empty() {
-                    return (Some(qty), text[..space_idx].to_string());
-                }
-            }
-        }
-    }
-    (None, text.to_string())
+}
+
+/// CR 608.2c + CR 107.1: the repeat-count tail of a clause — `<count> times` or
+/// `twice`, each arm anchored at end of input. Each arm carries its own `eof`, so
+/// the alternatives are order-independent: the bare "twice" arm cannot succeed on
+/// the prefix of a composed "twice that many times" (which the count arm parses as
+/// `Multiply { 2, EventContextAmount }`), and `alt` never settles on a partial
+/// match that a later end check would reject.
+fn parse_repeat_count_tail(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        terminated(parse_count_expr_combinator, (tag("times"), eof)),
+        value(QuantityExpr::Fixed { value: 2 }, (tag("twice"), eof)),
+    ))
+    .parse(input)
 }
 
 /// Strip "each player/opponent [verb]s" subject prefix.
@@ -7296,6 +7329,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
         || spell_history_relative_clause_owns_suffix(lower.as_str())
         || cant_be_activated_clause_owns_tapped_suffix(lower.as_str())
+        || combat_history_relative_clause_owns_suffix(lower.as_str())
     {
         return (text, None);
     }
@@ -7612,6 +7646,32 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// CR 608.2i + CR 611.2a: a combat-history relative clause ("each creature it
+/// blocked this combat", "all creatures it blocked this turn") owns its trailing
+/// window; it is a look-back restriction, not an effect duration (#9179:
+/// Cathedral Membrane, Defiant Vanguard). Context-free on purpose: when the
+/// target parser declines to bind a bare "it" (no `SelfRef` antecedent), the
+/// window still belongs to the clause, so no spurious duration appears and the
+/// swallow audit reports the unrepresented clause. Recognition is delegated to
+/// `parse_source_blocked_history_clause`, the clause's single authority, and the
+/// clause must run to end of input, so a genuine OUTER duration after it leaves
+/// a non-empty remainder and still strips.
+fn combat_history_relative_clause_owns_suffix(input: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(input, |i| {
+        terminated(
+            parse_source_blocked_history_clause,
+            (
+                multispace0,
+                opt(alt((tag("."), tag(",")))),
+                multispace0,
+                eof,
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
 fn target_relative_clause_owns_suffix(input: &str) -> bool {
     let Ok((relative_clause, _)) = take_until::<_, _, OracleError<'_>>(" that ").parse(input)
     else {
@@ -7679,6 +7739,67 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
+/// CR 603.7a + CR 500.1: clause-final "at the beginning of {your next <step> |
+/// that player's next <step> | the <step> on your next turn}" for one named step.
+/// The player is a placeholder rewritten from `binding` at delayed-trigger
+/// creation; "on your next turn" skips the creation turn's step, and
+/// CR 608.2c: "that player" is the owner of the object the parent moved.
+fn parse_player_next_step_suffix(input: &str) -> OracleResult<'_, DelayedTriggerCondition> {
+    use crate::types::ability::{DelayedTriggerPlayerBinding, TurnGate};
+    // A grouped name ("main phase") is two steps, so it is left to the table.
+    let step = || {
+        map_opt(
+            super::conditions::parse_phase_name_set,
+            |phases| match phases.as_slice() {
+                [phase] => Some(*phase),
+                _ => None,
+            },
+        )
+    };
+    let (rest, (binding, gate, phase)) = terminated(
+        preceded(
+            tag("at the beginning of "),
+            alt((
+                map(preceded(tag("your next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::Controller,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(preceded(tag("that player's next "), step()), |phase| {
+                    (
+                        DelayedTriggerPlayerBinding::ParentTargetOwner,
+                        TurnGate::None,
+                        phase,
+                    )
+                }),
+                map(
+                    delimited(tag("the "), step(), tag(" on your next turn")),
+                    |phase| {
+                        (
+                            DelayedTriggerPlayerBinding::Controller,
+                            TurnGate::AfterCreationTurn,
+                            phase,
+                        )
+                    },
+                ),
+            )),
+        ),
+        eof,
+    )
+    .parse(input)?;
+    Ok((
+        rest,
+        DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase,
+            player: crate::types::player::PlayerId(0),
+            gate,
+            binding,
+        },
+    ))
+}
+
 /// CR 603.7a: Strip temporal suffix indicating a delayed trigger condition.
 /// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
 /// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
@@ -7691,6 +7812,15 @@ fn bare_dealt_damage_relative_clause_owns_suffix(input: &str) -> bool {
 /// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
+    if let Some((offset, condition, _)) = nom_primitives::scan_last_at_word_boundaries_with_offset(
+        &lower,
+        parse_player_next_step_suffix,
+    )
+    .filter(|(offset, ..)| *offset > 0)
+    {
+        let end = text.len() - (lower.len() - offset);
+        return (text[..end].trim_end_matches(',').trim(), Some(condition));
+    }
     for (suffix, condition) in [
         (
             " at the beginning of the next end step",
@@ -7728,54 +7858,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 505.1 + CR 603.7a: Symmetric to the prefix form at
-        // `strip_temporal_prefix`. Greasefang's "return it to its owner's hand
-        // at the beginning of your next end step" uses this suffix shape; the
-        // player placeholder is rewritten to `ability.controller` at resolve
-        // time alongside the main-phase and upkeep variants.
-        (
-            " at the beginning of your next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        // CR 608.2c: anaphoric "that player's next end step" — "that player"
-        // refers to a chained effect's target's OWNER, not the ability's
-        // controller (The Eternal Wanderer's +1: "Return that card to the
-        // battlefield under its owner's control at the beginning of that
-        // player's next end step"; Faramir, Prince of Ithilien uses the same
-        // surface phrase for a DIFFERENT referent — a chosen player — and
-        // remains its own unimplemented gap, not covered by this arm). Must
-        // precede the bare "your next end step" arm textually distinct
-        // (neither is a suffix of the other), so ordering here is not
-        // load-bearing, but is kept adjacent for readability.
-        (
-            " at the beginning of that player's next end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::ParentTargetOwner,
-            },
-        ),
-        // CR 513.2 + CR 603.7a: reordered "…, sacrifice that token at the
-        // beginning of the end step on your next turn" (Kav Landseeker). Suffix
-        // companion of the prefix arm. Skip-current via `AfterCreationTurn`
-        // (rewritten to `After(creation_turn)` at resolve). Diverges from the
-        // Greasefang "your next end step" suffix above ("the end step on" vs
-        // "your next end step"); neither suffix is a tail of the other.
-        (
-            " at the beginning of the end step on your next turn",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::AfterCreationTurn,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
         // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
         // turn granted by the parent clause (the controller's next turn), so
         // the controller's next end step. Suffix companion of the prefix arm
@@ -7785,15 +7867,6 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
             " at the beginning of that turn's end step",
             DelayedTriggerCondition::AtNextPhaseForPlayer {
                 phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
-            },
-        ),
-        (
-            " at the beginning of your next upkeep",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::Upkeep,
                 player: crate::types::player::PlayerId(0),
                 gate: crate::types::ability::TurnGate::None,
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
@@ -9737,6 +9810,7 @@ pub(super) fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<Par
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9823,6 +9897,7 @@ pub(super) fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<P
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -9899,6 +9974,7 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -10012,6 +10088,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         condition: None,
         optional: false,
         unless_pay: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     })
 }
 
@@ -11174,6 +11251,34 @@ pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Opt
     (tp, None)
 }
 
+/// Terminal-only form of [`strip_trailing_where_x`] for callers that lower only
+/// the text BEFORE the definition.
+///
+/// The general helper bounds the definition at the first instruction that
+/// follows it (CR 608.2c), which is right for callers that keep parsing the
+/// remainder. A caller that discards the remainder instead would silently drop
+/// that instruction while still reporting the clause as lowered. This form
+/// accepts the strip only when the extracted definition ends the input text
+/// (trailing periods ignored), so a definition the general helper bounded at a
+/// later comma — a parseable one — is rejected here.
+///
+/// It is not a totality check. A definition the quantity grammar cannot parse
+/// (the demonstrative this helper exists for) comes back whole, continuation
+/// included; the caller's definition-level pass then binds it or reports it as a
+/// `where_x_binding` gap, so nothing is dropped silently.
+pub(crate) fn strip_terminal_where_x<'a>(tp: TextPair<'a>) -> Option<(TextPair<'a>, String)> {
+    let (stripped, expression) = strip_trailing_where_x(tp);
+    let expression = expression?;
+    // `expression` was extracted from this same text, so a suffix match holds
+    // exactly when the definition runs to the end of the input. A definition the
+    // general helper bounded at a later instruction's comma leaves that
+    // instruction in the text and fails here.
+    let sentence = tp.trim_end().trim_end_matches('.');
+    // allow-noncombinator: TextPair dual-string suffix test, not parse-branch dispatch.
+    sentence.strip_suffix(&expression.to_lowercase())?;
+    Some((stripped, expression))
+}
+
 fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
     let clause = clause.trim_start().trim_end_matches('.').trim_end();
     match nom_quantity::parse_coordinated_card_population(clause.lower) {
@@ -12144,6 +12249,11 @@ pub(super) fn apply_where_x_effect_expression(
         | Effect::CopyTokenOf { count: amount, .. }
         | Effect::Discard { count: amount, .. }
         | Effect::EachSourceDealsDamage { amount, .. }
+        // CR 701.71a + CR 107.3c: empower Jace's N is the ability's single
+        // quantity slot. A "where X is …" tail defines it exactly like every
+        // other carrier here; the licensed excess demonstrative (CR 120.10)
+        // arrives already normalized by `rebind_context_dependent_where_x`.
+        | Effect::EmpowerJace { count: amount }
         | Effect::Endure { amount, .. }
         | Effect::GainEnergy { amount, .. }
         | Effect::GivePlayerCounter { count: amount, .. }
@@ -12919,9 +13029,9 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::ManaDynamic { quantity: amount } => {
             bind_where_x_quantity(amount, where_x_expression, unbound);
         }
-        // CR 701.9: "discard X cards, where X is …" — the discard count is a
-        // `QuantityExpr` and must track the same where-X binding.
-        AbilityCost::Discard { count, .. } => {
+        // CR 701.9 / CR 701.20a: discard/reveal counts are QuantityExpr and
+        // track the same where-X binding ("discard X cards, where X is …").
+        AbilityCost::Discard { count, .. } | AbilityCost::Reveal { count, .. } => {
             bind_where_x_quantity(count, where_x_expression, unbound);
         }
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
@@ -12970,7 +13080,6 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::Mill { .. }
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
         // CR 118.9: the borrowed keyword cost is read at runtime from the cast
         // spell's keyword — it carries no where-X `QuantityExpr` amount to bind.
@@ -13878,7 +13987,8 @@ mod tests {
         parse_where_x_quantity_expression_with_owner,
         patch_choose_from_zone_counter_continuation_target, relink_gated_token_referent_consumers,
         relink_gated_tracked_set_consumers, strip_redundant_flip_win_quantifier,
-        strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
+        strip_repeat_count_suffix, strip_return_destination_ext_with_remainder,
+        strip_temporal_prefix, strip_temporal_suffix, strip_terminal_where_x,
         strip_trailing_duration, strip_trailing_where_x,
         value_quantity_clause_owns_this_turn_suffix, ControlClausePossessor,
     };
@@ -13998,6 +14108,88 @@ mod tests {
     use crate::types::phase::Phase;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
     use crate::types::zones::Zone;
+
+    /// CR 608.2c + CR 608.2h + CR 107.1: the repeat-count suffix admits every
+    /// `parse_count_expr` phrase before "times" (including the multi-word
+    /// anaphoric "that many" and compositions), keeps the pre-existing literal /
+    /// `X` / "twice" forms identical, and rejects non-count words before "times".
+    #[test]
+    fn strip_repeat_count_suffix_count_phrase_matrix() {
+        let that_many = || QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        // New multi-word count phrases (the "investigate that many times" class).
+        for (text, quantity, base) in [
+            ("investigate that many times", that_many(), "investigate"),
+            ("incubate 2 that many times", that_many(), "incubate 2"),
+            (
+                "investigate twice that many times",
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(that_many()),
+                },
+                "investigate",
+            ),
+            // Pre-existing forms stay identical (base keeps original case).
+            (
+                "investigate twice",
+                QuantityExpr::Fixed { value: 2 },
+                "investigate",
+            ),
+            (
+                "investigate three times",
+                QuantityExpr::Fixed { value: 3 },
+                "investigate",
+            ),
+            (
+                "Investigate X times",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                "Investigate",
+            ),
+            (
+                "incubate 3 X times",
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+                "incubate 3",
+            ),
+            (
+                "Incubate 2 five times",
+                QuantityExpr::Fixed { value: 5 },
+                "Incubate 2",
+            ),
+            ("scry 2 twice", QuantityExpr::Fixed { value: 2 }, "scry 2"),
+        ] {
+            assert_eq!(
+                strip_repeat_count_suffix(text),
+                (Some(quantity), base.to_string()),
+                "{text:?} must peel its trailing repeat count",
+            );
+        }
+        // Non-count words before "times", an unterminated phrase, an empty base,
+        // and a trailing period are not repeat suffixes — the text is returned
+        // unchanged. The positives above prove the scanner fires.
+        for text in [
+            "repeat this process two more times",
+            "you may activate this ability any number of times",
+            "flip a coin that many times or until you lose a flip",
+            "investigate that many",
+            "three times",
+            "investigate that many times.",
+        ] {
+            assert_eq!(
+                strip_repeat_count_suffix(text),
+                (None, text.to_string()),
+                "{text:?} must not peel a repeat count",
+            );
+        }
+    }
 
     #[test]
     fn strip_redundant_flip_win_quantifier_accepts_number_and_tense_variants() {
@@ -15271,6 +15463,34 @@ mod tests {
         assert_eq!(expr.as_deref(), Some("the number of creatures you control"));
     }
 
+    /// The terminal form accepts only a definition that ends the input text, so a
+    /// caller that lowers nothing after it cannot drop a following instruction.
+    /// Paired negatives: a comma continuation the general helper bounds at, and a
+    /// following sentence. (A definition the quantity grammar cannot parse is
+    /// returned whole instead; the definition-level totality guard owns that case.)
+    #[test]
+    fn strip_terminal_where_x_requires_the_definition_to_end_the_input() {
+        let text = "empower jace x, where x is that excess damage";
+        let lower = text.to_ascii_lowercase();
+        let (stripped, expr) = strip_terminal_where_x(TextPair::new(text, &lower))
+            .expect("a terminal definition is accepted");
+        assert_eq!(stripped.original, "empower jace x");
+        assert_eq!(expr, "that excess damage");
+
+        for text in [
+            // A later instruction in the same sentence.
+            "empower jace x, where x is the number of creatures you control, draw a card",
+            // A later sentence.
+            "empower jace x, where x is that excess damage. draw a card",
+        ] {
+            let lower = text.to_ascii_lowercase();
+            assert!(
+                strip_terminal_where_x(TextPair::new(text, &lower)).is_none(),
+                "{text:?} must not be treated as terminal"
+            );
+        }
+    }
+
     #[test]
     fn coordinated_where_x_operand_is_complete() {
         for introduction in ["", "the number of ", "the total number of "] {
@@ -16180,6 +16400,44 @@ mod where_x_tests {
         assert_eq!(stripped, text.trim());
     }
 
+    /// CR 608.2i + CR 611.2a (#9179): the window closing a combat-history
+    /// relative clause ("each creature it blocked this combat", "all creatures it
+    /// blocked this turn") belongs to the clause, not to the effect — no duration
+    /// is stripped and the clause text survives intact for the target parser.
+    #[test]
+    fn strip_trailing_duration_preserves_combat_history_relative_clause() {
+        use super::strip_trailing_duration;
+
+        for text in [
+            "it deals 6 damage to each creature it blocked this combat.",
+            "destroy it and all creatures it blocked this turn.",
+        ] {
+            let (stripped, duration) = strip_trailing_duration(text);
+            assert_eq!(duration, None, "{text}");
+            assert_eq!(stripped, text, "{text}");
+        }
+    }
+
+    /// Hostile fixtures for the combat-history guard: a GENUINE outer duration
+    /// after the clause still strips (the guard requires the clause to run to end
+    /// of input), and a bare "this combat" effect duration with no blocked-history
+    /// clause keeps its `UntilEndOfCombat` (CR 511.2).
+    #[test]
+    fn strip_trailing_duration_combat_history_guard_does_not_over_suppress() {
+        use super::strip_trailing_duration;
+
+        let (stripped, duration) = strip_trailing_duration(
+            "creatures it blocked this turn gain flying until end of turn.",
+        );
+        assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(stripped, "creatures it blocked this turn gain flying");
+
+        let (stripped, duration) =
+            strip_trailing_duration("creatures you control can't block this combat.");
+        assert_eq!(duration, Some(Duration::UntilEndOfCombat));
+        assert_eq!(stripped, "creatures you control can't block");
+    }
+
     /// Hostile fixture (review requirement): a `who`-introduced look-back
     /// relative clause followed by a GENUINE outer "until end of turn" duration —
     /// the outer duration must still strip, the guard must NOT over-suppress it.
@@ -16448,6 +16706,37 @@ mod where_x_tests {
         assert!(
             exprs.iter().all(has_event_context_amount),
             "rewritten expression should contain the where-X event amount in every branch: {exprs:?}"
+        );
+    }
+
+    /// CR 701.20a + CR 107.3i: a reveal count is a `QuantityExpr` slot, so a
+    /// trailing "where X is …" binds it exactly as it binds a discard count.
+    #[test]
+    fn where_x_binds_reveal_cost_count() {
+        use crate::types::ability::AbilityCost;
+        use crate::types::mana::ManaColor;
+        let expression = "the number of cards in your hand";
+        let expected = parse_where_x_quantity_expression(expression)
+            .expect("the where-X expression is representable");
+        let filter =
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]));
+        let mut cost = AbilityCost::Reveal {
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name: "X".into() },
+            },
+            filter: Some(filter.clone()),
+        };
+        let mut unbound = None;
+        super::apply_where_x_to_ability_cost(&mut cost, Some(expression), &mut unbound);
+        assert_eq!(unbound, None);
+        assert_eq!(
+            cost,
+            AbilityCost::Reveal {
+                count: expected,
+                filter: Some(filter),
+            }
         );
     }
 
@@ -17399,6 +17688,83 @@ mod dq_d_player_set_lift_tests {
             body,
             "create a 2/2 black Zombie creature token unless they sacrifice a creature."
         );
+    }
+
+    /// CR 107.1a: "for every" is a marker spelling of "for each"; numbered
+    /// clauses lower through the shared grouped-quantity authority
+    /// (`parse_for_each_clause_expr`), never through group-size handling at the
+    /// suffix seam. Every row compares the two markers, and accepting rows are
+    /// pinned to `Some(..)` so `None == None` cannot pass.
+    #[test]
+    fn for_every_marker_agrees_with_for_each_through_shared_grouped_authority() {
+        use super::parse_for_each_multiplier_prefix;
+        use crate::parser::oracle_quantity::parse_for_each_clause_expr;
+        use crate::types::ability::{QuantityExpr, RoundingMode};
+
+        // Reach guard: the grouped form is the floor over the same inner the
+        // ungrouped grammar emits, and equals the authority called directly.
+        let per_each = parse_for_each_multiplier_prefix(" for each card in your graveyard")
+            .expect("for-each regression: the existing marker must still parse");
+        let grouped = parse_for_each_multiplier_prefix(" for every three cards in your graveyard");
+        assert_eq!(
+            grouped,
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(per_each),
+                divisor: 3,
+                rounding: RoundingMode::Down,
+            })
+        );
+        assert_eq!(
+            grouped,
+            parse_for_each_clause_expr("three cards in your graveyard"),
+            "the suffix seam must defer to the shared authority"
+        );
+
+        let is_grouped = |q: &Option<QuantityExpr>| {
+            matches!(
+                q,
+                Some(QuantityExpr::DivideRounded {
+                    rounding: RoundingMode::Down,
+                    ..
+                })
+            )
+        };
+        let is_ref = |q: &Option<QuantityExpr>| matches!(q, Some(QuantityExpr::Ref { .. }));
+        let is_none = |q: &Option<QuantityExpr>| q.is_none();
+        type ShapeCheck = dyn Fn(&Option<QuantityExpr>) -> bool;
+        let rows: &[(&str, &ShapeCheck)] = &[
+            ("three cards in your graveyard", &is_grouped),
+            ("3 cards in your graveyard", &is_grouped),
+            ("five counters on it", &is_grouped),
+            ("five counters removed this way", &is_grouped),
+            ("two other creatures you control", &is_grouped),
+            ("three cards in your graveyard.", &is_grouped),
+            ("creature you control", &is_ref),
+            ("one card in your graveyard", &is_none),
+            ("0 cards in your graveyard", &is_none),
+            ("zero cards in your graveyard", &is_none),
+            (
+                "three cards in your graveyard and each land you control",
+                &is_none,
+            ),
+            ("three frobnications", &is_none),
+        ];
+        for (clause, expected) in rows {
+            let every = parse_for_each_multiplier_prefix(&format!(" for every {clause}"));
+            let each = parse_for_each_multiplier_prefix(&format!(" for each {clause}"));
+            assert_eq!(every, each, "markers disagree on {clause:?}");
+            assert!(
+                expected(&every),
+                "unexpected shape for {clause:?}: {every:?}"
+            );
+        }
+
+        // Marker boundary: other spellings and a bare marker decline.
+        assert_eq!(
+            parse_for_each_multiplier_prefix(" for any three cards in your graveyard"),
+            None
+        );
+        assert_eq!(parse_for_each_multiplier_prefix(" for every"), None);
     }
     #[test]
     fn nested_attack_creation_keeps_inner_cleanup_and_end_combat_sibling_boundaries() {

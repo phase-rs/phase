@@ -53,6 +53,7 @@ pub fn resolve(
     let work =
         std::collections::VecDeque::from([crate::types::game_state::TokenCreationWork::Proposed(
             crate::types::game_state::TokenCreationBatch {
+                appended: Vec::new(),
                 owner: controller,
                 spec: Box::new(jace_token_spec(controller, source_id)),
                 copy: None,

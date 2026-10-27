@@ -451,7 +451,7 @@ fn targeted_activation_surfaces_reveal_cost_after_target_selection() {
     let source = scenario
         .add_creature(P0, "Targeted Reveal Cost", 1, 1)
         .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Reveal {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: Some(TargetFilter::Typed(TypedFilter::creature())),
         }))
         .id();

@@ -46,6 +46,28 @@ afterEach(() => {
 });
 
 describe("multiplayer WebSocket session persistence", () => {
+  it.each(["endpoint", "game code", "generation", "player token"])(
+    "does not clear a replacement session with a different %s", (changed) => {
+      const expected = {
+        gameCode: "ABCDE", playerToken: "old-token",
+        fullKey: { game_code: "ABCDE", generation: 1 },
+        serverUrl: "wss://play.example/ws", timestamp: Date.now(),
+      };
+      const replacement = {
+        ...expected,
+        ...(changed === "endpoint" ? { serverUrl: "wss://new.example/ws" } : {}),
+        ...(changed === "game code" ? { gameCode: "NEW", fullKey: { game_code: "NEW", generation: 1 } } : {}),
+        ...(changed === "generation" ? { fullKey: { game_code: "ABCDE", generation: 2 } } : {}),
+        ...(changed === "player token" ? { playerToken: "another-seat-token" } : {}),
+      };
+      saveWsSession(replacement);
+      clearWsSession(expected);
+      expect(loadWsSession()).toEqual(replacement);
+      saveWsSession({ ...expected, terminalOnly: true }, expected);
+      expect(loadWsSession()).toEqual(replacement);
+    },
+  );
+
   it("loads a valid reconnect session", () => {
     const session = {
       gameCode: "ABCDE",

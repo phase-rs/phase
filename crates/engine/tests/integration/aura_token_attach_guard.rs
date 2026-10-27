@@ -406,6 +406,7 @@ fn a_replacement_that_leaves_a_non_aura_entrant_still_creates_the_token() {
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         },
         &mut events,

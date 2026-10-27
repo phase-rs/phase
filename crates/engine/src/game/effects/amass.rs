@@ -280,6 +280,7 @@ fn create_army_token(
     let work =
         std::collections::VecDeque::from([crate::types::game_state::TokenCreationWork::Proposed(
             crate::types::game_state::TokenCreationBatch {
+                appended: Vec::new(),
                 owner: controller,
                 spec: Box::new(spec),
                 copy: None,

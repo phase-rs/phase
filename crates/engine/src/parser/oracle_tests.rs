@@ -21571,6 +21571,188 @@ fn investigate_twice_uses_repeat_for() {
     assert!(def.sub_ability.is_none());
 }
 
+/// CR 608.2c + CR 608.2h + CR 701.16a: "investigate that many times" lowers the
+/// anaphoric repeat count onto the Investigate's `repeat_for` as
+/// `EventContextAmount`, read from the trigger's own event (combat damage dealt
+/// by the source / +1/+1 counters put on it). Verbatim Oracle text, full
+/// pipeline. Before the fix the one-word suffix splitter handed "many" to the
+/// count grammar, failed, and the clause lowered to a bare one-Clue Investigate.
+#[test]
+fn that_many_times_investigate_class_parses_repeat_for() {
+    let that_many = Some(QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    });
+    let investigate_execute = |trigger: &TriggerDefinition| -> AbilityDefinition {
+        let execute = trigger
+            .execute
+            .as_deref()
+            .expect("the trigger must carry an execute body")
+            .clone();
+        assert!(
+            matches!(*execute.effect, Effect::Investigate),
+            "reach-guard: the trigger body must be a parsed Investigate, got {:?}",
+            execute.effect,
+        );
+        execute
+    };
+
+    // Piper Wright, Publick Reporter — combat damage to a player.
+    let piper = parse(
+        "Whenever Piper Wright deals combat damage to a player, investigate that many times. (To investigate, create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")\nWhenever you sacrifice a Clue, put a +1/+1 counter on target creature you control.",
+        "Piper Wright, Publick Reporter",
+        &[],
+        &["Creature"],
+        &["Human", "Detective"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&piper),
+        "Piper Wright must parse without an Unimplemented effect: {piper:#?}"
+    );
+    let damage = piper
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+        .expect("Piper Wright must retain its combat-damage trigger");
+    assert_eq!(damage.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(damage.damage_kind, DamageKindFilter::CombatOnly);
+    assert_eq!(investigate_execute(damage).repeat_for, that_many);
+    // The sibling Clue-sacrifice trigger is unaffected.
+    let sacrificed = piper
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::Sacrificed)
+        .expect("Piper Wright must retain its Clue-sacrifice trigger");
+    let sacrificed_execute = sacrificed
+        .execute
+        .as_deref()
+        .expect("the Clue-sacrifice trigger must carry an execute body");
+    assert!(
+        matches!(
+            &*sacrificed_execute.effect,
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ),
+        "the Clue-sacrifice trigger still puts one +1/+1 counter, got {:?}",
+        sacrificed_execute.effect,
+    );
+
+    // Inquisitor Eisenhorn — same trigger shape (its first paragraph is out of
+    // scope, so only the combat-damage trigger is pinned).
+    let eisenhorn = parse(
+        "You may reveal the first card you draw each turn as you draw it. Whenever you reveal an instant or sorcery card this way, create Cherubael, a legendary 4/4 black Demon creature token with flying.\nWhenever Inquisitor Eisenhorn deals combat damage to a player, investigate that many times. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+        "Inquisitor Eisenhorn",
+        &[],
+        &["Creature"],
+        &["Human", "Inquisitor"],
+    );
+    let damage = eisenhorn
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::DamageDone)
+        .expect("Inquisitor Eisenhorn must retain its combat-damage trigger");
+    assert_eq!(damage.valid_source, Some(TargetFilter::SelfRef));
+    assert_eq!(investigate_execute(damage).repeat_for, that_many);
+
+    // Lonis, Genetics Expert — +1/+1 counters put on it (a named counter kind,
+    // so the trigger fires per placement event, not per batch).
+    let lonis = parse(
+        "Evolve (Whenever a creature you control enters, if that creature has greater power or toughness than this creature, put a +1/+1 counter on this creature.)\nWhenever one or more +1/+1 counters are put on Lonis, investigate that many times.\nWhenever you sacrifice a Clue, put a +1/+1 counter on another target creature you control.",
+        "Lonis, Genetics Expert",
+        &[Keyword::Evolve],
+        &["Creature"],
+        &["Snake", "Elf", "Detective"],
+    );
+    assert!(
+        !parsed_has_unimplemented(&lonis),
+        "Lonis must parse without an Unimplemented effect: {lonis:#?}"
+    );
+    let counters = lonis
+        .triggers
+        .iter()
+        .find(|trigger| trigger.mode == TriggerMode::CounterAdded)
+        .expect("Lonis must retain its counter-placement trigger");
+    assert_eq!(
+        counters
+            .counter_filter
+            .as_ref()
+            .map(|filter| filter.counter_type.clone()),
+        Some(CounterType::Plus1Plus1),
+    );
+    assert!(
+        !counters.batched,
+        "a named-kind counter trigger reads each placement event's own count"
+    );
+    assert_eq!(investigate_execute(counters).repeat_for, that_many);
+}
+
+/// SHAPE ONLY — Phyrexian Incubator's "incubate 2 that many times" now carries
+/// `repeat_for: EventContextAmount` on the Incubate (a side effect of the
+/// repeat-count suffix generalization; CR 608.2c + CR 701.53a). The card itself is
+/// out of scope: its search filter's "cards with phyrexian back faces" branch is a
+/// separate pre-existing misparse that keeps its coverage red, and the runtime
+/// count binding (the exiled-card count via `last_effect_count`) is not asserted
+/// here. The trailing "Then shuffle." stays a single sequential sibling outside the
+/// repeat.
+#[test]
+fn phyrexian_incubator_incubate_repeat_for_that_many_shape() {
+    let parsed = parse(
+        "{3}, {T}, Sacrifice Phyrexian Incubator: Search your library for any number of Phyrexian cards or cards with phyrexian back faces, exile them, then incubate 2 that many times. Then shuffle.",
+        "Phyrexian Incubator",
+        &[],
+        &["Artifact"],
+        &[],
+    );
+    let search = parsed
+        .abilities
+        .iter()
+        .find(|ability| matches!(&*ability.effect, Effect::SearchLibrary { .. }))
+        .expect("Phyrexian Incubator must retain its search ability");
+    let exile = search
+        .sub_ability
+        .as_deref()
+        .expect("search must chain into the exile");
+    assert!(
+        matches!(&*exile.effect, Effect::ChangeZone { .. }),
+        "reach-guard: search chains into ChangeZone, got {:?}",
+        exile.effect,
+    );
+    let incubate = exile
+        .sub_ability
+        .as_deref()
+        .expect("exile must chain into the incubate");
+    assert!(
+        matches!(
+            &*incubate.effect,
+            Effect::Incubate {
+                count: QuantityExpr::Fixed { value: 2 },
+            }
+        ),
+        "reach-guard: the incubate keeps its two counters, got {:?}",
+        incubate.effect,
+    );
+    assert_eq!(
+        incubate.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        }),
+        "\"incubate 2 that many times\" repeats the incubate that many times",
+    );
+    let shuffle = incubate
+        .sub_ability
+        .as_deref()
+        .expect("incubate must chain into the shuffle");
+    assert!(
+        matches!(&*shuffle.effect, Effect::Shuffle { .. }),
+        "reach-guard: the trailing instruction is the shuffle, got {:?}",
+        shuffle.effect,
+    );
+    assert_eq!(shuffle.repeat_for, None);
+    assert_eq!(shuffle.sub_link, SubAbilityLink::SequentialSibling);
+}
+
 #[test]
 fn put_name_sticker_parses() {
     use crate::parser::oracle_effect::parse_effect;
@@ -23395,16 +23577,19 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
     let choose = chain
         .sub_ability
         .as_ref()
-        .and_then(|search_move| search_move.sub_ability.as_ref())
-        .expect("search move should chain to ChooseFromZone");
-    assert!(matches!(
-        &*choose.effect,
-        Effect::ChooseFromZone {
-            count: 2,
-            chooser: ZoneChoiceChooser::Opponent,
-            ..
-        }
-    ));
+        .expect("search should chain directly to ChooseFromZone");
+    assert!(
+        matches!(
+            &*choose.effect,
+            Effect::ChooseFromZone {
+                count: 2,
+                chooser: ZoneChoiceChooser::Opponent,
+                ..
+            }
+        ),
+        "{:?}",
+        choose.effect
+    );
     let chosen_move = choose
         .sub_ability
         .as_ref()
@@ -23429,6 +23614,62 @@ fn choice_partition_after_search_routes_chosen_and_rest() {
             ..
         }
     ));
+}
+
+#[test]
+fn shuffle_choice_partition_after_search_leaves_found_cards_in_library() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let chain = parse_effect_chain(
+            "Search your library for up to four creature cards with different powers and reveal them. An opponent chooses two of those cards. Shuffle the chosen cards into your library and put the rest into your hand.",
+            AbilityKind::Spell,
+        );
+    let choose = chain
+        .sub_ability
+        .as_ref()
+        .expect("search should chain directly to ChooseFromZone");
+    assert!(
+        matches!(&*choose.effect, Effect::ChooseFromZone { .. }),
+        "{:?}",
+        choose.effect
+    );
+    let chosen_move = choose
+        .sub_ability
+        .as_ref()
+        .expect("choice should route chosen cards first");
+    assert!(matches!(
+        &*chosen_move.effect,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Library,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn search_without_choice_partition_keeps_its_put_step() {
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::types::ability::AbilityKind;
+
+    let chain = parse_effect_chain(
+        "Search your library for a card, put that card into your hand, then shuffle.",
+        AbilityKind::Spell,
+    );
+    let put = chain.sub_ability.as_ref().expect("search put step");
+    assert!(
+        matches!(
+            &*put.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ),
+        "{:?}",
+        put.effect
+    );
 }
 
 #[test]
@@ -31302,45 +31543,42 @@ fn fatal_push_full_composition() {
         other => panic!("expected TargetMatchesFilter on base, got: {other:?}"),
     }
 
-    // Sub-ability: ConditionInstead with And([Revolt, CmcLE(4)])
+    // CR 614.6 + CR 608.2c: Revolt selects the replacement; "if it has mana value
+    // 4 or less" stays on the replacement's own Destroy beneath the carrier.
     let sub = ability
         .sub_ability
         .as_ref()
         .expect("should have sub_ability");
-    match &sub.condition {
-        Some(AbilityCondition::ConditionInstead { inner }) => match inner.as_ref() {
-            AbilityCondition::And { conditions } => {
-                assert_eq!(conditions.len(), 2, "And should have 2 conditions");
-                // First: Revolt (QuantityCheck on zone-change count)
-                assert!(
-                    matches!(&conditions[0], AbilityCondition::QuantityCheck { .. }),
-                    "first condition should be QuantityCheck (revolt)"
-                );
-                // Second: CmcLE(4)
-                match &conditions[1] {
-                    AbilityCondition::TargetMatchesFilter { filter, .. } => {
-                        if let TargetFilter::Typed(tf) = filter {
-                            assert!(
-                                tf.properties.iter().any(|p| matches!(
-                                    p,
-                                    FilterProp::Cmc {
-                                        comparator: Comparator::LE,
-                                        value: QuantityExpr::Fixed { value: 4 }
-                                    }
-                                )),
-                                "revolt sub should have CmcLE(4), got: {:?}",
-                                tf.properties
-                            );
-                        } else {
-                            panic!("expected Typed filter on revolt sub");
-                        }
-                    }
-                    other => panic!("expected TargetMatchesFilter in And[1], got: {other:?}"),
+    assert!(
+        matches!(
+            &sub.condition,
+            Some(AbilityCondition::ConditionInstead { inner })
+                if matches!(inner.as_ref(), AbilityCondition::QuantityCheck { .. })
+        ),
+        "the override is selected by Revolt alone, got: {:?}",
+        sub.condition
+    );
+    let body = sub
+        .sub_ability
+        .as_ref()
+        .expect("the guarded replacement sits beneath the selector");
+    assert!(matches!(*body.effect, Effect::Destroy { .. }));
+    match &body.condition {
+        Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(tf),
+            ..
+        }) => assert!(
+            tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::Cmc {
+                    comparator: Comparator::LE,
+                    value: QuantityExpr::Fixed { value: 4 }
                 }
-            }
-            other => panic!("expected And inside ConditionInstead, got: {other:?}"),
-        },
-        other => panic!("expected ConditionInstead on sub, got: {other:?}"),
+            )),
+            "revolt body should have CmcLE(4), got: {:?}",
+            tf.properties
+        ),
+        other => panic!("expected TargetMatchesFilter on the revolt body, got: {other:?}"),
     }
 }
 
@@ -36774,7 +37012,7 @@ fn azors_gateway_transform_condition_parses_with_zero_swallowed_clauses() {
     assert!(matches!(
         transform.effect.as_ref(),
         Effect::Transform {
-            target: TargetFilter::ParentTarget,
+            target: TargetFilter::SelfRef,
             ..
         }
     ));
@@ -39052,7 +39290,7 @@ fn census_variant_names(body: &str) -> Vec<String> {
 /// it.
 #[test]
 fn render_net_effect_carrier_census() {
-    const EFFECT_VARIANT_PIN: usize = 236;
+    const EFFECT_VARIANT_PIN: usize = 237;
     /// `(enum header, pinned variant count, the ONE variant the net destructures)`.
     const PAYLOAD_ENUM_PINS: &[(&str, usize, &str)] = &[
         ("pub enum CastingPermission {", 8, "ExileWithAltCost"),
@@ -48476,4 +48714,50 @@ pub(crate) mod defining_modifier_publication {
             }
         }
     }
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.3a + CR 613.1b: Risky Move, verbatim, parses
+/// to the right shape: the second ability ("When you gain control of this
+/// enchantment from another player, ...") is the gain-side
+/// `ChangesController`, and the first is the upkeep `GiveControl` of the
+/// enchantment to the scoped (active) player. The card nevertheless stays
+/// honestly unsupported: layer-2 control changes (Confiscate, Control Magic)
+/// emit no `ControllerChanged` (phase-rs/phase#9903), so `card_face_gaps`
+/// reports exactly the gain-side trigger until that emitter lands.
+#[test]
+fn risky_move_gain_side_control_trigger_parses_but_card_stays_unsupported() {
+    use crate::types::triggers::{ControlChangeSide, TriggerMode};
+    let face = oracle_face_for(
+        "Risky Move",
+        "At the beginning of each player's upkeep, that player gains control of this enchantment.\nWhen you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        &["Enchantment"],
+        &[],
+    );
+    let gaps = crate::game::coverage::card_face_gaps(&face);
+    assert_eq!(
+        gaps,
+        vec![String::from("Trigger:ChangesController { side: Gains }")]
+    );
+    assert_eq!(face.triggers.len(), 2, "{:#?}", face.triggers);
+    let upkeep = &face.triggers[0];
+    assert_eq!(upkeep.mode, TriggerMode::Phase);
+    assert_eq!(upkeep.phase, Some(Phase::Upkeep));
+    assert_eq!(
+        upkeep
+            .execute
+            .as_ref()
+            .expect("upkeep body")
+            .effect
+            .as_ref(),
+        &Effect::GiveControl {
+            target: TargetFilter::SelfRef,
+            recipient: TargetFilter::ScopedPlayer,
+        }
+    );
+    assert_eq!(
+        face.triggers[1].mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
 }

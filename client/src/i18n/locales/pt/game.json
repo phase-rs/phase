@@ -873,6 +873,8 @@
     "chooseCreatureTokenToPopulate": "Escolha uma ficha de criatura para popular",
     "chooseReturnAsAuraTarget": "Escolha um permanente para encantar",
     "chooseTokenHost": "Escolha um hospedeiro para a ficha",
+    "chooseOneHighlighted": "Escolha uma das opções destacadas",
+    "chooseUpToOneHighlighted": "Escolha até uma das opções destacadas",
     "tapUntappedCreatures_one": "Vire {{count}} criatura desvirada",
     "tapUntappedCreatures_other": "Vire {{count}} criaturas desviradas",
     "chooseTargetOf": "Escolha o alvo {{current}} de {{total}}",
@@ -1329,7 +1331,8 @@
     "passwordPrompt": "Esta sala requer uma senha:",
     "toasts": {
       "connectionFailed": "Falha na conexão. Tente novamente ou altere o servidor nas Configurações.",
-      "eliminatedSpectating": "Você foi eliminado. Agora está assistindo."
+      "eliminatedSpectating": "Você foi eliminado. Agora está assistindo.",
+      "retainedTerminalUnreadable": "Não foi possível ler a entrega retida do resultado final"
     },
     "resumeReset": {
       "appUpdated": "O aplicativo foi atualizado e seu jogo salvo é incompatível com a nova versão.",
@@ -2706,6 +2709,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",

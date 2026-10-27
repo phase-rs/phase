@@ -1209,7 +1209,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // this conjunct does not try: it pins the whole `.extend(` / `.append(` / `.resize(` /
     // `.splice(` population instead, and a new one anywhere in `engine/src` turns this red so a
     // human reads the argument. Kept as a separate pin rather than folded into conjunct 1 for a
-    // measured reason: folding would take the pin to `(7, 0)` and put `counters.rs` and
+    // measured reason: folding would raise conjunct 1's pin and put `counters.rs` and
     // `token_copy.rs` — whose ABSENCE is conjunct 1's whole claim — back into the multiset, and
     // would add a non-authority function to conjunct 2's list.
     let ambiguous = census_with(classify_ambiguous_mutators);
@@ -1229,25 +1229,32 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
          Ambiguous hits = {ambiguous_production:#?}"
     );
 
-    // Issue #5904 moved TWO of these from `counters.rs` to `token_copy.rs` without changing
-    // the total, which is exactly the shape this pin's own instructions ask for. The
-    // `ContinueCopyTokenCreation` resume arm's `if let Some(pending) = active_copy_token_mut()
-    // { pending.created_ids.extend(..) } else { last_created_token_ids.extend(..) }` pair was
-    // about to be COPIED verbatim into the new `ContinueCopyTokenEntryAfterAuraHost` resume,
-    // so it was lifted into `token_copy::extend_copy_batch_created_ids` instead and both arms
-    // now call it. Same five calls, same bulk arguments (`status.created_ids`, a `Vec`), one
-    // fewer place to write the destination-selection rule wrong. `counters.rs` therefore drops
-    // out of this multiset entirely; its absence is now a claim, not an omission.
+    // Issue #5904 moved the copy-batch resume arms' bulk republishes out of `counters.rs` into
+    // `token_copy.rs`, and `counters.rs` has carried none since; its absence from this multiset
+    // is a claim, not an omission. The three post-action arms that restart a paused copy batch
+    // (`ContinueCopyTokenCreation`, the Aura-host resume, the copied entry-payment resume) now
+    // all call `token_copy::resume_copy_token_batch_remainder`, the one bulk republish they
+    // share. Its `pending.created_ids.extend(status.created_ids)` (a `Vec`) is the one hit it
+    // contributes; its frameless branch assigns the continuation's prefixed list onto ledger 3
+    // instead, so it is not a mutator this conjunct pins. The other `token_copy.rs` hits are the
+    // CopyToken batch loop's `.extend(state.last_created_token_ids.clone())` pair.
+    //
+    // The compound CreateToken event (CR 614.1a: a batch a replacement appends belongs to the one
+    // modified event) added one more, in `token.rs`: `token::repark_event_copy_frame`'s
+    // `frame.created_ids.extend(ids)`. A bulk argument (a `Vec`): the event's ordered ids at
+    // completion, or the ledger at a copy batch's pause, handed to the CopyToken owner the
+    // delivery detached. It is the ONE hand-over site for every re-park of that owner, so the
+    // pause and completion paths cannot pick different ids.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
-            ("engine/src/game/effects/token.rs".to_string(), 1),
-            ("engine/src/game/effects/token_copy.rs".to_string(), 4),
+            ("engine/src/game/effects/token.rs".to_string(), 2),
+            ("engine/src/game/effects/token_copy.rs".to_string(), 3),
         ],
         "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
-         republishes today — `.extend(status.created_ids)` and `.extend(state.\
-         last_created_token_ids.clone())` — and the pin exists so that a SIXTH cannot arrive \
-         without someone reading its argument"
+         republishes today — `.extend(status.created_ids)`, `.extend(state.\
+         last_created_token_ids.clone())` and `repark_event_copy_frame`'s `.extend(ids)` — and \
+         the pin exists so that a SIXTH cannot arrive without someone reading its argument"
     );
 }
 

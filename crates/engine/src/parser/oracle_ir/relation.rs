@@ -23,7 +23,7 @@
 
 use super::doc::OracleItemId;
 use crate::types::{
-    ability::{ChosenSubtypeKind, TargetFilter},
+    ability::{AbilityCondition, ChosenSubtypeKind, TargetFilter},
     card_type::CoreType,
 };
 
@@ -76,6 +76,11 @@ pub(crate) enum DocumentRelationIr {
     SelfReplacementOverride {
         base: OracleItemId,
         override_item: OracleItemId,
+        /// CR 614.6 + CR 608.2c: the paragraph-level selector (ability word,
+        /// "instead if"), kept off the override body so a guard the body prints
+        /// stays on its own instruction. `None` when the body's root condition is
+        /// the selector.
+        selector: Option<AbilityCondition>,
     },
     /// CR 607.2d: A "choose a [value]" producer linked to an ability that reads
     /// "the chosen [value]" back. One parameterized relation; `LinkedChoiceKind`

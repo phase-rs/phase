@@ -35,6 +35,7 @@ use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode, StaticModeKind};
 use crate::types::zones::{ExileCostSourceZone, Zone};
 
+use super::announcement_triggers::stage_with_pending_owner;
 use super::casting::emit_targeting_events;
 use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
@@ -1321,7 +1322,9 @@ pub(crate) fn eligible_behold_choices(
     source: ObjectId,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source);
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player);
     let mut choices: Vec<ObjectId> = state
         .battlefield
         .iter()
@@ -2254,6 +2257,7 @@ pub(crate) fn begin_deferred_target_selection(
         );
         // CR 601.2c + CR 603.2: each automatically declared target becomes the
         // target of the spell or ability once, as a prompted declaration emits it.
+        let event_start = events.len();
         super::casting::emit_targeting_events(
             state,
             &declared_targets_in_chain(&pending.ability),
@@ -2262,6 +2266,14 @@ pub(crate) fn begin_deferred_target_selection(
             super::casting::pending_cast_targeter(state, &pending),
             events,
         );
+        // CR 601.2c + CR 603.2: Stage announcement triggers (e.g., Horobi) after
+        // target declaration but before cost payment, so automatic mana payments
+        // (e.g., sacrificing Blood Pet) don't move the target before the trigger
+        // is matched. The activation route uses begin_activation_trigger_collection();
+        // spells use the in-flight spell trigger carrier.
+        if pending.activation_ability_index.is_none() {
+            stage_with_pending_owner(state, &pending, events, event_start);
+        }
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -2289,6 +2301,7 @@ pub(crate) fn begin_deferred_target_selection(
         );
         // CR 601.2c + CR 603.2: each automatically declared target becomes the
         // target of the spell or ability once, as a prompted declaration emits it.
+        let event_start = events.len();
         super::casting::emit_targeting_events(
             state,
             &declared_targets_in_chain(&pending.ability),
@@ -2297,6 +2310,14 @@ pub(crate) fn begin_deferred_target_selection(
             super::casting::pending_cast_targeter(state, &pending),
             events,
         );
+        // CR 601.2c + CR 603.2: Stage announcement triggers (e.g., Horobi) after
+        // target declaration but before cost payment, so automatic mana payments
+        // (e.g., sacrificing Blood Pet) don't move the target before the trigger
+        // is matched. The activation route uses begin_activation_trigger_collection();
+        // spells use the in-flight spell trigger carrier.
+        if pending.activation_ability_index.is_none() {
+            stage_with_pending_owner(state, &pending, events, event_start);
+        }
         if pending.activation_ability_index.is_some() {
             // CR 602.2b + CR 601.2c: automatic target declaration remains
             // before the activation's payment boundary, including after X was
@@ -3790,7 +3811,9 @@ fn validate_deferred_spell_sacrifices_at_commit(
             state,
             id,
             &selection.filter,
-            &super::filter::FilterContext::from_source(state, pending.object_id),
+            // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+            // activated ability).
+            &super::filter::FilterContext::from_source_with_controller(pending.object_id, player),
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Deferred sacrifice permanent no longer matches the sacrifice cost".to_string(),
@@ -4936,7 +4959,9 @@ pub(crate) fn handle_unattach_for_cost(
             "Must unattach at least one attachment to pay the cost".to_string(),
         ));
     }
-    let ctx = super::filter::FilterContext::from_source(state, pending.object_id)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(pending.object_id, player)
         .with_granting_object(pending.ability.context.granting_object);
     for &id in chosen {
         if !choices.contains(&id) {
@@ -6344,6 +6369,31 @@ pub(crate) fn finish_activated_ability_at_payment_boundary(
         )
     })?;
 
+    // CR 601.2c + CR 602.2b + CR 603.2: Targets have been declared and targeting
+    // events emitted before costs are paid. Collect any pre-payment announcement
+    // triggers now against the pre-payment game state so costs (such as activating
+    // mana abilities that sacrifice a creature target, or paying non-mana costs)
+    // do not alter the target's qualification or zone before becomes-target triggers
+    // are matched. Only an owned announcement scope has a carrier to commit them;
+    // an unowned one leaves collection to the priority pipeline.
+    if let crate::types::game_state::AnnouncementEventScope::From { start } =
+        state.announcement_event_scope
+    {
+        let unclaimed = super::announcement_triggers::unclaimed_events(state, events, start);
+        if !unclaimed.is_empty() {
+            pending.begin_activation_trigger_collection();
+            if let Some(collection) = pending.activation_trigger_collection.as_deref_mut() {
+                collection.collect(state, &unclaimed);
+                super::announcement_triggers::claim_ordinary_collected_span(
+                    state,
+                    events,
+                    start,
+                    events.len(),
+                );
+            }
+        }
+    }
+
     if !pending.cost.is_without_paying_mana() {
         return super::casting::finalize_pending_activation_mana_payment(
             state,
@@ -7216,6 +7266,24 @@ fn surface_next_interactive_activation_cost_leg(
         })
     {
         if let Some(filter) = filter {
+            // CR 107.3a + CR 602.2b: the announced X is the number of cards revealed.
+            let count =
+                super::quantity::resolve_quantity_with_targets(state, count, &pending.ability)
+                    .max(0) as usize;
+            if count == 0 {
+                // CR 107.3a + CR 601.2h: an announced X of 0 reveals no cards, so
+                // the leg is paid by doing nothing — no dead prompt.
+                pending.activation_cost = remove_first_activation_cost_matching(
+                    pending
+                        .activation_cost
+                        .take()
+                        .expect("checked activation cost is present"),
+                    |cost| matches!(cost, AbilityCost::Reveal { .. }),
+                );
+                return surface_next_unpaid_interactive_activation_cost(
+                    state, player, pending, events,
+                );
+            }
             let choices = super::casting::find_eligible_reveal_targets(
                 state,
                 player,
@@ -7223,7 +7291,7 @@ fn surface_next_interactive_activation_cost_leg(
                 granting_object,
                 filter,
             );
-            if choices.len() < *count as usize {
+            if choices.len() < count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible cards in hand to reveal".to_string(),
                 ));
@@ -7240,7 +7308,7 @@ fn surface_next_interactive_activation_cost_leg(
                 player,
                 kind: PayCostKind::Reveal,
                 choices,
-                count: *count as usize,
+                count,
                 min_count: 0,
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
@@ -8364,6 +8432,10 @@ pub(super) fn begin_required_cost_before_targets(
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
+    // CR 601.2c: the targets this deferred selection chooses must satisfy the
+    // spell's cross-target constraints ("from a single graveyard"); the spell's
+    // resolved ability carries them, built from its definition.
+    pending.target_constraints = pending.ability.target_constraints.clone();
     pending.origin_zone = origin_zone;
     pending.payment_mode = payment_mode;
     pending.deferred_target_selection = true;
@@ -10908,27 +10980,14 @@ fn pay_additional_cost_with_source(
             // source is eligible unless a {T} cost is also present in the
             // activation cost (in which case the source was already tapped, so
             // !obj.tapped naturally excludes it).
-            let eligible: Vec<ObjectId> = state
-                .battlefield
-                .iter()
-                .copied()
-                .filter(|id| {
-                    state.objects.get(id).is_some_and(|obj| {
-                        obj.controller == player
-                            && !obj.tapped
-                            && super::filter::matches_target_filter(
-                                state,
-                                obj.id,
-                                filter,
-                                &super::filter::FilterContext::from_source(
-                                    state,
-                                    pending.object_id,
-                                )
-                                .with_granting_object(pending.ability.context.granting_object),
-                            )
-                    })
-                })
-                .collect();
+            let eligible = super::casting::find_eligible_tap_creatures_for_cost(
+                state,
+                player,
+                pending.object_id,
+                pending.ability.context.granting_object,
+                &cost,
+                filter,
+            );
             // CR 601.2b: The requirement shapes drive different prompts.
             // Fixed-count taps exactly `count`; the X-sentinel form (CR 107.3a)
             // taps freely within [0, eligible]; aggregate (Crew/Saddle/Teamwork)
@@ -11009,6 +11068,16 @@ fn pay_additional_cost_with_source(
                 }
                 return finish_pending_cost_or_cast(state, player, pending, events);
             };
+            // CR 107.3a: the pending ability carries the announced X that a
+            // "reveal X red cards" count reads.
+            let count =
+                super::quantity::resolve_quantity_with_targets(state, &count, &pending.ability)
+                    .max(0) as usize;
+            // CR 107.3a + CR 601.2h: an announced X of 0 reveals no cards;
+            // continue with the remaining costs.
+            if count == 0 {
+                return finish_pending_cost_or_cast(state, player, pending, events);
+            }
             // CR 701.20a + CR 601.2b: A filtered reveal requires interactive
             // card selection — return a WaitingFor, mirroring Discard.
             let eligible = super::casting::find_eligible_reveal_targets(
@@ -11019,7 +11088,7 @@ fn pay_additional_cost_with_source(
                 &filter,
             );
             // CR 601.2b: Defense-in-depth — payability already gated this.
-            if eligible.len() < count as usize {
+            if eligible.len() < count {
                 return Err(EngineError::ActionNotAllowed(
                     "Not enough eligible cards in hand to reveal".to_string(),
                 ));
@@ -11028,7 +11097,7 @@ fn pay_additional_cost_with_source(
                 player,
                 kind: PayCostKind::Reveal,
                 choices: eligible,
-                count: count as usize,
+                count,
                 min_count: 0,
                 resume: CostResume::Spell {
                     spell: Box::new(pending),
@@ -11096,6 +11165,13 @@ pub(crate) fn handle_reveal_for_cost(
             expected,
             chosen.len()
         )));
+    }
+    // CR 601.2h + CR 701.20a: revealing X cards shows X different cards, so
+    // the chosen cards must be distinct — one card can't pay for two.
+    if (0..chosen.len()).any(|i| chosen[i + 1..].contains(&chosen[i])) {
+        return Err(EngineError::InvalidAction(
+            "Selected cards must be unique".to_string(),
+        ));
     }
     for card_id in chosen {
         if !legal_cards.contains(card_id) {
@@ -11298,6 +11374,24 @@ fn additional_cost_x_max(
             .max()
             .unwrap_or(0),
         ),
+        // CR 107.3a + CR 601.2h: X in a reveal count is announced before the
+        // reveal; the engine caps it at the matching cards in hand, since
+        // revealing more is an unpayable cost (CR 118.3).
+        AbilityCost::Reveal {
+            count,
+            filter: Some(filter),
+        } if is_bare_x_count(count) => Some(
+            super::casting::find_eligible_reveal_targets(
+                state,
+                player,
+                source_id,
+                granting_object,
+                filter,
+            )
+            .len()
+            .try_into()
+            .unwrap_or(u32::MAX),
+        ),
         AbilityCost::Sacrifice(cost)
             if cost.requirement == SacrificeRequirement::Count { count: u32::MAX } =>
         {
@@ -11385,9 +11479,9 @@ fn additional_cost_x_max(
     }
 }
 
-/// True when a cost's count is exactly the announced X ("discard X cards"),
-/// the only X-count shape printed on a discard cost; the discardable-card
-/// count is then X's exact bound.
+/// True when a cost's count is exactly the announced X ("discard X cards",
+/// "reveal X red cards"), the shape printed on discard and reveal costs; the
+/// payable-card count is then X's exact bound.
 fn is_bare_x_count(count: &QuantityExpr) -> bool {
     matches!(
         count,
@@ -11427,7 +11521,9 @@ pub(super) fn activation_cost_needs_x_choice(
 /// announced before payment: a variable counter-removal count (CR 601.2b), a
 /// variable `{E}` amount (CR 107.3a + CR 601.2b, e.g. "Pay X {E}" — Chthonian
 /// Nightmare, issue #1092), or a discard whose count or mana-value filter reads
-/// X (CR 107.3a, e.g. "Discard X cards" — Gix, Yawgmoth Praetor). `AbilityCost::PayLife`/`PaySpeed` variable amounts
+/// X (CR 107.3a, e.g. "Discard X cards" — Gix, Yawgmoth Praetor), or a reveal
+/// whose count is X (CR 107.3a, e.g. "Reveal X red cards from your hand" —
+/// Martyr cycle). `AbilityCost::PayLife`/`PaySpeed` variable amounts
 /// are handled by a separate, older path (`additional_cost_x_max`'s `PayLife`
 /// arm feeds `pay_additional_cost_with_source` directly; `PaySpeed` rides the
 /// mana-ability `PayAmountChoice` channel) so are intentionally not duplicated
@@ -11442,6 +11538,10 @@ fn cost_needs_activation_x_announcement(cost: &AbilityCost) -> bool {
                     .as_ref()
                     .is_some_and(super::cost_payability::target_filter_has_x_mana_value_constraint)
         }
+        AbilityCost::Reveal {
+            count,
+            filter: Some(_),
+        } => is_bare_x_count(count),
         AbilityCost::Composite { costs } => costs.iter().any(cost_needs_activation_x_announcement),
         _ => false,
     }
@@ -14223,6 +14323,7 @@ fn spell_graveyard_replacement_def(
                 target: TargetFilter::SelfRef,
                 count: QuantityExpr::Fixed { value: 1 },
                 position,
+                arranger: None,
             },
             "CR 614.1a: if this spell would be put into its owner's graveyard, put it on its \
              owner's library instead.",
@@ -15345,12 +15446,14 @@ fn auto_tap_mana_sources_inner(
                 // CR 305.6 + CR 605.3: tapping a basic land for mana activates its
                 // intrinsic mana ability. It never moves the land, so it carries no
                 // departed-source LKI; its triggers are observed at the activation
-                // boundary, before production, like every mana activation.
+                // boundary, before production, like every mana activation. Its
+                // activation cost is the intrinsic "{T}" (CR 305.6).
                 let activation_event = super::casting_targets::emit_ability_activated(
                     state,
                     player,
                     option.object_id,
                     crate::types::events::ActivatedAbilityKind::Mana,
+                    crate::types::events::BoundActivationCost::basic_land_intrinsic(),
                     None,
                     crate::types::zones::Zone::Battlefield,
                     events,
@@ -18274,37 +18377,68 @@ pub fn cost_has_x(cost: &crate::types::mana::ManaCost) -> bool {
     }
 }
 
-/// Return true when an activated ability's cost contains `{X}` anywhere in its
-/// cost tree (including composite costs like `{T}, Pay {X}`).
+/// CR 107.3a: does this activation cost contain the `{X}` mana symbol — never a
+/// variable count. Unbound Flourishing / Magus Lucea Kane ruling: "a spell or
+/// ability with a cost that includes X, but not the mana symbol {X}, won't be
+/// copied." Every wrapper that carries a mana cost answers from that cost; the
+/// match is exhaustive so the next such wrapper is compiler-forced.
 pub fn ability_cost_has_x(cost: &crate::types::ability::AbilityCost) -> bool {
     use crate::types::ability::AbilityCost;
     match cost {
-        AbilityCost::Mana { cost } => cost_has_x(cost),
+        // CR 701.67a: "Waterbend [cost]" means "Pay [cost]" (with a tap-to-pay
+        // allowance), so its mana cost is the activation's mana cost.
+        AbilityCost::Mana { cost } | AbilityCost::Waterbend { cost } => cost_has_x(cost),
+        // CR 702.49a: "Ninjutsu [cost]" means "[Cost], Reveal this card …".
+        AbilityCost::NinjutsuFamily { mana_cost, .. } => cost_has_x(mana_cost),
         AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
             costs.iter().any(ability_cost_has_x)
         }
-        _ => false,
+        AbilityCost::PerCounter { base, .. } => ability_cost_has_x(base),
+        // A resolution-time payment quantity: it does not record whether a
+        // printed `{X}` produced it, and no activated ability carries it.
+        AbilityCost::ManaDynamic { .. } => false,
+        // A cast-time borrowed mana cost, never an activation cost.
+        AbilityCost::KeywordCostOfCastSpell { .. } => false,
+        // No `{X}` symbol is represented: fail closed.
+        AbilityCost::EffectCost { .. } | AbilityCost::Unimplemented { .. } => false,
+        // CR 107.3a: these carry at most a variable count ("Sacrifice X
+        // creatures", "Remove X counters", a loyalty −X), not the `{X}` symbol.
+        AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice(_)
+        | AbilityCost::PayLife { .. }
+        | AbilityCost::Discard { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::GetPlayerCounters { .. } => false,
     }
 }
 
-/// Return true when `source_id`'s most recent pending activation carries an
-/// `{X}` activation cost. Used by `AbilityActivated` trigger matchers.
-pub fn pending_activation_cost_has_x(state: &GameState, source_id: ObjectId) -> bool {
-    let Some((_, ability_index)) = state
-        .pending_activations
-        .iter()
-        .rev()
-        .find(|(id, _)| *id == source_id)
-    else {
-        return false;
-    };
-    let Some(obj) = state.objects.get(&source_id) else {
-        return false;
-    };
-    let Some(ability) = obj.abilities.get(*ability_index) else {
-        return false;
-    };
-    ability.cost.as_ref().is_some_and(ability_cost_has_x)
+/// CR 602.1a: does an activation's bound cost (carried on its
+/// `AbilityActivated` event) contain the `{X}` mana symbol.
+pub fn bound_activation_cost_has_x(cost: &crate::types::events::BoundActivationCost) -> bool {
+    use crate::types::events::BoundActivationCost;
+    match cost {
+        BoundActivationCost::Cost(cost) => ability_cost_has_x(cost),
+        BoundActivationCost::Costless => false,
+        // No binding is known (a legacy decode): fail closed.
+        BoundActivationCost::Unknown => false,
+    }
 }
 
 /// Extract a mana sub-cost containing X from an activated ability cost.
@@ -18386,6 +18520,197 @@ mod tests {
     use super::*;
     use crate::game::scenario::P0;
     use crate::types::ability::ContinuousModification;
+
+    fn x_mana(extra: &[ManaCostShard]) -> ManaCost {
+        let mut shards = vec![ManaCostShard::X];
+        shards.extend_from_slice(extra);
+        ManaCost::Cost { shards, generic: 0 }
+    }
+
+    /// CR 107.3a + CR 602.1a: "contains {X}" means the `{X}` mana symbol, read
+    /// through every wrapper that carries a mana cost — never a variable count
+    /// (Unbound Flourishing / Magus Lucea Kane ruling: "a cost that includes X,
+    /// but not the mana symbol {X}").
+    #[test]
+    fn ability_cost_has_x_reads_the_x_symbol_through_every_mana_wrapper() {
+        use crate::types::ability::{
+            NinjutsuVariant, SacrificeCost, TapCreaturesRequirement, TargetFilter, TypedFilter,
+        };
+        use crate::types::counter::CounterMatch;
+        let x_sentinel = QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        };
+        let x_mana_leg = AbilityCost::Mana { cost: x_mana(&[]) };
+        let with_x = [
+            x_mana_leg.clone(),
+            // Pernicious Deed: "{X}, Sacrifice this enchantment".
+            AbilityCost::Composite {
+                costs: vec![
+                    x_mana_leg.clone(),
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            },
+            // Wizard's Rockets: "{X}, {T}, Sacrifice this artifact".
+            AbilityCost::Composite {
+                costs: vec![
+                    x_mana_leg.clone(),
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+                ],
+            },
+            // CR 701.67a: Katara's "Waterbend {X}" means "Pay {X}".
+            AbilityCost::Waterbend { cost: x_mana(&[]) },
+            // CR 702.49a: a ninjutsu-family cost carries its mana cost.
+            AbilityCost::NinjutsuFamily {
+                variant: NinjutsuVariant::Ninjutsu,
+                mana_cost: x_mana(&[ManaCostShard::Blue]),
+            },
+            AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Composite {
+                        costs: vec![x_mana_leg.clone(), AbilityCost::Tap],
+                    },
+                    AbilityCost::Composite {
+                        costs: vec![
+                            AbilityCost::Mana {
+                                cost: ManaCost::Cost {
+                                    shards: vec![ManaCostShard::Blue],
+                                    generic: 0,
+                                },
+                            },
+                            AbilityCost::Tap,
+                        ],
+                    },
+                ],
+            },
+            AbilityCost::PerCounter {
+                counter: crate::types::counter::CounterType::Age,
+                target: TargetFilter::SelfRef,
+                base: Box::new(x_mana_leg.clone()),
+            },
+        ];
+        for cost in &with_x {
+            assert!(ability_cost_has_x(cost), "{cost:?} contains {{X}}");
+        }
+
+        let without_x = [
+            AbilityCost::Waterbend {
+                cost: ManaCost::generic(3),
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            AbilityCost::Tap,
+            AbilityCost::Loyalty { amount: -3 },
+            AbilityCost::RemoveCounter {
+                count: u32::MAX,
+                counter_type: CounterMatch::Any,
+                target: None,
+                selection: Default::default(),
+            },
+            // Krav, the Unredeemed: "Sacrifice X creatures" carries X, not {X}.
+            AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::creature()),
+                u32::MAX,
+            )),
+            AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::Count { count: u32::MAX },
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            AbilityCost::PayLife {
+                amount: x_sentinel.clone(),
+            },
+            AbilityCost::PayEnergy {
+                amount: x_sentinel.clone(),
+            },
+            AbilityCost::ManaDynamic {
+                quantity: x_sentinel,
+            },
+            AbilityCost::Unimplemented {
+                description: "pay {X}".to_string(),
+            },
+        ];
+        for cost in &without_x {
+            assert!(!ability_cost_has_x(cost), "{cost:?} has no {{X}} symbol");
+        }
+    }
+
+    /// CR 602.1a: the three-state front — only a bound cost carrying `{X}`
+    /// answers true; a cost-less binding and an unknown (legacy) one fail
+    /// closed.
+    #[test]
+    fn bound_activation_cost_has_x_answers_only_a_bound_x_cost() {
+        use crate::types::events::BoundActivationCost;
+        assert!(bound_activation_cost_has_x(&BoundActivationCost::Cost(
+            Box::new(AbilityCost::Mana { cost: x_mana(&[]) })
+        )));
+        assert!(!bound_activation_cost_has_x(&BoundActivationCost::Cost(
+            Box::new(AbilityCost::Tap)
+        )));
+        assert!(!bound_activation_cost_has_x(&BoundActivationCost::Costless));
+        assert!(!bound_activation_cost_has_x(&BoundActivationCost::Unknown));
+    }
+
+    /// CR 305.6 + CR 602.1a + CR 605.3: the auto-payment tapping a land for its
+    /// intrinsic "{T}: Add [mana symbol]" publishes a mana activation whose
+    /// activation cost is `{T}`.
+    #[test]
+    fn auto_tapped_intrinsic_land_publishes_its_tap_activation_cost() {
+        use crate::types::actions::GameAction;
+        use crate::types::events::{ActivatedAbilityKind, BoundActivationCost};
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let spell = scenario
+            .add_creature_to_hand(P0, "Green Spell", 1, 1)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let forest = crate::game::zones::create_object(
+            runner.state_mut(),
+            CardId(9001),
+            P0,
+            "Intrinsic Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let object = runner.state_mut().objects.get_mut(&forest).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.card_types.subtypes.push("Forest".to_string());
+        object.base_card_types = object.card_types.clone();
+        assert!(
+            object.abilities.is_empty(),
+            "fixture must rely on the CR 305.6 intrinsic mana ability"
+        );
+
+        let card_id = runner.state().objects[&spell].card_id;
+        let result = runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the auto-paid cast succeeds");
+
+        assert!(
+            runner.state().objects[&forest].tapped,
+            "reach: the auto payment tapped the Forest"
+        );
+        assert!(result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::AbilityActivated {
+                source_id,
+                kind: ActivatedAbilityKind::Mana,
+                activation_cost,
+                ..
+            } if *source_id == forest
+                && *activation_cost == BoundActivationCost::Cost(Box::new(AbilityCost::Tap))
+        )));
+    }
 
     /// CR 601.2g + CR 605.3b: a `Choose` auto-tap made while an automatic payment
     /// is executing takes that payment's published row policy instead of
@@ -29980,7 +30305,7 @@ its replicate cost was paid.)\nDraw a card.";
             (
                 "reveal",
                 AbilityCost::Reveal {
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: None,
                 },
             ),

@@ -241,7 +241,7 @@ pub fn resolve(
     // objects usually function only while that object is on the battlefield"):
     // the collection loop's zone gate (triggers.rs, keyed on `trigger_zones`)
     // enforces it, and every printed `ChangesController` producer (Khârn the
-    // Betrayer, Duplicity, Gustha's Scepter, Stolen Uniform) declares
+    // Betrayer, Duplicity, Gustha's Scepter, Stolen Uniform, Risky Move) declares
     // `trigger_zones: ["Battlefield"]`, so none of them ever scan this
     // spell-half event on the stack. `valid_card` remains a real, secondary
     // scope for the in-zone case — it is just not what protects the

@@ -393,6 +393,9 @@ mod tests {
 
     fn winston_session(pod_size: u8, rng_seed: u64) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Winston,

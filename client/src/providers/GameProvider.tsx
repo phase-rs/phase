@@ -46,13 +46,18 @@ import { useGameplayPreferencesSync } from "../hooks/useGameplayPreferencesSync"
 import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
-import { loadP2PTerminalResult } from "../services/p2pTerminalResult";
+import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { formatSuppliesDeck } from "../data/formatRegistry";
 import { emptySeatDeck, pileSeatDeck, pileSourceFromParam, type PileSource } from "../services/pileSource";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { inspectActiveQuickDraftLifecycle, loadDraftRun } from "../services/quickDraftPersistence";
-import { loadGameStrict } from "../services/gamePersistence";
+import {
+  clearFullTerminalCleanupStrict,
+  clearGameStrict,
+  loadFullTerminalCleanupStrict,
+  loadGameStrict,
+} from "../services/gamePersistence";
 import type { DraftRunState } from "../services/quickDraftPersistence";
 import { SPECTATOR_PLAYER_ID } from "../constants/game";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
@@ -810,13 +815,11 @@ export function GameProvider({
 
     if (isP2P) {
       // A supplied-deck format reads no active deck; the host's guest gate, not
-      // the guest, decides whether a guest's submission fits the room.
+      // the guest, decides whether a guest's submission fits the room. The
+      // host's no-deck refusal waits until pending terminal cleanup has run:
+      // finishing a retained cleanup needs no deck.
       const suppliedFormat = formatConfig && formatSuppliesDeck(formatConfig.format) ? formatConfig.format : null;
       const parsedDeck = suppliedFormat ? null : loadActiveDeck();
-      if (mode === "p2p-host" && !parsedDeck && !suppliedFormat) {
-        onNoDeckRef.current?.();
-        return;
-      }
 
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
         // Host-only: proactively request notification permission while the
@@ -850,12 +853,18 @@ export function GameProvider({
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
           }
+          if (event.type === "terminalResult"
+            && !(adapter instanceof P2PHostAdapter && adapter.usesNativeEngine())) {
+            void clearGame(gameId);
+          }
           onP2PEventRef.current?.(event);
         });
       };
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
+        let nativeTerminalContinuation: P2PTerminalResult | undefined;
+
         // Resources that may need undoing on abort/error. `broker` is
         // closed unconditionally when set; `serverGameCode` gates the
         // compensating `unregister` call — we only un-do a registration
@@ -865,6 +874,70 @@ export function GameProvider({
         let hostPeerHandle: { destroy: () => void } | null = null;
 
         try {
+          if (mode === "p2p-host") {
+            let cleanup;
+            try {
+              cleanup = await loadFullTerminalCleanupStrict(gameId);
+            } catch (error) {
+              onP2PEventRef.current?.({
+                type: "terminalUnavailable",
+                message: error instanceof Error ? error.message : "Terminal cleanup could not be read",
+              });
+              return;
+            }
+            if (cleanup) {
+              // This row contains ACK credentials only, never a playable
+              // snapshot. Show its saved result before retrying idempotent ACKs.
+              onP2PEventRef.current?.({ type: "terminalResult", result: cleanup.p2pResult });
+              try {
+                // The owner is written before the resume records are deleted,
+                // so a restart can land between the two. Finish that deletion
+                // before any ACK; if it fails, the owner stays for the next try.
+                await clearGameStrict(gameId);
+                if (!nativeEngineKey) {
+                  throw new Error("The local native engine is unavailable for terminal cleanup.");
+                }
+                await ensureNativeEngine(nativeEngineKey);
+                signal.throwIfAborted();
+                for (const delivery of cleanup.deliveries) {
+                  const current = await readFullTerminalResult(
+                    "native-engine://phase-server",
+                    delivery.credential,
+                    () => new NativeEngineSocket(),
+                  );
+                  if (
+                    !current
+                    || current.key.game_code !== cleanup.fullKey.game_code
+                    || current.key.generation !== cleanup.fullKey.generation
+                    || current.terminalRevision !== cleanup.terminalRevision
+                    || current.deliveryId !== delivery.deliveryId
+                    || current.credential !== delivery.credential
+                  ) {
+                    throw new Error("Full terminal cleanup authority no longer matches");
+                  }
+                  if (!(await acknowledgeFullTerminalDelivery(
+                    "native-engine://phase-server",
+                    delivery.deliveryId,
+                    delivery.credential,
+                    () => new NativeEngineSocket(),
+                  ))) {
+                    throw new Error("Full terminal cleanup acknowledgement was rejected");
+                  }
+                }
+                await clearFullTerminalCleanupStrict(gameId);
+              } catch (error) {
+                onP2PEventRef.current?.({
+                  type: "terminalUnavailable",
+                  message: error instanceof Error ? error.message : "Terminal cleanup remains pending",
+                });
+              }
+              return;
+            }
+          }
+          if (mode === "p2p-host" && !parsedDeck && !suppliedFormat) {
+            onNoDeckRef.current?.();
+            return;
+          }
           let player: ExpandedDeckWithTier;
           if (!suppliedFormat) {
             player = {
@@ -905,16 +978,20 @@ export function GameProvider({
             ]);
             signal.throwIfAborted();
 
+            const isNativeResume = savedSession?.nativeSession !== undefined;
             if (savedSession) {
               const terminal = await loadP2PTerminalResult(savedSession.sessionKey);
               signal.throwIfAborted();
               if (terminal) {
-                onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
-                return;
+                if (!isNativeResume) {
+                  void clearGame(gameId);
+                  onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
+                  return;
+                }
+                nativeTerminalContinuation = terminal;
               }
             }
 
-            const isNativeResume = savedSession?.nativeSession !== undefined;
             const isWasmResume =
               !isNativeResume
               && savedState !== null
@@ -943,6 +1020,13 @@ export function GameProvider({
                 };
               } catch (err) {
                 if (isNativeResume) {
+                  if (nativeTerminalContinuation) {
+                    onP2PEventRef.current?.({
+                      type: "terminalResult",
+                      result: nativeTerminalContinuation,
+                    });
+                    return;
+                  }
                   throw new Error(
                     `The local native engine is required to resume this hosted game: ${err instanceof Error ? err.message : String(err)}`,
                   );
@@ -951,6 +1035,13 @@ export function GameProvider({
               }
             }
             if (isNativeResume && !nativeP2P) {
+              if (nativeTerminalContinuation) {
+                onP2PEventRef.current?.({
+                  type: "terminalResult",
+                  result: nativeTerminalContinuation,
+                });
+                return;
+              }
               throw new Error("The local native engine is unavailable for this hosted game.");
             }
 
@@ -1029,7 +1120,10 @@ export function GameProvider({
                 hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
                 resumeData: isResume && savedSession
                   ? isNativeResume
-                    ? { session: savedSession }
+                    ? {
+                      session: savedSession,
+                      ...(nativeTerminalContinuation ? { terminalResult: nativeTerminalContinuation } : {}),
+                    }
                     : savedState
                       ? { state: savedState, session: savedSession }
                       : undefined
@@ -1074,6 +1168,7 @@ export function GameProvider({
               const terminal = await loadP2PTerminalResult(existing.authority.sessionKey);
               signal.throwIfAborted();
               if (terminal) {
+                void clearGame(gameId);
                 onP2PEventRef.current?.({ type: "terminalResult", result: terminal });
                 return;
               }
@@ -1128,6 +1223,13 @@ export function GameProvider({
           if (broker) useMultiplayerStore.getState().closeBroker(broker);
           hostPeerHandle?.destroy();
           if (signal.aborted) return;
+          if (nativeTerminalContinuation) {
+            onP2PEventRef.current?.({
+              type: "terminalResult",
+              result: nativeTerminalContinuation,
+            });
+            return;
+          }
           const message = err instanceof Error ? err.message : String(err);
           const peerErrorType = (err as { peerErrorType?: string }).peerErrorType;
           if (peerErrorType === "unavailable-id") {
@@ -1231,27 +1333,51 @@ export function GameProvider({
         if (reconnectSession) {
           const terminalDelivery = await loadFullTerminalDelivery(reconnectSession.fullKey);
           if (cancelled) return;
+          if (reconnectSession.terminalOnly && !terminalDelivery) {
+            onWsEventRef.current?.({
+              type: "terminalUnavailable",
+              message: tRef.current("gameProvider.toasts.retainedTerminalUnreadable"),
+            });
+            return;
+          }
 
           if (terminalDelivery) {
             // A retained terminal capability is read only through the small raw
             // socket helper. This branch intentionally returns before any
             // playable adapter, controller, deck, or reconnect setup exists.
+            saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession);
+            // Show the cached result summary immediately. A refreshed delivery
+            // must establish matching authority before reusing a private view.
+            onWsEventRef.current?.({
+              type: "terminalDelivery", delivery: { ...terminalDelivery, finalView: undefined },
+            });
             try {
               const refreshed = await readFullTerminalResult(
                 reconnectSession.serverUrl,
                 terminalDelivery.credential,
               );
               if (cancelled) return;
-              if (refreshed && !(await replaceFullTerminalDelivery(refreshed))) {
+              const retainsLocalFinalView = refreshed !== null
+                && refreshed.key.game_code === terminalDelivery.key.game_code
+                && refreshed.key.generation === terminalDelivery.key.generation
+                && refreshed.deliveryId === terminalDelivery.deliveryId
+                && refreshed.credential === terminalDelivery.credential
+                && refreshed.finalView === undefined
+                && terminalDelivery.finalView !== undefined;
+              const effectiveRefresh = retainsLocalFinalView
+                ? { ...refreshed, finalView: terminalDelivery.finalView }
+                : refreshed;
+              if (effectiveRefresh && !(await replaceFullTerminalDelivery(effectiveRefresh))) {
                 throw new Error("Failed to retain terminal delivery");
               }
-              const display = refreshed ?? terminalDelivery;
+              const display = effectiveRefresh ?? terminalDelivery;
               void acknowledgeFullTerminalDelivery(
                 reconnectSession.serverUrl,
-                display.delivery_id,
+                display.deliveryId,
                 display.credential,
-              ).catch(() => {});
-              clearWsSession();
+              ).then((acknowledged) => {
+                if (acknowledged && !cancelled) clearWsSession(reconnectSession);
+              }).catch(() => {});
               onWsEventRef.current?.({
                 type: "terminalDelivery",
                 delivery: display,
@@ -1296,12 +1422,14 @@ export function GameProvider({
               });
               return;
             }
+            saveWsSession({ ...reconnectSession, terminalOnly: true }, reconnectSession);
             void acknowledgeFullTerminalDelivery(
               reconnectSession.serverUrl,
-              bootstrap.delivery_id,
+              bootstrap.deliveryId,
               bootstrap.credential,
-            ).catch(() => {});
-            clearWsSession();
+            ).then((acknowledged) => {
+              if (acknowledged && !cancelled) clearWsSession(reconnectSession);
+            }).catch(() => {});
             onWsEventRef.current?.({ type: "terminalDelivery", delivery: bootstrap });
             return;
           }
@@ -1327,6 +1455,7 @@ export function GameProvider({
           useMultiplayerStore.getState().displayName || "Player",
         );
 
+        let adapterSession: ReturnType<typeof loadWsSession> = null;
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
@@ -1348,9 +1477,13 @@ export function GameProvider({
           }
           if (event.type === "sessionChanged") {
             if (event.session) {
-              saveWsSession(event.session);
-            } else {
-              clearWsSession();
+              const previousSession = adapterSession;
+              adapterSession = event.session;
+              saveWsSession(event.session, event.session.terminalOnly
+                ? previousSession ?? event.session : undefined);
+            } else if (adapterSession) {
+              clearWsSession(adapterSession);
+              adapterSession = null;
             }
           }
           if (event.type === "stateChanged") {

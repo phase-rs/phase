@@ -7,9 +7,6 @@
 //!   - Boreal Outrider: "Whenever you cast a creature spell, if {S} of any of
 //!     that spell's colors was spent to cast it, that creature enters with an
 //!     additional +1/+1 counter on it. ({S} is mana from a snow source.)"
-//!   - Torgal, A Fine Hound: "Whenever you cast your first Human creature spell
-//!     each turn, that creature enters with an additional +1/+1 counter on it for
-//!     each Dog and/or Wolf you control." / "{T}: Add one mana of any color."
 //!   - Hosting Season (three paragraphs, below).
 //!   - Dark Intimations (two paragraphs, below).
 //!
@@ -34,8 +31,6 @@ use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
 const BOREAL_OUTRIDER: &str = "Whenever you cast a creature spell, if {S} of any of that spell's colors was spent to cast it, that creature enters with an additional +1/+1 counter on it. ({S} is mana from a snow source.)";
-
-const TORGAL: &str = "Whenever you cast your first Human creature spell each turn, that creature enters with an additional +1/+1 counter on it for each Dog and/or Wolf you control.\n{T}: Add one mana of any color.";
 
 const HOSTING_SEASON: &str = "While it's October 25th, 2024, whenever you cast your commander, create a token that's a copy of it except it isn't legendary.\nWhile it's October 26th or 27th, 2024, if one or more tokens would be created under your control, instead twice that many tokens are created and each of them enters with a +1/+1 counter on it.\nOn any other date, both abilities apply. (Because why not?)";
 
@@ -164,90 +159,6 @@ fn boreal_outrider_is_an_honest_gap() {
     assert_eq!(
         cast_creature_and_count("Test Grower", SELF_COUNTER, cost(), green_and_two()),
         1
-    );
-}
-
-/// Torgal's rider names the Human creature spell its trigger watches. The
-/// trigger head is read faithfully; the body is an honest gap until the floating
-/// replacement can evaluate "Dogs and/or Wolves you control" for its installer.
-/// Torgal itself enters with no counter (its text gives it none). This test
-/// deliberately does not assert what a later Human gets, which would lock the
-/// gap in as behaviour.
-#[test]
-fn torgal_is_an_honest_gap_and_does_not_count_itself() {
-    let parsed = parse_oracle_text(
-        TORGAL,
-        "Torgal, A Fine Hound",
-        &[],
-        &["Creature".to_string()],
-        &["Wolf".to_string()],
-    );
-    let triggers: Vec<_> = parsed
-        .triggers
-        .iter()
-        .filter(|t| t.mode == TriggerMode::SpellCast)
-        .collect();
-    assert_eq!(triggers.len(), 1, "reach guard: {parsed:?}");
-    assert!(
-        matches!(
-            triggers[0].constraint,
-            Some(engine::types::ability::TriggerConstraint::NthSpellThisTurn { n: 1, .. })
-        ),
-        "the first-Human-spell head is read, got {:?}",
-        triggers[0].constraint
-    );
-    assert!(
-        matches!(
-            triggers[0].execute.as_deref().map(|e| e.effect.as_ref()),
-            Some(Effect::Unimplemented { .. })
-        ),
-        "the body is one explicit gap leaf, got {:?}",
-        triggers[0].execute
-    );
-    assert!(
-        parsed.replacements.is_empty(),
-        "got {:?}",
-        parsed.replacements
-    );
-    assert!(
-        triggers[0]
-            .execute
-            .as_deref()
-            .map(chain_effects)
-            .unwrap_or_default()
-            .iter()
-            .all(|effect| !matches!(
-                effect,
-                Effect::AddTargetReplacement { .. }
-                    | Effect::PutCounter { .. }
-                    | Effect::AddPendingETBCounters { .. }
-            )),
-        "no install or put in the trigger body"
-    );
-
-    let cost = || ManaCost::Cost {
-        shards: vec![ManaCostShard::Green],
-        generic: 1,
-    };
-    let pool = || {
-        let mut pool = colorless(1);
-        pool.push(ManaUnit::new(
-            ManaType::Green,
-            ObjectId(0),
-            false,
-            Vec::new(),
-        ));
-        pool
-    };
-    assert_eq!(
-        cast_creature_and_count("Torgal, A Fine Hound", TORGAL, cost(), pool()),
-        0,
-        "Torgal's text gives no counter to Torgal"
-    );
-    assert_eq!(
-        cast_creature_and_count("Test Grower", SELF_COUNTER, cost(), pool()),
-        1,
-        "control"
     );
 }
 

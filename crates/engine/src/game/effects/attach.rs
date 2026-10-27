@@ -2045,6 +2045,45 @@ pub(crate) fn can_attach_to_player_with_authority(
     }
 }
 
+/// CR 701.3b: [`attach_to`] that reports whether the attachment actually moved
+/// onto `target_id`. Same-host re-attaches (a no-op under CR 701.3b) and
+/// rejected attaches return `false`, so "becomes attached" events (CR 603.2e)
+/// are emitted only for a genuine transition.
+pub(crate) fn attach_to_reporting_change(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+) -> bool {
+    let host = Some(AttachTarget::Object(target_id));
+    let host_of = |state: &GameState| {
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|o| o.attached_to)
+    };
+    let was_attached = host_of(state) == host;
+    attach_to(state, attachment_id, target_id);
+    !was_attached && host_of(state) == host
+}
+
+/// Player-host sibling of [`attach_to_reporting_change`].
+pub(crate) fn attach_to_player_reporting_change(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+) -> bool {
+    let host = Some(AttachTarget::Player(target_player));
+    let host_of = |state: &GameState| {
+        state
+            .objects
+            .get(&attachment_id)
+            .and_then(|o| o.attached_to)
+    };
+    let was_attached = host_of(state) == host;
+    attach_to_player(state, attachment_id, target_player);
+    !was_attached && host_of(state) == host
+}
+
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
 /// Core attachment logic: attach `attachment_id` to `target_id`.
 /// Handles detaching from a previous target if already attached.

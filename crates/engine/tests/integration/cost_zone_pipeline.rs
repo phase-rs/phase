@@ -992,6 +992,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -4967,6 +4968,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -11866,6 +11868,7 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![TargetRef::Object(first), TargetRef::Object(second)],
         source,
@@ -12722,6 +12725,7 @@ fn library_effect_placements_stay_synchronous_without_redirects() {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: engine::types::ability::LibraryPosition::Top,
+                arranger: None,
             },
             vec![TargetRef::Object(first), TargetRef::Object(second)],
             put_source,
@@ -13932,6 +13936,7 @@ fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
             ),
             count: QuantityExpr::Fixed { value: 1 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![],
         source,
@@ -14044,6 +14049,7 @@ fn effect_zone_put_at_library_position_rejects_duplicate_selection() {
             ),
             count: QuantityExpr::Fixed { value: 2 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![],
         source,

@@ -115,9 +115,10 @@ use crate::types::ability::{
     CombatRelationSubject, ContinuousModification, ControllerRef, CountBinding,
     CounterMoveSelection, DamageSource, EachDamageRecipient, Effect, EffectKind, EffectScope,
     FilterProp, GameRestriction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
-    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionPlayerScope, SpellContext, SubAbilityLink, TargetChoiceTiming,
-    TargetFilter, TargetReadOrigin, TargetRef, TypeFilter, TypedFilter,
+    MultiTargetSpec, ObjectScope, PlayerFilter, PlayerScope, PreventionAmount, PtValue,
+    QuantityExpr, QuantityRef, ResolvedAbility, RestrictionPlayerScope, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::game_state::RandomDraw;
 // CR 601.2c: mana recipient / count-source role slot gate.
@@ -126,7 +127,7 @@ use crate::types::ability::mana_multi_role;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    ChainStep, GameState, PtDirection, RetargetSlotAddress, TargetEffectDetail,
+    ChainStep, GameState, PtDirection, RetargetSlotAddress, StackEntryKind, TargetEffectDetail,
     TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
@@ -210,6 +211,79 @@ pub fn build_resolved_from_def_with_targets_and_chain_root(
     let mut resolved = build_resolved_from_def_with_targets(def, source_id, controller, targets);
     resolved.set_chain_root_targets_recursive(chain_root_targets);
     resolved
+}
+
+/// CR 113.7a + CR 400.7: inherit only the source identity of a newly materialized
+/// dice/coin result branch, never its actor, targets, pins, or other context.
+/// Both the resolving entry and its contained ability must name this source.
+/// Activated carriers supply only their post-cost `source_incarnation`, never
+/// `announced_source_incarnation`. Triggered carriers supply the full
+/// `TriggerSourceContext` and its incarnation only when it names this source;
+/// missing/foreign carriers, provenance-free triggers, spells, keyword actions,
+/// and combat damage leave the branch unchanged.
+///
+/// CR 608.2h: full provenance preserves the existing source-read authority:
+/// `ExactLive` reads current characteristics when incarnation and expected zone
+/// match; a departed source reads its captured LKI, not a later same-ID object.
+///
+/// The carrier is a proxy for the flipping/rolling node, not proof of syntactic
+/// ancestry: a same-source replacement flip inherits the activation's stamp.
+/// Resolution-segment provenance updates do not update this carrier, and
+/// off-stack mana abilities read whatever carrier is installed.
+///
+/// CR 608.2c + CR 400.7e: fresh random-result frames retain and replay their
+/// suspension's owning trigger scope. `Some(empty)` clears foreign channels;
+/// legacy `None` does not push a scope or reconstruct missing authority.
+///
+/// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
+/// retain their owning scope, including explicit emptiness; legacy missing scope
+/// is not reconstructed. A die roll started by a coin's continuation drain still
+/// loses its published per-survivor result at the drain's whole-snapshot restore
+/// (pre-existing, unchanged).
+///
+/// This policy is dice/coin-only. Sibling branch builders in `vote.rs`,
+/// `reveal_from_hand.rs`, and `exile_top_card_contest.rs` are untouched.
+pub(crate) fn inherit_result_branch_source_identity(
+    state: &GameState,
+    branch: &mut ResolvedAbility,
+) {
+    let Some(entry) = state
+        .resolving_stack_entry
+        .as_ref()
+        .filter(|entry| entry.source_id == branch.source_id)
+    else {
+        return;
+    };
+    let carried = match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            if ability.source_id != branch.source_id {
+                return;
+            }
+            ability
+                .source_incarnation
+                .map(|incarnation| (None, incarnation))
+        }
+        StackEntryKind::TriggeredAbility { ability, .. } => {
+            if ability.source_id != branch.source_id {
+                return;
+            }
+            ability
+                .trigger_source
+                .as_ref()
+                .filter(|source| source.identity.reference.object_id == branch.source_id)
+                .map(|source| (Some(source), source.identity.reference.incarnation))
+        }
+        StackEntryKind::Spell { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
+    };
+    if let Some((trigger_source, incarnation)) = carried {
+        branch.set_result_branch_source_identity_recursive(
+            branch.source_id,
+            trigger_source,
+            incarnation,
+        );
+    }
 }
 
 /// CR 601.2b + CR 602.2b: publish an announce-time-locked X onto an ability being
@@ -335,6 +409,10 @@ pub fn build_resolved_from_def_with_targets(
     // CR 608.2c: Carry the parent-link kind through so the decline classifier can
     // distinguish a separate-sentence sibling from a within-clause continuation.
     resolved.sub_link = def.sub_link;
+    // CR 611.2e + CR 608.2c: Carry the parser-stamped onset through so the
+    // entry-observation boundary knows whether this instruction's continuous
+    // effect applies simultaneously with an entry of this resolution.
+    resolved.entry_onset = def.entry_onset;
     // CR 702.1c ("the same is true") + CR 608.2c (written order): Carry the
     // replication marker through so `resolve_chain_body` evaluates a
     // `ReplicatedOrBranch` per-item OR-branch (Mutable Pupa, Kathril)
@@ -753,7 +831,7 @@ pub(crate) fn transfer_coin_target_custody(
 /// player_scope, optional, optional_for, optional_targeting, multi_target,
 /// target_constraints, target_choice_timing, description, repeat_for,
 /// min_x_value, forward_result, unless_pay, distribution, distribute,
-/// target_selection_mode.
+/// target_selection_mode, entry_onset.
 ///
 /// Fields preserved from `parent`: controller, source_id, kind, context,
 /// original_controller, scoped_player, chosen_x, cost_paid_object,
@@ -815,6 +893,8 @@ pub(crate) fn apply_instead_swap(
     overridden.distribute = sub.distribute.clone();
     overridden.target_selection_mode = sub.target_selection_mode;
     overridden.target_chooser = sub.target_chooser.clone();
+    // CR 611.2e: the onset is a property of the swapped-in instruction's wording.
+    overridden.entry_onset = sub.entry_onset;
     // CR 608.2b + CR 601.2c: a swapped-in effect with its own declared target
     // resolves against its OWN resolution-validated targets. The parent may
     // retain a subset that still meets its narrower filter while dropping other
@@ -4186,7 +4266,8 @@ fn validate_targets_in_chain_inner(
     {
         // CR 608.2b + CR 609.7a: A source-scoped `PreventDamage` carries its
         // chosen source spell in `targets[0]`. `extract_target_filter_from_effect`
-        // returns `None` for its `Any` recipient, so the generic `None` arm below
+        // returns `None` for a source-scoped prevention (its recipient is an
+        // untargeted scope, CR 115.10a), so the generic `None` arm below
         // would fizzle-filter the spell to battlefield presence and drop it
         // (the spell lives on the STACK). Re-validate against the source leaf
         // (`InZone Stack`-aware) instead, preserving the spell target.
@@ -4570,7 +4651,7 @@ fn restamp_inherited_rider_target(parent: &mut ResolvedAbility) {
 /// Returns `None` for recipient-scoped or `ChosenDamageSource`/`IsChosenColor`
 /// ("by …" Arachnogenesis) prevents, so those are NOT diverted into a source
 /// target slot.
-fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
+pub(crate) fn damage_replacement_source_slot_filter(effect: &Effect) -> Option<&TargetFilter> {
     let source_filter = match effect {
         Effect::PreventDamage {
             damage_source_filter,
@@ -5135,10 +5216,11 @@ fn collect_target_slots_inner(
     // target instant or sorcery spell would deal this turn") surfaces the
     // choosable source spell as a target slot. Declared FIRST (CR 601.2c
     // declaration order). The generic path below cannot reach it —
-    // `target_filter()` returns the `Any` recipient and short-circuits to `None`
-    // — so we surface it here, mirroring the `CreateDamageReplacement` arm. We
-    // do NOT `return`: the generic recipient logic still runs, but for the
-    // source-scoped form `target == Any` so it adds nothing.
+    // `extract_target_filter_from_effect` returns `None` for the source-scoped
+    // form (its `target` is an untargeted recipient scope —
+    // `Any`/`Player`/`Controller`) — so we surface it here, mirroring the
+    // `CreateDamageReplacement` arm. We do NOT `return`: the generic recipient
+    // logic still runs, but for the source-scoped form it adds nothing.
     if ability.target_choice_timing == TargetChoiceTiming::Stack {
         if let Some(roles) = damage_replacement_target_roles(&ability.effect) {
             for (index, role) in roles.into_iter().enumerate() {
@@ -5973,6 +6055,13 @@ fn filter_prop_contains_quantity_scope(prop: &FilterProp, scope: ObjectScope) ->
         | FilterProp::PtComparison { value, .. } => {
             crate::game::quantity::quantity_expr_contains_scope(value, scope)
         }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), exactly as it does for `CanEnchant`, so this
+        // per-prop classifier answers only for the node it is called on.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| filter_prop_contains_quantity_scope(p, scope)),
@@ -6140,6 +6229,13 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         FilterProp::SharesQuality { reference, .. } => {
             matches!(reference.as_deref(), Some(TargetFilter::ParentTarget))
         }
+        // CR 701.3a: the filter-matched host axis boxes a `TargetFilter`; the
+        // OUTER `filter_contains` traversal visits it (through
+        // `filter_prop_contains`), mirroring `CanEnchant`, so no arm is needed
+        // for the nested filter's own position here.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        } => false,
         FilterProp::AnyOf { props } => props.iter().any(filter_prop_binds_prior_target),
         FilterProp::Not { prop } => filter_prop_binds_prior_target(prop),
         // Every remaining prop enumerated explicitly (no `_ =>`) — see
@@ -6461,8 +6557,8 @@ fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
 /// `combat::defending_player_cr508_5` for the attacked-player anaphor needs the
 /// resolving ability's `trigger_source`, because that authority's binding rule is
 /// `trigger_source.and_then(|_| detection.or(state.current_trigger_event))` — with
-/// no `trigger_source` the binding is `DefenderBinding::None`, which skips the
-/// attack-entry tiers entirely and leaves only `resolve_defending_player`. That
+/// no `trigger_source` no attack event is bound (`with_bound_attack_event` passes
+/// `None`), which skips the attack-entry tiers entirely and leaves only `resolve_defending_player`. That
 /// tail resolves a non-attacking source through `extract_source_from_event`,
 /// whose `AttackersDeclared` arm is gated on `attacker_ids.len() == 1`, so ANY
 /// declaration with two or more attackers yields `None`,
@@ -6673,7 +6769,10 @@ fn mass_all_target_filter(effect: &Effect) -> Option<&TargetFilter> {
 /// detectors. Returns true if any filter seam (`Attach` operands, a non-targeted
 /// `GenericEffect`'s static `affected`, the effect's own `target_filter()`, or a
 /// mass-placement `target`) satisfies `pred`.
-fn effect_bound_filter_matches(effect: &Effect, pred: fn(&TargetFilter) -> bool) -> bool {
+pub(crate) fn effect_bound_filter_matches(
+    effect: &Effect,
+    pred: fn(&TargetFilter) -> bool,
+) -> bool {
     if let Effect::Attach {
         attachment, target, ..
     }
@@ -7273,35 +7372,105 @@ fn attach_object_binding(
     ))
 }
 
+/// Which player relation of a `TypedFilter` a player-binding walk reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlayerBindingAxis {
+    /// Only a `FilterProp::Owned` property ("cards target player owns").
+    Owner,
+    /// The filter's `controller` or a `FilterProp::Owned` property.
+    ControllerOrOwner,
+}
+
 /// Tree-walks a `TargetFilter` and returns true if any `TypedFilter` inside it
-/// carries a `controller` (or `Owned` property) satisfying `pred`. Shared walker
-/// behind `filter_references_target_player` / `filter_references_target_opponent`.
-fn filter_binds_controller(filter: &TargetFilter, pred: fn(&ControllerRef) -> bool) -> bool {
+/// binds a player through `axis` to a `ControllerRef` satisfying `pred`.
+fn filter_binds_player(
+    filter: &TargetFilter,
+    axis: PlayerBindingAxis,
+    pred: fn(&ControllerRef) -> bool,
+) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter {
             controller,
             properties,
             ..
         }) => {
-            controller.as_ref().is_some_and(pred)
+            let controlled = match axis {
+                PlayerBindingAxis::Owner => false,
+                PlayerBindingAxis::ControllerOrOwner => controller.as_ref().is_some_and(pred),
+            };
+            controlled
                 || properties.iter().any(
                     |prop| matches!(prop, FilterProp::Owned { controller } if pred(controller)),
                 )
         }
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-            filters.iter().any(|f| filter_binds_controller(f, pred))
+            filters.iter().any(|f| filter_binds_player(f, axis, pred))
         }
-        TargetFilter::Not { filter } => filter_binds_controller(filter, pred),
-        _ => false,
+        TargetFilter::Not { filter } => filter_binds_player(filter, axis, pred),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject { .. }
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
     }
 }
 
-/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds to a
-/// declared-target player scope — `TargetPlayer` (any player) or `TargetOpponent`
-/// (opponent-only). Both surface a companion player slot; they differ only in that
-/// slot's legal targets, so slot *detection* treats them alike.
-pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
-    filter_binds_controller(filter, |c| {
+/// CR 109.4 + CR 115.1: Returns true if any `TypedFilter` binds, through
+/// `axis`, to a declared-target player scope — `TargetPlayer` (any player) or
+/// `TargetOpponent` (opponent-only). Both surface a companion player slot; they
+/// differ only in that slot's legal targets, so slot *detection* treats them alike.
+pub(crate) fn filter_binds_target_player(filter: &TargetFilter, axis: PlayerBindingAxis) -> bool {
+    filter_binds_player(filter, axis, |c| {
         matches!(
             c,
             ControllerRef::TargetPlayer | ControllerRef::TargetOpponent
@@ -7309,11 +7478,18 @@ pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
     })
 }
 
+/// CR 109.4 + CR 115.1: a filter whose controller or owner is a declared target player.
+pub(crate) fn filter_references_target_player(filter: &TargetFilter) -> bool {
+    filter_binds_target_player(filter, PlayerBindingAxis::ControllerOrOwner)
+}
+
 /// CR 109.4 + CR 102.2 / CR 102.3: Opponent-constrained mirror — true only for
 /// `TargetOpponent`. Drives the companion-slot legal-target discriminator
 /// (opponent-only vs. any player).
 fn filter_references_target_opponent(filter: &TargetFilter) -> bool {
-    filter_binds_controller(filter, |c| matches!(c, ControllerRef::TargetOpponent))
+    filter_binds_player(filter, PlayerBindingAxis::ControllerOrOwner, |c| {
+        matches!(c, ControllerRef::TargetOpponent)
+    })
 }
 
 /// CR 115.1 + CR 118.12a: True when an `UnlessPayModifier` payer was DECLARED as a
@@ -7831,6 +8007,12 @@ fn effect_target_slot_filter(effect: &Effect) -> Option<QuantitySlotDerivation> 
         | Effect::DamageEachPlayer { amount, .. }
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
+        // CR 115.1 + CR 601.2c + CR 111.2: a token count read off a target-bound
+        // population ("a number of tokens equal to the number of creatures target
+        // player controls": Will of the Mardu, Ferrafor) announces that player as
+        // its own slot. The tokens' owner stays the controller (CR 111.2), so
+        // `target_filter()` surfaces no slot for it.
+        | Effect::Token { count: amount, .. }
         | Effect::Sacrifice { count: amount, .. } => quantity_expr_target_slot_filter(amount),
         Effect::DestroyAll { target, .. }
         | Effect::PumpAll { target, .. }
@@ -9684,6 +9866,21 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
     }
     match effect {
         Effect::DealDamage { target, .. } => is_any_target_filter(target),
+        // CR 115.4 + CR 615.7: a single, declared recipient for a finite
+        // "next N damage" shield uses the same creature/player/planeswalker/
+        // battle domain as any other damage target. Broadcast and source-scoped
+        // prevention do not declare a recipient slot.
+        Effect::PreventDamage {
+            amount,
+            amount_dynamic,
+            recipient_scope: EffectScope::Single,
+            damage_source_filter: None,
+            target,
+            ..
+        } => {
+            (matches!(amount, PreventionAmount::Next(_)) || amount_dynamic.is_some())
+                && is_any_target_filter(target)
+        }
         // CR 609.7a + CR 614.9: only the role declared at THIS slot decides; a
         // declared source is never narrowed because a sibling recipient is `Any`.
         Effect::CreateDamageReplacement { .. } => match slot {
@@ -9753,7 +9950,10 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
         || matches!(&sub.condition,
             Some(AbilityCondition::AdditionalCostPaid { subject: ObjectScope::Source, source, origin: None, origin_ordinal: None, variant, kicker_cost, min_count })
                 if !sub.context.additional_cost_paid_matches(*source, *variant, kicker_cost.as_ref(), *min_count))
-        || sub.target_choice_timing == TargetChoiceTiming::Resolution
+        // CR 608.2c: the sticker's recipient is chosen during resolution,
+        // but its independent following instructions still announce targets.
+        || (sub.target_choice_timing == TargetChoiceTiming::Resolution
+            && !matches!(sub.effect, Effect::PutSticker { .. }))
 }
 
 fn defers_sub_ability_target_selection(effect: &Effect) -> bool {
@@ -14104,6 +14304,235 @@ mod tests {
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
 
+    #[test]
+    fn inherit_result_branch_source_identity_follows_the_carrier_policy() {
+        use crate::game::triggers::trigger_source_context_for_latch;
+        use crate::types::ability::KeywordAction;
+        use crate::types::game_state::{
+            CastingVariant, CombatDamageSubStep, StackEntry, TriggerSourceContext,
+        };
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Carrier source".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source).unwrap().incarnation = 9;
+        let context = trigger_source_context_for_latch(&state, &state.objects[&source]);
+        let other = ObjectId(999);
+        let mut foreign_context = context.clone();
+        foreign_context.identity.reference.object_id = other;
+        let node = |source_id| {
+            let mut ability = ResolvedAbility::new(
+                Effect::NoOp,
+                vec![TargetRef::Object(other)],
+                source_id,
+                PlayerId(1),
+            );
+            ability.original_controller = Some(PlayerId(1));
+            ability.scoped_player = Some(PlayerId(1));
+            ability.source_incarnation = Some(3);
+            ability.announced_source_incarnation = Some(99);
+            ability
+        };
+        let chain = || {
+            let mut root = node(source);
+            root.sub_ability = Some(Box::new(node(source)));
+            root.else_ability = Some(Box::new(node(source)));
+            root
+        };
+        let carrier = |source_id, incarnation, trigger_source| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source_id, PlayerId(0));
+            ability.source_incarnation = incarnation;
+            ability.announced_source_incarnation = Some(99);
+            ability.trigger_source = trigger_source;
+            Box::new(ability)
+        };
+        let activated = |source_id, incarnation| StackEntryKind::ActivatedAbility {
+            source_id,
+            ability: carrier(source_id, incarnation, None),
+        };
+        let triggered = |trigger_source| StackEntryKind::TriggeredAbility {
+            source_id: source,
+            // Deliberately different: matching provenance, not the bare stamp, wins.
+            ability: carrier(source, Some(8), trigger_source),
+            condition: None,
+            trigger_event: None,
+            description: None,
+            source_name: String::new(),
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        };
+        let entry = |source_id, kind| {
+            Some(StackEntry {
+                id: ObjectId(900),
+                source_id,
+                controller: PlayerId(0),
+                kind,
+            })
+        };
+        let cases = [
+            (
+                "activated",
+                entry(source, activated(source, Some(7))),
+                7,
+                None,
+            ),
+            (
+                "unstamped activation",
+                entry(source, activated(source, None)),
+                3,
+                None,
+            ),
+            (
+                "triggered",
+                entry(source, triggered(Some(context.clone()))),
+                9,
+                Some(&context),
+            ),
+            (
+                "provenance-free trigger",
+                entry(source, triggered(None)),
+                3,
+                None,
+            ),
+            (
+                "foreign provenance",
+                entry(source, triggered(Some(foreign_context))),
+                3,
+                None,
+            ),
+            (
+                "spell",
+                entry(
+                    source,
+                    StackEntryKind::Spell {
+                        card_id: CardId(1),
+                        ability: Some(carrier(source, Some(7), Some(context.clone()))),
+                        casting_variant: CastingVariant::default(),
+                        actual_mana_spent: 0,
+                    },
+                ),
+                3,
+                None,
+            ),
+            (
+                "keyword action",
+                entry(
+                    source,
+                    StackEntryKind::KeywordAction {
+                        action: KeywordAction::Equip {
+                            equipment_id: source,
+                            target_creature_id: other,
+                        },
+                    },
+                ),
+                3,
+                None,
+            ),
+            (
+                "combat damage",
+                entry(
+                    source,
+                    StackEntryKind::CombatDamage {
+                        sub_step: CombatDamageSubStep::Regular,
+                        assignments: vec![],
+                    },
+                ),
+                3,
+                None,
+            ),
+            (
+                "foreign entry",
+                entry(other, activated(source, Some(7))),
+                3,
+                None,
+            ),
+            (
+                "foreign contained ability",
+                entry(source, activated(other, Some(7))),
+                3,
+                None,
+            ),
+            ("absent entry", None, 3, None),
+        ];
+        let assert_node = |ability: &ResolvedAbility,
+                           source_id,
+                           incarnation,
+                           trigger_source: Option<&TriggerSourceContext>,
+                           label| {
+            assert_eq!(
+                (
+                    ability.source_id,
+                    ability.source_incarnation,
+                    ability.trigger_source.as_ref()
+                ),
+                (source_id, Some(incarnation), trigger_source),
+                "{label}",
+            );
+            assert_eq!(
+                (
+                    ability.controller,
+                    ability.original_controller,
+                    ability.scoped_player
+                ),
+                (PlayerId(1), Some(PlayerId(1)), Some(PlayerId(1))),
+                "{label}",
+            );
+            assert_eq!(ability.targets, vec![TargetRef::Object(other)], "{label}");
+            assert_eq!(ability.announced_source_incarnation, Some(99), "{label}");
+        };
+        for (label, resolving_entry, incarnation, trigger_source) in cases {
+            state.resolving_stack_entry = resolving_entry;
+            let mut branch = chain();
+            inherit_result_branch_source_identity(&state, &mut branch);
+            for ability in [
+                &branch,
+                branch.sub_ability.as_deref().unwrap(),
+                branch.else_ability.as_deref().unwrap(),
+            ] {
+                assert_node(ability, source, incarnation, trigger_source, label);
+            }
+        }
+
+        state.resolving_stack_entry = entry(source, triggered(Some(context.clone())));
+        let mut branch = chain();
+        let foreign = branch.sub_ability.as_mut().unwrap();
+        foreign.source_id = other;
+        foreign.sub_ability = Some(Box::new(node(source)));
+        foreign.else_ability = Some(Box::new(node(source)));
+        inherit_result_branch_source_identity(&state, &mut branch);
+        assert_node(&branch, source, 9, Some(&context), "matching root");
+        assert_node(
+            branch.else_ability.as_deref().unwrap(),
+            source,
+            9,
+            Some(&context),
+            "matching else",
+        );
+        let foreign = branch.sub_ability.as_deref().unwrap();
+        assert_node(foreign, other, 3, None, "foreign boundary");
+        assert_node(
+            foreign.sub_ability.as_deref().unwrap(),
+            source,
+            3,
+            None,
+            "boundary sub",
+        );
+        assert_node(
+            foreign.else_ability.as_deref().unwrap(),
+            source,
+            3,
+            None,
+            "boundary else",
+        );
+    }
+
     fn assert_declaration_witnesses(
         ability: &ResolvedAbility,
         broad: bool,
@@ -14661,6 +15090,7 @@ mod tests {
                 target: TargetFilter::LastRevealed,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
+                arranger: None,
             }),
             true,
             &[TargetFilter::LastRevealed],
@@ -14718,6 +15148,74 @@ mod tests {
             true,
             std::slice::from_ref(&creature),
         );
+    }
+
+    #[test]
+    fn resolution_sticker_head_preserves_independent_announcement_walks() {
+        let mut scenario = crate::game::scenario::GameScenario::new();
+        let own = scenario
+            .add_creature(PlayerId(0), "Runeclaw Bear", 2, 2)
+            .id();
+        let opponent = scenario
+            .add_creature(PlayerId(1), "Centaur Courser", 3, 3)
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let parsed = crate::parser::parse_oracle_text(
+            "You get {TK}{TK}, then you may put a sticker on a nonland permanent you own. Target creature you control deals damage equal to its power to target creature you don't control.",
+            "Finishing Move", &[], &["Sorcery".into()], &[],
+        );
+        let root = build_resolved_from_def(&parsed.abilities[0], ObjectId(99), PlayerId(0));
+        assert_eq!(build_target_slots(state, &root).unwrap().len(), 2);
+        assert_eq!(target_slot_specs(state, &root).len(), 2);
+        assert_eq!(minimum_targets_in_chain(state, &root), 2);
+        let targets = [TargetRef::Object(own), TargetRef::Object(opponent)];
+        let mut flat = root.clone();
+        assign_targets_in_chain(state, &mut flat, &targets).unwrap();
+        let mut slotted = root;
+        assign_selected_slots_in_chain(
+            state,
+            &mut slotted,
+            &targets.iter().cloned().map(Some).collect::<Vec<_>>(),
+        )
+        .unwrap();
+        for ability in [&flat, &slotted] {
+            let sticker = ability.sub_ability.as_deref().unwrap();
+            assert!(
+                sticker.targets.is_empty(),
+                "a zero-slot Resolution node must not mirror its child"
+            );
+            let damage_source = sticker.sub_ability.as_deref().unwrap();
+            assert_eq!(damage_source.targets, vec![targets[0].clone()]);
+            assert_eq!(
+                damage_source.sub_ability.as_deref().unwrap().targets,
+                vec![targets[1].clone()]
+            );
+            let retargets = chain_retarget_slots(ability);
+            assert_eq!(retargets.len(), 2);
+            assert_eq!(
+                retargets
+                    .iter()
+                    .map(|binding| binding.current.clone())
+                    .collect::<Vec<_>>(),
+                targets
+            );
+            assert!(retargets.iter().all(|binding| !matches!(
+                node_at(ability, &binding.address.path).unwrap().effect,
+                Effect::PutSticker { .. }
+            )));
+        }
+        let targeted = crate::parser::parse_oracle_text(
+            "Put a sticker on target creature.",
+            "Grammar control",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        let explicit = build_resolved_from_def(&targeted.abilities[0], ObjectId(99), PlayerId(0));
+        assert!(node_has_stack_target_declaration(&explicit));
+        assert_eq!(build_target_slots(state, &explicit).unwrap().len(), 1);
+        assert_eq!(minimum_targets_in_chain(state, &explicit), 1);
     }
 
     #[test]
@@ -21757,6 +22255,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -24937,6 +25436,51 @@ mod tests {
             }),
             "DealDamage{{TargetZoneCardCount, Typed(creature)}} needs the opponent slot",
         );
+        // Will of the Mardu / Ferrafor shape: the tokens' owner is the
+        // controller (no player slot from `owner`), while the count reads a
+        // "target player controls" population — the count's slot must fire.
+        let token_with_count = |count: QuantityExpr| Effect::Token {
+            name: "Warrior".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Warrior".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count,
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        assert!(
+            effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                    ),
+                },
+            })),
+            "Token{{ObjectCount{{controller TargetPlayer}}, Controller}} (Will of the Mardu) needs the player slot",
+        );
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Fixed {
+                value: 1,
+            })),
+            "Token{{Fixed}} must NOT need a slot",
+        );
+        // Anaphoric "that creature's mana value" counts ride an earlier
+        // announcement and surface no slot of their own.
+        assert!(
+            !effect_needs_target_creature_quantity_slot(&token_with_count(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Target,
+                },
+            })),
+            "Token{{ObjectManaValue{{Target}}}} must NOT need a slot",
+        );
         // Baseline: no quantity target, no slot.
         assert!(
             !effect_needs_target_creature_quantity_slot(&Effect::Draw {
@@ -26466,6 +27010,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -30742,6 +31287,7 @@ mod coin_target_custody_tests {
             panic!("coin")
         };
         let pending = PendingCoinFlip {
+            trigger_context: None,
             return_result_occurrence: None,
             expected_return_result_process: None,
             source_id: owner.source_id,

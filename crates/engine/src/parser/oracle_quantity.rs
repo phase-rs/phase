@@ -9517,6 +9517,7 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::CreatureTypes,
+                restrict: None,
             })
         );
     }
@@ -9533,7 +9534,24 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             })
+        );
+    }
+
+    /// CR 205.3 scope cut: unprinted category heads fail closed — "land types"
+    /// and "artifact types" have no producer (only the attested creature /
+    /// planeswalker heads bind) and must stay `None`. Reach-guard: the P2/R4
+    /// positives pass in the same run.
+    #[test]
+    fn cda_unprinted_category_heads_fail_closed() {
+        assert_eq!(
+            parse_cda_quantity("the number of land types among lands you control"),
+            None
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of artifact types among artifacts you control"),
+            None
         );
     }
 
@@ -9552,9 +9570,11 @@ mod tests {
         );
     }
 
-    /// Honest gaps: ETB-snapshot and flavor-text CDA tails have no live ref and
-    /// MUST remain `None` (no green-wash). Forcing a live ref would misread
-    /// these (a live recount reads 0 for sacrificed-Forest / life-paid cards).
+    /// Honest gaps: sacrificed-Forest-style ETB snapshots (which would need a
+    /// live recount that reads 0) and flavor-text CDA tails have no live ref
+    /// and MUST remain `None` (no green-wash). Minion of the Wastes is NOT in
+    /// this class: its "life paid" ref is a pre-entry `ChosenNumber` LATCH
+    /// (correct by construction, not a live recount), so it parses below.
     #[test]
     fn cda_gapped_cards_remain_unparsed() {
         // Graveyard Busybody — "cards with flavor text in your graveyards"
@@ -9567,8 +9587,11 @@ mod tests {
             parse_cda_quantity("the number of Forests sacrificed as it entered"),
             None
         );
-        // Minion of the Wastes — "the life paid as it entered" (ETB snapshot)
-        assert_eq!(parse_cda_quantity("the life paid as it entered"), None);
+        // Minion of the Wastes — "the life paid as it entered" (pre-entry latch)
+        assert_eq!(
+            parse_cda_quantity("the life paid as it entered"),
+            ref_of(QuantityRef::ChosenNumber)
+        );
     }
 
     /// CR 402.1 + CR 109.5 (issue #5637): "for each opponent who has one or fewer

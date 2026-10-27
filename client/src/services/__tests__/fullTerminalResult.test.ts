@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 vi.mock("idb-keyval", () => ({
   createStore: vi.fn(() => ({})),
@@ -15,13 +17,22 @@ import {
   replaceFullTerminalDelivery,
   type FullTerminalDelivery,
 } from "../fullTerminalResult";
+import { p2pFinalStateCommitment } from "../p2pTerminalResult";
+import type { GameState } from "../../adapter/types";
+
+const finalViewJsonTemplate = readFileSync(
+  resolve(process.cwd(), "../fixtures/full-terminal-final-view.template.json"),
+  "utf8",
+).trim();
+const finalView = JSON.parse(finalViewJsonTemplate) as GameState;
 
 const delivery: FullTerminalDelivery = {
   key: { game_code: "TERM01", generation: 3 },
-  terminal_revision: 8,
-  delivery_id: "delivery-0",
+  terminalRevision: 8,
+  deliveryId: "delivery-0",
   credential: "credential-0",
   display: { winner: 1, reason: "Match conceded" },
+  finalView,
 };
 
 describe("full terminal result persistence", () => {
@@ -44,16 +55,16 @@ describe("full terminal result persistence", () => {
   it("requires an explicit replacement for a changed delivery tuple", async () => {
     vi.mocked(idbGet).mockResolvedValueOnce(delivery);
     expect(
-      await commitFullTerminalDelivery({ ...delivery, delivery_id: "delivery-1" }),
+      await commitFullTerminalDelivery({ ...delivery, deliveryId: "delivery-1" }),
     ).toBe(false);
     expect(idbSet).not.toHaveBeenCalled();
 
     expect(
-      await replaceFullTerminalDelivery({ ...delivery, delivery_id: "delivery-1" }),
+      await replaceFullTerminalDelivery({ ...delivery, deliveryId: "delivery-1" }),
     ).toBe(true);
     expect(idbSet).toHaveBeenCalledWith(
       "phase-full-terminal:TERM01:3",
-      expect.objectContaining({ delivery_id: "delivery-1" }),
+      expect.objectContaining({ deliveryId: "delivery-1" }),
       expect.anything(),
     );
   });
@@ -65,5 +76,26 @@ describe("full terminal result persistence", () => {
     expect(isValidFullTerminalDelivery(legacySnapshot)).toBe(false);
     await expect(loadFullTerminalDelivery(delivery.key)).resolves.toBeNull();
     await expect(commitFullTerminalDelivery(legacySnapshot as never)).resolves.toBe(false);
+  });
+
+  it("retains the local final view when an acknowledged server read omits its payload", async () => {
+    vi.mocked(idbGet).mockResolvedValueOnce(delivery);
+    const afterAck: FullTerminalDelivery = { ...delivery };
+    delete afterAck.finalView;
+
+    expect(await replaceFullTerminalDelivery(afterAck)).toBe(true);
+    expect(idbSet).toHaveBeenCalledWith(
+      "phase-full-terminal:TERM01:3",
+      expect.objectContaining({ finalView, deliveryId: delivery.deliveryId }),
+      expect.anything(),
+    );
+  });
+
+  it("preserves the P2P final-state commitment through terminal JSON recovery", async () => {
+    const recoveredFinalView = JSON.parse(finalViewJsonTemplate) as GameState;
+    expect(recoveredFinalView).toEqual(finalView);
+    await expect(p2pFinalStateCommitment(recoveredFinalView)).resolves.toBe(
+      await p2pFinalStateCommitment(finalView),
+    );
   });
 });

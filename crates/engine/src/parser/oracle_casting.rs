@@ -2176,7 +2176,7 @@ Trample";
         match result {
             Some(AdditionalCost::Choice(
                 AbilityCost::Reveal {
-                    count: 1,
+                    count: QuantityExpr::Fixed { value: 1 },
                     filter: Some(_),
                 },
                 AbilityCost::Mana { .. },
@@ -2194,7 +2194,7 @@ Trample";
         let result = parse_additional_cost_line(lower, raw);
         match result {
             Some(AdditionalCost::Required(AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(_),
             })) => {}
             other => panic!("Expected Required(Reveal with filter), got {:?}", other),

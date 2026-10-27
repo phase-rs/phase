@@ -17,8 +17,8 @@ use crate::types::ability::{
     ActivationManaPaymentRestriction, ActivationRestriction, ChoiceType, ChosenGroupId,
     ControllerRef, CostReduction, DelayedTriggerCondition, Duration, Effect, ManaSpendPermission,
     MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReturnResultReadSpec, RoundingMode, SubAbilityLink, TargetChoiceTiming, TargetFilter,
-    TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
+    ReturnResultReadSpec, RoundingMode, SiblingCondition, SubAbilityLink, TargetChoiceTiming,
+    TargetFilter, TargetReadOrigin, TargetSelectionMode, UnlessPayModifier,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaExpiry;
@@ -999,6 +999,10 @@ pub(crate) struct ClauseIr {
     /// CR 111.3 + CR 608.2c: exact creation completed by this defining sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) token_definition_owner: Option<ClauseId>,
+    /// CR 608.2c: lowered onto the node's `sibling_condition`; written only by the
+    /// chunk loop's trailing-guard pass.
+    #[serde(skip_serializing_if = "SiblingCondition::is_default")]
+    pub(crate) sibling_condition: SiblingCondition,
     /// The exact prior zone instruction whose settled results this clause names.
     /// Returns retain their delayed noun/destination predicate; Seek cost grants
     /// consume the completed cards independently of their actual destination.
@@ -1430,6 +1434,7 @@ impl ClauseIr {
             reads_chosen_group,
             target_reads,
             token_definition_owner,
+            sibling_condition,
             reads_return_result,
             source: _,
             disposition,
@@ -1463,6 +1468,7 @@ impl ClauseIr {
         *reads_chosen_group = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
         *token_definition_owner = None;
+        *sibling_condition = SiblingCondition::Dependent;
         *reads_return_result = None;
         *disposition = ClauseDisposition::Emit {
             followup: None,
@@ -2170,6 +2176,7 @@ impl ClauseIrBuilder {
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.declares_instruction_result = instruction_declaration;
             absorbed.target_reads = c.target_reads;
+            absorbed.sibling_condition = c.sibling_condition;
             if let Some(relation) = revealed_relation {
                 absorbed.reads_return_result = Some(relation);
             }
@@ -2761,6 +2768,7 @@ impl ClauseDraft<'_> {
             reads_chosen_group,
             target_reads: TargetReadOrigin::OwnAnnouncement,
             token_definition_owner: self.token_definition_owner,
+            sibling_condition: SiblingCondition::Dependent,
             reads_return_result,
             source,
             disposition: self.disposition,
