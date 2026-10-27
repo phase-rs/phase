@@ -313,7 +313,7 @@ fn shieldmates_blessing_prevents_three_damage_and_fff_bypasses_it_for_the_turn()
         // CR 615.7: only unconsumed finite shields contribute remaining capacity.
         runner.state().objects[&target]
             .replacement_definitions
-            .iter()
+            .iter_unchecked()
             .filter(|replacement| !replacement.is_consumed)
             .filter_map(|replacement| {
                 if let ShieldKind::Prevention {
