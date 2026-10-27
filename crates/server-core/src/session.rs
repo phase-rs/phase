@@ -9,7 +9,7 @@ use engine::game::deck_loading::{DeckPayload, PlayerDeckPayload};
 use engine::game::engine::{
     apply_with_rejection,
     resume_restored_stack_automation as resume_engine_restored_stack_automation, start_game,
-    RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
+    EngineError, RestoredStackAutomationOutcome, RestoredStackAutomationPresentation,
 };
 use engine::game::interaction::{bind_interaction_authority, submit_interaction_with_rejection};
 use engine::game::match_flow::apply_trusted_match_forfeit;
@@ -1670,15 +1670,17 @@ impl GameSession {
     /// decode is not an implicit priority pass. The restore owner invokes this
     /// once after it has supplied process-owned hosting policy, then broadcasts
     /// the returned bounded presentation with the recomputed snapshot.
-    pub fn resume_restored_stack_automation(&mut self) -> RestoredStackAutomationResume {
-        let resumed = resume_engine_restored_stack_automation(&mut self.state);
+    pub fn resume_restored_stack_automation(
+        &mut self,
+    ) -> Result<RestoredStackAutomationResume, EngineError> {
+        let resumed = resume_engine_restored_stack_automation(&mut self.state)?;
         let presentation = resumed.presentation.clone();
         if presentation.outcome == RestoredStackAutomationOutcome::Noop {
-            return RestoredStackAutomationResume {
+            return Ok(RestoredStackAutomationResume {
                 state_revision: None,
                 presentation,
                 broadcast: None,
-            };
+            });
         }
 
         // The engine's complete event batch stays server-internal. In
@@ -1696,11 +1698,11 @@ impl GameSession {
         let (legal_actions, spell_costs, by_object) = engine_legal_actions_full(&self.state);
         let auto_pass = auto_pass_recommended(&self.state, &legal_actions);
 
-        RestoredStackAutomationResume {
+        Ok(RestoredStackAutomationResume {
             state_revision: Some(revision),
             presentation,
             broadcast: Some((post_state, legal_actions, auto_pass, spell_costs, by_object)),
-        }
+        })
     }
 
     // ---- Relocated from `impl SessionManager` -------------------------------
@@ -6981,13 +6983,13 @@ mod tests {
     /// their own encoded string beside the payload, exactly as
     /// `load_active_full_sessions` carries `deck_pools_json` beside
     /// `session_state_json`. Carrying them inside the JSON would exercise a
-    /// shape no writer produces, since the field is `skip_serializing`.
+    /// shape no writer produces, since the field is `skip_serializing`. Both
+    /// strings are decoded by the production row decoder, `decode_row`.
     fn round_trip_through_disk(session: &GameSession, db: &Arc<CardDatabase>) -> GameSession {
         let snapshot = session.to_persisted();
         let pools_json = serde_json::to_string(&snapshot.deck_pools).unwrap();
         let json = serde_json::to_string(&snapshot).unwrap();
-        let mut persisted: crate::persist::PersistedSession = serde_json::from_str(&json).unwrap();
-        persisted.deck_pools = serde_json::from_str(&pools_json).unwrap();
+        let persisted = crate::persist::PersistedSession::decode_row(&json, &pools_json).unwrap();
         GameSession::from_persisted(persisted, db).expect("supported persisted format config")
     }
 
@@ -9127,7 +9129,9 @@ mod tests {
         );
         assert_eq!(restored.state_revision, revision_before);
 
-        let resumed = restored.resume_restored_stack_automation();
+        let resumed = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
         assert_eq!(
             resumed.presentation.outcome,
             RestoredStackAutomationOutcome::Progressed,
@@ -9161,7 +9165,9 @@ mod tests {
         assert!(restored.state.stack.is_empty());
         assert!(restored.state.stack_resolution_session.is_none());
 
-        let repeated = restored.resume_restored_stack_automation();
+        let repeated = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
         assert_eq!(
             repeated.presentation.outcome,
             RestoredStackAutomationOutcome::Noop
@@ -9225,7 +9231,9 @@ mod tests {
             WaitingFor::ResolveAllReady { .. }
         ));
         let revision_before = restored.state_revision;
-        let resumed = restored.resume_restored_stack_automation();
+        let resumed = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
 
         assert!(
             matches!(restored.state.waiting_for, WaitingFor::Priority { .. }),
@@ -9255,7 +9263,9 @@ mod tests {
                 .expect("ordinary state restores");
         let revision_before = restored.state_revision;
 
-        let resumed = restored.resume_restored_stack_automation();
+        let resumed = restored
+            .resume_restored_stack_automation()
+            .expect("the fixture's restore resume is representable");
 
         assert_eq!(
             resumed.presentation.outcome,

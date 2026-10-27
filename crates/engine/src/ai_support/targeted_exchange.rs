@@ -256,7 +256,8 @@ pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
 /// Note what is deliberately NOT on that list: "an installer the cast path
 /// provably never calls." That clause was carried for three rounds with an
 /// instrument — a grep for LEAF installer names over three files — that could
-/// not have detected its own falsity: `stickers.rs:490` is reached through a
+/// not have detected its own falsity: the `abilities` write in
+/// `stickers::apply_ability_stickers` is reached through a
 /// WRAPPER (the `stickers::rebuild_public_zone_stickers` call in
 /// `zones::apply_zone_exit_cleanup`) named in a file the grep already
 /// covered, so the grep returned zero while the route existed. (The route is
@@ -275,8 +276,8 @@ pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
 /// to it. CR 123.5
 /// says stickers "are retained as that object moves to a public zone and
 /// continue to apply to the new object it becomes in that zone." The engine
-/// implements only half of that: the `if !zone_retains_stickers(to) && !obj_mut.stickers.is_empty() { .. obj_mut.stickers.clear(); }`
-/// guard in `zones::apply_zone_exit_cleanup` clears on a move to a
+/// implements only half of that: the `zones::clear_stickers_for_hidden_destination`
+/// call in `zones::apply_zone_exit_cleanup` clears on a move to a
 /// hidden zone, and the `stickers::rebuild_public_zone_stickers` call in
 /// `zones::apply_zone_exit_cleanup` re-applies ONLY on a battlefield exit
 /// (`from == Zone::Battlefield` in `zones::apply_zone_exit_cleanup`). A card carrying a sticker in
@@ -293,10 +294,11 @@ pub fn is_targeted_exchange_root(action: &GameAction) -> bool {
 /// and needs a fall-open rail immediately below the `layers_dirty` one:
 ///     if crate::game::stickers::object_has_sticker_kind(
 ///         source, crate::types::stickers::StickerKind::Ability) { return true; }
-/// `object_has_sticker_kind` (`game/stickers.rs:101`, unconditionally `pub`) is
+/// `stickers::object_has_sticker_kind` (unconditionally `pub`) is
 /// `obj.stickers.iter().any(|s| s.kind() == kind)` — no allocation, no clone.
-/// `StickerKind::Ability` is the correct discriminant: `stickers.rs:483` is the
-/// sole gate on the path to the `abilities` write at `:490`.
+/// `StickerKind::Ability` is the correct discriminant: the `AppliedSticker::Ability`
+/// match in `stickers::apply_ability_stickers` is the sole gate on the path to
+/// its `abilities` write.
 ///
 /// Deliberately stated WITHOUT a reachability qualifier: deciding which of those
 /// dispositions applies needs one function read, whereas deciding "is this

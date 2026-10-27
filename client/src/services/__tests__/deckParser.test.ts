@@ -8,10 +8,10 @@ import {
   deriveImportedDeckName,
   repairParsedDeck,
   assignOathbreakerSlots,
-  resolveCommander,
   expandParsedDeck,
   parsedDeckHasCards,
 } from '../deckParser';
+import { resolveCommander } from '../commanderResolution';
 
 vi.mock('../engineRuntime', () => ({
   isCardCommanderEligible: vi.fn(),

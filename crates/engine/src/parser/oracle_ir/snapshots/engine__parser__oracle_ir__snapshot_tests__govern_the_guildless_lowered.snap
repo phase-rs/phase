@@ -55,7 +55,10 @@ expression: "&lowered"
           },
           {
             "type": "Reveal",
-            "count": 1
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            }
           }
         ]
       },

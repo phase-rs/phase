@@ -1234,7 +1234,8 @@ pub(crate) fn proposer_hidden_view_as_of(
 /// - a paused cost move (`pending_cost_move_resume`: a cast/activation root, a
 ///   sacrifice or mill payment, collected evidence, or a loyalty tail);
 /// - a deferred life-cost payment (`pending_deferred_life_cost_resume`);
-/// - every activated ability on the stack (a second line of defense).
+/// - every activated ability on the stack or departed from it
+///   (`departed_activated_abilities`; a second line of defense).
 ///
 /// The two resume carriers are also dropped wholesale later in this
 /// projection; clearing their records here keeps the redaction local to one
@@ -1293,7 +1294,12 @@ fn redact_activation_records(filtered: &mut GameState) {
             DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::ManaRoot { .. } => {}
         }
     }
-    for entry in filtered.stack.iter_mut() {
+    for entry in filtered.stack.iter_mut().chain(
+        filtered
+            .departed_activated_abilities
+            .iter_mut()
+            .map(|(_, entry)| entry),
+    ) {
         if let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind {
             ability.activation_record = None;
         }
@@ -1449,9 +1455,11 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // state the drain resumes from is never filtered.
     filtered.pending_discard_batch = None;
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
-    // identities and origins for later private choices. The public current
-    // `EffectZoneChoice` is projected below; its execution-only successor
-    // carrier must never be shipped to any viewer, including a future owner.
+    // identities and origins for later private choices, and the orders owners
+    // have already chosen (CR 401.4: the order isn't revealed). The public
+    // current `EffectZoneChoice` is projected below; its execution-only
+    // successor carrier must never be shipped to any viewer, including a
+    // future owner.
     filtered.pending_mass_library_order_choice = None;
     // CR 400.2 + CR 616.1: the replacement-suspended exile iterator retains
     // the exact remaining library order and current-resolution incarnation
@@ -1829,7 +1837,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // hidden-object redaction in every carrier the projection retains:
     // installed delayed triggers, queued/ordering/deferred triggers, and stack
     // entries. (`resolution_stack` and the paused-resolution resumes are blanked
-    // above; `departed_stack_spells` holds spells, never delayed abilities.)
+    // above; the departed tables hold spells and activated abilities, never delayed
+    // abilities; a departed activated ability takes this same per-entry redaction,
+    // CR 400.2: it was public on the stack.)
     // CR 601.2h + CR 113.7a: the same carriers latch their source's payment snapshots in
     // `ResolvedAbility::trigger_source`; a hidden mana source's entry is blanked there too,
     // and a hidden linked-exile member's mana value is zeroed (CR 406.3).
@@ -1845,6 +1855,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .stack
         .iter_mut()
         .chain(filtered.resolving_stack_entry.iter_mut())
+        .chain(
+            filtered
+                .departed_activated_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
     {
         if let Some(ability) = entry.ability_mut() {
             ability.for_each_creation_lookback_event_mut(&mut redact_lookback);
@@ -4273,6 +4289,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
 /// - id-keyed LKI (`lki_cache`, `lki_by_incarnation`, `lki_copiable_values`,
 ///   `lki_copiable_values_by_incarnation`, `departed_stack_spells`, and `linked_exile_lki`
 ///   keyed by a hidden source) is dropped;
+/// - a departed activated ability whose source is hidden from the viewer is dropped (the
+///   same rule as a departed spell keyed by a hidden id: once the ability left the stack,
+///   its CR 701.20a reveal or its source's public zone is gone);
 /// - a hidden `linked_exile_lki` member keeps its slot (the per-source count is read) but
 ///   loses its mana value, and the same rule applies to the `linked_exile_snapshot` vectors
 ///   nested in zone-change records and source contexts;
@@ -4305,6 +4324,12 @@ fn redact_hidden_identity_side_tables(state: &mut GameState, hidden_ids: &HashSe
         state.departed_stack_spells.remove(id);
         state.linked_exile_lki.remove(id);
     }
+    // CR 400.2: a departed activated ability names its source and carries that source's
+    // ability. Once the source is hidden from this viewer the record is dropped, as a
+    // departed spell keyed by a hidden id is. Projection only.
+    state
+        .departed_activated_abilities
+        .retain(|_, entry| !hidden_ids.contains(&entry.source_id));
     // CR 601.2h + CR 400.2: only public-id departed spells remain; each keeps its entry and
     // object, and loses the last-known identity of any hidden mana source that paid for it.
     // A read-only pass selects the incarnations that name a hidden source; only those are
@@ -4557,8 +4582,10 @@ fn redact_lki_snapshot(snapshot: &mut crate::types::game_state::LKISnapshot) {
         is_suspected: _,
         was_prepared: _,
         attachments,
+        intensity,
     } = snapshot;
     *name = HIDDEN_CARD_NAME.to_string();
+    *intensity = 0;
     *token_image_ref = None;
     *power = None;
     *toughness = None;
@@ -4796,6 +4823,12 @@ fn redact_hidden_library_identity_carriers(
         .stack
         .iter_mut()
         .chain(filtered.resolving_stack_entry.iter_mut())
+        .chain(
+            filtered
+                .departed_activated_abilities
+                .iter_mut()
+                .map(|(_, entry)| entry),
+        )
     {
         match &mut entry.kind {
             StackEntryKind::Spell {
@@ -5529,6 +5562,44 @@ mod tests {
                 (2u64, departed_spell(sub_only, unpaid_object)),
             ]),
         );
+        // CR 113.7a + CR 608.2h: a countered activated ability of the public `paid` source
+        // keeps its entry whole, latched ability chain and in-flight activation record
+        // included; the projection redacts it exactly as it did on the stack (CR 400.2).
+        let departed_activation = ObjectId(804);
+        let mut departed_ability = ability.clone();
+        departed_ability.activation_record = Some(Box::new(
+            crate::types::game_state::AbilityActivationRecord {
+                activator: owner,
+                source: paid,
+                source_lki: state.objects[&paid].snapshot_public_characteristics(),
+                source_zone: Zone::Battlefield,
+                ability_tag: None,
+                is_loyalty_ability: false,
+                activation_cost: crate::types::events::BoundActivationCost::Unknown,
+                targets: Vec::new(),
+            },
+        ));
+        state.departed_activated_abilities.insert(
+            departed_activation,
+            StackEntry {
+                id: departed_activation,
+                source_id: paid,
+                controller: owner,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: paid,
+                    ability: Box::new(departed_ability),
+                },
+            },
+        );
+        let departed_activation_record = |state: &GameState| {
+            state.departed_activated_abilities[&departed_activation]
+                .ability()
+                .and_then(|ability| ability.activation_record.clone())
+        };
+        assert!(
+            departed_activation_record(&state).is_some(),
+            "reach-guard: the departed activation carries its activation record"
+        );
 
         // Every payment vector the projection retains, labelled by carrier.
         fn carriers(state: &GameState) -> Vec<(String, Vec<ManaSpentSourceSnapshot>)> {
@@ -5732,6 +5803,26 @@ mod tests {
                     );
                 }
             }
+            for (id, entry) in state.departed_activated_abilities.iter() {
+                if let Some(ability) = entry.ability() {
+                    push(
+                        &format!("departed activation {id:?} ability"),
+                        &from_ability(ability),
+                    );
+                    if let Some(sub) = ability.sub_ability.as_deref() {
+                        push(
+                            &format!("departed activation {id:?} sub_ability"),
+                            &from_ability(sub),
+                        );
+                    }
+                    if let Some(other) = ability.else_ability.as_deref() {
+                        push(
+                            &format!("departed activation {id:?} else_ability"),
+                            &from_ability(other),
+                        );
+                    }
+                }
+            }
             for (_, incarnations) in state.departed_stack_spells.iter() {
                 for (incarnation, spell) in incarnations.iter() {
                     if !spell.object.mana_spent_source_snapshots.is_empty() {
@@ -5799,6 +5890,9 @@ mod tests {
             "departed 1 entry ability",
             "departed 1 entry sub_ability",
             "departed 2 entry sub_ability",
+            "departed activation ObjectId(804) ability",
+            "departed activation ObjectId(804) sub_ability",
+            "departed activation ObjectId(804) else_ability",
         ];
         for label in expected_labels {
             assert!(
@@ -5850,6 +5944,28 @@ mod tests {
             raw,
             "authoritative state is untouched by the projection"
         );
+        // CR 602.2: the activation record is engine authority, cleared from every viewer's
+        // copy of the departed activation as from a live one; authoritative state keeps it.
+        let spectator_view = filter_state_for_unseated_viewer(&state);
+        for (label, view) in [
+            ("opponent", &opponent),
+            ("spectator", &spectator_view),
+            ("owner", &owner_view),
+        ] {
+            assert!(
+                view.departed_activated_abilities
+                    .contains_key(&departed_activation),
+                "reach-guard ({label}): the public source's departed activation is kept"
+            );
+            assert!(
+                departed_activation_record(view).is_none(),
+                "{label}: the departed activation's activation record is cleared"
+            );
+        }
+        assert!(
+            departed_activation_record(&state).is_some(),
+            "authoritative state keeps the departed activation's record"
+        );
 
         // CR 406.3 + CR 406.3a: the linked-exile vectors ride the same carriers. Independent
         // JSON key-walk oracle over the whole state; the visible member and every id, owner,
@@ -5876,6 +5992,7 @@ mod tests {
             "/waiting_for/",
             "/transient_continuous_effects/",
             "/departed_stack_spells/",
+            "/departed_activated_abilities/",
         ] {
             assert!(
                 raw_linked
@@ -7726,6 +7843,7 @@ mod tests {
                     entry_ref,
                     enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
                     enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
                     applied: std::collections::HashSet::new(),
                 },
             });
@@ -11411,10 +11529,10 @@ mod tests {
             source: crate::types::game_state::OpponentGuessSource {
                 prompt: expected_prompt.clone(),
             },
-            owner: Some(crate::types::game_state::OpponentGuessOwner {
+            owner: Some(Box::new(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
                 committed_choice: None,
-            }),
+            })),
             proposition_truth: Some(true),
         };
 
@@ -11599,10 +11717,10 @@ mod tests {
                     &source_context,
                 ),
             },
-            owner: Some(crate::types::game_state::OpponentGuessOwner {
+            owner: Some(Box::new(crate::types::game_state::OpponentGuessOwner {
                 context: source_context,
                 committed_choice: Some(ChosenAttribute::Number(5)),
-            }),
+            })),
             proposition_truth: None,
         };
 
@@ -14299,6 +14417,28 @@ mod tests {
             });
             state.current_trigger_events.push(event);
         }
+        // A departed activation record of a public source gets the per-entry
+        // redaction a live stack entry gets.
+        for (id, object) in [(ObjectId(810), library_card), (ObjectId(811), permanent)] {
+            state.departed_activated_abilities.insert(
+                id,
+                StackEntry {
+                    id,
+                    source_id: permanent,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::ActivatedAbility {
+                        source_id: permanent,
+                        ability: Box::new(with_context(object, &state)),
+                    },
+                },
+            );
+        }
+        let departed_context = |state: &GameState, id: ObjectId| {
+            state.departed_activated_abilities[&id]
+                .ability()
+                .and_then(|ability| ability.effect_context_object.as_ref())
+                .map(|snapshot| snapshot.object_id)
+        };
         state.last_revealed_ids = vec![library_card];
 
         let stripped = |event: &GameEvent| match event {
@@ -14350,6 +14490,14 @@ mod tests {
                 ],
                 "stack carriers, viewer {viewer:?}"
             );
+            assert_eq!(
+                (
+                    departed_context(&projected, ObjectId(810)),
+                    departed_context(&projected, ObjectId(811)),
+                ),
+                (None, Some(permanent)),
+                "departed activation carriers, viewer {viewer:?}"
+            );
         }
         let projected = filter_state_for_unseated_viewer(&state);
         assert!(projected.last_revealed_ids.is_empty());
@@ -14357,7 +14505,13 @@ mod tests {
             projected.current_trigger_events,
             vec![stripped(&library_event), permanent_event.clone()]
         );
+        assert_eq!(departed_context(&projected, ObjectId(810)), None);
         assert_eq!(state.last_revealed_ids, vec![library_card]);
+        assert_eq!(
+            departed_context(&state, ObjectId(810)),
+            Some(library_card),
+            "the rules state keeps the departed record's context"
+        );
         assert!(matches!(
             &state.current_trigger_events[0],
             GameEvent::EffectResolved {
@@ -14452,8 +14606,10 @@ mod tests {
         flate2::read::GzDecoder::new(&gz[..])
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )

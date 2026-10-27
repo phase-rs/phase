@@ -38,6 +38,7 @@ use crate::types::ability::{
     QuantityExpr, QuantityRef, RoundingMode, SharedQuality, SubtypeExclusion, TargetFilter,
     ThisWayCause, TrackedAnaphorSource, TurnJournalKind, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::card_type::SubtypeSet;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -1067,6 +1068,35 @@ fn parse_chosen_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(QuantityRef::ChosenNumber, tag("the chosen number")).parse(input)
 }
 
+/// CR 614.12a + CR 400.7: "the life paid as ~ entered" — the amount paid for
+/// the entering object's own as-enters life payment (Phyrexian Processor
+/// class), latched pre-entry as `ChosenAttribute::Number` on the object.
+/// Reads via the existing `ChosenNumber` channel (game/quantity.rs), like
+/// `parse_chosen_number_ref` beside it. Longer subject alts precede the `it`
+/// alternative, which carries a word-boundary guard (peek-not-alphanumeric,
+/// per `parse_chosen_number_noun`) so "item" cannot false-match.
+fn parse_life_paid_as_entered_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::ChosenNumber,
+        (
+            tag("the life paid as "),
+            alt((
+                tag("this artifact"),
+                tag("this creature"),
+                tag("~"),
+                terminated(
+                    tag("it"),
+                    nom::combinator::not(nom::character::complete::satisfy(|c: char| {
+                        c.is_ascii_alphanumeric()
+                    })),
+                ),
+            )),
+            tag(" entered"),
+        ),
+    )
+    .parse(input)
+}
+
 /// Digital-only Alchemy (no CR entry): "the noted number" — the resolving
 /// player's `Player::noted_number`, written by `Effect::NoteNumber` ("note
 /// its power", "note that excess damage") and read when a granted one-time
@@ -1170,6 +1200,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             parse_guessed_number_ref,
             parse_object_count_by_shared_quality,
             parse_chosen_number_ref,
+            parse_life_paid_as_entered_ref,
             parse_noted_number_ref,
             parse_paid_energy_this_way_ref,
             parse_intensity_ref,
@@ -2128,10 +2159,19 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // dynamic-quantity reading of the counter-kind cardinality (Perrie, the
         // Pulverizer: "X is the number of different kinds of counters among
         // permanents you control") — shares this nest for the same reason.
+        //
+        // CR 205.3: "\<category\> type[s] among <population>" (Tam: planeswalker
+        // types, CR 205.3j; Hoshi/Saavik: creature types, CR 205.3m) — the
+        // category-restricted distinct-subtype count. Reads the population with
+        // `TypePhraseGrammar::Legacy` (REQUIRED: "non-Borg ..." needs Legacy's
+        // `classify_negation`); only the two attested heads bind, unprinted
+        // heads fail closed. Leading tokens are disjoint from every earlier
+        // arm's head, so no commit-before-dispatch hazard.
         alt((
             parse_distinct_subtypes_among,
             parse_turns_taken_this_game,
             parse_distinct_counter_kinds_among_tail,
+            parse_distinct_category_subtypes_among,
         )),
         // CR 201.2 + CR 603.4: "differently named <type-phrase>" (distinct-by-name)
         // and "different <power|mana value> among <type>" (distinct-by-quality —
@@ -3039,6 +3079,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3176,6 +3217,7 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3531,7 +3573,46 @@ fn parse_distinct_subtypes_among(input: &str) -> OracleResult<'_, QuantityRef> {
     // CR 400.1 / CR 109.2 / CR 601.2a: the shared population grammar. Reads with
     // `TypePhraseGrammar::Legacy`, the grammar this head has always used.
     let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
-    Ok((rest, QuantityRef::DistinctSubtypes { source, exclude }))
+    Ok((
+        rest,
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict: None,
+        },
+    ))
+}
+
+/// CR 205.3: "\<category\> type\[s\] among \<population\>" →
+/// [`QuantityRef::DistinctSubtypes`] with `restrict: Some(set)`.
+///
+/// The category-restricted dual of [`parse_distinct_subtypes_among`]: Tam, the
+/// Possibility ("the number of planeswalker types among planeswalkers you
+/// control", CR 205.3j) and Hoshi Sato / Saavik ("creature types among
+/// non-Borg creatures you control", CR 205.3m). Reads with
+/// [`TypePhraseGrammar::Legacy`] — REQUIRED, not Strict: "non-Borg creatures
+/// you control" needs Legacy's `classify_negation` (unknown →
+/// `Non(Subtype(..))`). Only the two attested heads bind; unprinted heads
+/// ("land types", "artifact types", ...) fail closed (no producer).
+/// Combinator-composed from `alt`/`value`/`opt` — no string dispatch.
+fn parse_distinct_category_subtypes_among(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, set) = alt((
+        value(SubtypeSet::Creature, tag("creature")),
+        value(SubtypeSet::Planeswalker, tag("planeswalker")),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag(" type").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let (rest, source) = parse_characteristic_set_source_list(rest, TypePhraseGrammar::Legacy)?;
+    Ok((
+        rest,
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude: SubtypeExclusion::None,
+            restrict: Some(set),
+        },
+    ))
 }
 
 /// CR 122.1: Parse "different kind[s] of counters {on|among} <filter>" after
@@ -3884,6 +3965,21 @@ fn parse_zone_ref_plural(input: &str) -> OracleResult<'_, ZoneRef> {
         value(ZoneRef::Library, tag("libraries")),
         value(ZoneRef::Hand, tag("hands")),
     ))
+    .parse(input)
+}
+
+/// CR 614.12a, Nameless-Race-local: "their \<zone-plural\>" — the opponents'
+/// zones, bound positionally to the "your opponents" named in the payment
+/// cap's left half. Deliberately NOT registered in any global alt: the bare
+/// "their" possessive stays TargetPlayer-anaphoric everywhere else (see
+/// `parse_self_possessive`'s "their" arm, which reads the ability source).
+/// Sole caller: the Nameless cap composer in `oracle_replacement.rs`.
+pub(crate) fn parse_their_opponents_zone_ref(
+    input: &str,
+) -> OracleResult<'_, (ZoneRef, CountScope)> {
+    map(preceded(tag("their "), parse_zone_ref_plural), |zone| {
+        (zone, CountScope::Opponents)
+    })
     .parse(input)
 }
 
@@ -7000,7 +7096,39 @@ pub(crate) fn parse_attachment_referent_prop(input: &str) -> OracleResult<'_, Fi
             },
             alt((tag(" attached to them"), tag(" attached to that player"))),
         ),
+        // CR 303.4b + CR 303.4m: the LITERAL "enchanted player" noun phrase is
+        // the same referent as the anaphoric "them"/"that player" arms above —
+        // the player this source Aura is attached to. Kept as one shared tail
+        // combinator ([`parse_enchanted_player_attachment_tail`]) because the
+        // type-phrase suffix cascade also calls it, with its own leading-space
+        // handling, so the phrase string has exactly one home.
+        preceded(tag(" "), parse_enchanted_player_attachment_tail),
     ))
+    .parse(input)
+}
+
+/// CR 303.4b + CR 303.4m: source-relative attachment tail with the LITERAL
+/// player referent — `"attached to enchanted player"` (Curse of Misfortunes'
+/// "a Curse attached to enchanted player" reference population).
+///
+/// Two entry points, one phrase: [`parse_attachment_referent_prop`] consumes
+/// the `" attached to <referent>"` tail (leading space included) for the
+/// quantity/condition count sites, while the type-phrase suffix cascade
+/// (`oracle_target::parse_type_phrase_folding_with_ctx`) calls this trimmed
+/// form directly as a postnominal noun-phrase modifier. `enchanted player` is
+/// SELF-referential (CR 303.4b/303.4m): the referent is the player the ability's
+/// source is attached to, resolved live through `ControllerRef::EnchantedPlayer`,
+/// so it is safe in a filter — unlike the OBJECT referents (`it`,
+/// `that creature`), which need per-clause recipient/declared-slot binding.
+pub(crate) fn parse_enchanted_player_attachment_tail(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Player {
+                player: ControllerRef::EnchantedPlayer,
+            },
+        },
+        tag("attached to enchanted player"),
+    )
     .parse(input)
 }
 
@@ -7547,8 +7675,9 @@ mod tests {
     use super::*;
     use crate::parser::oracle_quantity::parse_for_each_clause;
     use crate::types::ability::{
-        AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
-        SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, AttachmentReferent, ControllerRef, FilterProp, ObjectProperty,
+        PlayerFilter, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -9426,6 +9555,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_attachment_referent_prop_enchanted_player() {
+        // CR 303.4b + CR 303.4m: "the object or player an Aura is attached to is
+        // called enchanted", and "enchanted [object or player]" in a permanent's
+        // ability names whatever that permanent is attached to. The shared
+        // referent map already carries this value for the anaphoric "them" /
+        // "that player" arms; the literal "enchanted player" phrase is the same
+        // referent and must map to the same typed value (Curse of Misfortunes'
+        // "a Curse attached to enchanted player" reference population).
+        let (rest, prop) = parse_attachment_referent_prop(" attached to enchanted player").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            prop,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player {
+                    player: ControllerRef::EnchantedPlayer
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_enchanted_player_attachment_tail_stops_at_clause_boundary() {
+        // The tail combinator is also called directly by the type-phrase suffix
+        // cascade, where it is handed trimmed text and must leave the following
+        // clause for the enclosing parser.
+        let (rest, prop) = parse_enchanted_player_attachment_tail(
+            "attached to enchanted player, put it onto the battlefield",
+        )
+        .unwrap();
+        assert_eq!(rest, ", put it onto the battlefield");
+        assert_eq!(
+            prop,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player {
+                    player: ControllerRef::EnchantedPlayer
+                }
+            }
+        );
+        // Sibling: an OBJECT referent ("enchanted creature") is a different
+        // population and stays out of this phrase.
+        assert!(
+            parse_enchanted_player_attachment_tail("attached to enchanted creature").is_err(),
+            "\"enchanted creature\" must not bind the player referent"
+        );
+    }
+
+    #[test]
     fn parse_for_each_attached_to_recipient_single_kind() {
         // CR 303.4 + CR 613.4c: Single-subtype variant ("for each Aura
         // attached to it" — Auramancer's Guise / Gatherer of Graces /
@@ -10567,6 +10743,100 @@ mod tests {
                 .unwrap();
         assert_eq!(rest, "");
         assert!(matches!(q, QuantityRef::DistinctCounterKindsAmong { .. }));
+    }
+
+    #[test]
+    fn test_parse_the_number_of_planeswalker_types_among() {
+        // CR 205.3j: Tam, the Possibility — "the number of planeswalker types
+        // among planeswalkers you control" (category-restricted
+        // distinct-subtype count, not the "different subtypes" peer).
+        let (rest, q) =
+            parse_quantity_ref("the number of planeswalker types among planeswalkers you control")
+                .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctSubtypes {
+                source,
+                exclude,
+                restrict,
+            } => {
+                assert_eq!(exclude, SubtypeExclusion::None);
+                assert_eq!(
+                    restrict,
+                    Some(crate::types::card_type::SubtypeSet::Planeswalker)
+                );
+                match source {
+                    CardTypeSetSource::Objects { filter } => match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.type_filters, vec![TypeFilter::Planeswalker]);
+                            assert_eq!(tf.controller, Some(ControllerRef::You));
+                        }
+                        other => panic!("expected typed planeswalker filter, got {other:?}"),
+                    },
+                    other => panic!("expected Objects source, got {other:?}"),
+                }
+            }
+            other => panic!("expected DistinctSubtypes, got {other:?}"),
+        }
+        // Neg (same fn): the bare head without among+population must not
+        // wholly bind — proves the positive above reached the new arm rather
+        // than a prefix-tolerant fallback.
+        if let Ok((rest, _)) = parse_quantity_ref("the number of planeswalker types") {
+            assert!(
+                !rest.is_empty(),
+                "bare head without among+population must not wholly bind"
+            );
+        }
+        // Cousin untouched (same fn): Niv-Mizzet's pair counting still
+        // declines the nest — all four arms decline, no whole bind.
+        if let Ok((rest, _)) =
+            parse_quantity_ref("the number of different color pairs among permanents you control")
+        {
+            assert!(!rest.is_empty(), "color-pair cousin must not wholly bind");
+        }
+    }
+
+    #[test]
+    fn test_parse_the_number_of_creature_types_among_non_borg() {
+        // CR 205.3m: Hoshi Sato / Saavik — "the number of creature types among
+        // non-Borg creatures you control".
+        let (rest, q) =
+            parse_quantity_ref("the number of creature types among non-Borg creatures you control")
+                .unwrap();
+        // NOTE (plan-tree delta): the space-separated "non Borg" form does NOT
+        // fold — the shared Legacy negation loop breaks when the negated word
+        // is empty (`end == 0`, oracle_target.rs), so only "non-X"/"nonX"
+        // attach. Pre-existing behavior, out of scope to change (no card
+        // prints the space form; the verbatim Hoshi/Saavik text is hyphenated).
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::DistinctSubtypes {
+                source,
+                exclude,
+                restrict,
+            } => {
+                assert_eq!(exclude, SubtypeExclusion::None);
+                assert_eq!(
+                    restrict,
+                    Some(crate::types::card_type::SubtypeSet::Creature)
+                );
+                match source {
+                    CardTypeSetSource::Objects { filter } => match filter {
+                        TargetFilter::Typed(tf) => {
+                            assert_eq!(tf.controller, Some(ControllerRef::You));
+                            assert_eq!(tf.type_filters.len(), 2);
+                            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                            assert!(tf.type_filters.contains(&TypeFilter::Non(Box::new(
+                                TypeFilter::Subtype("Borg".to_string())
+                            ))));
+                        }
+                        other => panic!("expected typed creature filter, got {other:?}"),
+                    },
+                    other => panic!("expected Objects source, got {other:?}"),
+                }
+            }
+            other => panic!("expected DistinctSubtypes, got {other:?}"),
+        }
     }
 
     #[test]
@@ -12146,6 +12416,74 @@ mod tests {
                 "{unrelated} must not read as a chosen-number extremum"
             );
         }
+    }
+
+    /// CR 614.12a + CR 400.7: the Phyrexian Processor class back-references —
+    /// "the life paid as \<subject\> entered" — read the pre-entry latch via
+    /// `ChosenNumber`. One row per subject shape (artifact, creature, `~`,
+    /// `it`), all fully consumed.
+    #[test]
+    fn life_paid_as_entered_ref_reads_chosen_number() {
+        for text in [
+            "the life paid as this artifact entered",
+            "the life paid as this creature entered",
+            "the life paid as ~ entered",
+            "the life paid as it entered",
+        ] {
+            let (rest, qty) = parse_life_paid_as_entered_ref(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(qty, QuantityRef::ChosenNumber, "{text}");
+        }
+        // Reachable from the context-free grammar (the token where-X and CDA
+        // consumers both delegate here).
+        let (rest, qty) = parse_quantity_ref("the life paid as this artifact entered").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(qty, QuantityRef::ChosenNumber);
+    }
+
+    /// HOSTILE: the `it` alternative's word-boundary guard blocks "item", and
+    /// the sibling "the life lost this way" shape (PreviousEffectAmount) is
+    /// not stolen by the paid-as-entered leaf.
+    #[test]
+    fn life_paid_as_entered_ref_rejects_near_misses() {
+        assert!(
+            parse_life_paid_as_entered_ref("the life paid as item entered").is_err(),
+            "item must not false-match the it alternative"
+        );
+        assert!(
+            parse_life_paid_as_entered_ref("the life lost this way").is_err(),
+            "the lost-this-way shape is not a paid-as-entered ref"
+        );
+        assert_ne!(
+            crate::parser::oracle_quantity::parse_cda_quantity("the life lost this way"),
+            Some(crate::types::ability::QuantityExpr::Ref {
+                qty: QuantityRef::ChosenNumber,
+            }),
+            "the CDA interpreter must not route lost-this-way to the latch"
+        );
+    }
+
+    /// CR 614.12a, Nameless-Race-local: "their \<zone-plural\>" binds the
+    /// opponents' zones. The arm is deliberately NOT in any global alt: the
+    /// full cap sentence still declines the context-free grammar (the cap
+    /// composer is the sole caller).
+    #[test]
+    fn their_opponents_zone_ref_binds_opponents_zones() {
+        for (text, zone) in [
+            ("their graveyards", ZoneRef::Graveyard),
+            ("their hands", ZoneRef::Hand),
+            ("their libraries", ZoneRef::Library),
+        ] {
+            let (rest, (parsed_zone, scope)) = parse_their_opponents_zone_ref(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(parsed_zone, zone, "{text}");
+            assert_eq!(scope, CountScope::Opponents, "{text}");
+        }
+        assert!(
+            parse_quantity_ref_complete("the total number of white cards in their graveyards")
+                .is_err(),
+            "the their-arm must not leak into the global grammar"
+        );
     }
 
     /// The extremum reference is NOT reachable from the context-free

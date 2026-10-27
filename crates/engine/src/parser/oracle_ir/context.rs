@@ -6,9 +6,9 @@
 use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
-    ChosenGroupId, ControllerRef, Duration, MultiTargetSpec, ObjectScope, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    ZoneChoiceCandidateSource,
+    ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
+    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -320,10 +320,12 @@ pub(crate) struct ParseContext {
     /// Whether we are inside a trigger effect (enables event context refs).
     ///
     /// Consumed by `oracle_replacement::parse_oneshot_target_source_prevent`
-    /// (the Awe Strike one-shot target-source prevention branch): inside a
-    /// trigger body "that creature" is an event-context anaphor resolved by
-    /// the trigger machinery, not a target-source capture, so the branch must
-    /// not claim trigger-body text (Ria Ivor keeps its fall-through shapes).
+    /// (the Awe Strike one-shot target-source prevention branch), which
+    /// rejects the "that creature" anaphor inside a trigger body: there "that
+    /// creature" is an event-context anaphor resolved by the trigger machinery,
+    /// not a target-source capture (Impulsive Maneuvers keeps its fall-through).
+    /// A declared "target creature" subject inside a trigger body fails closed
+    /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
     pub in_trigger: bool,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
@@ -610,6 +612,17 @@ pub(crate) struct ParseContext {
     /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
     /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
     pub current_ability_exile_cost_zone: Option<Zone>,
+    /// CR 608.2k: One entry per payment component of the enclosing activated
+    /// ability's cost, each that component's categories
+    /// (`AbilityCost::component_categories`). Set by
+    /// `parse_activated_ability_ir` beside `current_ability_exile_cost_zone`
+    /// and restored after the ability; empty outside an activated ability. A
+    /// cost participle ("the discarded card" → `CostCategory::Discards`, "the
+    /// sacrificed creature" → `CostCategory::SacrificesPermanent`) names an
+    /// object paid for the cost only when exactly one component can write the
+    /// cost-paid object and that component has the participle's category;
+    /// otherwise the participle describes an effect's action or is ambiguous.
+    pub current_ability_cost_components: Vec<Vec<CostCategory>>,
     /// CR 608.2c: The current effect-chain chunk has an earlier typed object
     /// referent that `ParentTarget` can legally bind to. Standalone clause
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of

@@ -193,12 +193,16 @@ fn cast_one_copy(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<ObjectId, String> {
-    let (source, card_id, origin_zone) = {
+    let (mut source, card_id, origin_zone) = {
         let Some(source) = state.objects.get(&source_id) else {
             return Err(format!("copy source {source_id:?} not found"));
         };
         (source.clone(), source.card_id, source.zone)
     };
+    // CR 123.1 + CR 707.2 + CR 707.12: the copy has the card's copiable values;
+    // stickers and their changes aren't among them. Stripped before anything
+    // (the spell ability, the keyword snapshot) is derived from the clone.
+    crate::game::stickers::remove_stickers_from_copy(&mut source);
     crate::game::ledger::validate_spell_cast_recording(state, ability.controller)
         .map_err(cast_copy_spell_cast_ledger_error)?;
 

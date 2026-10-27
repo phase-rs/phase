@@ -1380,4 +1380,7 @@ mod tests {
 }
 
 #[cfg(test)]
+mod bandwidth_budget_tests;
+
+#[cfg(test)]
 mod network_tests;

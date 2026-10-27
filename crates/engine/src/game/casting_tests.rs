@@ -15988,10 +15988,16 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
         "payable alternative cost should make the spell castable without mana"
     );
 
-    let mut events = Vec::new();
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
-        .expect("cast should reach alternative-cost choice");
-    state.waiting_for = waiting;
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id: CardId(10),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast should reach alternative-cost choice");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16179,10 +16185,16 @@ fn cast_without_mana_cost_option_checks_commander_control() {
         "controlling a commander should make the free-cast option payable"
     );
 
-    let mut events = Vec::new();
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
-        .expect("cast should reach the free-cast choice");
-    state.waiting_for = waiting;
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id: CardId(10),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast should reach the free-cast choice");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16287,15 +16299,16 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
         .core_types
         .push(CoreType::Creature);
 
-    let waiting = handle_cast_spell(
+    crate::game::engine::apply_as_current(
         &mut state,
-        PlayerId(0),
-        spell_id,
-        CardId(10),
-        &mut Vec::new(),
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id: CardId(10),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
     )
     .expect("Snuff Out should reach the alternative-cost choice");
-    state.waiting_for = waiting;
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -20711,6 +20724,7 @@ fn cast_from_exile_library_bottom_rider_bottoms_resolved_spell() {
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         },
         vec![],
         kylox,
@@ -61984,6 +61998,7 @@ fn an_activation_journal_row_round_trips() {
         source_zone: crate::types::zones::Zone::Battlefield,
         ability_tag: Some(crate::types::ability::AbilityTag::Boast),
         is_loyalty_ability: true,
+        activation_cost: crate::types::events::BoundActivationCost::Unknown,
         targets: vec![
             ActivationTargetFact::Player(PlayerId(1)),
             ActivationTargetFact::Object {

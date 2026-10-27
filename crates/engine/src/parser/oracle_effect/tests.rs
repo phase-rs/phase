@@ -1,8 +1,9 @@
+use super::assembly::bind_repeat_directives;
 use super::gap_diagnosis::diagnose_clause_gap;
 use super::lower::{
     rewrite_parent_target_to_last_created, target_filter_is_explicit_target_player_graveyard_card,
 };
-use super::sequence::split_clause_sequence;
+use super::sequence::{split_clause_sequence, starts_bare_and_clause};
 use super::*;
 use crate::game::coverage::card_face_has_unimplemented_parts;
 use crate::game::triggers::extract_target_filter_from_effect;
@@ -15,11 +16,12 @@ use crate::parser::parse_oracle_text;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
-    AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, CardSelectionMode,
-    CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
+    AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
+    CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
     CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
     ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
+    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
+    VoteVisibility, VoterScope,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -388,6 +390,44 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
         aggregate.source(),
         CardTypeSetSource::TrackedSet { set, .. } if *set == expected
     ));
+}
+
+#[test]
+fn put_sticker_timing_is_local_to_the_printed_instruction() {
+    for (name, text, card_type, expected_timing) in [
+        ("Finishing Move", "You get {TK}{TK}, then you may put a sticker on a nonland permanent you own. Target creature you control deals damage equal to its power to target creature you don't control.", "Sorcery", TargetChoiceTiming::Resolution),
+        ("Scampire", "When Scampire enters, you get {TK}, then you may put a sticker on a creature card in your graveyard.\n{3}{B}: Return target creature card with a sticker on it from your graveyard to the battlefield. That creature gains haste. Exile it at the beginning of the next end step. Activate only as a sorcery.", "Creature", TargetChoiceTiming::Resolution),
+        ("Prize Wall", "Defender\n{U}, {T}: You get {TK}.\n{4}{U}, {T}: You may put a sticker on a nonland permanent you own. Activate only as a sorcery.", "Creature", TargetChoiceTiming::Resolution),
+        ("_____ _____ Rocketship", "Flying\nWhen this Vehicle enters, you may put up to two name stickers on it.\nWhenever this Vehicle attacks, choose a letter. This Vehicle gets +1/+1 until end of turn for each name sticker on it that begins with the chosen letter.\nCrew 2", "Artifact", TargetChoiceTiming::Stack),
+        ("Targeted grammar control", "Put a sticker on target creature.", "Sorcery", TargetChoiceTiming::Stack),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &[card_type.into()], &[]);
+        let mut found = 0;
+        for root in parsed.abilities.iter().chain(parsed.triggers.iter().filter_map(|trigger| trigger.execute.as_deref())) {
+            let mut node = Some(root);
+            while let Some(ability) = node {
+                if let Effect::PutSticker { target, .. } = ability.effect.as_ref() {
+                    found += 1;
+                    assert_eq!(ability.target_choice_timing, expected_timing, "{name}: {ability:?}");
+                    if expected_timing == TargetChoiceTiming::Resolution {
+                        assert!(!target.is_context_ref());
+                        assert!(ability.optional);
+                    }
+                    if name == "Finishing Move" {
+                        let source = ability.sub_ability.as_deref().expect("independent damage source");
+                        assert!(matches!(source.effect.as_ref(), Effect::TargetOnly { .. }));
+                        assert_eq!(source.target_choice_timing, TargetChoiceTiming::Stack);
+                        let damage = source.sub_ability.as_deref().expect("one-way damage clause");
+                        assert!(matches!(damage.effect.as_ref(), Effect::DealDamage { .. }));
+                        assert_eq!(damage.target_choice_timing, TargetChoiceTiming::Stack);
+                        assert!(damage.sub_ability.is_none());
+                    }
+                }
+                node = ability.sub_ability.as_deref();
+            }
+        }
+        assert_eq!(found, 1, "{name} must reach the actual sticker grammar");
+    }
 }
 
 fn assert_attachment_chain_has_no_unimplemented(def: &AbilityDefinition) {
@@ -2989,6 +3029,7 @@ fn prepared_designation_subject_unclassified_subject_stays_single() {
         multi_target: None,
         inherits_parent: false,
         is_optional: false,
+        player_anaphor: None,
     };
     let yours = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
 
@@ -12994,12 +13035,10 @@ fn singular_battlefield_recall_after_chosen_target_exile_keeps_tracked_set() {
     );
 }
 
-/// B6 — hostile, delayed: the rewriter never descends into
-/// CreateDelayedTrigger, so the payload keeps its CR 603.7c ParentTarget
-/// referent with origin pinned to Exile at delayed-trigger creation
-/// (CR 603.7a; Aetherling / Otherworldly Journey shapes).
+/// CR 400.7j + CR 603.7c: a delayed singular recall after a self-exile binds
+/// the source, guarded on the exile it was moved to (Aetherling shape).
 #[test]
-fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
+fn singular_battlefield_recall_delayed_binds_self_with_exile_origin() {
     let def = parse_effect_chain(
         "Exile ~, then return it to the battlefield at the beginning of the next end step.",
         AbilityKind::Spell,
@@ -13029,12 +13068,12 @@ fn singular_battlefield_recall_delayed_keeps_parent_target_payload() {
     let Effect::ChangeZone {
         origin: Some(Zone::Exile),
         destination: Zone::Battlefield,
-        target: TargetFilter::ParentTarget,
+        target: TargetFilter::SelfRef,
         ..
     } = &*effect.effect
     else {
         panic!(
-            "delayed payload must keep ParentTarget with origin Exile, got {:?}",
+            "delayed payload must bind SelfRef with origin Exile, got {:?}",
             effect.effect
         );
     };
@@ -16886,15 +16925,16 @@ fn compound_parent_target_shuffle_hand_and_graveyard_keeps_player_scope() {
         .sub_ability
         .as_deref()
         .expect("library exile should chain hand move");
-    assert!(matches!(
-        &*hand.effect,
-        Effect::ChangeZoneAll {
-            origin: Some(Zone::Hand),
-            destination: Zone::Library,
-            target: TargetFilter::ParentTargetController,
-            ..
-        }
-    ));
+    let Effect::ChangeZoneAll {
+        origin: Some(Zone::Hand),
+        destination: Zone::Library,
+        target: TargetFilter::DeclaredPlayer { group },
+        ..
+    } = &*hand.effect
+    else {
+        panic!("hand move must name the declared player: {hand:#?}");
+    };
+    assert_eq!(Some(*group), def.declares_chosen_group);
 
     let graveyard = hand
         .sub_ability
@@ -17820,12 +17860,35 @@ fn parse_search_aura_with_mana_value_and_different_name() {
                     "Should have DifferentNameFrom, got {:?}",
                     properties
                 );
+                // CR 201.2a: "with a different name than each Aura you control"
+                // is NOT the "that doesn't have the same name as" grammar. The
+                // negated-name arm added for the Curse/Yenna/Folly class must
+                // not hijack it into a `SharesQuality` prop.
+                assert!(
+                    !properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::Name,
+                            ..
+                        }
+                    )),
+                    "the negated-name arm must not capture the different-name grammar, got {:?}",
+                    properties
+                );
             }
             other => panic!("Expected Typed filter, got {:?}", other),
         },
         other => panic!("Expected SearchLibrary, got {:?}", other),
     }
 }
+
+// Herald of Vengeance's affirmative filter-position name clause ("… that has
+// the same name as a permanent that dealt damage to you last turn") remains an
+// unsupported history-predicate gap; issue #10280 tracks it. The arm
+// deliberately refuses the affirmative frame, and
+// `parse_that_clause_suffix_refuses_affirmative_name_clause` pins that scoping
+// at the seam, so no full-card test records the swallowed restriction as
+// expected behavior.
 
 #[test]
 fn effect_create_colored_token() {
@@ -23784,6 +23847,200 @@ fn put_counter_each_of_them_is_parent_target_not_put_counter_all() {
     );
 }
 
+/// The effect of the first sub-ability after a leading `Token` head.
+fn sub_after_token_head(def: &AbilityDefinition) -> &AbilityDefinition {
+    assert!(
+        matches!(def.effect.as_ref(), Effect::Token { .. }),
+        "chain must start with the token clause, got {:?}",
+        def.effect
+    );
+    def.sub_ability
+        .as_deref()
+        .expect("a clause must follow the token clause")
+}
+
+/// SHAPE — CR 608.2c + CR 111.1: "each of them" right after a token clause is
+/// the just-created tokens (`LastCreated`), routed to `PutCounter` (the bounded
+/// anaphor), never to the battlefield-scanning `PutCounterAll`.
+/// REVERT-PROBE: drop `LastCreated` from `counter_target_is_bounded_anaphor`
+/// and the head mis-promotes to `PutCounterAll { LastCreated }`.
+#[test]
+fn put_counter_each_of_them_after_token_clause_is_last_created_put_counter() {
+    let def = parse_effect_chain(
+        "Create two 0/0 green and blue Fractal creature tokens. Put a +1/+1 counter on each of them.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let put = sub_after_token_head(&def);
+    assert_eq!(
+        put.effect.as_ref(),
+        &Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::LastCreated,
+        }
+    );
+}
+
+/// SHAPE — the compound Snarl Song shape ("... on each of them and you gain 2
+/// life") routes through the same site and keeps the life-gain conjunct.
+#[test]
+fn put_counter_each_of_them_compound_after_token_clause_is_last_created_put_counter() {
+    let def = parse_effect_chain(
+        "Create two 0/0 green and blue Fractal creature tokens. Put a +1/+1 counter on each of them and you gain 2 life.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let put = sub_after_token_head(&def);
+    assert_eq!(
+        put.effect.as_ref(),
+        &Effect::PutCounter {
+            counter_type: CounterType::Plus1Plus1,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::LastCreated,
+        }
+    );
+    let gain = put
+        .sub_ability
+        .as_deref()
+        .expect("life-gain conjunct must follow");
+    assert!(
+        matches!(gain.effect.as_ref(), Effect::GainLife { .. }),
+        "compound tail must be reached, got {:?}",
+        gain.effect
+    );
+}
+
+/// SHAPE — the for-each twin goes through the "put a counter on <target> for
+/// each X" dispatch, which consults `counter_anaphor_created_token_binding`
+/// directly. Paired control: with no token clause the anaphor stays
+/// `ParentTarget`.
+#[test]
+fn put_counter_each_of_them_for_each_after_token_clause_is_last_created() {
+    let def = parse_effect_chain(
+        "Create two 0/0 green and blue Fractal creature tokens. Put a +1/+1 counter on each of them for each card in your graveyard.",
+        AbilityKind::Spell,
+    );
+    assert_attachment_chain_has_no_unimplemented(&def);
+    let put = sub_after_token_head(&def);
+    let Effect::PutCounter { target, .. } = put.effect.as_ref() else {
+        panic!("expected PutCounter, got {:?}", put.effect);
+    };
+    assert_eq!(target, &TargetFilter::LastCreated);
+
+    let control = parse_effect_chain(
+        "Put a +1/+1 counter on each of them for each card in your graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::PutCounter { target, .. } = control.effect.as_ref() else {
+        panic!("expected PutCounter control, got {:?}", control.effect);
+    };
+    assert_eq!(target, &TargetFilter::ParentTarget);
+}
+
+/// SHAPE — CR 608.2c + CR 111.1: the move-counters consumer binds "on each of
+/// them" exactly like its "on them" sibling after a token clause. Paired
+/// control: with no token clause it stays `ParentTarget`.
+#[test]
+fn move_counters_on_each_of_them_after_token_clause_matches_on_them() {
+    fn move_target(text: &str) -> TargetFilter {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let mut current = Some(&def);
+        while let Some(ability) = current {
+            if let Effect::MoveCounters { target, .. } = ability.effect.as_ref() {
+                return target.clone();
+            }
+            current = ability.sub_ability.as_deref();
+        }
+        panic!("no MoveCounters in chain for {text:?}: {def:#?}");
+    }
+    let each = move_target(
+        "Create two 0/0 green and blue Fractal creature tokens. Put its counters on each of them.",
+    );
+    let plain = move_target(
+        "Create two 0/0 green and blue Fractal creature tokens. Put its counters on them.",
+    );
+    assert_eq!(each, TargetFilter::LastCreated);
+    assert_eq!(each, plain);
+    assert_eq!(
+        move_target("Put its counters on each of them."),
+        TargetFilter::ParentTarget
+    );
+}
+
+/// SHAPE — Recursive Recruitment, verbatim Oracle text. The counter clause is
+/// gated on a graveyard cast and places floor(graveyard / 3) +1/+1 counters on
+/// each created Cadet; nothing in the chain stays unimplemented.
+#[test]
+fn recursive_recruitment_full_card_shape() {
+    let parsed = parse_oracle_text(
+        "Create two 2/2 colorless Wizard Soldier creature tokens named Cadet. If this spell was cast from a graveyard, put a +1/+1 counter on each of them for every three cards in your graveyard.\nFlashback {6}{U}{B}",
+        "Recursive Recruitment",
+        &["Flashback".to_string()],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let spell = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(a.effect.as_ref(), Effect::Token { .. }))
+        .expect("spell ability must start with the Cadet token clause");
+    assert_attachment_chain_has_no_unimplemented(spell);
+    let Effect::Token { name, count, .. } = spell.effect.as_ref() else {
+        unreachable!()
+    };
+    assert_eq!(name, "Cadet");
+    assert_eq!(count, &QuantityExpr::Fixed { value: 2 });
+    let put = spell
+        .sub_ability
+        .as_deref()
+        .expect("counter clause must follow the token clause");
+    let Effect::PutCounter {
+        counter_type,
+        count,
+        target,
+    } = put.effect.as_ref()
+    else {
+        panic!("expected PutCounter, got {:?}", put.effect);
+    };
+    assert_eq!(counter_type, &CounterType::Plus1Plus1);
+    assert!(
+        matches!(
+            count,
+            QuantityExpr::DivideRounded {
+                divisor: 3,
+                rounding: RoundingMode::Down,
+                ..
+            }
+        ),
+        "count must be floor(graveyard / 3), got {count:?}"
+    );
+    assert_eq!(target, &TargetFilter::LastCreated);
+    assert_eq!(
+        put.condition,
+        Some(AbilityCondition::WasCast {
+            zone: Some(Zone::Graveyard)
+        })
+    );
+}
+
+/// Coverage honesty: a "for every K" tail whose noun does not parse is NOT
+/// accepted — the clause stays `Unimplemented`, while the token clause before
+/// it is reached and lowered (positive guard).
+#[test]
+fn put_counter_for_every_unparsable_noun_stays_unimplemented() {
+    let def = parse_effect_chain(
+        "Create two 2/2 colorless Wizard Soldier creature tokens named Cadet. Put a +1/+1 counter on each of them for every three frobnications.",
+        AbilityKind::Spell,
+    );
+    let tail = sub_after_token_head(&def);
+    assert!(
+        matches!(tail.effect.as_ref(), Effect::Unimplemented { .. }),
+        "nonsense for-every tail must stay unimplemented, got {:?}",
+        tail.effect
+    );
+}
+
 /// Issue #588 (Summon: Good King Mog XII, chapter IV): the mass counter
 /// placement must stay scoped to other Moogles you control — not every
 /// other permanent. Regression when "Moogle" was absent from SUBTYPES.
@@ -23994,6 +24251,102 @@ fn strip_temporal_suffix_your_next_main_phase() {
             binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
         })
     );
+}
+
+/// CR 603.7a + CR 500.1: the player-relative next-step suffix composes the
+/// player axis with any single named step.
+#[test]
+fn strip_temporal_suffix_player_next_step_shapes() {
+    use crate::types::ability::{DelayedTriggerPlayerBinding as B, TurnGate as G};
+    for (step_text, phase) in [
+        ("declare attackers step", Phase::DeclareAttackers),
+        ("end step", Phase::End),
+        ("upkeep", Phase::Upkeep),
+    ] {
+        for (shape, binding, gate) in [
+            (format!("your next {step_text}"), B::Controller, G::None),
+            (
+                format!("that player's next {step_text}"),
+                B::ParentTargetOwner,
+                G::None,
+            ),
+            (
+                format!("the {step_text} on your next turn"),
+                B::Controller,
+                G::AfterCreationTurn,
+            ),
+        ] {
+            let text = format!("Return it to the battlefield at the beginning of {shape}");
+            let (rest, cond) = strip_temporal_suffix(&text);
+            assert_eq!(rest, "Return it to the battlefield", "{text}");
+            assert_eq!(
+                cond,
+                Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase,
+                    player: crate::types::player::PlayerId(0),
+                    gate,
+                    binding,
+                }),
+                "{text}"
+            );
+        }
+    }
+
+    assert_eq!(
+        strip_temporal_suffix("you draw a card at the beginning of their next upkeep").1,
+        None
+    );
+    let quenchable = "it deals an additional 3 damage to that player or planeswalker at the beginning of your next upkeep step";
+    assert_eq!(
+        strip_temporal_suffix(quenchable).1,
+        Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+            phase: Phase::Upkeep,
+            player: crate::types::player::PlayerId(0),
+            gate: crate::types::ability::TurnGate::None,
+            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+        })
+    );
+    assert_eq!(
+        strip_temporal_suffix(&format!(
+            "{quenchable} unless that player or that planeswalker's controller pays {{U}} before that step"
+        ))
+        .1,
+        None
+    );
+}
+
+/// CR 506.1 + CR 608.2c: Noctis's "that combat" rider rides the delayed
+/// declare-attackers return; "this combat" names the current combat and stays
+/// a sibling.
+#[test]
+fn delayed_combat_step_payload_nests_that_combat_continuation() {
+    let text = |combat: &str| {
+        format!(
+            "Exile ~. Return it to the battlefield under its owner's control tapped and attacking at the beginning of that player's next declare attackers step. It can't be blocked {combat} combat."
+        )
+    };
+    let nested = parse_effect_chain(&text("that"), AbilityKind::Activated);
+    let legs = chain_effects(&nested);
+    assert_eq!(legs.len(), 2, "{legs:?}");
+    let Effect::CreateDelayedTrigger { effect, .. } = &legs[1] else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    assert!(
+        matches!(
+            effect.sub_ability.as_deref().map(|sub| &*sub.effect),
+            Some(Effect::GenericEffect { .. })
+        ),
+        "payload must carry the rider: {effect:?}"
+    );
+
+    let sibling = parse_effect_chain(&text("this"), AbilityKind::Activated);
+    let legs = chain_effects(&sibling);
+    assert_eq!(legs.len(), 3, "{legs:?}");
+    let Effect::CreateDelayedTrigger { effect, .. } = &legs[1] else {
+        panic!("expected CreateDelayedTrigger, got {:?}", legs[1]);
+    };
+    assert!(effect.sub_ability.is_none(), "{effect:?}");
+    assert!(matches!(legs[2], Effect::GenericEffect { .. }), "{legs:?}");
 }
 
 #[test]
@@ -25225,10 +25578,10 @@ fn put_one_two_or_three_target_creature_cards_is_bounded_multi_target() {
 
 /// CR 601.2c + CR 115.1a: "Put two target <permanents> on top of their owners'
 /// libraries" (Rebuking Ceremony, Plow Under) announces exactly two targets.
-/// SHAPE; the runtime proof for Rebuking Ceremony is
-/// `put_target_count_entry_counters.rs`. The destination assertion is only a
-/// reach guard that the clause parsed to a library move (the separate
-/// "libraries" plural routing defect is not asserted here).
+/// SHAPE; the runtime proof is `put_target_count_entry_counters.rs`. The clause
+/// routes to the positional placement — each card goes on top of its owner's
+/// library (CR 400.3) — and the announced count rides on `multi_target`
+/// (CR 601.2c + CR 115.1a).
 ///
 /// Paired control on the same entry points: a resource count on a target
 /// ("Put two +1/+1 counters on target creature") is not an announced target
@@ -25236,22 +25589,29 @@ fn put_one_two_or_three_target_creature_cards_is_bounded_multi_target() {
 #[test]
 fn put_two_target_permanents_is_exact_multi_target() {
     let two = MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 });
-    for text in [
-        "Put two target artifacts on top of their owners' libraries.",
-        "Put two target lands on top of their owners' libraries.",
+    for (text, expected_type) in [
+        (
+            "Put two target artifacts on top of their owners' libraries.",
+            TypeFilter::Artifact,
+        ),
+        (
+            "Put two target lands on top of their owners' libraries.",
+            TypeFilter::Land,
+        ),
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
-        assert!(
-            matches!(
-                def.effect.as_ref(),
-                Effect::ChangeZone {
-                    destination: Zone::Library,
-                    ..
-                }
-            ),
-            "{text:?}: reach guard: expected a library ChangeZone, got {:?}",
-            def.effect
-        );
+        let Effect::PutAtLibraryPosition {
+            position: LibraryPosition::Top,
+            target: TargetFilter::Typed(f),
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!(
+                "{text:?}: expected a top-of-library PutAtLibraryPosition, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(f.type_filters, vec![expected_type], "{text:?}");
         assert_eq!(def.multi_target, Some(two.clone()), "{text:?}");
     }
 
@@ -25266,6 +25626,237 @@ fn put_two_target_permanents_is_exact_multi_target() {
     let clause = parse_effect_clause(counters, &mut ParseContext::default());
     assert!(matches!(clause.effect, Effect::PutCounter { .. }));
     assert_eq!(clause.multi_target, None, "{counters:?}");
+}
+
+/// Verbatim Oracle text of Vault 13: Dweller's Journey (Enchantment — Saga).
+const VAULT_13_ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — For each player, exile up to one other target enchantment or creature that player controls until this Saga leaves the battlefield.\nII — You gain 2 life and scry 2.\nIII — Return two cards exiled with this Saga to the battlefield under their owners' control and put the rest on the bottom of their owners' libraries.";
+
+/// CR 400.3 + CR 401.4: "on top of / on the bottom of their owners' libraries"
+/// sends each moved object to its own owner's library at the stated position.
+/// Only a subject that begins with a target cardinality or a declared-target
+/// prefix ("target", "another target", "other target") is a positional placement (`PutAtLibraryPosition`); an "all"/"each" mass
+/// subject is the `ChangeZoneAll` move that carries the position itself, and
+/// anaphoric ("the rest") or compound ("this creature and target creature")
+/// subjects keep their own routes. The singular "its owner's library" form is
+/// unchanged.
+#[test]
+fn plural_owners_libraries_placement_routes_by_subject_shape() {
+    fn typed_types(filter: &TargetFilter) -> &[TypeFilter] {
+        match filter {
+            TargetFilter::Typed(f) => &f.type_filters,
+            other => panic!("expected a typed target filter, got {other:?}"),
+        }
+    }
+
+    // R2 — grammar-axis row (no printed card): the bottom form is symmetric.
+    let text = "Put two target creatures on the bottom of their owners' libraries.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::PutAtLibraryPosition {
+        position: LibraryPosition::Bottom,
+        target,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "{text:?}: expected a bottom PutAtLibraryPosition, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(typed_types(target), [TypeFilter::Creature], "{text:?}");
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 })),
+        "{text:?}"
+    );
+
+    // R2b — grammar-axis row (no printed card): "up to N target" admits the plural.
+    let text = "Put up to two target creatures on top of their owners' libraries.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::PutAtLibraryPosition {
+        position: LibraryPosition::Top,
+        target,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "{text:?}: expected a top PutAtLibraryPosition, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(typed_types(target), [TypeFilter::Creature], "{text:?}");
+    assert_eq!(
+        def.multi_target,
+        Some(MultiTargetSpec::up_to(QuantityExpr::Fixed { value: 2 })),
+        "{text:?}"
+    );
+
+    // R2c — grammar-axis row (no printed card): the bare target article admits
+    // the plural; one target, no count.
+    let text = "Put target creature on the bottom of their owners' libraries.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::PutAtLibraryPosition {
+        position: LibraryPosition::Bottom,
+        target,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "{text:?}: expected a bottom PutAtLibraryPosition, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(typed_types(target), [TypeFilter::Creature], "{text:?}");
+    assert_eq!(def.multi_target, None, "{text:?}");
+
+    // R2d — grammar-axis row (no printed card): the "another target" member of
+    // the declared-target family admits the plural; one target, no count, and
+    // the target keeps its "another" restriction.
+    let text = "Put another target creature on the bottom of their owners' libraries.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::PutAtLibraryPosition {
+        position: LibraryPosition::Bottom,
+        target,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "{text:?}: expected a bottom PutAtLibraryPosition, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(typed_types(target), [TypeFilter::Creature], "{text:?}");
+    let TargetFilter::Typed(typed) = target else {
+        unreachable!("typed_types already required a typed filter");
+    };
+    assert!(
+        typed.properties.contains(&FilterProp::Another),
+        "{text:?}: expected the Another restriction, got {:?}",
+        typed.properties
+    );
+    assert_eq!(def.multi_target, None, "{text:?}");
+
+    // R3 — mass subjects (Terminus / Hallowed Burial; Harmonic Convergence) keep
+    // the `ChangeZoneAll` move with its own library position.
+    for (text, expected_type, expected_position) in [
+        (
+            "Put all creatures on the bottom of their owners' libraries.",
+            TypeFilter::Creature,
+            LibraryPosition::Bottom,
+        ),
+        (
+            "Put all enchantments on top of their owners' libraries.",
+            TypeFilter::Enchantment,
+            LibraryPosition::Top,
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::ChangeZoneAll {
+            destination: Zone::Library,
+            target,
+            library_position,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!(
+                "{text:?}: expected a library ChangeZoneAll, got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(typed_types(target), [expected_type], "{text:?}");
+        assert_eq!(*library_position, Some(expected_position), "{text:?}");
+    }
+
+    // R8 — singular-library sibling (Griptide) is unchanged.
+    let text = "Put target creature on top of its owner's library.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    let Effect::PutAtLibraryPosition {
+        position: LibraryPosition::Top,
+        target,
+        ..
+    } = def.effect.as_ref()
+    else {
+        panic!(
+            "{text:?}: expected a top PutAtLibraryPosition, got {:?}",
+            def.effect
+        );
+    };
+    assert_eq!(typed_types(target), [TypeFilter::Creature], "{text:?}");
+    assert_eq!(def.multi_target, None, "{text:?}");
+
+    // R10 — Vault 13 chapter III: the tracked remainder "the rest" stays off the
+    // positional route. `library_position` and `target` are deliberately NOT
+    // asserted: they are known pre-existing defects, deferred ("the rest" binds
+    // to the returned/latest tracked set rather than the Saga's remaining
+    // exiles, and the bottom placement is lost). This row must not be read as
+    // locking either in.
+    let parsed = parse_oracle_text(
+        VAULT_13_ORACLE,
+        "Vault 13: Dweller's Journey",
+        &[],
+        &["Enchantment".to_string()],
+        &["Saga".to_string()],
+    );
+    let chapter_iii = parsed
+        .triggers
+        .iter()
+        .find(|t| t.saga_chapter == Some(3))
+        .expect("chapter III trigger must parse");
+    let rest_move = chapter_iii
+        .execute
+        .as_deref()
+        .and_then(|execute| execute.sub_ability.as_deref())
+        .expect("chapter III has a rest-move sub-ability");
+    assert!(
+        matches!(
+            rest_move.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Library,
+                ..
+            }
+        ),
+        "Vault 13 chapter III rest move: expected an exile-to-library ChangeZoneAll, got {:?}",
+        rest_move.effect
+    );
+
+    // R11 — Void Stalker: a compound subject with an interior "target" stays off
+    // the positional route. `target` is deliberately NOT asserted (the second
+    // object is dropped — pre-existing; the card stays unsupported).
+    let parsed = parse_oracle_text(
+        "{2}{U}, {T}: Put this creature and target creature on top of their owners' libraries, then those players shuffle their libraries.",
+        "Void Stalker",
+        &[],
+        &["Creature".to_string()],
+        &["Eldrazi".to_string()],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Void Stalker has an activated ability");
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+        ),
+        "Void Stalker: expected a library ChangeZone, got {:?}",
+        ability.effect
+    );
+    let mut effects = Vec::new();
+    for def in &parsed.abilities {
+        let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect| {
+            effects.push(effect.clone());
+            std::ops::ControlFlow::Continue(())
+        });
+    }
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PutAtLibraryPosition { .. })),
+        "Void Stalker must not route to PutAtLibraryPosition: {effects:?}"
+    );
 }
 
 /// The entry counters of a battlefield mover (single or mass), `None` for any
@@ -31362,6 +31953,7 @@ fn search_shuffle_put_those_cards_on_top_in_any_order() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: LibraryPosition::Top,
+            arranger: None,
         }
     ));
 }
@@ -31393,6 +31985,7 @@ fn dig_put_those_cards_on_top_in_any_order() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: LibraryPosition::Top,
+            arranger: None,
         }
     ));
 }
@@ -31420,6 +32013,7 @@ fn reveal_dig_put_those_cards_on_top_stays_dig() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: LibraryPosition::Top,
+            arranger: None,
         })
     ));
 }
@@ -46330,7 +46924,8 @@ fn chain_position_windowed_graveyard_redirect_lowers() {
 // `oracle_replacement`'s own rows still cover its grammar.
 //
 // The venue-P companion `guard_ownership::v10_*` was already withdrawn for a different
-// reason (it would have fired on Ria Ivor, whose shield merely failed to parse).
+// reason (it would have fired on Ria Ivor, whose shield did not parse when V10 was
+// withdrawn).
 
 /// The `Event` conjunct on `is_ownership_candidate` (and on `guard_owner`'s O1a arm) is
 /// load-bearing: an O1a rider SHAPE under a STATE guard is not an ownership candidate.
@@ -51779,6 +52374,7 @@ fn doomsday_search_exiles_rest_and_orders_chosen_cards() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: LibraryPosition::Top,
+            arranger: None,
         }
     ));
     assert!(!ability_chain_has_unimplemented(&def));
@@ -53890,6 +54486,7 @@ fn chaos_wand_lowers_to_targeted_exile_until_optional_cast_and_cleanup() {
             target,
             count,
             position,
+            arranger: _,
         } = &*cleanup.effect
         else {
             panic!(
@@ -53946,6 +54543,7 @@ fn sanwell_exile_top_optional_cast_and_rest_on_bottom() {
             target,
             count,
             position,
+            arranger: _,
         } = &*cleanup.effect
         else {
             panic!(
@@ -58762,9 +59360,14 @@ fn attach_host_timing_stonehewer_giant_is_resolution() {
 /// instead of a `ParentTarget` attach bound to the bounced creature, which
 /// CR 400.7 makes a new object.
 ///
-/// Reach-guards: the bounce in front of it still parses, and the chain reaches
-/// the attach clause behind the (attachment-qualified, fail-closed) gain-control
-/// clause, so the refusal is not a whole-line collapse.
+/// The gain-control clause itself is now modelled: its "that were attached to
+/// it" relation binds the bounced creature's numbered declared slot (CR 601.2c
+/// and CR 608.2c), so it lowers to `GainControlAll{…AttachedTo{DeclaredTarget{0}}}`
+/// — never `Host`, and never the fail-closed `attached_to_qualifier` gap.
+///
+/// Reach-guards: the bounce in front of it still parses, the gain-control clause
+/// lowers, and the chain reaches the attach clause behind it, so the refusal is
+/// not a whole-line collapse.
 #[test]
 fn plural_anaphor_attachment_clause_is_unsupported() {
     let def = parse_effect_chain(
@@ -58780,13 +59383,24 @@ fn plural_anaphor_attachment_clause_is_unsupported() {
         .sub_ability
         .as_deref()
         .expect("the gain-control clause must follow the bounce");
-    // CR 301.5 + CR 303.4: "that were attached to it" is an unmodelled
-    // attachment relation, so the gain-control clause fails closed too; the
-    // reach-guard is that the chain still reaches the attach clause behind it.
+    // CR 601.2c + CR 608.2c + CR 701.3a: the attachment relation binds the
+    // bounced creature's unique numbered declared slot, so the gain-control
+    // instruction lowers with a `DeclaredTarget` prop (the D2 family).
+    let Effect::GainControlAll { target } = &*gain.effect else {
+        panic!(
+            "the gain-control clause must lower to GainControlAll with its declared-slot \
+             attachment prop, got {:?}",
+            gain.effect
+        );
+    };
+    assert_eq!(
+        declared_slots_in_filter(target),
+        vec![0],
+        "the pronoun binds the announced slot"
+    );
     assert!(
-        matches!(&*gain.effect, Effect::Unimplemented { name, .. } if name == "attached_to_qualifier"),
-        "the gain-control clause must fail closed on its attachment qualifier, got {:?}",
-        gain.effect
+        !filter_has_host(target, &TargetFilter::ParentTarget),
+        "a bound slot is DeclaredTarget, never Host: {target:?}"
     );
     let attach_clause = gain
         .sub_ability
@@ -64436,7 +65050,9 @@ fn stolen_uniform_lose_control_delayed_trigger_shape() {
     );
     assert_eq!(
         trigger.mode,
-        TriggerMode::ChangesController,
+        TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses
+        },
         "trigger fires on the control change"
     );
     // Claim 2: valid_card binds the Equipment slot, not the collision ParentTarget.
@@ -66933,8 +67549,7 @@ fn defend_the_hearth_prevent_binds_to_bare_players_recipient() {
 /// the single authority the stack-time slot builder consults.
 #[test]
 fn prevent_recipient_scope_classification() {
-    // (oracle clause, scope, mints a declared slot, expected announced count)
-    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 8] = [
+    let rows: [(&str, EffectScope, bool, Option<MultiTargetSpec>); 9] = [
         (
             "Prevent all damage that would be dealt to target creature this turn.",
             EffectScope::Single,
@@ -66955,6 +67570,12 @@ fn prevent_recipient_scope_classification() {
         ),
         (
             "Prevent the next 1 damage that would be dealt to target player, planeswalker, or Sliver creature this turn.",
+            EffectScope::Single,
+            true,
+            None,
+        ),
+        (
+            "Prevent the next 2 damage that would be dealt to any target this turn.",
             EffectScope::Single,
             true,
             None,
@@ -68646,6 +69267,7 @@ fn filter_has_chosen_color(f: &TargetFilter) -> bool {
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -68680,6 +69302,11 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         }
         FilterProp::TargetsOnly { filter } => filter_has_chosen_color(filter),
         FilterProp::Targets { filter } => filter_has_chosen_color(filter),
+        // CR 701.3a: the filter-matched host axis boxes a whole `TargetFilter`,
+        // so a stamped prop can sit inside it.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => filter_has_chosen_color(filter),
         // Nested `PlayerFilter`.
         FilterProp::ControllerMatches { player } => player_filter_has_chosen_color(player),
         FilterProp::Token
@@ -69221,6 +69848,7 @@ fn effect_filter_has_chosen_color(effect: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -74533,8 +75161,29 @@ fn peel_library_placement_cardinality_discriminates_placement_shapes() {
     );
     assert_eq!(rest, "target cards from your graveyard");
 
-    // A concrete numeral is a count on the effect, never a target set
-    // (Brainstorm / Cavalier of Gales class).
+    // CR 601.2c + CR 115.1a: an exact "<N> target" count is an announced target set
+    let (got, rest) = peel_library_placement_cardinality("two target lands");
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::TargetSet(MultiTargetSpec::exact(QuantityExpr::Fixed {
+            value: 2
+        }))
+    );
+    assert_eq!(rest, "target lands");
+
+    let (got, rest) = peel_library_placement_cardinality("x target creatures");
+    assert_eq!(
+        got,
+        LibraryPlacementCardinality::TargetSet(MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }))
+    );
+    assert_eq!(rest, "target creatures");
+
+    // An article-less concrete numeral is a count on the effect, never a target
+    // set (Brainstorm / Cavalier of Gales class).
     let (got, rest) = peel_library_placement_cardinality("two cards from your hand");
     assert_eq!(
         got,
@@ -74559,6 +75208,40 @@ fn peel_library_placement_cardinality_discriminates_placement_shapes() {
         !matches!(got, LibraryPlacementCardinality::TargetSet(_)),
         "an article-less \"any number of\" is not a target set"
     );
+}
+
+/// CR 115.1 + CR 601.2c: `placement_noun_phrase_is_targeted` discriminates by
+/// structure, not vocabulary — only a noun phrase that BEGINS with a target
+/// cardinality or a declared-target prefix ("target" / "another target" /
+/// "other target") is targeted. A "target" inside a
+/// compound subject ("~ and target creature") does not count.
+#[test]
+fn placement_noun_phrase_is_targeted_requires_a_leading_target_phrase() {
+    for input in [
+        "two target lands on top of their owners' libraries.",
+        "up to two target creatures on top of their owners' libraries.",
+        "any number of target cards on top of their owners' libraries.",
+        "target creature on the bottom of their owners' libraries.",
+        "another target creature on top of their owners' libraries.",
+        "other target creature on the bottom of their owners' libraries.",
+    ] {
+        assert!(
+            placement_noun_phrase_is_targeted(input),
+            "{input:?} must be a targeted placement noun phrase"
+        );
+    }
+    for input in [
+        "the rest on the bottom of their owners' libraries.",
+        "all creatures on the bottom of their owners' libraries.",
+        "~ and target creature on top of their owners' libraries.",
+        "this creature and each creature it's blocking on top of their owners' libraries.",
+        "two cards from your hand on top of their owners' libraries.",
+    ] {
+        assert!(
+            !placement_noun_phrase_is_targeted(input),
+            "{input:?} must not be a targeted placement noun phrase"
+        );
+    }
 }
 
 /// A-13 — exact-count placement must not move. Brainstorm's placement clause
@@ -74601,6 +75284,7 @@ fn brainstorm_exact_count_placement_shape_unchanged() {
             target,
             count,
             position,
+            arranger,
         } => {
             assert_eq!(
                 *count,
@@ -74615,6 +75299,13 @@ fn brainstorm_exact_count_placement_shape_unchanged() {
                         .controller(ControllerRef::You)
                         .properties(vec![FilterProp::InZone { zone: Zone::Hand }])
                 )
+            );
+            // PAIRED NEGATIVE (P1): "in any order" closes this clause too, but a
+            // resolution-time selection is placed in its selector's order, so
+            // only an announced target set names an arranger.
+            assert_eq!(
+                *arranger, None,
+                "an exact-count selection names no arranger"
             );
         }
         other => panic!("expected PutAtLibraryPosition, got {other:?}"),
@@ -74667,7 +75358,16 @@ fn bow_of_nylea_mode_four_gains_up_to_four_target_set_shape() {
             target,
             count,
             position,
+            arranger,
         } => {
+            // P1 (CR 608.2c + CR 101.1): "in any order" closes the controller's
+            // instruction over an announced target set, so the controller
+            // arranges. Inert here (the owner is the controller) but recorded.
+            assert_eq!(
+                *arranger,
+                Some(TargetFilter::Controller),
+                "Bow of Nylea mode 4's closing \"in any order\" names the controller"
+            );
             // PAIRED NEGATIVE: the quantifier must route to the spec, never to
             // the effect's count.
             assert_eq!(
@@ -74735,9 +75435,19 @@ fn lodestone_bauble_targets_up_to_four_basic_lands_in_a_graveyard() {
         "the announced target set must be up to four"
     );
 
-    let Effect::PutAtLibraryPosition { target, .. } = ability.effect.as_ref() else {
+    let Effect::PutAtLibraryPosition {
+        target, arranger, ..
+    } = ability.effect.as_ref()
+    else {
         panic!("expected PutAtLibraryPosition, got {:?}", ability.effect);
     };
+    // P1 (CR 608.2c + CR 101.1): the first clause ends at "in any order", so the
+    // activator arranges the chosen player's lands.
+    assert_eq!(
+        *arranger,
+        Some(TargetFilter::Controller),
+        "Lodestone Bauble's closing \"in any order\" names the controller"
+    );
     let TargetFilter::Typed(filter) = target else {
         panic!("expected a Typed filter, got {target:?}");
     };
@@ -74767,6 +75477,217 @@ fn lodestone_bauble_targets_up_to_four_basic_lands_in_a_graveyard() {
             .any(|property| matches!(property, FilterProp::Owned { .. })),
         "\"a player's\" binds no owner, got {:?}",
         filter.properties
+    );
+}
+
+/// Every `PutAtLibraryPosition` node of a parsed card: spell and activated
+/// abilities, their modes, and trigger bodies, through `sub_ability` and
+/// `else_ability` chains.
+fn parsed_library_placement_nodes(
+    parsed: &crate::parser::oracle::ParsedAbilities,
+) -> Vec<&AbilityDefinition> {
+    fn walk<'a>(definition: &'a AbilityDefinition, nodes: &mut Vec<&'a AbilityDefinition>) {
+        if matches!(
+            definition.effect.as_ref(),
+            Effect::PutAtLibraryPosition { .. }
+        ) {
+            nodes.push(definition);
+        }
+        for child in definition
+            .mode_abilities
+            .iter()
+            .chain(definition.sub_ability.as_deref())
+            .chain(definition.else_ability.as_deref())
+        {
+            walk(child, nodes);
+        }
+    }
+    let mut nodes = Vec::new();
+    for root in parsed.abilities.iter().chain(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|trigger| trigger.execute.as_deref()),
+    ) {
+        walk(root, &mut nodes);
+    }
+    nodes
+}
+
+fn placement_arranger(node: &AbilityDefinition) -> Option<&TargetFilter> {
+    let Effect::PutAtLibraryPosition { arranger, .. } = node.effect.as_ref() else {
+        unreachable!("only placement nodes are collected");
+    };
+    arranger.as_ref()
+}
+
+/// P1 — CR 608.2c + CR 101.1: "in any order" closing an imperative placement of
+/// an ANNOUNCED target set is part of the controller's instruction, so the
+/// controller arranges (`arranger: Some(Controller)`), overriding the CR 401.4
+/// owner default. Every placement without that closing phrase, and every
+/// resolution-time selection, keeps `None` (the owner default). Verbatim Oracle
+/// text throughout.
+///
+/// REVERT-FAILING: without the `TargetSet` + closing-"in any order" gate in
+/// `refine_put_at_library_position`, every positive row reads `None`.
+#[test]
+fn announced_target_set_placement_in_any_order_names_the_controller_arranger() {
+    let parse = |text: &str, name: &str, keywords: &[&str], types: &[&str]| {
+        parse_oracle_text(
+            text,
+            name,
+            &keywords.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+            &types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+            &[],
+        )
+    };
+
+    let positives = [
+        parse(
+            "Put up to three target cards from an opponent's graveyard on top of their library \
+             in any order.",
+            "Misinformation",
+            &[],
+            &["Instant"],
+        ),
+        parse(
+            "{1}, {T}, Sacrifice this artifact: Put up to four target basic land cards from a \
+             player's graveyard on top of their library in any order. That player draws a card \
+             at the beginning of the next turn's upkeep.",
+            "Lodestone Bauble",
+            &[],
+            &["Artifact"],
+        ),
+        parse(
+            "Put any number of target artifact cards from target player's graveyard on top of \
+             their library in any order.",
+            "Drafna's Restoration",
+            &[],
+            &["Sorcery"],
+        ),
+        parse(
+            "Attacking creatures you control have deathtouch.\n{1}{G}, {T}: Choose one —\n\
+             • Put a +1/+1 counter on target creature.\n\
+             • Bow of Nylea deals 2 damage to target creature with flying.\n\
+             • You gain 3 life.\n\
+             • Put up to four target cards from your graveyard on the bottom of your library \
+             in any order.",
+            "Bow of Nylea",
+            &[],
+            &["Enchantment", "Artifact"],
+        ),
+    ];
+    for (parsed, name) in positives.iter().zip([
+        "Misinformation",
+        "Lodestone Bauble",
+        "Drafna's Restoration",
+        "Bow of Nylea",
+    ]) {
+        let nodes = parsed_library_placement_nodes(parsed);
+        assert_eq!(nodes.len(), 1, "reach guard: {name} has one placement node");
+        assert!(
+            nodes[0].multi_target.is_some(),
+            "reach guard: {name} places an announced target set"
+        );
+        assert_eq!(
+            placement_arranger(nodes[0]),
+            Some(&TargetFilter::Controller),
+            "{name}: the closing \"in any order\" names the controller as arranger"
+        );
+    }
+
+    // PAIRED NEGATIVES: announced target sets with no closing "in any order"
+    // keep the CR 401.4 owner default. Each reach guard proves the node is an
+    // announced target set, so `None` is not a missed node.
+    let owner_default = [
+        parse(
+            "Put two target lands on top of their owners' libraries.",
+            "Plow Under",
+            &[],
+            &["Sorcery"],
+        ),
+        parse(
+            "Put two target artifacts on top of their owners' libraries.",
+            "Rebuking Ceremony",
+            &[],
+            &["Sorcery"],
+        ),
+        parse(
+            "Put up to three target creature cards from your graveyard on top of your library.",
+            "Reinforcements",
+            &[],
+            &["Instant"],
+        ),
+        parse(
+            "Put any number of target creature cards from your graveyard on top of your \
+             library.\nDraw a card.",
+            "Gravepurge",
+            &[],
+            &["Instant"],
+        ),
+        parse(
+            "Double strike\nProwess (Whenever you cast a noncreature spell, this creature gets \
+             +1/+1 until end of turn.)\nWhen this creature enters, for each opponent, put up to \
+             one target nonland permanent that player controls into its owner's library third \
+             from the top.",
+            "Riptide Gearhulk",
+            &["Double strike", "Prowess"],
+            &["Artifact", "Creature"],
+        ),
+    ];
+    for (parsed, name) in owner_default.iter().zip([
+        "Plow Under",
+        "Rebuking Ceremony",
+        "Reinforcements",
+        "Gravepurge",
+        "Riptide Gearhulk",
+    ]) {
+        let nodes = parsed_library_placement_nodes(parsed);
+        assert_eq!(nodes.len(), 1, "reach guard: {name} has one placement node");
+        assert!(
+            nodes[0].multi_target.is_some(),
+            "reach guard: {name} places an announced target set"
+        );
+        assert_eq!(
+            placement_arranger(nodes[0]),
+            None,
+            "{name}: no closing \"in any order\", so each owner arranges (CR 401.4)"
+        );
+    }
+
+    // PAIRED NEGATIVE: an exact-count subject-led selection ("target opponent puts
+    // two cards …") names no arranger — it never reaches the announced-target-set
+    // gate, whatever its closing "in any order".
+    let imp = parse(
+        "({B/P} can be paid with either {B} or 2 life.)\nFlying\nWhen Phyrexian Chimney Imp \
+         dies, target opponent puts two cards from their hand on top of their library in any \
+         order.",
+        "Phyrexian Chimney Imp",
+        &["Flying"],
+        &["Creature"],
+    );
+    let nodes = parsed_library_placement_nodes(&imp);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "reach guard: Phyrexian Chimney Imp has one placement node"
+    );
+    assert!(
+        matches!(
+            nodes[0].effect.as_ref(),
+            Effect::PutAtLibraryPosition {
+                count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
+                ..
+            }
+        ),
+        "reach guard: the imp's placement of two cards on top, got {:?}",
+        nodes[0].effect
+    );
+    assert_eq!(
+        placement_arranger(nodes[0]),
+        None,
+        "an exact-count subject-led selection names no arranger"
     );
 }
 
@@ -74820,6 +75741,7 @@ fn assert_untargeted_any_number_placement_shape(placement: &AbilityDefinition) {
         target,
         count,
         position,
+        arranger,
     } = placement.effect.as_ref()
     else {
         panic!(
@@ -74841,6 +75763,10 @@ fn assert_untargeted_any_number_placement_shape(placement: &AbilityDefinition) {
     // REACH GUARDS: the node's own recipient and position.
     assert_eq!(*target, your_hand_cards_filter());
     assert_eq!(*position, LibraryPosition::Bottom);
+    assert_eq!(
+        *arranger, None,
+        "a resolution-time selection names no arranger"
+    );
     // GREEN AT BASE; its pairing is mutation MP-SPEC (see the row's doc comment).
     assert!(
         placement.multi_target.is_none(),
@@ -74881,6 +75807,7 @@ fn assert_pronoun_partition_keeps_base_shape(
         target,
         count,
         position,
+        arranger,
     } = placement.effect.as_ref()
     else {
         panic!(
@@ -74888,6 +75815,10 @@ fn assert_pronoun_partition_keeps_base_shape(
             placement.effect
         );
     };
+    assert_eq!(
+        *arranger, None,
+        "a pronoun partition is not an announced target set, so it names no arranger"
+    );
     assert_eq!(
         *count,
         QuantityExpr::Fixed { value: 1 },
@@ -79962,9 +80893,9 @@ fn cast_a_type_list_card_exiled_with_self_is_a_resolution_cast_of_the_linked_poo
 /// player's graveyard" (Wrexial, the Risen Deep) chooses its card in the
 /// graveyard of the player the trigger's event names, so the cast target
 /// carries `Owned { TriggeringPlayer }`. A spell's untargeted "cast … spell
-/// from that player's graveyard" (Sorcerous Squall, where "that player" is the
-/// spell's target opponent) is not bound this way, nor is the targeted
-/// sentence outside a trigger, nor a "from a graveyard" origin whose clause
+/// from that player's graveyard" (Sorcerous Squall) is bound to the player its
+/// first clause targeted instead (CR 608.2c). The targeted sentence outside a
+/// trigger stays unbound, and so does a "from a graveyard" origin whose clause
 /// mentions that player's graveyard only later.
 #[test]
 fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
@@ -80049,7 +80980,12 @@ fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
         &[],
     ));
     assert!(
-        !squall.properties.contains(&owned_by_triggering_player),
+        squall.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::DeclaredPlayer { .. }
+            }
+        )) && !squall.properties.contains(&owned_by_triggering_player),
         "{squall:?}"
     );
     let outside_a_trigger = parse_effect_chain(
@@ -80070,6 +81006,38 @@ fn cast_target_card_from_that_players_graveyard_binds_its_owner() {
     assert!(
         !typed.properties.contains(&owned_by_triggering_player),
         "{typed:?}"
+    );
+}
+
+/// CR 400.1 + CR 608.2c: "cast a spell from each opponent's graveyard"
+/// (Jetsam) allows one cast per graveyard, which one resolution pick cannot
+/// carry, so the clause is a gap. The same clause from one graveyard parses.
+#[test]
+fn cast_a_spell_from_each_graveyard_is_a_gap() {
+    let cast_clause = |origin: &str| {
+        parse_effect_chain(
+            &format!("You may cast a spell from {origin} without paying its mana cost."),
+            AbilityKind::Spell,
+        )
+        .effect
+    };
+    for origin in ["each opponent's graveyard", "each graveyard"] {
+        assert!(
+            matches!(
+                &*cast_clause(origin),
+                Effect::Unimplemented { name, .. } if name == PER_GRAVEYARD_CAST_GAP
+            ),
+            "{origin}: {:?}",
+            cast_clause(origin)
+        );
+    }
+    assert!(
+        matches!(
+            &*cast_clause("an opponent's graveyard"),
+            Effect::CastFromZone { .. }
+        ),
+        "{:?}",
+        cast_clause("an opponent's graveyard")
     );
 }
 
@@ -84608,21 +85576,152 @@ fn bidirectional_prevent_binds_the_by_half_to_the_chosen_object() {
     }
 }
 
-/// CR 301.5 + CR 303.4: a mass leg qualified by "attached to <object>" names
-/// the attachments of the primary object. No filter expresses that relation, so
-/// it must fail closed for every verb, not widen to every Aura/Equipment on the
-/// battlefield. Paired positive: the same legs without the qualifier lower.
+/// -----------------------------------------------------------------------
+/// "all <filter> attached to <referent>" — the mass attachment qualifier class
+/// -----------------------------------------------------------------------
+///
+/// CR 115.1a + CR 115.1d + CR 115.10a + CR 701.3a + CR 608.2c: helpers shared by
+/// the P rows below.
+fn attached_set_type_list(core: &str) -> Vec<String> {
+    vec![core.to_string()]
+}
+
+/// The mass-population filter of a mass effect (`Effect::target_filter()` hides
+/// it by design).
+fn mass_population_filter(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::DestroyAll { target, .. }
+        | Effect::ChangeZoneAll { target, .. }
+        | Effect::BounceAll { target, .. }
+        | Effect::GainControlAll { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// Does any typed leg of `filter` carry `AttachedTo { Host { expected } }`?
+fn filter_has_host(filter: &TargetFilter, expected: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo { to: AttachmentReferent::Host { filter } }
+                    if filter.as_ref() == expected
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(|inner| filter_has_host(inner, expected))
+        }
+        TargetFilter::Not { filter } => filter_has_host(filter, expected),
+        _ => false,
+    }
+}
+
+/// Does EVERY typed leg carry the host prop? Used for the `Or` attachment legs
+/// (RF6: "Auras and Equipment" distributes onto both).
+fn all_typed_legs_carry_host(filter: &TargetFilter, expected: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo { to: AttachmentReferent::Host { filter } }
+                    if filter.as_ref() == expected
+            )
+        }),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty()
+                && filters
+                    .iter()
+                    .all(|inner| all_typed_legs_carry_host(inner, expected))
+        }
+        _ => false,
+    }
+}
+
+/// The distinct declared slots referenced by
+/// `AttachedTo { DeclaredTarget { slot } }`. Set semantics: "Auras and
+/// Equipment" distributes the prop onto one `Or` leg per type (Fumble), so the
+/// same slot legitimately appears on several legs.
+fn declared_slots_in_filter(filter: &TargetFilter) -> Vec<usize> {
+    let mut slots = Vec::new();
+    fn walk(filter: &TargetFilter, out: &mut Vec<usize>) {
+        match filter {
+            TargetFilter::Typed(tf) => {
+                for prop in &tf.properties {
+                    if let FilterProp::AttachedTo {
+                        to: AttachmentReferent::DeclaredTarget { slot },
+                    } = prop
+                    {
+                        if !out.contains(slot) {
+                            out.push(*slot);
+                        }
+                    }
+                }
+            }
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().for_each(|inner| walk(inner, out));
+            }
+            _ => {}
+        }
+    }
+    walk(filter, &mut slots);
+    slots
+}
+
+/// CR 115.1a + CR 115.1d + CR 701.3a: every modelled verb lowers a head + mass
+/// child. Revert-failing: deleting `parse_attached_set_clause` leaves the
+/// `attached_to_qualifier` gap for every one of these texts.
 #[test]
-fn attached_to_mass_leg_fails_closed_for_every_verb() {
+fn attached_to_mass_leg_lowers_for_every_modelled_verb() {
     for text in [
+        // Family C (announced primary + same-instruction referent).
         "Destroy target creature and all Equipment attached to it.",
         "Return target creature and all Auras attached to it to their owners' hands.",
         "Return target creature you control and all Auras you control attached to it to their owner's hand.",
         "Return target creature and each Aura attached to it to their owners' hands.",
         "Exile target attacking creature and all Equipment attached to it.",
-        // Single-verb mass forms and the past tense name the same relation.
+        // Family B (announced referent).
         "Return all Auras attached to target permanent you own to their owner's hand.",
         "Exile all Auras attached to target creature.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            !chain_has_unimplemented(&def),
+            "{text}: the class must lower, got {def:#?}"
+        );
+        let Effect::TargetOnly { target: head } = &*def.effect else {
+            panic!("{text}: expected a TargetOnly head, got {def:#?}");
+        };
+        assert!(
+            matches!(head, TargetFilter::Typed(_) | TargetFilter::Or { .. }),
+            "{text}: the head announces the object filter, got {head:?}"
+        );
+        let child = def
+            .sub_ability
+            .as_deref()
+            .unwrap_or_else(|| panic!("{text}: expected the mass child, got {def:#?}"));
+        let population = mass_population_filter(&child.effect)
+            .unwrap_or_else(|| panic!("{text}: expected a mass effect, got {child:#?}"));
+        assert!(
+            filter_has_host(population, &TargetFilter::ParentTarget),
+            "{text}: the mass population must carry AttachedTo{{Host{{ParentTarget}}}}, got {population:?}"
+        );
+        if text.contains("attached to target") {
+            // Family B: every typed leg of the announced filter carries the prop.
+            assert!(
+                all_typed_legs_carry_host(population, &TargetFilter::ParentTarget),
+                "{text}: every leg carries the host prop, got {population:?}"
+            );
+        }
+    }
+}
+
+/// CR 608.2c + CR 601.2c: an UNBOUND "it"/"them" that names no numbered
+/// declared slot and has no trigger context keeps the fail-closed gap (the
+/// RF2 decline), while the same clause after an announced reference binds that
+/// slot and lowers. Paired with the five unqualified reach guards.
+#[test]
+fn attached_to_mass_leg_unbound_referent_fails_closed() {
+    for text in [
         "Gain control of all Equipment that were attached to it.",
         "Gain control of all Equipment that was attached to it.",
     ] {
@@ -84632,16 +85731,35 @@ fn attached_to_mass_leg_fails_closed_for_every_verb() {
                 &*d.effect,
                 Effect::Unimplemented { name, .. } if name == "attached_to_qualifier"
             )),
-            "{text}: must fail closed, got {def:#?}"
+            "{text}: an unbound referent must fail closed, got {def:#?}"
         );
         assert!(
-            !chain_any(&def, &|d| matches!(
-                &*d.effect,
-                Effect::BounceAll { .. } | Effect::ChangeZoneAll { .. } | Effect::DestroyAll { .. }
-            )),
-            "{text}: no unrestricted mass leg: {def:#?}"
+            !chain_any(&def, &|d| mass_population_filter(&d.effect).is_some()),
+            "{text}: no mass leg may be invented: {def:#?}"
         );
     }
+
+    // Paired positive: the same clause after an announced reference binds slot 0.
+    let def = parse_effect_chain(
+        "Destroy target creature. Gain control of all Equipment that were attached to it.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        !chain_has_unimplemented(&def),
+        "reach guard: the bound clause lowers, got {def:#?}"
+    );
+    let gain = chain_nodes(&def)
+        .into_iter()
+        .find(|d| matches!(&*d.effect, Effect::GainControlAll { .. }))
+        .unwrap_or_else(|| panic!("expected GainControlAll, got {def:#?}"));
+    let Effect::GainControlAll { target } = &*gain.effect else {
+        unreachable!()
+    };
+    assert_eq!(
+        declared_slots_in_filter(target),
+        vec![0],
+        "the pronoun binds the announced slot"
+    );
 
     for text in [
         "Return target creature and all Auras to their owners' hands.",
@@ -84656,6 +85774,880 @@ fn attached_to_mass_leg_fails_closed_for_every_verb() {
             "{text}: reach guard, the unqualified leg must lower: {def:#?}"
         );
     }
+}
+
+/// P1 (RF6): Strip Bare — head `TargetOnly{Typed(Creature)}`, child
+/// `DestroyAll{AttachedTo{Host{ParentTarget}}}`, and the attachment filter is
+/// `Or[Typed(Aura), Typed(Equipment)]` carrying the prop on BOTH legs (the
+/// Mantle of the Ancients precedent), not a `Typed{AnyOf}`.
+#[test]
+fn p1_strip_bare_lowers_to_or_of_host_attached_aura_equipment() {
+    let def = parse_effect_chain(
+        "Destroy all Auras and Equipment attached to target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let Effect::TargetOnly { target: head } = &*def.effect else {
+        panic!("expected TargetOnly, got {def:#?}");
+    };
+    assert!(
+        matches!(head, TargetFilter::Typed(_)),
+        "head is the announced creature, got {head:?}"
+    );
+    let child = def.sub_ability.as_deref().expect("mass child");
+    let Effect::DestroyAll { target, .. } = &*child.effect else {
+        panic!("expected DestroyAll, got {child:#?}");
+    };
+    let TargetFilter::Or { filters } = target else {
+        panic!("RF6: the attachment filter is Or of legs, got {target:?}");
+    };
+    assert_eq!(filters.len(), 2, "Auras + Equipment legs, got {filters:?}");
+    assert!(
+        all_typed_legs_carry_host(target, &TargetFilter::ParentTarget),
+        "each Or leg carries the host prop, got {target:?}"
+    );
+    assert_eq!(
+        chain_nodes(&def).len(),
+        2,
+        "one instruction chain: head + mass child"
+    );
+}
+
+/// P3: family A — Treefolk Mystic / Corrosive Ooze / Hakim. No `TargetOnly`
+/// (the cards announce no target); the prop is exactly
+/// `AttachedTo{Host{ParentTarget}}` for the trigger bodies and
+/// `AttachedTo{Source}` for Hakim's `~` referent; Corrosive keeps its delayed
+/// "at end of combat" wrapper.
+#[test]
+fn p3_family_a_trigger_bodies_bind_the_event_or_source_host() {
+    for (text, name) in [
+        (
+            "Whenever this creature blocks or becomes blocked by a creature, destroy all Auras attached to that creature.",
+            "Treefolk Mystic",
+        ),
+        (
+            "Whenever this creature blocks or becomes blocked by an equipped creature, destroy all Equipment attached to that creature at end of combat.",
+            "Corrosive Ooze",
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[],
+            &[],
+            &attached_set_type_list("Creature"),
+        );
+        let body = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{name}: expected a trigger body"));
+        assert!(
+            !chain_has_unimplemented(body),
+            "{name}: must lower, got {body:#?}"
+        );
+        assert!(
+            !chain_any(body, &|d| matches!(&*d.effect, Effect::TargetOnly { .. })),
+            "{name}: must not announce a target the card does not have: {body:#?}"
+        );
+        // `chain_nodes` (not `chain_any`) is the walker that descends a
+        // `CreateDelayedTrigger`'s payload, which is where Corrosive Ooze's
+        // "at end of combat" mass destroy lives.
+        assert!(
+            chain_nodes(body).into_iter().any(|d| match &*d.effect {
+                Effect::DestroyAll { target, .. } => {
+                    all_typed_legs_carry_host(target, &TargetFilter::ParentTarget)
+                }
+                _ => false,
+            }),
+            "{name}: DestroyAll must carry AttachedTo{{Host{{ParentTarget}}}}: {body:#?}"
+        );
+        if name == "Corrosive Ooze" {
+            assert!(
+                chain_any(body, &|d| matches!(
+                    &*d.effect,
+                    Effect::CreateDelayedTrigger { .. }
+                )),
+                "the 'at end of combat' wrapper is preserved: {body:#?}"
+            );
+        }
+    }
+
+    // Hakim's "attached to Hakim" is the SOURCE referent (CR 201.5), not a Host.
+    let hakim = "Flying\n{U}{U}: Return target Aura card from your graveyard to the battlefield attached to Hakim. Activate only during your upkeep and only if Hakim isn't enchanted.\n{U}{U}, {T}: Destroy all Auras attached to Hakim.";
+    let parsed = parse_oracle_text(
+        hakim,
+        "Hakim, Loreweaver",
+        &[],
+        &[],
+        &attached_set_type_list("Creature"),
+    );
+    assert!(
+        parsed.abilities.iter().any(|ability| {
+            chain_any(ability, &|d| match &*d.effect {
+                Effect::DestroyAll { target, .. } => filter_has_source_attached_to(target),
+                _ => false,
+            })
+        }),
+        "Hakim's ~ referent lowers to AttachedTo{{Source}}: {parsed:#?}"
+    );
+}
+
+/// `AttachedTo { Source }` anywhere in `filter`'s typed legs.
+fn filter_has_source_attached_to(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::AttachedTo {
+                    to: AttachmentReferent::Source
+                }
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_has_source_attached_to)
+        }
+        _ => false,
+    }
+}
+
+/// P4: family C′ — End Hostilities destroys all creatures and every permanent
+/// attached to a creature: one instruction, one population.
+#[test]
+fn p4_end_hostilities_lowers_to_or_of_primary_and_host_attached() {
+    let def = parse_effect_chain(
+        "Destroy all creatures and all permanents attached to creatures.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let Effect::DestroyAll { target, .. } = &*def.effect else {
+        panic!("expected DestroyAll, got {def:#?}");
+    };
+    let TargetFilter::Or { filters } = target else {
+        panic!("expected Or[primary, attached'], got {target:?}");
+    };
+    assert_eq!(filters.len(), 2, "got {filters:?}");
+    assert!(
+        matches!(filters[0], TargetFilter::Typed(_)),
+        "primary mass leg first, got {filters:?}"
+    );
+    assert!(
+        all_typed_legs_carry_host(&filters[1], &TargetFilter::Typed(TypedFilter::creature())),
+        "attached leg hosts 'creatures', got {filters:?}"
+    );
+
+    // Hostile: an announced host referent is not this shape. The modelled
+    // production declines the announced referent (RF3-4), so the pre-existing
+    // compound splitter keeps the second leg as the fail-closed gap and no
+    // `Host` is synthesized. (The splitter's primary `DestroyAll` for "all
+    // creatures" is unrelated to the qualifier, so asserting its absence would
+    // be wrong.)
+    let def = parse_effect_chain(
+        "Destroy all creatures and all permanents attached to target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        chain_any(&def, &|d| matches!(
+            &*d.effect,
+            Effect::Unimplemented { name, .. } if name == super::imperative::ATTACHED_TO_QUALIFIER_GAP
+        )),
+        "announced-host variant must keep the attachment gap: {def:#?}"
+    );
+    assert!(
+        !serde_json::to_string(&def).unwrap().contains("\"Host\""),
+        "announced-host variant must not synthesize a Host: {def:#?}"
+    );
+}
+
+/// P5(b): Rhuk's "attacks or dies" must lower to BOTH a `Attacks` leg and a
+/// `ChangesZone` (dies) leg, each carrying the equipped-creature valid-card
+/// filter. Prints the parsed modes for the record.
+#[test]
+fn p5b_rhuk_parses_attack_and_dies_legs() {
+    let text = "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.";
+    let parsed = parse_oracle_text(
+        text,
+        "Rhuk, Hexgold Nabber",
+        &["Trample".to_string(), "Haste".to_string()],
+        &["Legendary".to_string()],
+        &attached_set_type_list("Creature"),
+    );
+    for trigger in &parsed.triggers {
+        eprintln!(
+            "mode={:?} valid_card={:?} valid_target={:?}",
+            trigger.mode, trigger.valid_card, trigger.valid_target
+        );
+    }
+    assert!(
+        parsed
+            .triggers
+            .iter()
+            .any(|trigger| trigger.mode == crate::types::triggers::TriggerMode::ChangesZone),
+        "the dies leg must be present as a ChangesZone trigger: {:?}",
+        parsed
+            .triggers
+            .iter()
+            .map(|t| t.mode.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// P5: family D — Rhuk attaches every Equipment attached to the triggering
+/// creature to itself (`Host{TriggeringSource}`, not `ParentTarget`).
+#[test]
+fn p5_rhuk_attaches_triggering_creatures_equipment_to_itself() {
+    let text = "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.";
+    let parsed = parse_oracle_text(
+        text,
+        "Rhuk, Hexgold Nabber",
+        &["Trample".to_string(), "Haste".to_string()],
+        &["Legendary".to_string()],
+        &attached_set_type_list("Creature"),
+    );
+    let bodies: Vec<&AbilityDefinition> = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .collect();
+    assert!(!bodies.is_empty(), "reach guard: Rhuk has trigger bodies");
+    let mut saw_attach = false;
+    for body in bodies {
+        if let Effect::Attach {
+            attachment,
+            target,
+            selection,
+            ..
+        } = &*body.effect
+        {
+            saw_attach = true;
+            assert_eq!(*target, TargetFilter::SelfRef, "Rhuk is the destination");
+            assert_eq!(
+                *selection,
+                AttachSelection::AtResolution {
+                    count: AttachCardinality::All
+                },
+                "all Equipment attached to the creature is a determined set"
+            );
+            assert!(
+                all_typed_legs_carry_host(attachment, &TargetFilter::TriggeringSource),
+                "the host is the triggering creature, got {attachment:?}"
+            );
+        }
+    }
+    assert!(saw_attach, "Rhuk's clause lowers to Attach: {parsed:#?}");
+}
+
+/// P6 (RF2): D2 binds a unique numbered declared slot (Murderous Spoils /
+/// Fumble) and Gauntlets of Chaos declines (no slot, no trigger context).
+#[test]
+fn p6_d2_binds_declared_slot_and_gauntlets_declines() {
+    for (text, name) in [
+        (
+            "Destroy target nonblack creature. It can't be regenerated. You gain control of all Equipment that were attached to it.",
+            "Murderous Spoils",
+        ),
+        (
+            "Return target creature to its owner's hand. Gain control of all Auras and Equipment that were attached to it, then attach them to another creature.",
+            "Fumble",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let gain = chain_nodes(&def)
+            .into_iter()
+            .find(|d| matches!(&*d.effect, Effect::GainControlAll { .. }))
+            .unwrap_or_else(|| panic!("{name}: expected GainControlAll, got {def:#?}"));
+        let Effect::GainControlAll { target } = &*gain.effect else {
+            unreachable!()
+        };
+        assert_eq!(
+            declared_slots_in_filter(target),
+            vec![0],
+            "{name}: the pronoun binds slot 0"
+        );
+        assert!(
+            !filter_has_host(target, &TargetFilter::ParentTarget),
+            "{name}: a bound slot is DeclaredTarget, never Host"
+        );
+    }
+
+    // Gauntlets of Chaos keeps its gap by rule: "them" has no declared slot,
+    // no explicit binding, and the clause is not a trigger body.
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to them",
+            &mut ctx
+        )
+        .is_none(),
+        "Gauntlets' unbound 'them' must decline"
+    );
+    ctx.in_trigger = true;
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to them",
+            &mut ctx
+        )
+        .is_some(),
+        "paired positive: the same clause in a trigger body binds Host{{ParentTarget}}"
+    );
+}
+
+/// P7 (F2): the existing declared-slot destroy authority still owns Turn to
+/// Slag / Blastfire / Fires — `DeclaredTarget`, never `Host`.
+#[test]
+fn p7_declared_slot_destroy_authority_is_not_shadowed() {
+    for (text, name) in [
+        (
+            "Turn to Slag deals 5 damage to target creature. Destroy all Equipment attached to that creature.",
+            "Turn to Slag",
+        ),
+        (
+            "Blastfire Bolt deals 5 damage to target creature. Destroy all Equipment attached to that creature.",
+            "Blastfire Bolt",
+        ),
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            !chain_has_unimplemented(&def),
+            "{name}: reach guard, got {def:#?}"
+        );
+        let destroy = chain_nodes(&def)
+            .into_iter()
+            .find(|d| matches!(&*d.effect, Effect::DestroyAll { .. }))
+            .unwrap_or_else(|| panic!("{name}: expected DestroyAll, got {def:#?}"));
+        let Effect::DestroyAll { target, .. } = &*destroy.effect else {
+            unreachable!()
+        };
+        assert_eq!(declared_slots_in_filter(target), vec![0], "{name}");
+        assert!(
+            !filter_has_host(target, &TargetFilter::ParentTarget),
+            "{name}: no Host may be invented: {target:?}"
+        );
+        assert!(
+            !serde_json::to_string(&def).unwrap().contains("\"Host\""),
+            "{name}: serialized AST carries no Host"
+        );
+    }
+}
+
+/// P8 (F5): Mark of Eviction / Flickerform stay out of class — the gap is
+/// retained and no `Host` is produced. Reach guard: the clause is reached and
+/// its primary effect still parses.
+#[test]
+fn p8_enchanted_creature_boundary_keeps_the_gap() {
+    for (text, name, primary) in [
+        (
+            "Enchant creature\nAt the beginning of your upkeep, return enchanted creature and all Auras attached to that creature to their owners' hands.",
+            "Mark of Eviction",
+            "Bounce",
+        ),
+        (
+            "Enchant creature\n{2}{W}{W}: Exile enchanted creature and all Auras attached to it. At the beginning of the next end step, return that card to the battlefield under its owner's control. If you do, return the other cards exiled this way to the battlefield under their owners' control attached to that creature.",
+            "Flickerform",
+            "ChangeZone",
+        ),
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            name,
+            &[],
+            &[],
+            &attached_set_type_list("Enchantment"),
+        );
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert!(
+            json.contains("attached_to_qualifier"),
+            "{name}: the boundary gap stays: {json}"
+        );
+        assert!(!json.contains("\"Host\""), "{name}: no Host: {json}");
+        let reached = parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .any(|def| match primary {
+                "Bounce" => chain_any(def, &|d| matches!(&*d.effect, Effect::Bounce { .. })),
+                _ => chain_any(def, &|d| matches!(&*d.effect, Effect::ChangeZone { .. })),
+            });
+        assert!(reached, "{name}: reach guard, the clause was reached");
+    }
+}
+
+/// P9 (F8): Essence Reliquary's head keeps `FilterProp::Another` — the grammar
+/// gate consumes nothing semantically.
+#[test]
+fn p9_essence_reliquary_head_keeps_another() {
+    let text = "Return another target permanent you control and all Auras you control attached to it to their owner's hand.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let Effect::TargetOnly {
+        target: TargetFilter::Typed(typed),
+    } = &*def.effect
+    else {
+        panic!("expected a typed TargetOnly head, got {def:#?}");
+    };
+    assert!(
+        typed.properties.contains(&FilterProp::Another),
+        "the head keeps Another, got {:?}",
+        typed.properties
+    );
+}
+
+/// P10 (F9): the attach-led class is untouched — Balan is a determined set with
+/// NO attachment relation; Autumn-Tail's targeted attach is still `Attach`.
+#[test]
+fn p10_attach_led_class_is_not_claimed() {
+    let balan = parse_effect_chain(
+        "Attach all Equipment you control to Balan.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&balan), "got {balan:#?}");
+    let Effect::Attach {
+        attachment,
+        selection,
+        ..
+    } = &*balan.effect
+    else {
+        panic!("expected Attach, got {balan:#?}");
+    };
+    assert!(
+        matches!(selection, AttachSelection::AtResolution { .. }),
+        "Balan's attachment operand is a described set"
+    );
+    assert!(
+        !filter_has_host(attachment, &TargetFilter::ParentTarget)
+            && !filter_has_host(attachment, &TargetFilter::TriggeringSource),
+        "no attachment relation on Balan: {attachment:?}"
+    );
+
+    let autumn = parse_effect_chain(
+        "Attach target Aura you control to target creature.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*autumn.effect, Effect::Attach { .. }),
+        "a targeted attach still lowers: {autumn:#?}"
+    );
+}
+
+/// P11 (F10 reachable half + RF7): an unconsumed control qualifier ahead of the
+/// relation fails closed; the admitted "you control" phrase parses.
+#[test]
+fn p11_unconsumed_control_qualifier_fails_closed() {
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras controlled by those players attached to target creature",
+            &mut ctx
+        )
+        .is_none(),
+        "an unadmitted control qualifier must fail closed"
+    );
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras you control attached to target creature",
+            &mut ctx
+        )
+        .is_some(),
+        "paired positive: the admitted 'you control' phrase parses"
+    );
+}
+
+/// P12 (F11): a declined clause leaves the parse context untouched.
+#[test]
+fn p12_declined_clause_rolls_back_the_parse_context() {
+    let mut ctx = ParseContext {
+        subject: Some(TargetFilter::SelfRef),
+        in_trigger: false,
+        ..Default::default()
+    };
+    let before = ctx.clone();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to that creature",
+            &mut ctx
+        )
+        .is_none(),
+        "a non-trigger unbound demonstrative declines"
+    );
+    assert_eq!(ctx, before, "a declined clause must not mutate ctx");
+
+    // Paired positive: the trigger-context twin parses and merges.
+    let mut ctx = ParseContext {
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        in_trigger: true,
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to that creature",
+            &mut ctx
+        )
+        .is_some(),
+        "paired positive: the trigger-context demonstrative binds Host{{TriggeringSource}}"
+    );
+}
+
+/// P13 (F7): Silence the Believers — the head carries `unlimited(0)` from the
+/// chunk-level "any number of" strip; the mass child carries none.
+#[test]
+fn p13_silence_carries_the_chunk_level_multi_target() {
+    let def = parse_effect_chain(
+        "Exile any number of target creatures and all Auras attached to them.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "got {def:#?}");
+    let spec = def.multi_target.as_ref().expect("the head's target spec");
+    assert_eq!(spec.min, QuantityExpr::Fixed { value: 0 }, "min 0");
+    assert_eq!(spec.max, None, "unlimited");
+    assert!(
+        def.sub_ability
+            .as_deref()
+            .is_some_and(|child| child.multi_target.is_none()),
+        "the mass child owns no target spec"
+    );
+
+    let bounded = parse_effect_chain(
+        "Exile up to two target creatures and all Auras attached to them.",
+        AbilityKind::Spell,
+    );
+    let spec = bounded.multi_target.as_ref().expect("bounded spec");
+    assert_eq!(
+        spec.max,
+        Some(QuantityExpr::Fixed { value: 2 }),
+        "up to two"
+    );
+}
+
+/// P18 (RF7): `attachment_phrase_admits` directly.
+#[test]
+fn p18_attachment_phrase_admission() {
+    for phrase in [
+        "Auras controlled by those players",
+        "Equipment that player controls",
+        "Auras they own",
+    ] {
+        assert!(
+            !super::imperative::attachment_phrase_admits(phrase),
+            "{phrase}: an unadmitted control/ownership word must be refused"
+        );
+    }
+    for phrase in [
+        "white Auras you own",
+        "Auras an opponent controls",
+        "Equipment you control",
+        "Auras",
+    ] {
+        assert!(
+            super::imperative::attachment_phrase_admits(phrase),
+            "{phrase}: an admitted / unqualified phrase must pass"
+        );
+    }
+}
+
+/// P19 (RF2): the exact gate set — unbound `ParentTarget` gated on trigger
+/// context; a bound pronoun admitted ungated; the demonstrative with a typed
+/// subject binds `TriggeringSource`.
+#[test]
+fn p19_rf2_gate_admits_only_bound_or_trigger_referents() {
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause("destroy all Auras attached to it", &mut ctx)
+            .is_none(),
+        "unbound pronoun outside a trigger declines"
+    );
+    ctx.in_trigger = true;
+    let clause =
+        super::imperative::parse_attached_set_clause("destroy all Auras attached to it", &mut ctx)
+            .expect("in a trigger the pronoun binds");
+    let Effect::DestroyAll { target, .. } = &clause.effect else {
+        panic!("expected DestroyAll, got {clause:#?}");
+    };
+    assert!(
+        all_typed_legs_carry_host(target, &TargetFilter::ParentTarget),
+        "got {target:?}"
+    );
+
+    let mut bound = ParseContext {
+        object_pronoun_ref: Some(TargetFilter::ParentTarget),
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "destroy all Auras attached to it",
+            &mut bound
+        )
+        .is_some(),
+        "a parser-bound pronoun is admitted ungated"
+    );
+
+    let mut demonstrative = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..Default::default()
+    };
+    let clause = super::imperative::parse_attached_set_clause(
+        "destroy all Auras attached to that creature",
+        &mut demonstrative,
+    )
+    .expect("the typed-subject demonstrative binds");
+    let Effect::DestroyAll { target, .. } = &clause.effect else {
+        panic!("expected DestroyAll, got {clause:#?}");
+    };
+    assert!(
+        all_typed_legs_carry_host(target, &TargetFilter::TriggeringSource),
+        "the demonstrative binds TriggeringSource, got {target:?}"
+    );
+}
+
+/// P20 (RF4): the pronoun-only declared-slot entry point binds the unique
+/// numbered slot; the shared definite-noun resolver stays pronoun-free.
+#[test]
+fn p20_pronoun_entry_point_is_separate_from_the_shared_resolver() {
+    let entries = vec![crate::parser::oracle_ir::context::DeclaredSlotEntry {
+        index: Some(0),
+        filter: TargetFilter::Typed(TypedFilter::creature()),
+    }];
+    let ctx = ParseContext {
+        chain_declared_slots: crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(
+            entries,
+        ),
+        ..Default::default()
+    };
+    assert_eq!(
+        super::resolve_pronoun_declared_slot_anaphor("them", &ctx),
+        Some((0, "")),
+        "the unique numbered slot binds"
+    );
+    assert!(
+        super::resolve_declared_slot_anaphor("them", &ctx).is_none(),
+        "the shared definite-noun resolver must stay pronoun-free"
+    );
+
+    // Several numbered slots: ambiguous.
+    let mut several = ctx.clone();
+    several.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(0),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(1),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(super::resolve_pronoun_declared_slot_anaphor("them", &several).is_none());
+
+    // An unnumbered slot and an Indeterminate registry both decline.
+    let mut unnumbered = ctx.clone();
+    unnumbered.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: None,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(super::resolve_pronoun_declared_slot_anaphor("them", &unnumbered).is_none());
+    let mut indeterminate = ctx.clone();
+    indeterminate.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate;
+    assert!(super::resolve_pronoun_declared_slot_anaphor("them", &indeterminate).is_none());
+
+    // A MIXED registry is incomplete, not "one numbered slot": the unnumbered
+    // entry means the chain's numbering could not be recorded for that slot, so
+    // the sole numbered entry must not be bound on a guess.
+    let mut mixed = ctx.clone();
+    mixed.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(0),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: None,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(
+        super::resolve_pronoun_declared_slot_anaphor("them", &mixed).is_none(),
+        "an incomplete registry is not a unique antecedent"
+    );
+}
+
+/// The imperative ParentTarget fallback shares the same incompleteness rule:
+/// `Indeterminate` and a mixed registry both decline a parser-bound pronoun,
+/// while the single numbered slot still binds.
+#[test]
+fn p20b_parent_target_fallback_declines_incomplete_registries() {
+    let clause = "destroy all Auras attached to it";
+    let mut bound = ParseContext {
+        object_pronoun_ref: Some(TargetFilter::ParentTarget),
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(clause, &mut bound).is_some(),
+        "positive control: a bound pronoun over a single numbered slot parses"
+    );
+
+    let mut indeterminate = bound.clone();
+    indeterminate.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Indeterminate;
+    assert!(
+        super::imperative::parse_attached_set_clause(clause, &mut indeterminate).is_none(),
+        "an Indeterminate registry cannot prove the nearest declarer"
+    );
+
+    let mut mixed = bound.clone();
+    mixed.chain_declared_slots =
+        crate::parser::oracle_ir::context::DeclaredSlotRegistry::Known(vec![
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: Some(0),
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            crate::parser::oracle_ir::context::DeclaredSlotEntry {
+                index: None,
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        ]);
+    assert!(
+        super::imperative::parse_attached_set_clause(clause, &mut mixed).is_none(),
+        "a mixed registry is incomplete, not unambiguous"
+    );
+}
+
+/// P21 (RF5): the promoted demonstrative recognizer keeps the counter helper's
+/// exact subject gate.
+#[test]
+fn p21_demonstrative_target_keeps_the_counter_gate() {
+    use crate::parser::oracle_target::resolve_demonstrative_target;
+    let typed = TargetFilter::Typed(TypedFilter::creature());
+    for (subject, expected) in [
+        (Some(TargetFilter::SelfRef), false),
+        (Some(TargetFilter::Any), false),
+        (None, false),
+        (Some(TargetFilter::CostPaidObject), true),
+        (Some(TargetFilter::AttachedTo), true),
+        (Some(typed.clone()), true),
+    ] {
+        let ctx = ParseContext {
+            subject: subject.clone(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_demonstrative_target("that creature.", &ctx),
+            expected.then_some("."),
+            "subject {subject:?}"
+        );
+    }
+    let ctx = ParseContext {
+        subject: Some(typed),
+        ..Default::default()
+    };
+    assert_eq!(
+        resolve_demonstrative_target("that permanent.", &ctx),
+        None,
+        "only the exact 'that creature' phrase matches"
+    );
+}
+
+/// P22 (RF3-4): a present announced head at a non-`Announced` site, or a
+/// player-typed announced referent, declines the whole clause — never an
+/// untargeted host. The last negative is the mixed `Or[Typed(Creature),
+/// Player]`: one player leg spoils the whole filter, so no `Host` is built.
+#[test]
+fn p22_announced_host_outside_the_announced_site_declines() {
+    for text in [
+        "Destroy all Curses attached to target player",
+        "Attach all Equipment attached to target creature to ~",
+        "Destroy target creature and all Auras attached to target player",
+        "Destroy all Auras attached to target creature or player",
+    ] {
+        let mut ctx = ParseContext::default();
+        assert!(
+            super::imperative::parse_attached_set_clause(text, &mut ctx).is_none(),
+            "{text}: must decline the whole clause"
+        );
+    }
+    for text in [
+        "Destroy all Curses attached to you",
+        "Destroy all Auras attached to target creature",
+    ] {
+        let mut ctx = ParseContext::default();
+        assert!(
+            super::imperative::parse_attached_set_clause(text, &mut ctx).is_some(),
+            "{text}: paired positive, must parse"
+        );
+    }
+    let mut ctx = ParseContext {
+        in_trigger: true,
+        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+        ..Default::default()
+    };
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "Attach all Equipment attached to that creature to ~",
+            &mut ctx
+        )
+        .is_some(),
+        "the trigger-context Attach form parses"
+    );
+    // A Context-site "that creature" in a non-trigger still declines (RF2).
+    let mut ctx = ParseContext::default();
+    assert!(
+        super::imperative::parse_attached_set_clause(
+            "Attach all Equipment attached to that creature to ~",
+            &mut ctx
+        )
+        .is_none(),
+        "RF2, not Host: a non-trigger demonstrative declines"
+    );
+}
+
+/// P24 (R4-001): the variable-count fixture keeps its gap; `DeclaredTarget`
+/// comes only from step 3's chain-wide registry. The fixed-prefix twin binds
+/// chain slot 1 (the preserved integration contract).
+#[test]
+fn p24_variable_prefix_never_translates_a_local_slot() {
+    let variable = "Tap up to one target land. Choose target creature and target artifact. Destroy all Equipment attached to that creature.";
+    let parsed = parse_oracle_text(
+        variable,
+        "Probe",
+        &[],
+        &attached_set_type_list("Sorcery"),
+        &[],
+    );
+    let json = serde_json::to_string(&parsed).unwrap();
+    assert!(
+        json.contains("attached_to_qualifier"),
+        "the variable fixture keeps its gap: {json}"
+    );
+    assert!(
+        !json.contains("DeclaredTarget"),
+        "no Choose-head-local index may be re-pointed: {json}"
+    );
+    assert!(
+        !json.contains("\"Host\""),
+        "no Host may be synthesized: {json}"
+    );
+
+    let fixed = "Tap target land. Choose target creature and target artifact. Destroy all Equipment attached to that creature.";
+    let parsed = parse_oracle_text(fixed, "Probe", &[], &attached_set_type_list("Sorcery"), &[]);
+    assert!(
+        !serde_json::to_string(&parsed)
+            .unwrap()
+            .contains("attached_to_qualifier"),
+        "the fixed-prefix twin binds through step 3"
+    );
+    let destroy = parsed
+        .abilities
+        .iter()
+        .flat_map(|ability| chain_nodes(ability))
+        .find(|def| matches!(&*def.effect, Effect::DestroyAll { .. }))
+        .expect("the fixed twin lowers to DestroyAll");
+    let Effect::DestroyAll { target, .. } = &*destroy.effect else {
+        unreachable!()
+    };
+    assert_eq!(declared_slots_in_filter(target), vec![1], "chain slot 1");
 }
 
 /// CR 608.2c: an unconditional, mandatory "repeat this process <cap>" re-follows the
@@ -84680,8 +86672,10 @@ fn repeat_process_directive_unconditional_cap_is_a_counted_repeat() {
 }
 
 /// Paired negative reach guard for the counted form above: a conditional cap keeps
-/// its loop predicate, and an uncapped directive stays consume-only, so neither is
-/// silently promoted to an unconditional fixed repeat.
+/// its loop predicate, and neither the bare directive nor "any number of times" is
+/// promoted to an unconditional fixed repeat. The bare directive is the structural
+/// `Bare` outcome (CR 608.2c: reached through its clause's gate); "any number of
+/// times" and "if you do" stay consume-only; "you may" stays the controller's choice.
 #[test]
 fn repeat_process_directive_conditional_or_uncapped_is_not_a_counted_repeat() {
     let mut ctx = ParseContext::default();
@@ -84692,9 +86686,13 @@ fn repeat_process_directive_conditional_or_uncapped_is_not_a_counted_repeat() {
         ),
         Some(RepeatProcessOutcome::Continuation(_))
     ));
+    assert!(matches!(
+        try_parse_repeat_process_directive("repeat this process", &mut ctx),
+        Some(RepeatProcessOutcome::Bare)
+    ));
     for text in [
-        "repeat this process",
         "repeat this process any number of times",
+        "if you do, repeat this process",
     ] {
         assert!(
             matches!(
@@ -84704,6 +86702,478 @@ fn repeat_process_directive_conditional_or_uncapped_is_not_a_counted_repeat() {
             "{text}"
         );
     }
+    assert!(matches!(
+        try_parse_repeat_process_directive("you may repeat this process", &mut ctx),
+        Some(RepeatProcessOutcome::Continuation(
+            RepeatContinuation::ControllerChoice
+        ))
+    ));
+}
+
+/// CR 608.2c: the splitter cuts only the terminal bare directive, so counted /
+/// open-ended / "for <X>" tails are not newly split into their own clause.
+#[test]
+fn bare_and_splitter_cuts_only_the_terminal_repeat_directive() {
+    assert!(
+        starts_bare_and_clause("draw a card"),
+        "reach guard: the splitter works"
+    );
+    for text in ["repeat this process.", "repeat this process"] {
+        assert!(starts_bare_and_clause(text), "{text}");
+    }
+    for text in [
+        "repeat this process for first strike",
+        "repeat this process once",
+        "repeat this process any number of times",
+    ] {
+        assert!(!starts_bare_and_clause(text), "{text}");
+    }
+}
+
+fn repeat_directive_chains(
+    text: &str,
+    name: &str,
+    types: &[&str],
+    subtypes: &[&str],
+) -> Vec<AbilityDefinition> {
+    let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+    let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+    let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+    let bodies = parsed.abilities.iter().cloned().chain(
+        parsed
+            .triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref().cloned()),
+    );
+    bodies
+        .filter(|def| {
+            collect_chain_effects(def)
+                .iter()
+                .any(|e| e.is_repeat_directive())
+        })
+        .collect()
+}
+
+fn repeat_directive_loop() -> RepeatContinuation {
+    RepeatContinuation::WhileCondition {
+        condition: Box::new(AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::RepeatDirectiveReached,
+        }),
+        max_iterations: None,
+    }
+}
+
+const TAMIYO_ORACLE: &str = "I, II, III \u{2014} Mill two cards. If two cards that share a card type were milled this way, draw a card and repeat this process.";
+
+/// CR 608.2c: "If C, do A and repeat this process" parses to A gated by C with the
+/// repeat directive as A's ungated tail child, and the root loops on the directive
+/// being reached. Verbatim Oracle text; no `Unimplemented` remains.
+#[test]
+fn repeat_directive_is_the_ungated_tail_of_its_gated_clause() {
+    struct Card {
+        text: &'static str,
+        name: &'static str,
+        types: &'static [&'static str],
+        subtypes: &'static [&'static str],
+        bodies: usize,
+    }
+    let cards = [
+        Card {
+            text: "+1: Create a 1/1 black and green Insect creature token, then mill a card. If an Insect card was milled this way, put a loyalty counter on Grist and repeat this process.",
+            name: "Grist, the Hunger Tide",
+            types: &["Planeswalker"],
+            subtypes: &["Grist"],
+            bodies: 1,
+        },
+        Card {
+            text: "When this creature enters, you may put a land card from your hand onto the battlefield tapped. If you do, draw a card and repeat this process.",
+            name: "Cultivator Colossus",
+            types: &["Creature"],
+            subtypes: &["Plant", "Wall"],
+            bodies: 1,
+        },
+        Card {
+            text: "At the beginning of your upkeep, reveal the top card of your library. If it's a land card, put it into your graveyard and repeat this process.",
+            name: "Countryside Crusher",
+            types: &["Creature"],
+            subtypes: &["Giant", "Warrior"],
+            bodies: 1,
+        },
+        Card {
+            text: TAMIYO_ORACLE,
+            name: "The Tale of Tamiyo",
+            types: &["Enchantment"],
+            subtypes: &["Saga"],
+            bodies: 3,
+        },
+    ];
+    for Card {
+        text,
+        name,
+        types,
+        subtypes,
+        bodies: expected,
+    } in cards
+    {
+        let chains = repeat_directive_chains(text, name, types, subtypes);
+        assert_eq!(
+            chains.len(),
+            expected,
+            "{name}: bodies carrying the directive"
+        );
+        for def in &chains {
+            let effects = collect_chain_effects(def);
+            assert!(
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::Unimplemented { .. })),
+                "{name}: {def:?}"
+            );
+            assert!(
+                effects.last().is_some_and(|e| e.is_repeat_directive()),
+                "{name}: the directive is the tail"
+            );
+            let mut node = def;
+            while node
+                .sub_ability
+                .as_ref()
+                .is_some_and(|sub| !sub.effect.is_repeat_directive())
+            {
+                node = node.sub_ability.as_deref().unwrap();
+            }
+            let directive_def = node.sub_ability.as_deref().expect("directive node");
+            assert!(
+                directive_def.condition.is_none(),
+                "{name}: the directive is ungated"
+            );
+            assert!(
+                node.condition.is_some(),
+                "{name}: its parent carries the gate"
+            );
+            assert_eq!(def.repeat_until, Some(repeat_directive_loop()), "{name}");
+        }
+    }
+}
+
+/// CR 608.2c fail closed: a directive whose parent is ungated would loop until a
+/// zone runs dry, so it is replaced by an `Unimplemented` gap (and no root loop is
+/// stamped); the same sentence behind an outer "if" keeps the directive and the
+/// loop. Hand-built chains cover the non-tail case.
+#[test]
+fn repeat_directive_without_a_gate_or_with_successors_is_removed() {
+    let ungated = parse_effect_chain("Draw a card and repeat this process.", AbilityKind::Spell);
+    assert!(
+        matches!(*ungated.effect, Effect::Draw { .. }),
+        "reach guard: the Draw parsed: {ungated:?}"
+    );
+    assert!(
+        !collect_chain_effects(&ungated)
+            .iter()
+            .any(|e| e.is_repeat_directive()),
+        "{ungated:?}"
+    );
+    assert!(ungated.repeat_until.is_none(), "{ungated:?}");
+    // The dropped directive leaves an honest gap, not a clean supported parse.
+    assert!(
+        collect_chain_effects(&ungated).iter().any(|e| {
+            matches!(e, Effect::Unimplemented { .. })
+                && e.unimplemented_description() == Some("repeat this process")
+        }),
+        "{ungated:?}"
+    );
+
+    let gated = parse_effect_chain(
+        "If you control a land, draw a card and repeat this process.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        collect_chain_effects(&gated)
+            .iter()
+            .any(|e| e.is_repeat_directive()),
+        "{gated:?}"
+    );
+    assert_eq!(
+        gated.repeat_until,
+        Some(repeat_directive_loop()),
+        "{gated:?}"
+    );
+
+    let directive = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RuntimeHandled {
+                handler: RuntimeHandler::RepeatProcess,
+            },
+        )
+    };
+    let step = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+        )
+    };
+    let gate = AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::OptionalEffectPerformed,
+    };
+    // Gated parent, directive is the tail: survives.
+    let mut tail = step().condition(gate.clone()).sub_ability(directive());
+    assert!(bind_repeat_directives(&mut tail));
+    // A directive with a successor is not a tail: replaced by an honest gap in its
+    // position, the successor stays linked.
+    let mut mid = step()
+        .condition(gate)
+        .sub_ability(directive().sub_ability(step()));
+    assert!(!bind_repeat_directives(&mut mid));
+    assert!(mid.repeat_until.is_none(), "{mid:?}");
+    let chain = collect_chain_effects(&mid);
+    assert_eq!(chain.len(), 3, "{mid:?}");
+    assert!(!chain.iter().any(|e| e.is_repeat_directive()), "{mid:?}");
+    assert!(
+        matches!(chain[1], Effect::Unimplemented { .. })
+            && chain[1].unimplemented_description() == Some("repeat this process"),
+        "{mid:?}"
+    );
+    assert!(matches!(chain[2], Effect::Shuffle { .. }), "{mid:?}");
+}
+
+/// CR 608.2c: a "repeat this process" in an otherwise-branch is outside the
+/// supported "If C, do A and repeat this process" class (no printed card has one:
+/// the only "otherwise ... repeat this process" Oracle text is explore's reminder
+/// text). It fails closed — an honest `Unimplemented` gap, no surviving directive
+/// in either branch and no root loop — rather than looping or dropping silently.
+#[test]
+fn repeat_directive_in_an_otherwise_branch_fails_closed() {
+    fn every_effect(def: &AbilityDefinition, out: &mut Vec<Effect>) {
+        out.push((*def.effect).clone());
+        for next in [&def.sub_ability, &def.else_ability].into_iter().flatten() {
+            every_effect(next, out);
+        }
+    }
+    let parsed = parse_effect_chain(
+        "If you control a Forest, draw a card. Otherwise, mill a card and repeat this process.",
+        AbilityKind::Spell,
+    );
+    let mut effects = Vec::new();
+    every_effect(&parsed, &mut effects);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+        "reach guard: the conditional head parsed: {parsed:?}"
+    );
+    assert!(
+        !effects.iter().any(Effect::is_repeat_directive),
+        "{parsed:?}"
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })
+                && e.unimplemented_description() == Some("repeat this process")),
+        "{parsed:?}"
+    );
+    assert_eq!(parsed.repeat_until, None, "{parsed:?}");
+}
+
+/// CR 608.2c: the `Bare` arm of the repeat-directive recognizer fires only for the
+/// comma-joined form ("..., put a loyalty counter on this planeswalker and repeat this
+/// process"), whose directive trails the gate of its own clause. The same instruction
+/// followed by an own-sentence "Repeat this process." stays as it was: no directive and
+/// no root loop (and no `Unimplemented`), rather than looping on an earlier gate.
+#[test]
+fn bare_repeat_directive_needs_the_comma_joined_form() {
+    let comma = parse_effect_chain(
+        "Mill a card. If an Insect card was milled this way, put a loyalty counter on this planeswalker and repeat this process.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        collect_chain_effects(&comma)
+            .iter()
+            .any(|e| e.is_repeat_directive()),
+        "reach guard: the comma form carries the directive: {comma:?}"
+    );
+    assert_eq!(
+        comma.repeat_until,
+        Some(repeat_directive_loop()),
+        "{comma:?}"
+    );
+
+    let own_sentence = parse_effect_chain(
+        "Mill a card. If an Insect card was milled this way, put a loyalty counter on this planeswalker. Repeat this process.",
+        AbilityKind::Spell,
+    );
+    let effects = collect_chain_effects(&own_sentence);
+    assert!(
+        effects.len() > 1,
+        "reach guard: the gated clause parsed: {own_sentence:?}"
+    );
+    assert!(
+        !effects.iter().any(|e| e.is_repeat_directive()),
+        "{own_sentence:?}"
+    );
+    assert!(own_sentence.repeat_until.is_none(), "{own_sentence:?}");
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Unimplemented { .. })),
+        "{own_sentence:?}"
+    );
+}
+
+/// CR 608.2c preservation: neighbouring "repeat this process" cards whose shape is not
+/// the gated comma-joined one keep parsing without a repeat directive and without a
+/// root `RepeatDirectiveReached` loop, exactly as at the phase base (pinned MTGJSON
+/// Oracle text; no `Unimplemented` count is asserted).
+#[test]
+fn neighbouring_repeat_this_process_cards_gain_no_directive() {
+    let cards: [(&str, &str, &[&str], &[&str]); 5] = [
+        (
+            "Crooked Scales",
+            "{4}, {T}: Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target creature you control unless you pay {3} and repeat this process.",
+            &["Artifact"],
+            &[],
+        ),
+        (
+            "Primal Surge",
+            "Exile the top card of your library. If it's a permanent card, you may put it onto the battlefield. If you do, repeat this process.",
+            &["Sorcery"],
+            &[],
+        ),
+        (
+            "Insatiable Frugivore",
+            "When this creature enters, create a Food token, then you may exile three cards from your graveyard. If you do, repeat this process.
+{3}{B}, Sacrifice X Foods: Creatures you control get +X/+0 and gain menace until end of turn.",
+            &["Creature"],
+            &["Rat", "Berserker"],
+        ),
+        (
+            "Sphinx's Tutelage",
+            "Whenever you draw a card, target opponent mills two cards. If two nonland cards that share a color were milled this way, repeat this process.
+{5}{U}: Draw a card, then discard a card.",
+            &["Enchantment"],
+            &[],
+        ),
+        (
+            "Demonic Covenant",
+            "Whenever one or more Demons you control attack a player, you draw a card and lose 1 life.
+At the beginning of your end step, create a 5/5 black Demon creature token with flying, then mill two cards. If two cards that share all their card types were milled this way, sacrifice this enchantment.",
+            &["Kindred", "Enchantment"],
+            &["Demon"],
+        ),
+    ];
+    for (name, text, types, subtypes) in cards {
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        let parsed = parse_oracle_text(text, name, &[], &types, &subtypes);
+        let bodies: Vec<AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .cloned()
+            .chain(
+                parsed
+                    .triggers
+                    .iter()
+                    .filter_map(|t| t.execute.as_deref().cloned()),
+            )
+            .collect();
+        assert!(!bodies.is_empty(), "{name}: reach guard: parsed bodies");
+        for def in &bodies {
+            assert!(
+                !collect_chain_effects(def)
+                    .iter()
+                    .any(|e| e.is_repeat_directive()),
+                "{name}: {def:?}"
+            );
+            assert_ne!(def.repeat_until, Some(repeat_directive_loop()), "{name}");
+        }
+    }
+}
+
+/// CR 701.17c + CR 608.2c: the milled-shared-quality gate is recognized by the
+/// general clause cascade, so The Tale of Tamiyo's draw is conditional, while
+/// Grindstone (whose repeat chunk takes it first) keeps its `WhileCondition` loop.
+#[test]
+fn milled_shared_quality_gate_is_recognized_by_the_general_cascade() {
+    let tamiyo = repeat_directive_chains(
+        TAMIYO_ORACLE,
+        "The Tale of Tamiyo",
+        &["Enchantment"],
+        &["Saga"],
+    );
+    let def = tamiyo.first().expect("a chapter body");
+    let draw = collect_chain_effects(def)
+        .into_iter()
+        .position(|e| matches!(e, Effect::Draw { .. }))
+        .expect("the draw");
+    let mut node = def;
+    for _ in 0..draw {
+        node = node.sub_ability.as_deref().unwrap();
+    }
+    assert!(
+        matches!(node.condition, Some(AbilityCondition::QuantityCheck { .. })),
+        "{node:?}"
+    );
+    let grindstone = parse_oracle_text(
+        "{3}, {T}: Target player mills two cards. If two cards that share a color were milled this way, repeat this process.",
+        "Grindstone",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    assert!(
+        matches!(
+            grindstone.abilities.first().map(|a| a.repeat_until.clone()),
+            Some(Some(RepeatContinuation::WhileCondition { .. }))
+        ),
+        "{grindstone:?}"
+    );
+}
+
+/// The new wire tags round-trip, and the new transient state slot serializes only
+/// while set (every serialized state is byte-identical while it is false).
+#[test]
+fn repeat_directive_wire_shapes_round_trip() {
+    let effect = Effect::RuntimeHandled {
+        handler: RuntimeHandler::RepeatProcess,
+    };
+    let json = serde_json::to_string(&effect).unwrap();
+    assert_eq!(serde_json::from_str::<Effect>(&json).unwrap(), effect);
+    let signal = AbilityCondition::EffectOutcome {
+        signal: EffectOutcomeSignal::RepeatDirectiveReached,
+    };
+    let json = serde_json::to_string(&signal).unwrap();
+    assert_eq!(
+        serde_json::from_str::<AbilityCondition>(&json).unwrap(),
+        signal
+    );
+
+    let mut state = crate::types::game_state::GameState::new_two_player(42);
+    let value = serde_json::to_value(&state).unwrap();
+    assert!(
+        value.get("repeat_process_requested").is_none(),
+        "a default state omits the slot"
+    );
+    let request = crate::types::game_state::RepeatProcessRequest {
+        source_id: crate::types::identifiers::ObjectId(7),
+    };
+    state.repeat_process_requested = Some(request);
+    let mut value = serde_json::to_value(&state).unwrap();
+    assert_eq!(
+        value["repeat_process_requested"],
+        serde_json::json!({ "source_id": 7 })
+    );
+    let round_tripped: crate::types::game_state::GameState =
+        serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(round_tripped.repeat_process_requested, Some(request));
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("repeat_process_requested");
+    let restored: crate::types::game_state::GameState = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        restored.repeat_process_requested, None,
+        "a payload without it reads as no request"
+    );
 }
 
 /// A multi-clause process is never stamped on the root: the runtime repeats only
@@ -88581,6 +91051,7 @@ mod carried_player_reference_tests {
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         }
     }
 
@@ -88741,6 +91212,7 @@ mod carried_player_reference_tests {
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         };
         let mut gain = gain_life_controller();
         inject_subject_target(
@@ -90611,6 +93083,7 @@ mod controller_anaphor_antecedent_writer_tests {
             multi_target,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         }
     }
 
@@ -92370,4 +94843,388 @@ fn an_unmodelled_player_relative_clause_is_an_unbound_subject() {
         "{:?}",
         each_of.effect
     );
+}
+
+#[test]
+fn search_reveal_continuation_keeps_the_searched_player_as_that_player() {
+    for text in [
+        "Search target opponent's library for a card and reveal it. That player loses 2 life.",
+        "Search target opponent's library for a card. That player loses 2 life.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let group = def
+            .declares_chosen_group
+            .expect("search declares its player");
+        let lose = chain_defs(&def)
+            .into_iter()
+            .find_map(|d| match &*d.effect {
+                Effect::LoseLife { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no LoseLife in {text}: {def:?}"));
+        assert_eq!(lose, Some(TargetFilter::DeclaredPlayer { group }), "{text}");
+    }
+}
+
+#[test]
+fn that_player_chooser_without_a_declared_player_is_not_bound_to_one() {
+    let def = parse_effect_chain(
+        "Choose two target creatures controlled by the same opponent. That player chooses one of those creatures. Trial of Agony deals 5 damage to that creature, and the other can't block this turn.",
+        AbilityKind::Spell,
+    );
+    assert!(!chain_has_unimplemented(&def), "{def:?}");
+    let chooser = chain_defs(&def)
+        .into_iter()
+        .find_map(|d| match &*d.effect {
+            Effect::ChooseFromZone { chooser, .. } => Some(*chooser),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no ChooseFromZone: {def:?}"));
+    assert!(
+        !matches!(chooser, ZoneChoiceChooser::DeclaredPlayer { .. }),
+        "{chooser:?}"
+    );
+}
+
+#[test]
+fn only_that_player_binds_the_declared_player_as_zone_chooser() {
+    let chooser_of = |text: &str| {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let chooser = chain_defs(&def).into_iter().find_map(|d| match &*d.effect {
+            Effect::ChooseFromZone { chooser, .. } => Some(*chooser),
+            _ => None,
+        });
+        (chooser, chain_has_unimplemented(&def), def)
+    };
+    let (chooser, unimplemented, def) = chooser_of(
+        "Search target opponent's library for four cards with different names and reveal them. That player chooses two of those cards. Put the chosen cards into the player's graveyard and the rest into your hand. Then that player shuffles their library.",
+    );
+    assert!(
+        matches!(chooser, Some(ZoneChoiceChooser::DeclaredPlayer { .. })) && !unimplemented,
+        "{def:?}"
+    );
+    for text in [
+        "Search target opponent's library for four cards with different names and reveal them. Its controller chooses two of those cards. Put the chosen cards into the player's graveyard and the rest into your hand.",
+        "Search target opponent's library for four cards with different names and reveal them. Tap target creature. Its controller chooses two of those cards. Put the chosen cards into the player's graveyard and the rest into your hand.",
+    ] {
+        let (chooser, unimplemented, def) = chooser_of(text);
+        assert!(
+            !matches!(chooser, Some(ZoneChoiceChooser::DeclaredPlayer { .. })),
+            "{text}: {def:?}"
+        );
+        assert!(unimplemented, "{text}: {def:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 701.18b + CR 608.2g: a free, no-duration single-card Play resolves now
+// ---------------------------------------------------------------------------
+
+fn first_cast_from_zone(def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    if matches!(&*def.effect, Effect::CastFromZone { .. }) {
+        return Some(def);
+    }
+    def.sub_ability.as_deref().and_then(first_cast_from_zone)
+}
+
+/// P1 — Hideaway's "You may play the exiled card without paying its mana cost"
+/// (verbatim, Shelldock Isle) selects the during-resolution driver: playing a
+/// card is casting it or playing it as a land (CR 701.18b), as the ability
+/// resolves (CR 608.2g + CR 305.2a).
+#[test]
+fn hideaway_free_play_of_the_exiled_card_resolves_now() {
+    let parsed = parse_oracle_text(
+        "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)\n\
+         This land enters tapped.\n\
+         {T}: Add {U}.\n\
+         {U}, {T}: You may play the exiled card without paying its mana cost if a library has twenty or fewer cards in it.",
+        "Shelldock Isle",
+        &[],
+        &["Land".to_string()],
+        &[],
+    );
+    let cast = parsed
+        .abilities
+        .iter()
+        .find_map(first_cast_from_zone)
+        .expect("Shelldock Isle's play ability lowers to CastFromZone");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                mode: Play,
+                target: TargetFilter::ExiledBySource,
+                without_paying_mana_cost: true,
+                duration: None,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+}
+
+/// P2 — Djinn of Wishes (verbatim): "You may play that card without paying its
+/// mana cost. If you don't, exile it." The play resolves now; the decline
+/// branch is the `Not(OptionalEffectPerformed)`-gated exile (CR 608.2c).
+#[test]
+fn djinn_of_wishes_free_play_resolves_now_with_a_decline_exile() {
+    let parsed = parse_oracle_text(
+        "Flying\nThis creature enters with three wish counters on it.\n\
+         {2}{U}{U}, Remove a wish counter from this creature: Reveal the top card of your library. You may play that card without paying its mana cost. If you don't, exile it.",
+        "Djinn of Wishes",
+        &["Flying".to_string()],
+        &["Creature".to_string()],
+        &["Djinn".to_string()],
+    );
+    let activated = parsed
+        .abilities
+        .iter()
+        .find(|def| first_cast_from_zone(def).is_some())
+        .expect("Djinn's activated ability");
+    assert!(
+        !chain_has_unimplemented(activated),
+        "reach-guard: the whole chain parses"
+    );
+    let cast = first_cast_from_zone(activated).unwrap();
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                mode: Play,
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+    assert!(cast.optional, "\"You may\" is optional");
+    let decline = cast
+        .sub_ability
+        .as_deref()
+        .expect("the If you don't branch");
+    assert!(
+        matches!(
+            &*decline.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "got {:?}",
+        decline.effect
+    );
+    assert!(decline
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_not_optional_effect_performed));
+}
+
+/// P3 — the forms that do NOT resolve a Play now, each paired with a positive
+/// `CastFromZone { mode: Play }` reach.
+#[test]
+fn durational_and_batch_play_forms_keep_their_drivers() {
+    // (a) A leading duration keeps the lingering grant (CR 611.2a).
+    let def = parse_effect_chain(
+        "Exile the top card. Until end of turn, you may play that card without paying its mana cost.",
+        AbilityKind::Activated,
+    );
+    let cast = first_cast_from_zone(&def).expect("leading-duration play");
+    assert!(
+        matches!(
+            &*cast.effect,
+            Effect::CastFromZone {
+                mode: Play,
+                driver: LingeringPermission,
+                ..
+            }
+        ),
+        "got {:?}",
+        cast.effect
+    );
+
+    // (b) A trailing "this turn" keeps the lingering grant too.
+    let effect = parse_effect("you may play that card without paying its mana cost this turn");
+    assert!(
+        matches!(
+            &effect,
+            Effect::CastFromZone {
+                mode: Play,
+                duration: Some(Duration::UntilEndOfTurn),
+                driver: LingeringPermission,
+                ..
+            }
+        ),
+        "got {effect:?}"
+    );
+
+    // (c) The free plural "them" anaphor selects the during-resolution driver;
+    // the runtime single-target gate (`target_ids.len() == 1`) keeps a
+    // multi-card binding on the lingering grant.
+    let effect = parse_effect("you may play them without paying their mana costs");
+    assert!(
+        matches!(
+            &effect,
+            Effect::CastFromZone {
+                mode: Play,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {effect:?}"
+    );
+
+    // (d) "one of those two cards" Play has no resolution-scoped batch window
+    // that plays lands: it stays an honest gap.
+    let effect = parse_effect("you may play one of those two cards without paying its mana cost");
+    assert!(
+        matches!(&effect, Effect::Unimplemented { name, .. } if name == "bounded_batch_cast"),
+        "got {effect:?}"
+    );
+
+    // (e) The Cast sibling is unchanged.
+    let effect = parse_effect("you may cast that card without paying its mana cost");
+    assert!(
+        matches!(
+            &effect,
+            Effect::CastFromZone {
+                mode: Cast,
+                driver: DuringResolution,
+                ..
+            }
+        ),
+        "got {effect:?}"
+    );
+}
+
+/// CR 701.24c + CR 400.6: "Shuffle ~ and your graveyard into their owner's
+/// library" moves the source and the WHOLE graveyard (Elixir of Immortality),
+/// not a single chosen graveyard card.
+#[test]
+fn compound_shuffle_self_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
+}
+
+/// CR 701.24c + CR 400.6: "Shuffle this artifact and your graveyard into their owner's library"
+/// recognizes "this artifact" via `nom_target::parse_self_reference` without requiring `~` normalization.
+#[test]
+fn compound_shuffle_this_artifact_and_graveyard_moves_whole_zone() {
+    let def = parse_effect_chain(
+        "Shuffle this artifact and your graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::ScopedPlayer,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+}
+
+/// CR 701.24c + CR 400.3: "Shuffle ~ and its owner's graveyard into their owner's
+/// library" preserves the parsed possessor as `TargetFilter::Owner` in `ChangeZoneAll`.
+#[test]
+fn compound_shuffle_self_and_its_owners_graveyard_moves_owners_graveyard() {
+    let def = parse_effect_chain(
+        "Shuffle ~ and its owner's graveyard into their owner's library",
+        AbilityKind::Spell,
+    );
+    assert!(matches!(
+        &*def.effect,
+        Effect::PutAtLibraryPosition {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            position: LibraryPosition::Bottom,
+            arranger: None,
+        }
+    ));
+    let zone_move = def.sub_ability.as_ref().expect("graveyard mass move");
+    assert!(matches!(
+        &*zone_move.effect,
+        Effect::ChangeZoneAll {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Library,
+            target: TargetFilter::Owner,
+            ..
+        }
+    ));
+    let shuffle = zone_move.sub_ability.as_ref().expect("terminal shuffle");
+    assert!(matches!(
+        &*shuffle.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer
+        }
+    ));
+    assert!(matches!(
+        shuffle.player_scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
+    ));
 }

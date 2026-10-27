@@ -568,6 +568,22 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       .toThrow(/Invalid message type/);
   });
 
+  it("accepts the durable terminal receipt tag and rejects a near miss", () => {
+    const result = {
+      key: "session-key",
+      lease: { sessionKey: "session-key", hostIncarnation: "host-1" },
+      recipient: 1,
+      revision: 7,
+      terminalId: "terminal-1:recipient:1",
+      finalStateCommitment: `sha256:${"0".repeat(64)}`,
+      display: { winner: 0, reason: "Game complete" },
+    };
+    expect(validateMessage({ type: "terminal_result_receipt", result, authority: result.lease }))
+      .toMatchObject({ type: "terminal_result_receipt", result });
+    expect(() => validateMessage({ type: "terminal_result_receipts" }))
+      .toThrow(/Invalid message type/);
+  });
+
   /**
    * Row 7, P2P half, at the real wire format: a decoder that does not know the
    * tag throws rather than passing it through. The KNOWN tag on the identical

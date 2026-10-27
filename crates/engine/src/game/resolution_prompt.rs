@@ -510,6 +510,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::EachSourceDealsDamage { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
@@ -642,6 +643,7 @@ pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
         replacement_applied: _, // replacement provenance set, no prompt
         sub_link: _, // SubAbilityLink kind tag
         target_reads: _, // TargetReadOrigin tag (announce-time), no prompt
+        entry_onset: _, // ContinuousEffectOnset tag, no prompt
         sibling_condition: _, // SiblingCondition replication marker, no resolution-time choice
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
@@ -1484,6 +1486,7 @@ mod tests {
                 entry_ref: victim,
                 enter_tapped: Default::default(),
                 enter_with_counters: Vec::new(),
+                enter_with_choices: None,
                 applied: Default::default(),
             }
         ));

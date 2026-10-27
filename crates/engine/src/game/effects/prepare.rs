@@ -505,7 +505,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.face_down_cause = None;
     copy.phase_status = PhaseStatus::PhasedIn;
     copy.counters.clear();
-    copy.stickers.clear();
+    crate::game::stickers::remove_stickers_from_copy(copy);
 
     // CR 722.3c: only the prepare spell's characteristics — none of the
     // permanent's battlefield state (marked damage, attachment and pairing

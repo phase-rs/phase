@@ -133,7 +133,14 @@ fn translate_trigger_mode(mode: &str) -> Result<TriggerMode, ForgeTranslateError
         // Zone changes (CR 603.6)
         "ChangesZone" => Ok(TriggerMode::ChangesZone),
         "ChangesZoneAll" => Ok(TriggerMode::ChangesZoneAll),
-        "ChangesController" => Ok(TriggerMode::ChangesController),
+        // The engine mode needs a `ControlChangeSide` (CR 603.10 gain vs CR 603.10d
+        // lose) that Forge's mode string does not supply — its direction lives in
+        // controller params this importer does not read. Fail closed rather than
+        // guess `Loses`, which would silently give a gain-side line lose-side
+        // semantics.
+        "ChangesController" => Err(ForgeTranslateError::UnsupportedTriggerMode(
+            mode.to_string(),
+        )),
         "LeavesBattlefield" => Ok(TriggerMode::LeavesBattlefield),
 
         // Damage (CR 120)

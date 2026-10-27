@@ -620,12 +620,14 @@ fn refused_search_pair_expires_at_the_next_source_chunk() {
         assert!(gaps[0].id < alternative.id);
         match intervening {
             "Repeat this process." => {
+                // The bare directive is the structural `Bare` outcome; as a
+                // standalone sentence it still emits no clause here.
                 assert!(matches!(
                     try_parse_repeat_process_directive(
                         "Repeat this process.",
                         &mut ParseContext::default()
                     ),
-                    Some(RepeatProcessOutcome::ConsumeOnly)
+                    Some(RepeatProcessOutcome::Bare)
                 ));
                 assert_eq!(
                     alternative.id.0,
@@ -2378,7 +2380,8 @@ fn crafty_cutpurse_oracle_text_parses_to_token_controller_redirect() {
     else {
         panic!("expected AddTargetReplacement, got {e:?}");
     };
-    assert_eq!(target, TargetFilter::SelfRef);
+    // CR 113.7a: the redirect is installed floating, not on the source.
+    assert_eq!(target, TargetFilter::None);
     assert_eq!(replacement.event, ReplacementEvent::CreateToken);
     assert_eq!(replacement.token_owner_scope, Some(ControllerRef::Opponent));
     assert_eq!(replacement.token_owner_redirect, Some(ControllerRef::You));

@@ -22,22 +22,22 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
     ActivationRestriction, AdditionalCost, AggregateFunction, AttachmentReferent, AttackSubject,
     AttackedYouScope, AttackerBlockStatus, CardTypeSetSource, ChoiceType, CoinFlipResult,
-    CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator, ContinuousModification,
-    ControllerRef, CountScope, CounterKindChooser, CounterKindDomain, CounterSourceRider,
-    DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration, EachDamageRecipient, Effect,
-    EffectOutcomeSignal, EffectScope, FilterProp, ForEachCategoryAction, GameRestriction,
-    LetterQuery, LibraryPosition, ManaProduction, MassLibraryShuffleMode, NameStickerSet,
-    NumberQuality, ObjectProperty, ObjectScope, ObjectSelectionCardinality,
-    ObjectSelectionEligibility, Parity, ParsedCondition, PerpetualModification, PlayerFilter,
-    PlayerRelation, PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-    ReplacementCondition, ReplacementDefinition, ReplacementMode, SeatDirection, SharedQuality,
-    SharedQualityRelation, SpeedDelta, SpellCastingOption, SpellCastingOptionKind,
-    SpellStackToGraveyardReplacement, StackAbilityKind, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    CoinFlipRun, CombatHistoryScope, CommanderOwnership, Comparator, ContinuousEffectOnset,
+    ContinuousModification, ControllerRef, CountScope, CounterKindChooser, CounterKindDomain,
+    CounterSourceRider, DelayedTriggerCondition, DieRollModifier, DoublePTMode, Duration,
+    EachDamageRecipient, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    ForEachCategoryAction, GameRestriction, LetterQuery, LibraryPosition, ManaProduction,
+    MassLibraryShuffleMode, NameStickerSet, NumberQuality, ObjectProperty, ObjectScope,
+    ObjectSelectionCardinality, ObjectSelectionEligibility, Parity, ParsedCondition,
+    PerpetualModification, PlayerFilter, PlayerRelation, PlayerScope, PtStat, PtValue,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, SeatDirection, SharedQuality, SharedQualityRelation, SpeedDelta,
+    SpellCastingOption, SpellCastingOptionKind, SpellStackToGraveyardReplacement, StackAbilityKind,
+    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
+    TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::ActivatedAbilityKind;
 use crate::types::keywords::{Keyword, ProtectionTarget};
@@ -45,7 +45,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
-use crate::types::triggers::TriggerMode;
+use crate::types::triggers::{ControlChangeSide, TriggerMode};
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -777,6 +777,9 @@ fn fmt_target(filter: &TargetFilter) -> String {
             "controller of the object targeted by the triggering event".into()
         }
         TargetFilter::DefendingPlayer => "defending player".into(),
+        TargetFilter::AttackedPlayerOrPlaneswalker => {
+            "the player or planeswalker it's attacking".into()
+        }
         TargetFilter::ParentTarget => "parent target".into(),
         TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::DeclaredPlayer { .. } => "declared player".to_string(),
@@ -989,6 +992,10 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::DeclaredTarget { slot },
             } => parts.push(format!("attached to target #{slot}")),
+            // CR 701.3a: the filter-matched host axis — "attached to <host>".
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Host { filter },
+            } => parts.push(format!("attached to {}", fmt_target(filter))),
             FilterProp::Unpaired => parts.push("unpaired".into()),
             FilterProp::HasAttachment {
                 kind,
@@ -1871,15 +1878,38 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_characteristic_population_bounded(source)
             )
         }
-        QuantityRef::DistinctSubtypes { source, exclude } => {
-            let suffix = match exclude {
-                crate::types::ability::SubtypeExclusion::CreatureTypes => {
-                    " other than creature types"
-                }
-                crate::types::ability::SubtypeExclusion::None => "",
-            };
+        QuantityRef::DistinctSubtypes {
+            source,
+            exclude,
+            restrict,
+        } => {
             let scope_desc = fmt_characteristic_population_bounded(source);
-            format!("subtypes{suffix} among {scope_desc}")
+            // CR 205.3: the category axis renders its own noun — derived from
+            // the `SubtypeSet`, not a second table. Only Creature/Planeswalker
+            // are producible today; the rest still render sanely.
+            match restrict {
+                Some(set) => {
+                    let noun = match set {
+                        SubtypeSet::Creature => "creature",
+                        SubtypeSet::Land => "land",
+                        SubtypeSet::Artifact => "artifact",
+                        SubtypeSet::Enchantment => "enchantment",
+                        SubtypeSet::Planeswalker => "planeswalker",
+                        SubtypeSet::Spell => "spell",
+                        SubtypeSet::Battle => "battle",
+                    };
+                    format!("{noun} types among {scope_desc}")
+                }
+                None => {
+                    let suffix = match exclude {
+                        crate::types::ability::SubtypeExclusion::CreatureTypes => {
+                            " other than creature types"
+                        }
+                        crate::types::ability::SubtypeExclusion::None => "",
+                    };
+                    format!("subtypes{suffix} among {scope_desc}")
+                }
+            }
         }
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ExiledCardPower { index } => format!("power of exiled card {index}"),
@@ -4150,10 +4180,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             count,
             position,
+            arranger,
         } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("count".into(), format!("{count:?}")));
             d.push(("position".into(), format!("{position:?}")));
+            if let Some(arranger) = arranger {
+                d.push(("arranger".into(), fmt_target(arranger)));
+            }
         }
         Effect::PutOnTopOrBottom { target, chooser } => {
             d.push(("target".into(), fmt_target(target)));
@@ -4277,6 +4311,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                     fmt_target(restriction),
                 ));
             }
+        }
+        Effect::ModifyAnnouncedX { modification } => {
+            d.push(("modifies X".into(), format!("{modification:?}")));
         }
         Effect::Double {
             target_kind,
@@ -4460,25 +4497,39 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     // for the shapes THIS PR's lift produces — a fieldless `Effect::Investigate` whose
     // `repeat_for` is a member-count `QuantityRef` (`PlayerCount`/`ObjectCount`), i.e.
     // exactly the eligibility set of `for_each_repeatable_repeat_for`
-    // (parser/oracle_effect/mod.rs). Projecting the *whole* repeat_for surface
+    // (parser/oracle_effect/lower.rs). Projecting the *whole* repeat_for surface
     // (CopySpell/Token/Proliferate/… and pre-existing `Fixed`/`Variable`/tracked-set
     // Investigate forms) would migrate ~250 unrelated, parse-identical cards' coverage
     // signatures in one shot — a deliberate global coverage-schema migration, deferred
     // out of this focused feature. `None`, or any out-of-scope shape, pushes nothing,
     // so those cards keep a byte-identical signature.
-    // COUPLING: if the lift's eligible quantity set ever widens (e.g. the Gap B
-    // leading-adjective fix), this scope MUST widen in lockstep, or the new lift class
-    // becomes false-green in the parse-diff.
+    // The second projected shape is the "that many times" suffix-lift class
+    // (`strip_repeat_count_suffix`, parser/oracle_effect/lower.rs): an Investigate or
+    // Incubate whose `repeat_for` is the anaphoric `EventContextAmount` ("investigate
+    // that many times", "incubate 2 that many times"). No pre-existing Investigate /
+    // Incubate def carries that repeat count, so admitting it moves only the cards the
+    // suffix lift newly reaches; other effects' `EventContextAmount` repeats (rider
+    // forms) stay unprojected for the same global-migration reason.
+    // COUPLING: if either lift's eligible quantity or effect set ever widens (e.g. the
+    // Gap B leading-adjective fix for `for_each_repeatable_repeat_for`, or a new
+    // effect reaching `strip_repeat_count_suffix` with "that many times"), this scope
+    // MUST widen in lockstep, or the new lift class becomes false-green in the
+    // parse-diff.
     if let Some(rf) = &def.repeat_for {
-        let is_lift_shape = matches!(&*def.effect, Effect::Investigate)
-            && matches!(
-                rf,
-                QuantityExpr::Ref { qty }
-                    if matches!(
-                        qty,
-                        QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. }
-                    )
-            );
+        let is_lift_shape = matches!(
+            (&*def.effect, rf),
+            (
+                Effect::Investigate,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::PlayerCount { .. } | QuantityRef::ObjectCount { .. },
+                },
+            ) | (
+                Effect::Investigate | Effect::Incubate { .. },
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            )
+        );
         if is_lift_shape {
             d.push(("repeat_for".into(), fmt_quantity(rf)));
         }
@@ -4551,6 +4602,13 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     // "from" would hide this on precisely the abilities it exists to watch.
     if let Some(zone) = &def.activation_zone {
         d.push(("activates from".into(), fmt_zone(zone)));
+    }
+    // CR 611.2e: the parse-time onset is semantic (it decides when enter observers read an
+    // entrant), so a stamped `WithEntry` must be visible in the parse-diff signature.
+    // `WhenFollowed` is the default and emits nothing, so existing signatures stay byte-identical.
+    match def.entry_onset {
+        ContinuousEffectOnset::WithEntry => d.push(("entry onset".into(), "with entry".into())),
+        ContinuousEffectOnset::WhenFollowed => {}
     }
     d
 }
@@ -4946,6 +5004,10 @@ fn fmt_trigger_condition(
         TC::CastDuringPhase { phases } => {
             let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
             format!("cast during {}", parts.join(" or "))
+        }
+        TC::CurrentPhaseIs { phases } => {
+            let parts: Vec<&str> = phases.iter().map(fmt_phase).collect();
+            format!("during {}", parts.join(" or "))
         }
         TC::CastTimingPermission { .. } => "cast with timing permission".into(),
         TC::ManaColorSpent { color, minimum } => {
@@ -5561,6 +5623,11 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
     }
     if let Some(cref) = &repl.enters_under {
         d.push(("enters under".into(), format!("{cref:?}")));
+    }
+    // CR 614.12a: project the entry-payment cap (Nameless Race) so a fix that
+    // only changes it cannot produce a byte-identical signature.
+    if let Some(max) = &repl.entry_payment_max {
+        d.push(("entry payment max".into(), format!("{max:?}")));
     }
     if let Some(expiry) = &repl.expiry {
         d.push(("expiry".into(), format!("{expiry:?}")));
@@ -6570,10 +6637,7 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     // of functioning state — we're computing coverage, not game behavior.
     for entry in obj.trigger_definitions.iter_all() {
         let trig = entry.definition();
-        if matches!(&trig.mode, TriggerMode::Unknown(_))
-            || (!trigger_registry.contains_key(&trig.mode)
-                && !matches!(&trig.mode, TriggerMode::StateCondition))
-        {
+        if !trigger_mode_is_supported(&trig.mode, trigger_registry) {
             missing.push(format!("Trigger: {}", trig.mode));
         }
     }
@@ -7820,7 +7884,29 @@ fn trigger_mode_is_supported(
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
     !matches!(mode, TriggerMode::Unknown(_))
+        && !trigger_mode_has_unpublished_event_source(mode)
         && (trigger_registry.contains_key(mode) || matches!(mode, TriggerMode::StateCondition))
+}
+
+/// CR 603.2 + CR 613.1b: a trigger mode whose matcher is registered but whose
+/// triggering event is not published for every way the game can produce it, so
+/// the printed ability would silently miss real occurrences. `Gains` of a
+/// `ChangesController` trigger fires on `GameEvent::ControllerChanged`, which
+/// spell/effect control changes publish but control the layer pass assigns or
+/// retires does not (CR 613.1b: Confiscate's "You control enchanted permanent",
+/// Control Magic, a lapsed `ForAsLongAs` duration): `layers.rs` only assigns
+/// `obj.controller` and diffs the settled controllers. Tracked upstream as
+/// phase-rs/phase#9903; lift this when static/layer control changes publish
+/// `ControllerChanged`. The `Loses` side is not charged here. The runtime
+/// matcher stays registered so the effect-driven control changes still fire it.
+fn trigger_mode_has_unpublished_event_source(mode: &TriggerMode) -> bool {
+    match mode {
+        TriggerMode::ChangesController { side } => match side {
+            ControlChangeSide::Gains => true,
+            ControlChangeSide::Loses => false,
+        },
+        _ => false,
+    }
 }
 
 /// CR 603.7 + CR 603.8: a delayed trigger fires only through an event matcher
@@ -7832,7 +7918,9 @@ fn delayed_trigger_mode_is_supported(
     mode: &TriggerMode,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
-    !matches!(mode, TriggerMode::Unknown(_)) && trigger_registry.contains_key(mode)
+    !matches!(mode, TriggerMode::Unknown(_))
+        && !trigger_mode_has_unpublished_event_source(mode)
+        && trigger_registry.contains_key(mode)
 }
 
 /// CR 603.7: the trigger definitions a delayed trigger this effect creates is
@@ -9152,6 +9240,7 @@ fn is_card_supported(
     for trig in &face.triggers {
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || !trigger_registry.contains_key(&trig.mode)
+            || trigger_mode_has_unpublished_event_source(&trig.mode)
         {
             return false;
         }
@@ -10333,6 +10422,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::DefendingPlayerControlsNone { .. }
         | TriggerCondition::TributeNotPaid
         | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
         | TriggerCondition::CastTimingPermission { .. }
         | TriggerCondition::ManaColorSpent { .. }
         | TriggerCondition::ManaSpentCondition { .. }
@@ -10462,6 +10552,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
             }
             EffectOutcomeSignal::Guessed { .. } => ("EffectOutcomeGuessed", Handled),
             EffectOutcomeSignal::RevealUntilMatched => ("EffectOutcomeRevealUntilMatched", Handled),
+            EffectOutcomeSignal::RepeatDirectiveReached => {
+                ("EffectOutcomeRepeatDirectiveReached", Handled)
+            }
         },
         AbilityCondition::EventOutcomeWon => ("EventOutcomeWon", Handled),
         AbilityCondition::CoinFlipOutcome { .. } => ("CoinFlipOutcome", Handled),
@@ -15426,6 +15519,51 @@ mod tests {
         );
     }
 
+    /// CR 611.2e: a stamped `WithEntry` onset reaches the parse-diff signature under its own
+    /// key; the `WhenFollowed` default emits nothing, so existing signatures stay byte-identical.
+    /// Reverting the `ability_details` push fails the first assertion.
+    #[test]
+    fn entry_onset_reaches_parse_details_only_when_with_entry() {
+        use crate::types::ability::{AbilityKind, ContinuousEffectOnset, Duration};
+
+        let details = |onset: ContinuousEffectOnset| -> Vec<(String, String)> {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: None,
+                    end_cost: None,
+                },
+            );
+            def.duration = Some(Duration::UntilEndOfTurn);
+            def.entry_onset = onset;
+            build_test_ability_item(&def).details
+        };
+
+        let with_entry = details(ContinuousEffectOnset::WithEntry);
+        assert!(
+            with_entry
+                .iter()
+                .any(|(k, v)| k == "entry onset" && v == "with entry"),
+            "a WithEntry onset must render in the parse details: {with_entry:?}"
+        );
+        assert!(
+            with_entry.iter().any(|(k, _)| k == "duration"),
+            "the onset key must not collide with the duration key under the dedup: {with_entry:?}"
+        );
+
+        let when_followed = details(ContinuousEffectOnset::WhenFollowed);
+        assert!(
+            !when_followed.iter().any(|(k, _)| k == "entry onset"),
+            "the WhenFollowed default must emit no onset key: {when_followed:?}"
+        );
+        assert!(
+            when_followed.iter().any(|(k, _)| k == "duration"),
+            "reach guard: the default def still renders its duration: {when_followed:?}"
+        );
+    }
+
     /// #7406 — a trigger's `attack_target_filter` must reach the parse-diff
     /// signature.
     ///
@@ -15996,6 +16134,45 @@ mod tests {
         assert!(
             !projects(Effect::Populate, Some(object_count())),
             "a non-Investigate repeat_for must not project (scope is the Investigate lift class)",
+        );
+
+        // Positive — the "that many times" suffix lift (`strip_repeat_count_suffix`):
+        // Investigate (Piper Wright / Inquisitor Eisenhorn / Lonis) and Incubate
+        // (Phyrexian Incubator) with an `EventContextAmount` repeat surface.
+        // Revert-probe: dropping the `EventContextAmount` arm flips both.
+        let that_many = || QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let incubate_two = || Effect::Incubate {
+            count: QuantityExpr::Fixed { value: 2 },
+        };
+        assert!(
+            projects(Effect::Investigate, Some(that_many())),
+            "Investigate + EventContextAmount suffix lift must appear in the signature",
+        );
+        assert!(
+            projects(incubate_two(), Some(that_many())),
+            "Incubate + EventContextAmount suffix lift must appear in the signature",
+        );
+        // Negative — a pre-existing `Fixed` Incubate repeat ("Incubate 2 five
+        // times") keeps a byte-identical signature.
+        assert!(
+            !projects(incubate_two(), Some(QuantityExpr::Fixed { value: 2 })),
+            "a Fixed Incubate repeat_for must not project",
+        );
+        // Negative — an `EventContextAmount` repeat on any other effect (the Gatta
+        // and Luzzu / Inkshield rider shape) stays unprojected. Revert-probe:
+        // widening the arm to every effect flips this.
+        assert!(
+            !projects(
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+                Some(that_many()),
+            ),
+            "an EventContextAmount repeat_for on a non-lift effect must not project",
         );
     }
 
@@ -17294,6 +17471,30 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         assert!(!obj.has_unimplemented_mechanics());
         obj.keywords.push(Keyword::Unknown("Bogus".to_string()));
         assert!(obj.has_unimplemented_mechanics());
+    }
+
+    /// CR 603.10a + CR 704.5n: Rhuk's deferred dies leg must surface as an
+    /// engine-visible gap, not as a silently supported ordinary Attach — the
+    /// coverage authority reads the trigger's effect, never the PR prose.
+    #[test]
+    fn rhuk_dies_leg_reports_the_departure_attachment_gap() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Trample, haste\nWhenever an equipped creature you control other than Rhuk attacks or dies, you may attach all Equipment attached to that creature to Rhuk.",
+            "Rhuk, Hexgold Nabber",
+            &["Trample".to_string(), "Haste".to_string()],
+            &["Legendary".to_string()],
+            &["Creature".to_string()],
+        );
+        let mut face = make_face();
+        face.name = "Rhuk, Hexgold Nabber".to_string();
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        let gaps = super::card_face_gaps(&face);
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains("departure_attachment_relation")),
+            "the deferred dies leg must be an engine-visible gap: {gaps:?}"
+        );
     }
 
     fn make_face() -> CardFace {
@@ -24713,5 +24914,185 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             items.is_empty(),
             "modeled tree must emit no unsupported item"
         );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_coverage_tests {
+    use super::*;
+
+    #[test]
+    fn attacked_referent_is_named_in_coverage_text() {
+        assert_eq!(
+            fmt_target(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            "the player or planeswalker it's attacking"
+        );
+    }
+}
+
+#[cfg(test)]
+mod unpublished_event_source_tests {
+    use super::*;
+
+    /// CR 603.2 + CR 613.1b: the gain side of `ChangesController` has a
+    /// registered matcher but no emitter for layer-2 control changes (#9903), so
+    /// the support authority must report it unsupported while the registered
+    /// `Loses` side and unrelated modes stay supported — for both the printed
+    /// and the delayed variant.
+    #[test]
+    fn gain_side_control_trigger_is_unsupported_until_layer_changes_publish_events() {
+        let registry = trigger_registry();
+        let gains = TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains,
+        };
+        let loses = TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses,
+        };
+
+        // Reach guard: the registry carries every key, so the `false` below is
+        // owed to the unpublished-event-source predicate, not a missing entry.
+        assert!(
+            registry.contains_key(&gains),
+            "Gains matcher stays registered"
+        );
+        assert!(registry.contains_key(&loses));
+        assert!(registry.contains_key(&TriggerMode::ChangesZone));
+        assert!(trigger_mode_has_unpublished_event_source(&gains));
+        assert!(!trigger_mode_has_unpublished_event_source(&loses));
+
+        assert!(!trigger_mode_is_supported(&gains, registry));
+        assert!(!delayed_trigger_mode_is_supported(&gains, registry));
+
+        for supported in [&loses, &TriggerMode::ChangesZone] {
+            assert!(
+                trigger_mode_is_supported(supported, registry),
+                "{supported:?}"
+            );
+            assert!(
+                delayed_trigger_mode_is_supported(supported, registry),
+                "{supported:?}"
+            );
+        }
+    }
+
+    /// Parse a card through the production MTGJSON-to-face path
+    /// (`build_oracle_face`), the same construction the parser tests use.
+    fn parsed_face(name: &str, type_line: &str, types: &[&str], oracle: &str) -> CardFace {
+        use crate::database::mtgjson::{AtomicCard, AtomicIdentifiers};
+        let card = AtomicCard {
+            name: name.to_string(),
+            mana_cost: Some("{2}{U}".to_string()),
+            colors: vec!["U".to_string()],
+            color_identity: vec!["U".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(oracle.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some(type_line.to_string()),
+            types: types.iter().map(|t| (*t).to_string()).collect(),
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            keywords: None,
+            side: None,
+            face_name: None,
+            mana_value: 3.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: AtomicIdentifiers {
+                scryfall_oracle_id: Some(format!("{}-oracle", name.to_lowercase())),
+                scryfall_id: Some(format!("{}-face", name.to_lowercase())),
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        };
+        crate::database::synthesis::build_oracle_face(&card, None)
+    }
+
+    fn has_control_trigger(face: &CardFace, side: ControlChangeSide) -> bool {
+        face.triggers
+            .iter()
+            .any(|trig| trig.mode == TriggerMode::ChangesController { side })
+    }
+
+    /// CR 603.2 + CR 613.1b: `is_card_supported` (the gate for
+    /// `audit_resolver_features` and `audit_semantic`) decides trigger support
+    /// inline rather than through `trigger_mode_is_supported`, so it needs the
+    /// unpublished-event-source check itself. Real parsed faces: Risky Move
+    /// (gain-side control trigger) is excluded from every support authority
+    /// and from both audits, while Duplicity (lose-side control trigger,
+    /// otherwise supported) stays in.
+    #[test]
+    fn gain_side_control_trigger_face_is_excluded_from_every_support_authority() {
+        let risky = parsed_face(
+            "Risky Move",
+            "Enchantment",
+            &["Enchantment"],
+            "At the beginning of each player's upkeep, that player gains control of this enchantment.\nWhen you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        );
+        let control = parsed_face(
+            "Duplicity",
+            "Enchantment",
+            &["Enchantment"],
+            "When this enchantment enters, exile the top five cards of your library face down.\nAt the beginning of your upkeep, you may exile all cards from your hand face down. If you do, put all other cards you own exiled with this enchantment into your hand.\nAt the beginning of your end step, discard a card.\nWhen you lose control of this enchantment, put all cards exiled with this enchantment into their owner's graveyard.",
+        );
+
+        // Reach guards: each face parsed the control-change trigger it is the
+        // fixture for, and the control face is otherwise fully supported, so the
+        // verdicts below turn on the unpublished-event-source predicate alone.
+        assert!(
+            has_control_trigger(&risky, ControlChangeSide::Gains),
+            "Risky Move must parse a Gains ChangesController trigger: {:#?}",
+            risky.triggers
+        );
+        assert!(
+            has_control_trigger(&control, ControlChangeSide::Loses),
+            "control face must parse a Loses ChangesController trigger: {:#?}",
+            control.triggers
+        );
+        assert!(
+            !has_control_trigger(&control, ControlChangeSide::Gains),
+            "control face must not carry a Gains trigger"
+        );
+        assert_eq!(
+            card_face_gaps(&control),
+            Vec::<String>::new(),
+            "control face must be fully supported"
+        );
+
+        let trigger_registry = build_trigger_registry();
+        let static_registry = build_static_registry();
+        assert!(
+            !is_card_supported(&risky, &trigger_registry, &static_registry),
+            "a face with a gain-side control trigger must not count as supported"
+        );
+        assert!(is_card_supported(
+            &control,
+            &trigger_registry,
+            &static_registry
+        ));
+        assert_eq!(
+            card_face_gaps(&risky),
+            vec!["Trigger:ChangesController { side: Gains }".to_string()]
+        );
+
+        // The public audits consume `is_card_supported`: of the two faces only
+        // the control one is audited.
+        let mut export = serde_json::Map::new();
+        for face in [&risky, &control] {
+            export.insert(
+                face.name.to_lowercase(),
+                serde_json::to_value(face).expect("test face should serialize"),
+            );
+        }
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+            .expect("test export should deserialize");
+        assert_eq!(db.card_count(), 2, "both faces reach the audits");
+        assert_eq!(audit_resolver_features(&db).total_supported_audited, 1);
+        assert_eq!(audit_semantic(&db).total_supported_audited, 1);
     }
 }

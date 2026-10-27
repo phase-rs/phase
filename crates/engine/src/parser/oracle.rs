@@ -1702,6 +1702,7 @@ fn apply_self_replacement_override(
         let DocumentRelationIr::SelfReplacementOverride {
             base,
             override_item,
+            selector,
         } = relation
         else {
             continue;
@@ -1723,12 +1724,27 @@ fn apply_self_replacement_override(
         } else {
             base_pos
         };
-        let condition = override_def.condition.take().expect(
-            "self-replacement override relations are emitted only for conditioned abilities",
+        // CR 614.6 + CR 608.2c: a body condition the selector already states is
+        // the selector; any other stays on the body as its own guard.
+        let selector = match selector {
+            Some(selector) => {
+                if override_def.condition.as_ref().is_some_and(|condition| {
+                    merge_ability_condition(Some(selector.clone()), condition.clone()) == *selector
+                }) {
+                    override_def.condition = None;
+                }
+                selector.clone()
+            }
+            None => override_def.condition.take().expect(
+                "self-replacement override relations are emitted only for conditioned abilities",
+            ),
+        };
+        let mut override_def = crate::parser::oracle_effect::instead_override_definition(
+            override_def,
+            AbilityCondition::ConditionInstead {
+                inner: Box::new(selector),
+            },
         );
-        override_def.condition = Some(AbilityCondition::ConditionInstead {
-            inner: Box::new(condition),
-        });
         let base = &mut result.abilities[base_pos];
         // CR 614.15 + CR 111.1 + CR 608.2c: The override paragraph was lowered in
         // isolation (its own single-ability `defs` slice), so
@@ -1740,7 +1756,7 @@ fn apply_self_replacement_override(
         // hour — If you have 5 or less life, create five of those tokens
         // instead.").
         crate::parser::oracle_effect::lower::rewrite_those_tokens_from_antecedent(
-            &mut override_def.effect,
+            &mut crate::parser::oracle_effect::instead_override_body_mut(&mut override_def).effect,
             &base.effect,
         );
         override_def.else_ability = base.sub_ability.take();
@@ -3438,6 +3454,26 @@ fn strip_instead_clause(
             // chain parser to produce `AdditionalCostPaidInstead` on the sub-ability.
             let before_trim = before.original.trim().trim_end_matches('.');
             if !before_trim.contains('.') {
+                // CR 614.6 + CR 608.2c: a leading "if [condition], " is the selector,
+                // kept off any guard the body prints.
+                if let Some((cond_text, body)) =
+                    crate::parser::oracle_effect::conditions::split_leading_conditional(
+                        before.original.trim(),
+                    )
+                {
+                    let cond_lower = cond_text.to_lowercase();
+                    let cond_rest = value::<_, _, OracleError<'_>, _>((), tag("if "))
+                        .parse(cond_lower.as_str())
+                        .ok()
+                        .map(|(rest, ())| rest.trim().to_string());
+                    if let Some(condition) = cond_rest.and_then(|rest| {
+                        crate::parser::oracle_effect::conditions::lower_instead_condition(
+                            &rest, ctx,
+                        )
+                    }) {
+                        return (body, Some(condition), true);
+                    }
+                }
                 return (before.original.trim().to_string(), None, true);
             }
         }
@@ -6665,9 +6701,9 @@ fn parse_normalized_oracle_ir(
         {
             // CR 603.1 + CR 603.3 + CR 614.1c/614.12: "Whenever you cast [spell],
             // that [subject] enters with … counter(s) on it[, where X is …]"
-            // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing; Torgal
-            // and Boreal Outrider are NOT recognized here; Dark Intimations
-            // composes a mandatory self-exile before the installer) is a TRIGGERED
+            // (Wildgrowth Archaic and cousin cards — Runadi, Communal Brewing, Torgal;
+            // Boreal Outrider is NOT recognized here; Dark Intimations composes a
+            // mandatory self-exile before the installer) is a TRIGGERED
             // ability (CR 603.1),
             // not an object-hosted static replacement — the entering-with-counters
             // effect must survive the source leaving the battlefield after the
@@ -8230,19 +8266,32 @@ fn parse_normalized_oracle_ir(
             // Ability-word condition (if any) is the "existing" baseline —
             // the chain-extracted condition is merged onto it, preserving the
             // historical `[ability_word, chain]` ordering when both are distinct.
-            if let Some(ability_word_condition) =
-                ability_word_to_ability_condition(&aw_condition, &mut ctx)
-            {
-                ability_ir
-                    .root_transforms
-                    .push(AbilityRootTransform::PrependCondition(
-                        ability_word_condition,
-                    ));
-            }
-            if let Some(instead_condition) = instead_condition {
-                ability_ir
-                    .root_transforms
-                    .push(AbilityRootTransform::AppendCondition(instead_condition));
+            let ability_word_condition = ability_word_to_ability_condition(&aw_condition, &mut ctx);
+            let selector = match (&ability_word_condition, &instead_condition) {
+                (Some(word), Some(instead)) => {
+                    Some(merge_ability_condition(Some(word.clone()), instead.clone()))
+                }
+                (word, instead) => word.clone().or_else(|| instead.clone()),
+            };
+            // CR 614.6 + CR 614.15: a bound override carries its paragraph selector
+            // to the fold rather than merging it into the body's own guard.
+            let binds_override =
+                (is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line))
+                    && emitter.last_ability_id().is_some()
+                    && (selector.is_some() || lower_ability_ir(&ability_ir).condition.is_some());
+            if !binds_override {
+                if let Some(ability_word_condition) = ability_word_condition {
+                    ability_ir
+                        .root_transforms
+                        .push(AbilityRootTransform::PrependCondition(
+                            ability_word_condition,
+                        ));
+                }
+                if let Some(instead_condition) = instead_condition {
+                    ability_ir
+                        .root_transforms
+                        .push(AbilityRootTransform::AppendCondition(instead_condition));
+                }
             }
             i = next_i;
             // CR 706.3b: An immediately following valid results table belongs to
@@ -8279,21 +8328,25 @@ fn parse_normalized_oracle_ir(
                 && !scan_contains(&effect_line_lower, "would");
 
             if is_instead || is_cross_line_dig_alt || is_instead_replacement_line(&effect_line) {
-                if lower_ability_ir(&ability_ir).condition.is_some() {
-                    if let Some(base) = emitter.last_ability_id() {
-                        let Some(_) = previous_spell else {
-                            unreachable!(
-                                "`spells_emitted` holds only spell nodes, and all three spell shapes lower"
-                            );
-                        };
-                        let override_item = emitter.ability_ir_at(item_line, ability_ir);
-                        document_relations.push(DocumentRelationIr::SelfReplacementOverride {
-                            base,
-                            override_item,
-                        });
-                        continue;
-                    }
-                } else if emitter.last_ability_node().is_some() {
+                if binds_override {
+                    let base = emitter
+                        .last_ability_id()
+                        .expect("a bound override has a preceding ability");
+                    let Some(_) = previous_spell else {
+                        unreachable!(
+                            "`spells_emitted` holds only spell nodes, and all three spell shapes lower"
+                        );
+                    };
+                    let override_item = emitter.ability_ir_at(item_line, ability_ir);
+                    document_relations.push(DocumentRelationIr::SelfReplacementOverride {
+                        base,
+                        override_item,
+                        selector,
+                    });
+                    continue;
+                } else if lower_ability_ir(&ability_ir).condition.is_none()
+                    && emitter.last_ability_node().is_some()
+                {
                     // CR 614.6: "If an event is replaced, it never happens."
                     //
                     // The line IS a self-replacement override of the preceding
@@ -8762,6 +8815,15 @@ fn parse_activated_ability_ir(
     // reference. Restored after the effect parse — no leak to sibling abilities.
     let prev_exile_zone = ctx.current_ability_exile_cost_zone.take();
     ctx.current_ability_exile_cost_zone = non_self_exile_cost_zone(&cost);
+    // CR 608.2k: likewise expose the cost's payment components (the
+    // `AbilityCost` classifier, one entry per component, no deduplication) so
+    // "the discarded card" / "the sacrificed creature" name a cost-paid object
+    // only when this ability's one slot-binding payment discards / sacrifices.
+    // Restored beside the exile zone.
+    let prev_cost_components = std::mem::replace(
+        &mut ctx.current_ability_cost_components,
+        cost.component_categories(),
+    );
     // CR 707.9a: thread the activated-ability index so "except it has this
     // ability" inside the effect body resolves to RetainPrintedAbilityFromSource.
     let prev_ability_index = ctx.current_ability_index;
@@ -8773,6 +8835,7 @@ fn parse_activated_ability_ir(
     let mut ir = parse_activated_ability_ir_with_self_ref_fallback(&effect_text, card_name, ctx);
 
     ctx.current_ability_exile_cost_zone = prev_exile_zone;
+    ctx.current_ability_cost_components = prev_cost_components;
     ctx.current_ability_index = prev_ability_index;
     let lowered_for_activation_zone = lower_ability_ir(&ir);
     // Three-authority precedence for the activation zone. The ORDER IS A RULES
@@ -9511,6 +9574,7 @@ fn resolve_guards_in_effect(effect: &mut Effect) {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -10593,6 +10657,7 @@ fn demote_lifetimes_in_effect(effect: &mut Effect) {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }

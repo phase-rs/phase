@@ -26,7 +26,7 @@ import { MANA_SYMBOL_SHARDS } from "../scryfall.ts";
 const assetsReady = {
   status: "ready",
   capabilities: {
-    engine: { status: "ready", cardCount: 1 },
+    engine: { status: "ready" },
     scryfallSearch: { status: "ready" },
     preconCatalog: { status: "ready" },
     bundledAiCatalog: { status: "ready" },

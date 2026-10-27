@@ -11,6 +11,7 @@ pub fn apply_pick(
     seat: u8,
     card_instance_ids: Vec<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
+    session.validate_legacy_admission()?;
     apply_pick_inner(session, seat, card_instance_ids)
 }
 
@@ -22,6 +23,7 @@ pub fn apply_pick_with_draft_effect(
     effect_card_instance_id: String,
     card_instance_ids: Vec<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
+    session.validate_legacy_admission()?;
     if card_instance_ids.len() != 2 {
         return Err(DraftError::InvalidDraftEffectSelection {
             expected_cards: 2,
@@ -52,11 +54,7 @@ pub fn apply_pick_with_draft_effect(
 /// the top of that function), and a status term here would mint a second
 /// authority for it.
 pub fn required_pick_count(session: &DraftSession, seat: u8) -> usize {
-    let pack_len = session
-        .current_pack
-        .get(seat as usize)
-        .and_then(|pack| pack.as_ref())
-        .map_or(0, |pack| pack.0.len());
+    let pack_len = session.head_pack(seat).map_or(0, |pack| pack.0.len());
     usize::from(session.kind.procedure().cards_per_pick).min(pack_len)
 }
 
@@ -240,6 +238,20 @@ fn finish_pick(
     seat: u8,
     card_instance_ids: Vec<String>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
+    if session.config.flow == DraftFlow::FifoAsync {
+        let mut deltas: Vec<_> = card_instance_ids
+            .into_iter()
+            .map(|card_instance_id| DraftDelta::CardPicked {
+                seat,
+                card_instance_id,
+            })
+            .collect();
+        deltas.extend(crate::session::finish_fifo_round(
+            session,
+            session.fifo_ref()?.last_now_ms,
+        )?);
+        return Ok(deltas);
+    }
     let pod_size = session.seats.len() as u8;
     session
         .current_pack_origins
@@ -328,6 +340,290 @@ fn finish_pick(
     Ok(deltas)
 }
 
+/// The refusal for one physical card named twice in one selection.
+const DUPLICATE_PHYSICAL_ID: &str = "duplicate or overlapping physical id";
+
+/// Exact requirements over the physical head for a selection that uses the
+/// draft-effect cards `effects`. Eligibility is checked against each selected
+/// pool instance, not against a global scan for any draft effect.
+pub fn selection_requirements(
+    session: &DraftSession,
+    seat: u8,
+    effects: &[String],
+) -> Result<DraftSelectionRequirements, DraftError> {
+    let head = session
+        .head_pack(seat)
+        .ok_or(DraftError::NoPendingPack { seat })?;
+    for (index, id) in effects.iter().enumerate() {
+        // Each draft-effect card is one physical card, so it can be listed once.
+        if effects[..index].contains(id) {
+            return Err(DraftError::InvalidSelection {
+                role: DraftSelectionRole::Effect,
+                reason: DUPLICATE_PHYSICAL_ID.into(),
+            });
+        }
+        // CR 905.2 + CR 905.2c: each selected face-up draft card is an
+        // AdditionalPick card in this seat's own pool, whatever the head holds.
+        if !session.pools.get(usize::from(seat)).is_some_and(|pool| {
+            pool.iter().any(|card| {
+                card.instance_id == *id
+                    && card.draft_effect == Some(engine::types::card::DraftEffect::AdditionalPick)
+            })
+        }) {
+            return Err(DraftError::DraftEffectCardNotInPool {
+                card_instance_id: id.clone(),
+            });
+        }
+    }
+    let picks = match effects {
+        [] => required_pick_count(session, seat),
+        [_, ..] => {
+            // The step drafts the kind's pick step plus one additional card
+            // for each draft-effect card, so the head must hold that many
+            // before the cards return to the pack.
+            let required = session
+                .kind
+                .procedure()
+                .draft_effect_step_size(effects.len());
+            if head.0.len() < required {
+                return Err(DraftError::InvalidDraftEffectSelection {
+                    expected_cards: required,
+                    actual_cards: head.0.len(),
+                });
+            }
+            required
+        }
+    };
+    Ok(DraftSelectionRequirements {
+        picks,
+        burns: usize::from(session.config.selection_policy.burns_per_pick)
+            .min(head.0.len() - picks),
+    })
+}
+
+/// Deterministic, ordinary (never effect-spending) fallback for a current head.
+pub fn legal_auto_selection(session: &DraftSession, seat: u8) -> Option<DraftAction> {
+    if session.config.flow != DraftFlow::FifoAsync || session.status != DraftStatus::Drafting {
+        return None;
+    }
+    let prompt_id = session
+        .fifo
+        .as_ref()?
+        .seats
+        .get(usize::from(seat))?
+        .prompt
+        .as_ref()?
+        .id
+        .clone();
+    let requirements = selection_requirements(session, seat, &[]).ok()?;
+    let pack = session.head_pack(seat)?;
+    if requirements.picks == 0 {
+        return None;
+    }
+    Some(DraftAction::Select {
+        seat,
+        prompt_id,
+        picked_card_instance_ids: pack
+            .0
+            .iter()
+            .take(requirements.picks)
+            .map(|card| card.instance_id.clone())
+            .collect(),
+        burned_card_instance_ids: pack
+            .0
+            .iter()
+            .skip(requirements.picks)
+            .take(requirements.burns)
+            .map(|card| card.instance_id.clone())
+            .collect(),
+        effect_card_instance_ids: Vec::new(),
+    })
+}
+
+pub(crate) enum SelectionTiming {
+    Human,
+    Expiry {
+        pack_id: DraftPackId,
+        deadline_ms: u64,
+    },
+}
+
+/// Runs only inside apply_at's staged transaction. Expiry carries its captured
+/// deadline/head authority through the same validation and card-movement path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_fifo(
+    session: &mut DraftSession,
+    seat: u8,
+    prompt_id: DraftPromptId,
+    picked: Vec<String>,
+    burned: Vec<String>,
+    effects: Vec<String>,
+    timing: SelectionTiming,
+) -> Result<Vec<DraftDelta>, DraftError> {
+    if session.status != DraftStatus::Drafting {
+        return Err(DraftError::InvalidTransition {
+            from: session.status,
+            action: "Select".into(),
+        });
+    }
+    if usize::from(seat) >= session.seats.len() {
+        return Err(DraftError::SeatOutOfRange {
+            seat,
+            pod_size: session.config.pod_size,
+        });
+    }
+    let fifo = session.fifo_ref()?;
+    let state = &fifo.seats[usize::from(seat)];
+    let head = session
+        .head_metadata(seat)
+        .ok_or(DraftError::NoPendingPack { seat })?;
+    let prompt = state.prompt.as_ref().ok_or(DraftError::StalePrompt)?;
+    if prompt.id != prompt_id
+        || prompt.pack_id != head.pack_id
+        || prompt_id.seat != seat
+        || prompt_id.session_id != fifo.session_id
+    {
+        return Err(DraftError::StalePrompt);
+    }
+    let deadline = match prompt.clock.as_ref().map(|clock| clock.state) {
+        Some(DraftClockState::Running { deadline_ms }) => Some(deadline_ms),
+        Some(DraftClockState::Frozen { .. }) => return Err(DraftError::StalePrompt),
+        None => None,
+    };
+    match timing {
+        SelectionTiming::Human => {
+            if deadline.is_some_and(|deadline| fifo.last_now_ms >= deadline) {
+                return Err(DraftError::ExpiredPrompt);
+            }
+        }
+        SelectionTiming::Expiry {
+            pack_id,
+            deadline_ms,
+        } => {
+            if pack_id != head.pack_id
+                || deadline != Some(deadline_ms)
+                || fifo.last_now_ms < deadline_ms
+            {
+                return Err(DraftError::StalePrompt);
+            }
+        }
+    }
+    let requirements = selection_requirements(session, seat, &effects)?;
+    let mut selected = std::collections::HashSet::new();
+    for (role, ids, expected) in [
+        (DraftSelectionRole::Pick, &picked, requirements.picks),
+        (DraftSelectionRole::Burn, &burned, requirements.burns),
+    ] {
+        if ids.len() != expected {
+            return Err(DraftError::InvalidSelectionCount {
+                role,
+                expected,
+                actual: ids.len(),
+            });
+        }
+        for id in ids {
+            if !selected.insert(id.as_str()) {
+                return Err(DraftError::InvalidSelection {
+                    role,
+                    reason: DUPLICATE_PHYSICAL_ID.into(),
+                });
+            }
+            if effects.contains(id) || !head.pack.0.iter().any(|card| &card.instance_id == id) {
+                return Err(DraftError::CardNotInPack {
+                    card_instance_id: id.clone(),
+                });
+            }
+        }
+    }
+    let pack_id = head.pack_id;
+    let mut head = session.fifo_mut()?.seats[usize::from(seat)]
+        .queue
+        .pop_front()
+        .expect("validated head");
+    let mut selected_cards = Vec::with_capacity(picked.len());
+    for id in &picked {
+        let index = head
+            .pack
+            .0
+            .iter()
+            .position(|card| &card.instance_id == id)
+            .expect("validated pick");
+        selected_cards.push(head.pack.0.remove(index));
+    }
+    for id in &burned {
+        let index = head
+            .pack
+            .0
+            .iter()
+            .position(|card| &card.instance_id == id)
+            .expect("validated burn");
+        head.pack.0.remove(index);
+        session.fifo_mut()?.removed.push(RemovedDraftCard {
+            card_instance_id: id.clone(),
+            pack_id,
+            reason: DraftRemovalReason::Burn,
+        });
+    }
+    for id in picked.iter().chain(&burned) {
+        session.fifo_mut()?.returned_effects.remove(id);
+    }
+    // After the picks and burns leave the head, each draft-effect card leaves
+    // the pool and joins the end of the remainder, in the action's order.
+    for id in &effects {
+        let index = session.pools[usize::from(seat)]
+            .iter()
+            .position(|card| &card.instance_id == id)
+            .expect("validated effect");
+        let card = session.pools[usize::from(seat)].remove(index);
+        head.pack.0.push(card);
+        session
+            .fifo_mut()?
+            .returned_effects
+            .insert(id.clone(), pack_id);
+    }
+    session.pools[usize::from(seat)].extend(selected_cards);
+    let selecting = &mut session.fifo_mut()?.seats[usize::from(seat)];
+    selecting.completed_steps = crate::clock::increment(selecting.completed_steps)?;
+    selecting.round_completed_steps = crate::clock::increment(selecting.round_completed_steps)?;
+    selecting.prompt = None;
+    let discarded =
+        if head.pack.0.len() <= usize::from(session.config.selection_policy.discard_threshold) {
+            let mut ids = Vec::new();
+            for card in head.pack.0.drain(..) {
+                let fifo = session.fifo_mut()?;
+                fifo.returned_effects.remove(&card.instance_id);
+                fifo.removed.push(RemovedDraftCard {
+                    card_instance_id: card.instance_id.clone(),
+                    pack_id,
+                    reason: DraftRemovalReason::Threshold,
+                });
+                ids.push(card.instance_id);
+            }
+            ids
+        } else {
+            Vec::new()
+        };
+    if !head.pack.0.is_empty() {
+        let recipient = session
+            .pass_direction
+            .next_seat(seat, session.config.pod_size);
+        session.fifo_mut()?.seats[usize::from(recipient)]
+            .queue
+            .push_back(head);
+    }
+    let accepted = DraftDelta::SelectionAccepted {
+        prompt_id,
+        seat,
+        picked_card_instance_ids: picked.clone(),
+        burned_card_instance_ids: burned,
+        returned_card_instance_ids: effects,
+        discarded_card_instance_ids: discarded,
+    };
+    let mut deltas = finish_pick(session, seat, picked)?;
+    deltas.push(accepted);
+    Ok(deltas)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +634,9 @@ mod tests {
 
     fn test_session(pod_size: u8) -> (DraftSession, FixturePackSource) {
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -881,6 +1180,9 @@ mod tests {
         let procedure = DraftKind::CommanderDraft.procedure();
         let pod_size = procedure.pod_size;
         let config = DraftConfig {
+            flow: crate::types::DraftFlow::LegacyBarrier,
+            selection_policy: crate::types::DraftSelectionPolicy::default(),
+            clock_policy: crate::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST"),
             set_code: "TST".to_string(),
             kind: DraftKind::CommanderDraft,

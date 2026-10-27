@@ -67,6 +67,46 @@ function DrawCardsForm({ onDispatch }: Props) {
   );
 }
 
+function GainLifeForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [amount, setAmount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={amount} onChange={setAmount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "GainLife", data: { player_id: playerId, amount } })}>
+        {t("sandboxTools.gainLife")}
+      </SubmitButton>
+    </>
+  );
+}
+
+function LoseLifeForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [amount, setAmount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={amount} onChange={setAmount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "LoseLife", data: { player_id: playerId, amount } })}>
+        {t("sandboxTools.loseLife")}
+      </SubmitButton>
+    </>
+  );
+}
+
 function MillForm({ onDispatch }: Props) {
   const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
@@ -274,6 +314,12 @@ export function DebugPlayerActions({ onDispatch }: Props) {
     <div>
       <AccordionItem label={t("sandboxTools.setLife")} expanded={expanded === "life"} onToggle={() => toggle("life")}>
         <SetLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label={t("sandboxTools.gainLife")} expanded={expanded === "gainLife"} onToggle={() => toggle("gainLife")}>
+        <GainLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label={t("sandboxTools.loseLife")} expanded={expanded === "loseLife"} onToggle={() => toggle("loseLife")}>
+        <LoseLifeForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem label={t("sandboxTools.drawCards")} expanded={expanded === "draw"} onToggle={() => toggle("draw")}>
         <DrawCardsForm onDispatch={onDispatch} />

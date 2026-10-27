@@ -14,8 +14,8 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
     distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
-    parse_target, parse_target_disjunction, parse_target_with_ctx, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, parse_zone_word,
+    parse_shared_quality_reference, parse_target, parse_target_disjunction, parse_target_with_ctx,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -76,7 +76,7 @@ pub(super) fn parse_search_library_details(
 
     // CR 701.23a: Detect "search target opponent's/player's library" patterns.
     // These target a player, searching that player's library instead of the controller's.
-    let target_player = parse_search_target_player(lower);
+    let target_player = parse_search_target_player(lower, ctx);
 
     // CR 107.1c: "any number of [FILTER] cards" — searcher may find 0..=matching.len()
     // cards. Detected before "up to N" since they share no overlap: "any number of"
@@ -642,10 +642,12 @@ fn scan_after_tag(lower: &str, tag_prefix: &str) -> Option<usize> {
 
 /// CR 701.23a: Detect player-targeting search patterns like "search target opponent's library"
 /// or "search target player's library". Returns a TargetFilter for the player.
-fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
+fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     use nom::branch::alt;
     use nom::combinator::value;
     use nom::sequence::preceded;
+
+    let has_declared_player = ctx.declared_player_scope.is_some();
 
     // CR 701.23a: The possessive determiner identifies the searched player; the
     // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
@@ -667,6 +669,12 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("an opponent's "),
+                ),
+                // CR 608.2c + CR 701.23a: "that player" names the player the chain
+                // already declared; the caster still searches.
+                value(
+                    TargetFilter::ParentTarget,
+                    verify(tag("that player's "), |_: &str| has_declared_player),
                 ),
             )),
         )
@@ -1860,7 +1868,7 @@ fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
     }
 }
 
-/// CR 201.2a + CR 201.2c: the verb-and-negation core of a same-name comparison,
+/// CR 201.2a: the verb-and-negation core of a same-name comparison,
 /// with any leading determiner already consumed by the caller.
 ///
 /// Composed as two independent axes rather than enumerated as whole phrases, so
@@ -1898,9 +1906,25 @@ fn parse_name_relation_body(
     ))
 }
 
-pub(crate) fn parse_search_name_reference_suffix(
-    input: &str,
-) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+/// CR 201.2a: parse one same-name frame and its reference
+/// population into [`FilterProp::SharesQuality`].
+///
+/// Three entry frames share this authority: the relative-clause frame
+/// ("that (doesn't) have/share …"), the bare predicate frame ("if it …"), and
+/// the prepositional frame ("with the same name as …"). Relation and verb are
+/// two independent axes (see [`parse_name_relation_body`]), so callers select a
+/// frame and receive the typed relation rather than a string.
+///
+/// `ctx` is the caller's parse context. Filter-position callers pass the live
+/// context so a demonstrative reference ("that creature") resolves through the
+/// same contextual reference resolver as the sibling "doesn't share a name
+/// with that creature" grammar; callers with no context (the search-suffix
+/// loop, trigger conditions) pass `None` and keep the context-free reference
+/// parse. Nested target/type parsing stays on throwaway contexts either way.
+pub(crate) fn parse_search_name_reference_suffix<'a>(
+    input: &'a str,
+    ctx: Option<&ParseContext>,
+) -> Result<(&'a str, FilterProp), nom::Err<OracleError<'a>>> {
     let (rest, relation) = alt((
         // Relative-clause frame: "<noun> that (doesn't) have/share ...".
         preceded(tag("that "), parse_name_relation_body),
@@ -1920,7 +1944,16 @@ pub(crate) fn parse_search_name_reference_suffix(
         )));
     }
 
-    let (reference, after_reference) = parse_target_disjunction(rest);
+    // CR 608.2k: with a caller context, a demonstrative reference ("that
+    // creature") must bind exactly like the sibling shared-quality grammar;
+    // without one, keep the context-free noun-phrase/disjunction parse.
+    let (reference, after_reference) = match ctx {
+        Some(ctx) => match parse_shared_quality_reference(rest, ctx) {
+            Ok((after_reference, reference)) => (reference, after_reference),
+            Err(_) => (TargetFilter::Any, rest),
+        },
+        None => parse_target_disjunction(rest),
+    };
     if !matches!(reference, TargetFilter::Any) {
         return Ok((
             after_reference,
@@ -2159,18 +2192,24 @@ fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectS
 }
 
 fn last_shared_quality_reference_in_filter(filter: &TargetFilter) -> Option<TargetFilter> {
-    match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(|property| {
-            if let FilterProp::SharesQuality {
+    fn reference_of(property: &FilterProp) -> Option<TargetFilter> {
+        match property {
+            FilterProp::SharesQuality {
                 reference: Some(reference),
                 ..
-            } = property
-            {
-                Some(reference.as_ref().clone())
-            } else {
-                None
-            }
-        }),
+            } => Some(reference.as_ref().clone()),
+            // CR 201.2a: the negated same-name arm composes `Not` around the
+            // positive comparison; the linked-reference suffix must still find
+            // the population inside it. `AnyOf` mirrors the other consumers that
+            // recurse through composite props.
+            FilterProp::Not { prop } => reference_of(prop),
+            FilterProp::AnyOf { props } => props.iter().rev().find_map(reference_of),
+            _ => None,
+        }
+    }
+
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(reference_of),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
             .iter()
             .rev()
@@ -2430,7 +2469,7 @@ fn parse_search_filter_suffixes(
             }
         }
 
-        if let Ok((rest, prop)) = parse_search_name_reference_suffix(remaining) {
+        if let Ok((rest, prop)) = parse_search_name_reference_suffix(remaining, None) {
             suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
@@ -2784,7 +2823,9 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
+    use crate::types::ability::{
+        AttachmentReferent, Comparator, QuantityRef, SharedQuality, SharedQualityRelation,
+    };
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
 
@@ -3228,6 +3269,23 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(details.target_player, None);
+    }
+
+    #[test]
+    fn search_that_players_library_after_declared_player_binds_parent_target() {
+        let mut ctx = ParseContext {
+            declared_player_scope: Some(ControllerRef::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            }),
+            ..Default::default()
+        };
+        let details = parse_search_library_details(
+            "search that player's library for up to fifteen cards",
+            &mut ctx,
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 15 });
+        assert_eq!(details.target_player, Some(TargetFilter::ParentTarget));
     }
 
     #[test]
@@ -4293,6 +4351,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_curse_card_name_reference_with_enchanted_player() {
+        // CR 201.2a + CR 303.4b + CR 303.4m: Curse of Misfortunes'
+        // search filter — "a Curse card that doesn't have the same name as a
+        // Curse attached to enchanted player". The negated name relation is
+        // consumed by the shared name authority through the type phrase as the
+        // LITERAL negation of a same-name comparison (CR 201.2a), so a nameless
+        // candidate satisfies it; the reference population is the Curses
+        // attached to the enchanted player on the battlefield (CR 109.2's zone
+        // default).
+        let filter = parse_search_filter(
+            "curse card that doesn't have the same name as a curse attached to enchanted player",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        // The subtype description's core type is inferred (CR 205.3h).
+        assert!(
+            filter.type_filters.contains(&TypeFilter::Enchantment),
+            "expected the inferred Enchantment core type, got {:?}",
+            filter.type_filters
+        );
+        assert_eq!(filter.get_subtype(), Some("Curse"));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Not { prop } if matches!(
+                prop.as_ref(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::Shares,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        properties,
+                        ..
+                    }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Curse"))
+                        && properties.iter().any(|property| matches!(
+                            property,
+                            FilterProp::AttachedTo {
+                                to: AttachmentReferent::Player {
+                                    player: ControllerRef::EnchantedPlayer
+                                }
+                            }
+                        ))
+                        && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+                )
+            )
+        )));
+    }
+
+    #[test]
     fn parse_search_filter_different_name_from_room_you_control() {
         let filter = parse_search_filter(
             "room card that doesn't have the same name as a room you control",
@@ -4303,18 +4414,21 @@ mod tests {
         };
         assert!(filter.properties.iter().any(|property| matches!(
             property,
-            FilterProp::SharesQuality {
-                quality: SharedQuality::Name,
-                reference: Some(reference),
-                relation: SharedQualityRelation::DoesNotShare,
-            } if matches!(
-                reference.as_ref(),
-                TargetFilter::Typed(TypedFilter {
-                    type_filters,
-                    controller: Some(ControllerRef::You),
-                    properties,
-                }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Room"))
-                    && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+            FilterProp::Not { prop } if matches!(
+                prop.as_ref(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::Shares,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::You),
+                        properties,
+                    }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Room"))
+                        && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+                )
             )
         )));
     }

@@ -43,7 +43,7 @@ expression: "&lowered"
               "origin": "Exile",
               "destination": "Battlefield",
               "target": {
-                "type": "ParentTarget"
+                "type": "SelfRef"
               },
               "owner_library": false,
               "enter_transformed": false,

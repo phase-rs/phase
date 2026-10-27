@@ -40,9 +40,10 @@ const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 
-vi.mock("../../services/cardData", () => ({
+vi.mock("../main-thread-engine", () => ({
   ensureWasmInit,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
+  loadEngineModule: () => import("@wasm/engine"),
 }));
 
 vi.mock("@wasm/engine", () => ({
@@ -78,6 +79,7 @@ const mockWorkerClient = {
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   canonicalCardNames: vi.fn().mockResolvedValue([]),
+  query: vi.fn().mockResolvedValue("answer"),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -681,6 +683,24 @@ describe("WasmAdapter", () => {
         "Revival/Revenge",
         "Not A Card",
       ]);
+    });
+  });
+
+  describe("query", () => {
+    it("loads the card database before a query that reads it", async () => {
+      await expect(adapter.query("classifyDeck", ["Forest"])).resolves.toBe("answer");
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.query).toHaveBeenCalledWith("classifyDeck", [["Forest"]]);
+    });
+
+    // The Play setup screen asks for the format's deck supply before any game
+    // starts; it must not pull the ~90 MB database in to answer.
+    it("answers a format query without loading the card database", async () => {
+      await expect(adapter.query("deckSupplyForFormat", "Standard")).resolves.toBe("answer");
+
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(mockWorkerClient.query).toHaveBeenCalledWith("deckSupplyForFormat", ["Standard"]);
     });
   });
 

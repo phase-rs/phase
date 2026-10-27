@@ -801,8 +801,10 @@ fn resolve_mana_types_impl(
         ManaProduction::OpponentLandColors { count } => {
             let amount = resolve_count(count, state, ability, controller, source_id);
             let color_options = mana_sources::opponent_land_color_options(state, controller);
-            // CR 106.5: If no color can be defined, produce no mana.
-            let Some(first) = color_options.first().copied() else {
+            // CR 106.5 + CR 106.7: If no color can be defined (including when the
+            // surveyed lands could produce only {C}, which is not a color per
+            // CR 106.1a), produce no mana.
+            let Some(first) = color_options.first().map(mana_color_to_type) else {
                 return Vec::new();
             };
             vec![first; amount]
@@ -3285,7 +3287,7 @@ mod tests {
         let mut state = commander_board_with_opponent_command_tower();
 
         let options = crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
-        assert_eq!(options, vec![ManaType::Blue]);
+        assert_eq!(options, vec![ManaColor::Blue]);
 
         let mut events = Vec::new();
         resolve(

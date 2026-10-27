@@ -352,5 +352,10 @@
   "deepLink": {
     "gameInProgressTitle": "Partida em andamento",
     "gameInProgressBody": "Termine ou saia da sua partida atual e abra o link novamente."
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "A concessão atingiu um estado final Full, mas não foi possível publicar as visualizações finais nativas.",
+    "concedeUnreconciled": "Não foi possível reconciliar o resultado da concessão; o assento permanece bloqueado.",
+    "receiptUnsent": "Não foi possível enviar o recibo durável do resultado final; aguardando nova entrega"
   }
 }
