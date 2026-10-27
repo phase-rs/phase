@@ -3,8 +3,9 @@
 //! combinators: the orphan rule binds both impls to `Keyword`'s crate, so the
 //! grammar they call lives beside it rather than in the parser.
 //!
-//! Each item is re-exported at its original `parser::…` path, and parser
-//! callers keep using those paths. `scripts/check-parser-combinators.sh` scans
+//! Each item that parser code still calls is re-exported at its original
+//! `parser::…` path, and parser callers keep using those paths; an item no
+//! parser code calls has no parser path. `scripts/check-parser-combinators.sh` scans
 //! this file, so the nom mandate binds it. Nothing here may name
 //! `crate::parser` (`tests/integration/layer_boundary_census.rs`, clause 3).
 

@@ -3,8 +3,10 @@
 //! Replaces thread-local `push_warning` string accumulation with
 //! machine-readable diagnostics carrying severity and source provenance.
 //!
-//! The producers (the diagnostic builders and swallow detectors) stay in
-//! `parser::oracle_ir`, which re-exports this module at its old paths.
+//! The producers stay in the parser (for example the swallow detectors in
+//! `parser::swallow_check` and the gap diagnosis in
+//! `parser::oracle_effect::gap_diagnosis`), and `parser::oracle_ir` re-exports
+//! this module at its old paths.
 
 use std::fmt;
 use strum::IntoEnumIterator;

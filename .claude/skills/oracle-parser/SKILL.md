@@ -197,7 +197,7 @@ Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full s
 | `ast.rs` | All parser AST types (`ParsedEffectClause`, `ClauseAst`, modal/loyalty AST — moved here from `oracle_effect/types.rs`, `oracle_modal.rs`, `oracle.rs`) |
 | `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleUnitSource`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex`; `OracleItemId` and `OracleSourceSpan`/`SpanPrecision` are re-exported from `types/oracle_diagnostic.rs` |
 | `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
-| `diagnostic.rs` | Re-exports the `OracleDiagnostic` data family (structured parse warnings) from `types/oracle_diagnostic.rs`; producers stay in this module |
+| `diagnostic.rs` | Re-exports the `OracleDiagnostic` data family (structured parse warnings) from `types/oracle_diagnostic.rs`; its producers stay in the parser (`swallow_check.rs`, `oracle_effect/gap_diagnosis.rs`, `ParseContext::push_diagnostic`) |
 | `effect_chain.rs` | `EffectChainIr`, `ClauseIr` + **typed clause provenance** (`ClauseId`, `ClauseDisposition`, antecedents, reference uses) and the mandatory `ClauseIrBuilder` |
 | `trigger.rs` | `TriggerIr` + lowering |
 | `static_ir.rs` | `StaticIr` + lowering |
@@ -323,7 +323,7 @@ All parser branches delegate atomic parsing to shared nom 8.0 combinators:
 | `enchant.rs` | "Enchant {filter}" attachment-restriction combinators |
 | `return_as_aura.rs` | "return ~ ... attached to" / return-as-Aura combinators |
 
-The leaf combinators that `Keyword` decoding needs (`parse_number`, `parse_color`, `parse_subtype`, `parse_zone_filter`, `parse_property_filter`, the enchant legs, `OracleResult`/`OracleError`, …) are defined in `crates/engine/src/types/text_grammar.rs` and re-exported at the paths this table names. The exception is private helpers that no parser code still calls (the English-number legs, including `parse_article_number`): they have no parser path, so reach them through `parse_number`. Call the others by those paths. The nom mandate and the combinator gate bind the new file.
+The leaf combinators that `Keyword` decoding needs (`parse_number`, `parse_color`, `parse_subtype`, `parse_zone_filter`, `parse_property_filter`, the enchant legs, `OracleResult`/`OracleError`, …) are defined in `crates/engine/src/types/text_grammar.rs`. Every one that parser code still calls is re-exported at its old parser path; call it by that path. The ones no parser code calls have no parser path: the English-number legs (including `parse_article_number`; reach them through `parse_number`), the other private helpers, and `parse_enchant_player_base`. The nom mandate and the combinator gate bind the new file.
 
 ### Two-Phase Parse/Lower Architecture (clause level)
 
