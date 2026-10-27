@@ -28,7 +28,6 @@ use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};
 
-use super::super::oracle_keyword::parse_granted_keyword_fragment;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::condition as nom_condition;
 use super::super::oracle_nom::defender_exception;
@@ -921,7 +920,7 @@ pub(super) fn try_parse_conditional_protection_grant_clause(
         &application,
         predicate,
         leading_duration.clone(),
-        ctx,
+        &mut complete_ctx,
     )
     .or_else(|| {
         build_conditional_protection_grant_clause(&application, predicate, leading_duration)
@@ -936,7 +935,7 @@ fn build_conditional_continuous_members(
     application: &SubjectApplication,
     predicate: &str,
     leading_duration: Option<Duration>,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let (body, trailing_duration) = super::strip_trailing_duration(predicate);
     let members = crate::parser::oracle_static::parse_complete_continuous_members(body)?;
@@ -973,7 +972,7 @@ fn build_conditional_continuous_members(
             .or(Some(Duration::Permanent));
         let board_gate = match condition {
             Some(condition) => Some(super::conditions::static_condition_to_ability_condition(
-                &condition,
+                &condition, ctx,
             )?),
             None => None,
         };
