@@ -439,7 +439,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Lila, Hospitality Hostess
 - Lithomancer's Focus
 - Localized Destruction
-- Locket of Yesterdays
 - Long Rest
 - Lost in the Maze
 - Loyal Unicorn
@@ -597,7 +596,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Rust
 - Sacellum Godspeaker
 - Sacred Guide
-- Sailors' Bane
 - Sanctum Spirit
 - Sandsower
 - Savaen Elves
@@ -983,7 +981,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Fyndhorn Druid
 - Galadriel of Lothlórien
 - Galvanoth
-- Game Preserve
 - Gandalf, Friend of the Shire
 - Gargantuan Gorilla
 - Garruk's Warsteed
@@ -1931,7 +1928,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Ignition Team
 - Ignorant Bliss
 - Illusionist's Gambit
-- Immard, the Stormcleaver
 - Immovable Rod
 - Impulsivity
 - Incriminating Impetus
@@ -2355,7 +2351,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Luxurious Locomotive
 - Lydia Frye
 - Machinist's Arsenal
-- Machinist's Dismissal
 - Maga, Traitor to Mortals
 - Managorger Phoenix
 - Marrow Chomper
@@ -3231,7 +3226,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - Consumed by Greed
 - Corrosion
 - Crashing Boars
-- Craterous Stomp
 - Creeping Dread
 - Crow Scarer
 - Cruel Fate
@@ -4338,7 +4332,6 @@ are outside the detector's class.
 - Absorbing Man
 - Auton Soldier
 - Brittle Blast
-- Broken Visage
 - Brokers' Safeguard
 - Captain's Maneuver
 - Carom
@@ -4732,7 +4725,6 @@ are outside the detector's class.
 - Blended Twistling
 - Blinding Flare
 - Chicken Egg
-- Circadian Struggle
 - Commune with Spirits
 - Conflux
 - Coral Helm
