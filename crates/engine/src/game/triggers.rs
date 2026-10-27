@@ -2,20 +2,19 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
-#[cfg(test)]
-use crate::types::ability::TapStateChange;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
-    AttachmentReferent, BounceSelection, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
+    AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    EffectScope, FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint,
-    PlayerFilter, PlayerScope, PreventionAmount, QuantityExpr, QuantityRef, RenownSubject,
-    ResolvedAbility, SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome,
-    TriggerCondition, TriggerConditionAnchor, TriggerConstraint, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey,
-    TypeFilter, TypedFilter,
+    FilterProp, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint, PlayerFilter,
+    PlayerScope, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility, SacrificeCost,
+    StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
+    TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TypeFilter, TypedFilter,
 };
+#[cfg(test)]
+use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::card_type::CoreType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
@@ -9269,7 +9268,7 @@ fn reveal_causing_card(ability: &ResolvedAbility) -> Option<ObjectId> {
     let reveal_caused = ability
         .condition
         .as_ref()
-        .is_some_and(super::effects::condition_has_reveal_until_matched_guard);
+        .is_some_and(crate::types::ability::condition_has_reveal_until_matched_guard);
     if !reveal_caused {
         return None;
     }
@@ -17677,210 +17676,6 @@ pub(super) fn build_triggered_ability(
     }
     resolved
 }
-
-/// Extract the TargetFilter from an effect, if it has targeting requirements.
-/// Returns None for effects with no targeting (Draw, GainLife, etc.) or
-/// effects targeting self/controller (which don't need player selection).
-///
-/// CR 115.1: Only objects on the battlefield, stack, graveyard, exile, and
-/// command zone can be targeted. Selections from private zones (hand, library)
-/// are resolution-time choices, not targeting. ChangeZone effects with a
-/// hand or library origin are therefore excluded — the resolution path
-/// handles them via WaitingFor::EffectZoneChoice.
-///
-/// Note: TriggeringSpellController, TriggeringSpellOwner, TriggeringPlayer,
-/// and TriggeringSource auto-resolve from event context at resolution time
-/// (via `state.current_trigger_event`), so they do not require player selection.
-/// CR 115.1 + CR 702.26a: True when a `PhaseOut`/`PhaseIn` filter denotes a
-/// population to expand at resolution rather than a single declared target.
-fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Controller | TargetFilter::Player | TargetFilter::ScopedPlayer => true,
-        TargetFilter::Typed(tf) => {
-            tf.type_filters == [TypeFilter::Permanent]
-                && tf.controller.is_some()
-                && tf.properties.is_empty()
-        }
-        _ => false,
-    }
-}
-
-pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
-    // CR 701.21a: Sacrifice does not target — the controller chooses permanents
-    // at resolution time via EffectZoneChoice. Returning a filter here would
-    // cause collect_target_slots to create target selection slots, routing
-    // resolution through the targeted path which lacks controller scoping.
-    if matches!(effect, Effect::Sacrifice { .. }) {
-        return None;
-    }
-    // CR 701.3d + CR 115.1: `UnattachAll` is a non-targeted mass effect. Its
-    // `target` is a resolution-time host-scope filter that `resolve_unattach_all`
-    // mass-scans (never a chosen target), and its `attachment` is a context-ref
-    // anaphor ("unattach it") resolved from the snapshot. Surfacing the host
-    // filter here would create a spurious required target slot (Stolen Uniform's
-    // "unattach it" would demand the controller pick among the creatures they
-    // control), stalling the delayed trigger unresolved. Mirrors the Sacrifice
-    // carve-out above; matches the `None` its mass siblings (DestroyAll/BounceAll)
-    // return from `Effect::target_filter`.
-    if matches!(effect, Effect::UnattachAll { .. }) {
-        return None;
-    }
-    // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
-    // the word "target" ("return a creature you control to its owner's hand")
-    // is NOT a targeted effect — the controller chooses an eligible permanent
-    // at resolution time via `EffectZoneChoice`. Returning a filter here would
-    // route resolution through the targeted path, which (a) creates spurious
-    // target selection slots at stack-push time and (b) leaves the resolver's
-    // targets vector empty, causing the effect to silently no-op. Mirrors the
-    // Sacrifice carve-out above.
-    if matches!(
-        effect,
-        Effect::Bounce {
-            selection: BounceSelection::AtResolution,
-            ..
-        }
-    ) {
-        return None;
-    }
-    // CR 702.95a + CR 115.10a + CR 608.2d: Soulbond pair choices are not
-    // targets. PairWith computes its legal partner while resolving.
-    if matches!(effect, Effect::PairWith { .. }) {
-        return None;
-    }
-    // CR 115.1 + CR 303.4f + CR 303.4g: An Aura's enchanted permanent is a
-    // CHOICE, not a target — Old-Growth Troll / Bronzehide Lion / Harold and
-    // Bob's return-as-Aura sub-effect contains no "target" word in Oracle
-    // text. The pick happens at resolution time via
-    // `WaitingFor::ReturnAsAuraTarget` (built without hexproof / protection
-    // filtering per CR 702.16b's targeting scope).
-    if matches!(effect, Effect::ReturnAsAura { .. }) {
-        return None;
-    }
-    // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
-    // selection, not stack-push-time targeting.
-    if let Effect::ChangeZone { origin, target, .. } = effect {
-        if matches!(origin, Some(Zone::Hand) | Some(Zone::Library)) {
-            return None;
-        }
-        // Also check InZone property when origin is None but the filter specifies a private zone
-        if origin.is_none() {
-            if let Some(zone) = target.extract_in_zone() {
-                if matches!(zone, Zone::Hand | Zone::Library) {
-                    return None;
-                }
-            }
-        }
-    }
-    // CR 115.1 + CR 400.2: PutAtLibraryPosition from a private zone (hand/library)
-    // is a resolution-time selection, not a casting-time target. Brainstorm's
-    // "put two cards from your hand on top of your library" does not use the word
-    // "target" — the player chooses cards during resolution via EffectZoneChoice.
-    if let Effect::PutAtLibraryPosition { target, .. } = effect {
-        if let Some(zone) = target.extract_in_zone() {
-            if matches!(zone, Zone::Hand | Zone::Library) {
-                return None;
-            }
-        }
-    }
-    // CR 601.2c: "You may cast a spell ... from your hand without paying its mana
-    // cost" (Baral's Expertise, Bring Back-style sub-effects) names no "target" —
-    // CR 601.2c puts target announcement BEFORE costs, and these clauses skip it
-    // entirely. The spell is chosen at resolution from the granting player's hand
-    // (or library, for Future Sight-style cast-from-library permissions), so a
-    // stack-time target slot would surface a phantom 4th pick alongside the real
-    // bounce/etc. targets.
-    //
-    // CR 115.1: Exile-link variants (`ExiledBySource`, `ParentTarget`, anaphoric
-    // "that card" / "the exiled card") stay resolved context references via the
-    // final `is_context_ref` guard rather than stack-time target slots. Those bind
-    // a single object selected earlier in the same effect chain and are not the
-    // "free pick from hand" pattern this carve-out covers. The is-private-zone
-    // test mirrors `Effect::ChangeZone` and `Effect::PutAtLibraryPosition` above.
-    if let Effect::CastFromZone { target, .. } = effect {
-        if let Some(zone) = target.extract_in_zone() {
-            if matches!(zone, Zone::Hand | Zone::Library) {
-                return None;
-            }
-        }
-        // CR 115.1 + CR 608.2c: "Draw three cards and reveal them. You may
-        // cast one of them without paying its mana cost" (Mad Wizard's Lair)
-        // names no "target" — the pick is chosen at resolution from the cards
-        // the same resolution revealed (`EffectZoneChoice` over
-        // `LastRevealed`). At stack-push time nothing is revealed yet, so
-        // surfacing a slot builds a required pick with zero legal candidates
-        // and the whole trigger is dropped for lack of a legal target before
-        // it can resolve. Deliberately NOT folded into `is_context_ref`:
-        // that predicate also drives the optional-frame stash injector
-        // (`ability_with_event_context_targets`), which would singular-bind
-        // the first revealed card and collapse the choose-one-of-many into a
-        // forced pick.
-        if matches!(target, TargetFilter::LastRevealed) {
-            return None;
-        }
-    }
-    // CR 115.1 / CR 115.1d: Only effects that use the word "target" require stack-time target
-    // selection. `TargetFilter::Any` is a sentinel value meaning "broadcast to all
-    // matching permanents at resolution time" — it is never a declared target on any
-    // effect. The one exception is `DealDamage`, which uses `TargetFilter::Any` to
-    // represent the "any target" wording in damage-dealing spells and abilities (e.g.
-    // "deals 3 damage to any target"), where the player does choose a single target
-    // from the combined pool of creatures, planeswalkers, and players.
-    //
-    // For all other effects, `TargetFilter::Any` arises in two ways: (a) as a mass
-    // broadcast where the Oracle text contains no "target" keyword (e.g. "creatures
-    // get -N/-M until end of turn"), or (b) as an unthreaded subject sentinel produced
-    // by a sub-parser before the calling parser threads the real subject (SelfRef,
-    // ParentTarget, etc.). In both cases no player-chosen target is required.
-    // Generating a slot for `Any` causes a spurious WaitingFor::TriggerTargetSelection
-    // entry that players and the AI cannot resolve, producing a hard freeze (issue #824
-    // class).
-    // CR 120.1 + CR 115.1: `EachSourceDealsDamage` with a `Shared(Any)` recipient
-    // ("each Dwarf you control deals 1 damage to any target", Princess Snowfall)
-    // is the same "any target" player-chosen slot as `DealDamage` — surface it so
-    // the cast/trigger-time target slot is built.
-    // CR 115.1a/c/d + CR 115.4 + CR 615.7: `PreventDamage` with a declared `Single`
-    // recipient, `TargetFilter::Any`, and no `damage_source_filter` ("prevent the
-    // next 2 damage that would be dealt to any target this turn", Aven Redeemer,
-    // Healing Salve) is a player-chosen target slot over creatures, planeswalkers,
-    // and players. When `damage_source_filter` is present (Awe Strike, Maze of Ith),
-    // the target slot is carried by the source filter and `Any` is an untargeted
-    // broadcast recipient that must not mint a slot. When `amount` is `All`
-    // (Fog, Sewers of Estark), it is an untargeted mass prevention effect that must
-    // not mint a slot.
-    if effect.target_filter() == Some(&TargetFilter::Any)
-        && !matches!(
-            effect,
-            Effect::DealDamage { .. }
-                | Effect::EachSourceDealsDamage { .. }
-                | Effect::PreventDamage {
-                    recipient_scope: EffectScope::Single,
-                    damage_source_filter: None,
-                    amount: PreventionAmount::Next(_),
-                    ..
-                }
-                | Effect::PreventDamage {
-                    recipient_scope: EffectScope::Single,
-                    damage_source_filter: None,
-                    amount_dynamic: Some(_),
-                    ..
-                }
-        )
-    {
-        return None;
-    }
-    // CR 115.1 + CR 702.26a: Mass phase-out / phase-in ("all permanents you
-    // control phase out" — Teferi's Protection; "you phase out") expands its
-    // population filter at resolution. Only "target [type] phase(s) out/in"
-    // requires a stack-time target slot.
-    if matches!(effect, Effect::PhaseOut { .. } | Effect::PhaseIn { .. })
-        && effect
-            .target_filter()
-            .is_some_and(phase_out_or_in_filter_is_mass)
-    {
-        return None;
-    }
-    effect.target_filter().filter(|t| !t.is_context_ref())
-}
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -17891,18 +17686,19 @@ pub mod tests {
     use crate::game::filter::{matches_target_filter, FilterContext};
     use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-        AggregateFunction, AttackersDeclaredCountSubject, CardSelectionMode, ChoiceType,
-        ChosenAttribute, ChosenSubtypeKind, CommanderOwnership, Comparator, ContinuousModification,
-        ControllerRef, DamageChannel, DamageKindFilter, DelayedTriggerCondition,
-        DelayedTriggerKind, DelayedTriggerLifetime, DiscardSelfScope, Duration,
-        EachDamageRecipient, Effect, FilterProp, GuessSubject, KickerVariant, ModalChoice,
-        MultiTargetSpec, NumberQuality, Parity, PlayerFilter, PlayerScope, PreventionAmount,
-        PreventionScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef,
-        ReplacementDefinition, ReplacementMode, ResolvedAbility, SearchSelectionConstraint,
-        SharedQuality, SharedQualityRelation, SpentColor, StaticCondition, StaticDefinition,
-        TargetFilter, TargetRef, TargetSelectionMode, TriggerCondition, TriggerConstraint,
-        TriggerDefinition, TriggerGrantInstanceRef, TypeFilter, TypedFilter,
+        extract_target_filter_from_effect, AbilityCondition, AbilityCost, AbilityDefinition,
+        AbilityKind, AdditionalCost, AggregateFunction, AttackersDeclaredCountSubject,
+        BounceSelection, CardSelectionMode, ChoiceType, ChosenAttribute, ChosenSubtypeKind,
+        CommanderOwnership, Comparator, ContinuousModification, ControllerRef, DamageChannel,
+        DamageKindFilter, DelayedTriggerCondition, DelayedTriggerKind, DelayedTriggerLifetime,
+        DiscardSelfScope, Duration, EachDamageRecipient, Effect, FilterProp, GuessSubject,
+        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, Parity, PlayerFilter,
+        PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, PtValueScope,
+        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, SpentColor,
+        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
+        TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;

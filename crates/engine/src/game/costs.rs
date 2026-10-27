@@ -43,8 +43,8 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
-    REMOVE_COUNTER_COST_ALL,
+    is_direct_resolution_optional_payment_branch, supported_at_resolution, AbilityCost, EffectKind,
+    PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -2218,65 +2218,6 @@ pub(crate) fn can_pay(
     }
 }
 
-/// CR 608.2d: choices made while applying an effect must be legal; CR 118.12:
-/// an optional resolution-time cost is offered only when its exact payment
-/// shape is supported.
-///
-/// Phase-1 structural allowlist for immediate direct optional-payment leaves.
-/// Execution and affordability remain owned by [`supported_at_resolution`] and
-/// [`can_pay`]; this predicate only keeps parser admission and prompt emission
-/// on the same exact branch family.
-pub(crate) fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool {
-    use crate::types::ability::{CardSelectionMode, DiscardSelfScope, QuantityExpr};
-
-    match cost {
-        AbilityCost::Mana { cost } => !super::casting_costs::cost_has_x(cost),
-        AbilityCost::Discard {
-            count: QuantityExpr::Fixed { value },
-            filter,
-            selection: CardSelectionMode::Chosen,
-            self_scope: DiscardSelfScope::FromHand,
-        } => *value > 0 && matches!(filter, None | Some(TargetFilter::Typed(_))),
-        AbilityCost::Exile {
-            count,
-            zone: Some(_),
-            filter,
-        } => *count > 0 && matches!(filter, None | Some(TargetFilter::Typed(_))),
-        AbilityCost::Discard { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice(_)
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Unattach
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::Composite { .. }
-        | AbilityCost::OneOf { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        | AbilityCost::EffectCost { .. }
-        | AbilityCost::PerCounter { .. }
-        | AbilityCost::KeywordCostOfCastSpell { .. }
-        | AbilityCost::GetPlayerCounters { .. }
-        | AbilityCost::Unimplemented { .. } => false,
-    }
-}
-
 /// Runtime branch family for the resolution optional-payment prompt.
 ///
 /// Fixed non-self sacrifice is added here before parser admission because its
@@ -2292,87 +2233,6 @@ pub(crate) fn is_resolution_optional_payment_prompt_branch(cost: &AbilityCost) -
                 if !matches!(sacrifice.target, TargetFilter::SelfRef)
                     && sacrifice.requirement.fixed_count().is_some_and(|count| count > 0)
         )
-}
-
-/// CR 118.12: The single source of truth for which `AbilityCost` shapes
-/// `pay_ability_cost_inner` can actually pay at `PaymentScope::Resolution`. Both
-/// the resolution affordability oracle (`can_pay_resolution`) and the
-/// resolution-scope structural guard inside `pay_ability_cost_inner` derive from
-/// this one predicate, so the two can never disagree and a future variant forces
-/// a deliberate decision in exactly one place.
-///
-/// A shape outside this set has no resolution-time payment arm: at resolution
-/// there is no interactive `WaitingFor` interceptor and no activation-window
-/// mana detour, so executing such an arm would either silently report a no-op
-/// cost as `Paid` (`Waterbend`, `ExileMaterials`, targeted `RemoveCounter`) or
-/// perform an effect that was never meant to fire at
-/// resolution (singleton `Tap`, self-ref `Sacrifice`/`Exile`, `Loyalty`,
-/// `RemoveCounter { target: None }`, `Exert`, `Unattach`, arbitrary `EffectCost`,
-/// source-card `Discard`). Both outcomes violate CR 118.3 / CR 601.2h, so the
-/// guard refuses them with `Failed`. Fixed non-self sacrifice is deliberately
-/// absent: the optional-branch selector intercepts it before this executor and
-/// rewrites the completed frame to an empty prepaid composite.
-pub(crate) fn supported_at_resolution(cost: &AbilityCost) -> bool {
-    use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
-    match cost {
-        AbilityCost::Mana { .. }
-        | AbilityCost::ManaDynamic { .. }
-        | AbilityCost::PayLife { .. }
-        | AbilityCost::PayEnergy { .. }
-        | AbilityCost::PaySpeed { .. }
-        | AbilityCost::TapCreatures { .. }
-        | AbilityCost::Composite { .. }
-        // CR 702.21a + CR 122.1: Ward's unless-pay always resolves at
-        // resolution time (never activation), so this must be true here.
-        | AbilityCost::GetPlayerCounters { .. }
-        | AbilityCost::OneOf { .. } => true,
-        // Only the chosen-from-hand discard has a resolution arm (the
-        // `WaitingFor::DiscardChoice` / forced-choice fast path). The source-card
-        // discard arm is an activation-cost shape with no resolution payment.
-        AbilityCost::Discard {
-            selection: CardSelectionMode::Chosen,
-            self_scope: DiscardSelfScope::FromHand,
-            ..
-        } => true,
-        // CR 406.6: Non-self exile cost at resolution time (e.g., The Mimeoplasm's
-        // "exile two creature cards from graveyards"). The interactive choice is
-        // surfaced via WaitingFor::PayCost before this resume runs.
-        AbilityCost::Exile { filter, .. } if !matches!(filter, Some(TargetFilter::SelfRef)) => true,
-        // CR 118.3: The shared effect-cost predicate admits only deterministic
-        // payment effects that the authority resolves directly.
-        AbilityCost::EffectCost { .. } if cost.supports_effect_cost_payment() => true,
-        AbilityCost::Discard { .. }
-        | AbilityCost::Sacrifice(_)
-        | AbilityCost::Tap
-        | AbilityCost::Untap
-        | AbilityCost::Loyalty { .. }
-        | AbilityCost::Exile { .. }
-        | AbilityCost::ExileMaterials { .. }
-        | AbilityCost::CollectEvidence { .. }
-        // CR 117.1 + CR 601.2b: `ExileWithAggregate` is an activation-only cost
-        // (paid by the interactive `PayCost { ExileAggregate }` detour); it has
-        // no resolution-time payment path.
-        | AbilityCost::ExileWithAggregate { .. }
-        | AbilityCost::RemoveCounter { .. }
-        | AbilityCost::ReturnToHand { .. }
-        | AbilityCost::Mill { .. }
-        | AbilityCost::Unattach
-        // CR 701.3d: an unattach-from cost is paid at activation via the
-        // interactive `PayCost { UnattachFrom }` detour, never at resolution.
-        | AbilityCost::UnattachFrom { .. }
-        | AbilityCost::Exert
-        | AbilityCost::Blight { .. }
-        | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
-        | AbilityCost::Waterbend { .. }
-        | AbilityCost::NinjutsuFamily { .. }
-        | AbilityCost::EffectCost { .. }
-        | AbilityCost::PerCounter { .. }
-        // CR 118.9: borrowed keyword cost — paid by the casting pipeline, never as
-        // a resolution-time activation cost.
-        | AbilityCost::KeywordCostOfCastSpell { .. }
-        | AbilityCost::Unimplemented { .. } => false,
-    }
 }
 
 /// CR 614.17b: would a mandatory can't-effect stop this player-counter gain?

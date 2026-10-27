@@ -9,20 +9,23 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    AttachmentReferent, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, ChosenAttribute,
-    ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, CounterKindDomain,
-    DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
-    NameStickerSet, ObjectScope, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
-    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause,
-    TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    condition_depends_on_effect_performed, condition_has_reveal_until_matched_guard,
+    effect_introduces_per_iteration_referent, effect_introduces_per_player_object_referent,
+    effect_parks_reveal_card_choice, filter_refs_parent_target, graveyard_destination_rider,
+    is_graveyard_exile_rider_subability, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityUseTally, AttachmentReferent, CardPlayMode, CardTypeSetSource,
+    CastFromZoneDriver, ChosenAttribute, ChosenTargetSlots, CommanderOwnership,
+    ContinuousEffectOnset, ContinuousModification, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient,
+    Effect, EffectError, EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope,
+    ExtraPhaseRecipient, FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
+    MassLibraryShuffleMode, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
+    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef,
+    ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -4911,7 +4914,7 @@ fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
 /// unless that choice reads only parent metadata
 /// (`effect_refs_parent_target_metadata`).
 fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
-    (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+    (crate::types::ability::extract_target_filter_from_effect(&sub.effect).is_some()
         && !effect_requires_parent_target_object(&sub.effect)
         && !sub_ability_target_belongs_to_reflexive_context(sub))
         || (sub
@@ -5886,11 +5889,8 @@ pub(crate) fn optional_decline_branch<'a>(
             && !(matches!(
                 &ability.effect,
                 Effect::CastFromZone { .. } | Effect::CastCopyOfCard { .. }
-            ) && (cast_from_zone::graveyard_destination_rider(
-                &sub.effect,
-                sub.condition.as_ref(),
-            )
-            .is_some()
+            ) && (graveyard_destination_rider(&sub.effect, sub.condition.as_ref())
+                .is_some()
                 || cast_from_zone::is_enters_with_counter_rider_subability(sub)
                 || cast_from_zone::is_enters_with_modifications_rider_subability(sub))));
     let mut branch = if !selected {
@@ -6734,7 +6734,7 @@ fn prepare_declined_search_node_with_input<'a>(
         if ability.target_choice_timing == TargetChoiceTiming::Resolution
             && ability.attach_host_target().is_none()
             && attachment.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && crate::types::ability::attach_host_filter_needs_target_slot(target)
             && target.denotes_battlefield_objects());
     if let Effect::GenericEffect {
         target,
@@ -6980,7 +6980,7 @@ fn declined_search_fresh_authority(ability: &ResolvedAbility) -> bool {
                 | Effect::ExileFromTopUntil { .. }
         )
         || effect_writes_last_revealed_ids(&ability.effect)
-        || reveal_hand::effect_parks_reveal_card_choice(&ability.effect)
+        || effect_parks_reveal_card_choice(&ability.effect)
         || ability.effect.publishes_created_referent()
         || (ability.forward_result
             && matches!(
@@ -7136,33 +7136,6 @@ fn without_declined_search_object_dependencies(
         relink_in_printed_order(kept.iter().collect()).map(|root| *root)
     }
     reduce(state, ability, ability)
-}
-
-/// Whether a sub-ability condition references a per-iteration outcome gate —
-/// "was the effect performed" (`IfYouDo` / `IfAPlayerDoes`, CR 118.12
-/// optional-cost branch) or "did the current scope iteration succeed"
-/// (`IfCurrentScopeSucceeded`, CR 101.3 + CR 118.12 mandatory-cost branch),
-/// including a `Not`-wrapped form or a composite `And`/`Or` that contains
-/// one. Such conditions cannot be evaluated while the parent effect is
-/// suspended for a player choice — the answer is not yet known — so the
-/// sub-ability must be deferred as a continuation rather than gated eagerly.
-/// They are also load-bearing for `detach_after_player_scope_local_chain`:
-/// a per-iteration outcome gate has meaning ONLY relative to its surrounding
-/// scoped iteration, so the sub-ability must stay inside the scoped template
-/// rather than detach as an unscoped post-loop tail. A composite like
-/// `Or { [IfYouDo, QuantityCheck] }` (Armored Kincaller) also qualifies:
-/// declining the optional effect leaves `IfYouDo` false, but the sibling
-/// disjunct may still be satisfied, so the sub-ability must be re-evaluated
-/// rather than dropped. Predicate helper, not rule-implementing code.
-fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
-    match condition {
-        AbilityCondition::EffectOutcome { .. } => true,
-        AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_depends_on_effect_performed)
-        }
-        _ => false,
-    }
 }
 
 /// CR 608.2c: Settle a game-state gate that covers several instructions of one
@@ -8416,7 +8389,7 @@ fn condition_depends_on_last_created(condition: &AbilityCondition) -> bool {
 /// satisfies `leaf`.
 ///
 /// EXHAUSTIVE on `AbilityCondition`, no `_` arm, for the same reason
-/// `filter::filter_contains` is exhaustive on `TargetFilter`. The wildcard this
+/// `types::ability::filter_contains` is exhaustive on `TargetFilter`. The wildcard this
 /// replaced classified EVERY filter-bearing condition as anaphor-free:
 /// `TargetMatchesFilter`, `ControllerControlsMatching`, `SourceMatchesFilter`,
 /// `ZoneChangeObjectMatchesFilter` and `DiscardedCardMatchesFilter` all read as
@@ -11665,33 +11638,6 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
     )
 }
 
-/// CR 608.2c + CR 701.20b: An effect that introduces a single per-player object
-/// referent which a later anaphoric clause ("that card", "it", "its mana value")
-/// in the same iteration binds to. `RevealTop` is the canonical case: it reveals
-/// one card per scoped player, captured into `effect_context_object` and exposed
-/// to later clauses as `Demonstrative`/`Anaphoric`/`ParentTarget`. This referent
-/// is rebuilt fresh each iteration, so a consuming sub-clause MUST run inside the
-/// same iteration as its introducer.
-fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
-    matches!(effect, Effect::RevealTop { .. })
-}
-
-/// CR 608.2c + CR 701.20a: a per-iteration reveal choice introduces the chosen
-/// card as that iteration's object referent (chain targets), consumed by a
-/// co-scoped `ParentTarget` clause ("exile a creature card they revealed this
-/// way" — Valki, God of Lies).
-fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
-    reveal_hand::effect_parks_reveal_card_choice(effect)
-}
-
-/// CR 608.2c: single authority for "this clause introduces a per-iteration object
-/// referent" — consumed by the player-scope co-scope split and by the swallow
-/// audit's per-player-iteration evidence.
-pub(crate) fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
-    effect_introduces_per_player_object_referent(effect)
-        || effect_introduces_per_player_chosen_card_referent(effect)
-}
-
 /// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
 /// per-player object referent anaphorically — a `Demonstrative`/`Anaphoric`
 /// object scope in a quantity, or a `ParentTarget`/`ParentTargetSlot` target.
@@ -13413,7 +13359,7 @@ fn node_or_branch_references_tracked_set(
     // target, so its grant still reads the tracked set.
     let declares_optional_single_target = ability.optional_targeting
         && ability.target_choice_timing == TargetChoiceTiming::Stack
-        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+        && crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
     let child_anaphor = if ability.multi_target.is_some() || declares_optional_single_target {
         ParentAnaphor::NamesDeclaredTargets
     } else {
@@ -14524,23 +14470,6 @@ fn reflexive_occurrence_voided_by_parent(
 ) -> bool {
     condition_has_reveal_until_matched_guard(condition)
         && parent_verdict == Some(crate::types::ability::ParentTargetMissingReason::RevealUntil)
-}
-
-/// Whether the root condition carries the reveal-until-hit guard, alone or as a
-/// member of the flat root `And` built by `when_you_do_with_guard`.
-pub(crate) fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
-    let is_guard = |condition: &AbilityCondition| {
-        matches!(
-            condition,
-            AbilityCondition::EffectOutcome {
-                signal: EffectOutcomeSignal::RevealUntilMatched,
-            }
-        )
-    };
-    match condition {
-        AbilityCondition::And { conditions } => conditions.iter().any(is_guard),
-        condition => is_guard(condition),
-    }
 }
 
 #[cfg(test)]
@@ -15951,49 +15880,6 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
     matches!(effect, Effect::SearchLibrary { filter, .. } if filter_refs_same_name_as_parent_target(filter))
 }
 
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
-pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
-    match filter {
-        // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
-        // must snapshot the parent targets at creation, exactly like the broad
-        // `ParentTarget` anaphor — the index is honored later by
-        // `effect_object_targets` when the snapshot fires.
-        TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. } => true,
-        TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
-                // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
-                // property (Jodah's "put the rest ..." exclusion of the declined
-                // hit, Radiance's "each OTHER creature that shares a color with it")
-                // reads the parent's chosen target, so the enclosing effect must
-                // inherit `ability.targets` on a decline for the exclusion to fire.
-                || typed.properties.iter().any(|prop| match prop {
-                    FilterProp::DistinctFrom { reference } => {
-                        filter_refs_parent_target(reference)
-                    }
-                    // CR 701.3a: a mass object set defined by attachment to the
-                    // parent referent ("destroy all Auras attached to that
-                    // creature") names the parent inside the host filter, so
-                    // propagation, delayed-trigger snapshotting and loop
-                    // rebinding must see it.
-                    FilterProp::AttachedTo {
-                        to: AttachmentReferent::Host { filter },
-                    } => filter_refs_parent_target(filter),
-                    _ => false,
-                })
-        }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_refs_parent_target)
-        }
-        TargetFilter::Not { filter } => filter_refs_parent_target(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
-        _ => false,
-    }
-}
-
 /// CR 608.2k: The EVENT-SUBJECT anaphors — the target filters that name an
 /// object carried by the trigger EVENT itself rather than a target a player
 /// chose. There are exactly two, and they are the two halves of the same
@@ -16720,7 +16606,8 @@ pub(crate) fn resolution_optional_payment_options(
             let intercepted_sacrifice = matches!(cost, AbilityCost::Sacrifice(_));
             crate::game::costs::is_resolution_optional_payment_prompt_branch(cost)
                 && ((!intercepted_sacrifice || ability.repeat_for.is_none())
-                    && (intercepted_sacrifice || crate::game::costs::supported_at_resolution(cost)))
+                    && (intercepted_sacrifice
+                        || crate::types::ability::supported_at_resolution(cost)))
                 && crate::game::costs::can_pay(state, payer, ability.source_id, cost, &scope)
         })
         .map(|(index, cost)| ResolutionOptionalPaymentOption {
@@ -21156,7 +21043,7 @@ fn counter_tail_family_has_runtime_evidence(effect: &Effect) -> bool {
 /// so a tail this drops is reported as a resolver gap. Asked of the link's
 /// fields because the resolver holds a `ResolvedAbility` and coverage an
 /// `AbilityDefinition` (the same convention as
-/// `cast_from_zone::is_graveyard_exile_rider_subability`).
+/// `types::ability::is_graveyard_exile_rider_subability`).
 pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effect) -> bool {
     link == SubAbilityLink::SequentialSibling && counter_tail_family_has_runtime_evidence(effect)
 }
@@ -24115,8 +24002,7 @@ fn resolve_chain_body(
         // last slot itself when no rider is printed.
         let cast_slots = cast_from_zone::cast_slot_group(ability);
         let is_rider = |link: &ResolvedAbility| {
-            cast_from_zone::graveyard_destination_rider(&link.effect, link.condition.as_ref())
-                .is_some()
+            graveyard_destination_rider(&link.effect, link.condition.as_ref()).is_some()
         };
         let tail_parent: Option<&ResolvedAbility> = match cast_slots.last() {
             Some(last) => Some(
@@ -24394,10 +24280,7 @@ fn resolve_chain_body(
         // its condition reads none and grants nothing, while the spell stays
         // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(
-                &sub.effect,
-                sub.condition.as_ref(),
-            )
+            && is_graveyard_exile_rider_subability(&sub.effect, sub.condition.as_ref())
         {
             // Not pinned by a test: no printed card reaches this state
             // (measured above), and returning here preserves `main`'s
@@ -26072,7 +25955,7 @@ pub(crate) fn declared_player_slot_is_empty(
 ) -> bool {
     crate::game::targeting::resolves_on_stack(state, ability)
         && !filter.is_context_ref()
-        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect) == Some(filter)
+        && crate::types::ability::extract_target_filter_from_effect(&ability.effect) == Some(filter)
         && crate::game::ability_utils::primary_announced_player(&ability.targets, ability).is_none()
 }
 
@@ -50844,7 +50727,9 @@ mod tests {
             "the reveal pass keeps no later instruction in its iteration"
         );
         let tail = tail.expect("the choice pass detaches as the tail");
-        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&tail.effect));
+        assert!(crate::types::ability::effect_parks_reveal_card_choice(
+            &tail.effect
+        ));
         assert_eq!(
             tail.player_scope,
             Some(PlayerFilter::Opponent),

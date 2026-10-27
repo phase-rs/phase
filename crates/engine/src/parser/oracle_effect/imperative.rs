@@ -10762,7 +10762,7 @@ pub(super) fn parse_destroy_ast(
         // supported lowering (the chain's anaphor rewrite collapses it to the
         // creature) and no printed producer, so it keeps the strict gap. The
         // untargeted resolution choice (Light of Judgment) passes through.
-        if crate::game::filter::filter_reads_declared_slot(&target)
+        if crate::types::ability::filter_reads_declared_slot(&target)
             && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
         {
             return None;
@@ -13325,7 +13325,7 @@ fn parse_context_set_referent<'a>(
                     // Eligibility first: an entry that reads a declared slot can
                     // never be the antecedent, so it is not evidence either way.
                     let eligible = entries.iter().filter(|entry| {
-                        !crate::game::filter::filter_reads_declared_slot(&entry.filter)
+                        !crate::types::ability::filter_reads_declared_slot(&entry.filter)
                     });
                     // An incomplete registry (any eligible entry without a
                     // chain-wide index) cannot prove the nearest declarer.
@@ -17523,7 +17523,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
-            dungeon: crate::game::dungeon::DungeonId::Undercity,
+            dungeon: crate::types::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
         // CR 701.31c: An ability instructs a player to planeswalk.

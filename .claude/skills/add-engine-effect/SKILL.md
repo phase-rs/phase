@@ -98,7 +98,7 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`SelfRef`/`Controller`.
 
-- [ ] **`crates/engine/src/game/triggers.rs` — `extract_target_filter_from_effect()`**
+- [ ] **`crates/engine/src/types/ability.rs` — `extract_target_filter_from_effect()`**
   Add the variant to the match arm that extracts `&TargetFilter` from effects. **If you skip this, triggered abilities with this effect will go on the stack without requesting targets — they'll silently fail at resolution.**
 
 - [ ] **`crates/engine/src/game/targeting.rs` — verify `find_legal_targets()`**
@@ -283,7 +283,7 @@ Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification
 
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
-| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `game/triggers.rs` |
+| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `types/ability.rs` |
 | Missing `extract_target_filter_from_effect` arm in `stack.rs` | Spells don't fizzle when targets become illegal | Ensure the effect's `TargetFilter` is returned by `extract_target_filter_from_effect` |
 | Creating a mega-effect instead of composing | One-off solution that handles one card pattern | Decompose into building blocks with `sub_ability` chains |
 | Boolean flags on `Effect` variants | Undefined combinations, unclear intent | Use enum variants (see `DamageAmount`, `LifeAmount`) |

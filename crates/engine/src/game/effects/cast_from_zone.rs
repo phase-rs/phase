@@ -1,8 +1,9 @@
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect,
-    EffectError, EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement,
-    TargetFilter, TargetRef,
+    graveyard_destination_rider, is_graveyard_exile_rider_subability, AbilityCondition,
+    AbilityCost, CastPermissionConstraint, CastingPermission, Duration, Effect, EffectError,
+    EffectKind, QuantityExpr, ResolvedAbility, SpellStackToGraveyardReplacement, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -2410,71 +2411,6 @@ fn cast_resolution_request_during_resolution(
         }
     };
     Ok(())
-}
-
-/// CR 614.1a + CR 608.2n: Torrential Gearhulk / Kylox's Voltstrider class — the
-/// parser represents "If that spell would be put into a graveyard, [exile it /
-/// put it on the bottom of its owner's library / return it to its owner's hand]
-/// instead" as a sequential rider sub-ability on `CastFromZone`, targeting the
-/// cast spell (`ParentTarget`). Runtime consumes that rider as permission
-/// metadata (the CR 608.2n redirect destination), not as an immediate zone
-/// move. Asked of the LINK, not the effect alone: CR 608.2c — a link whose gate
-/// reads the preceding instruction's outcome
-/// (`condition_depends_on_effect_performed`; the "If you don't [cast it], put it
-/// into your hand / exile it / put it on the bottom" decline branch of Solstice
-/// Revelations, Djinn of Wishes, Descendants' Path) carries a printed "if you
-/// do" / "if you don't" instruction that the controller follows in order, never
-/// a CR 614.1a "instead" replacement of the cast spell's trip to the graveyard.
-/// Returns the redirect destination the rider encodes, or `None` when the link
-/// is not such a rider.
-pub(crate) fn graveyard_destination_rider(
-    effect: &Effect,
-    condition: Option<&AbilityCondition>,
-) -> Option<SpellStackToGraveyardReplacement> {
-    // CR 608.2c + CR 614.1a: an outcome-gated link is an instruction followed in
-    // order, not an "instead" replacement.
-    if condition.is_some_and(super::condition_depends_on_effect_performed) {
-        return None;
-    }
-    match effect {
-        Effect::ChangeZone {
-            destination: Zone::Exile,
-            target: TargetFilter::ParentTarget,
-            ..
-        } => Some(SpellStackToGraveyardReplacement::Exile),
-        // Invasion of Alara's "Put one of them into your hand." is not such a
-        // rider: it lowers to a choice from the cards its exile loop found
-        // (`ZoneChoiceCandidateSource::ParentTargets`) and never reaches this arm
-        // (issue #8750).
-        Effect::ChangeZone {
-            destination: Zone::Hand,
-            target: TargetFilter::ParentTarget,
-            ..
-        } => Some(SpellStackToGraveyardReplacement::Hand),
-        Effect::PutAtLibraryPosition {
-            target: TargetFilter::ParentTarget,
-            position,
-            ..
-        } => Some(SpellStackToGraveyardReplacement::Library {
-            position: position.clone(),
-        }),
-        _ => None,
-    }
-}
-
-/// Exile-only view of [`graveyard_destination_rider`] — the structural marker
-/// that suppresses the counter path's immediate graveyard→exile sub-ability and
-/// is the only destination the COUNTER rider ever encodes (Force of Negation,
-/// No More Lies; the counter library/hand redirect rides `countered_spell_zone`
-/// instead, never a sub-ability).
-pub(crate) fn is_graveyard_exile_rider_subability(
-    effect: &Effect,
-    condition: Option<&AbilityCondition>,
-) -> bool {
-    matches!(
-        graveyard_destination_rider(effect, condition),
-        Some(SpellStackToGraveyardReplacement::Exile)
-    )
 }
 
 /// CR 614.1a + CR 608.2c + CR 110.4b: does the counter's exile rider `sub`

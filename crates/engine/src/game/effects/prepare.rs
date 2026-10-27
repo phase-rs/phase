@@ -2888,7 +2888,7 @@ mod tests {
                 effect.target_filter(),
                 Some(&TargetFilter::TriggeringSource)
             );
-            assert!(crate::game::triggers::extract_target_filter_from_effect(&effect).is_none());
+            assert!(crate::types::ability::extract_target_filter_from_effect(&effect).is_none());
             let slots = build_target_slots(
                 &state,
                 &ResolvedAbility::new(effect.clone(), vec![], source, PlayerId(0)),
@@ -2899,7 +2899,7 @@ mod tests {
 
         let typed = mass_prepare(EffectScope::Single);
         assert_eq!(
-            crate::game::triggers::extract_target_filter_from_effect(&typed),
+            crate::types::ability::extract_target_filter_from_effect(&typed),
             Some(&creatures_you_control())
         );
     }

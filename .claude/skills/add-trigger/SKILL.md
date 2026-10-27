@@ -214,7 +214,7 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
 
 ### Phase 4 — Target Extraction (if trigger effect targets)
 
-- [ ] **`crates/engine/src/game/triggers.rs` — `extract_target_filter_from_effect()`**
+- [ ] **`crates/engine/src/types/ability.rs` — `extract_target_filter_from_effect()`**
   If the trigger's `execute` effect has a target that requires player selection (not `SelfRef`/`Controller`/`None`), add a match arm returning `Some(&target_filter)`.
 
   **If you skip this, the trigger will go on the stack without requesting targets. The effect will fail at resolution with no valid targets.**
@@ -330,7 +330,7 @@ After completing work using this skill:
 ```bash
 rg -q "fn process_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn collect_matching_triggers" crates/engine/src/game/triggers.rs && \
-rg -q "fn extract_target_filter_from_effect" crates/engine/src/game/triggers.rs && \
+rg -q "fn extract_target_filter_from_effect" crates/engine/src/types/ability.rs && \
 rg -q "fn build_trigger_registry" crates/engine/src/game/trigger_matchers.rs && \
 rg -q "fn subject_filter_matches_with_lki" crates/engine/src/game/trigger_matchers.rs && \
 rg -q "fn source_controller_or_lki" crates/engine/src/game/filter.rs && \

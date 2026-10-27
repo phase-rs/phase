@@ -394,7 +394,7 @@ fn ability_with_resolved_until(
 /// `extract_target_filter_from_effect` so target-filter extraction stays
 /// in lockstep with the canonical accessor used by stack/trigger code.
 fn sub_effect_references_exiled_by_source(sub: &ResolvedAbility) -> bool {
-    crate::game::triggers::extract_target_filter_from_effect(&sub.effect)
+    crate::types::ability::extract_target_filter_from_effect(&sub.effect)
         .map(crate::types::ability::TargetFilter::references_exiled_by_source)
         .unwrap_or(false)
 }

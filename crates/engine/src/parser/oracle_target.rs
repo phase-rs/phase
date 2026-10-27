@@ -7624,7 +7624,7 @@ fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
 /// leaves listed below, recursing through every `QuantityExpr` composition
 /// arm. This list is NOT exhaustive: it omits `Intensity`, which the parser
 /// only emits as `Intensity { Source }`. The exhaustive object-scope
-/// classification is `game::quantity::quantity_ref_object_scope_read`, which
+/// classification is `types::ability::quantity_ref_object_scope_read`, which
 /// backs `quantity_expr_contains_scope`.
 fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
     fn rebind_ref(qty: &mut QuantityRef) {

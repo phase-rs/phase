@@ -838,7 +838,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
-        let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
+        let cost = crate::types::mana::parse_mtgjson_mana_cost(rest.trim());
         return Some(WardCost::Waterbend(cost));
     }
 
@@ -867,7 +867,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     }
 
     // Fall back to mana cost parsing
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(lower.trim());
+    let cost = crate::types::mana::parse_mtgjson_mana_cost(lower.trim());
     Some(WardCost::Mana(cost))
 }
 
@@ -1254,7 +1254,7 @@ fn parse_craft_keyword_line(text: &str) -> Option<Keyword> {
         .parse(text)
         .ok()?;
     let (rest, (materials, count)) = parse_craft_materials(rest)?;
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
+    let cost = crate::types::mana::parse_mtgjson_mana_cost(rest.trim());
     Some(Keyword::Craft {
         cost,
         materials,
@@ -1828,7 +1828,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("specialize ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((Keyword::Specialize(cost), mana_cost_remainder(cost_str)));
         }
     }
@@ -1837,7 +1837,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("level up ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((Keyword::LevelUp(cost), mana_cost_remainder(cost_str)));
         }
     }
@@ -1847,7 +1847,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more than meets the eye ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((
                 Keyword::MoreThanMeetsTheEye(cost),
                 mana_cost_remainder(cost_str),
@@ -1916,7 +1916,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         if !cost_str.is_empty() {
             // `parse_mtgjson_mana_cost` is lenient in the same way `FromStr` is: it
             // takes the symbols it knows and says nothing about the rest.
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((
                 Keyword::CommanderNinjutsu(cost),
                 mana_cost_remainder(cost_str),
@@ -1937,7 +1937,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .unwrap_or(after_count)
                 .trim();
             if !cost_str.is_empty() {
-                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
                 return Some((
                     Keyword::Suspend { count, cost },
                     mana_cost_remainder(cost_str),
@@ -1956,7 +1956,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .unwrap_or(after_count)
                 .trim();
             if !cost_str.is_empty() {
-                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
                 return Some((
                     Keyword::Awaken { count, cost },
                     mana_cost_remainder(cost_str),
@@ -1977,7 +1977,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .unwrap_or(after_count)
                 .trim();
             if !cost_str.is_empty() {
-                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
                 return Some((
                     Keyword::Reinforce { count, cost },
                     mana_cost_remainder(cost_str),
@@ -1995,7 +1995,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         if let Ok((_, (cost_str, pt_str))) =
             split_once_on(rest, "\u{2014}").or_else(|_| split_once_on(rest, "--"))
         {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str.trim());
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str.trim());
             if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
                 if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
                     if let Ok((after_toughness, toughness)) =

@@ -66,7 +66,7 @@ use super::{
     parse_for_each_object_copy_parts, refine_damage_target_remainder, replace_player_anaphor,
     scan_contains_phrase, target_filter_controller_ref, ParsedEffectClause,
 };
-use crate::game::effects::effect::generic_effect_population_filter;
+use crate::types::ability::generic_effect_population_filter;
 
 pub(super) fn rewrite_player_anaphor_targets_in_definition(def: &mut AbilityDefinition) {
     replace_player_anaphor(def.effect.as_mut(), || TargetFilter::ParentTarget);
@@ -2437,7 +2437,7 @@ pub(super) fn target_choice_timing_for_parsed(
             target,
             selection: _,
         } if attachment.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && crate::types::ability::attach_host_filter_needs_target_slot(target)
             && target.denotes_battlefield_objects()
             && nom_primitives::scan_contains(&lower, "attach ") =>
         {
@@ -2505,7 +2505,7 @@ pub(super) fn target_choice_timing_for_parsed(
             && parsed.multi_target.is_none()
             && parsed.distribute.is_none()
             && !nom_primitives::scan_contains(&lower, "target ")
-            && crate::game::effects::deal_damage::names_resolution_chosen_recipient(target)
+            && crate::types::ability::names_resolution_chosen_recipient(target)
         {
             return TargetChoiceTiming::Resolution;
         }

@@ -2574,6 +2574,41 @@ impl ManaCost {
     }
 }
 
+/// Parse an MTGJSON mana cost string (e.g. "{2}{W}{U}") into the engine's ManaCost type.
+pub fn parse_mtgjson_mana_cost(s: &str) -> ManaCost {
+    let s = s.trim();
+    if s.is_empty() {
+        return ManaCost::NoCost;
+    }
+
+    let mut generic: u32 = 0;
+    let mut shards = Vec::new();
+
+    // CR 107.4: `ManaCostShard::from_str` is the single authority for the
+    // symbol→shard mapping. Routing every symbol through it keeps the loader
+    // from drifting out of sync with the rest of the engine — previously this
+    // function kept its own hand-maintained list that recognized mono-Phyrexian
+    // (`{W/P}`) but not Phyrexian-hybrid (`{G/U/P}`) symbols, silently dropping
+    // the pip from compleated planeswalkers and undercounting their cost by 1
+    // (issue #1416, same class as #493's `{C/W}` drop). Anything `from_str`
+    // doesn't recognize is either a bare number (generic mana) or ignorable.
+    for segment in s.split('{').filter(|seg| !seg.is_empty()) {
+        let symbol = segment.trim_end_matches('}');
+        let symbol = symbol.to_ascii_uppercase();
+        match ManaCostShard::from_str(&symbol) {
+            Ok(shard) => shards.push(shard),
+            Err(_) => {
+                // A bare number is generic mana; any other unknown symbol is ignored.
+                if let Ok(n) = symbol.parse::<u32>() {
+                    generic += n;
+                }
+            }
+        }
+    }
+
+    ManaCost::Cost { shards, generic }
+}
+
 impl Default for ManaCost {
     fn default() -> Self {
         ManaCost::zero()

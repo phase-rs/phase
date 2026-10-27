@@ -3180,7 +3180,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     cost: AbilityCost::Mana { cost },
                     scale: None,
                     ..
-                } if crate::game::casting_costs::cost_has_x(cost)
+                } if cost.has_x()
             );
         // CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that
         // clause is now absorbed into `Effect::GenericEffect.end_cost` by the

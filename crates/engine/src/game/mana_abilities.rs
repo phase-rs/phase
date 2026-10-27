@@ -1,12 +1,10 @@
 use crate::game::functioning_abilities::static_kind_present;
 use crate::types::ability::{
+    chain_moves_card_to_or_from_library, cost_has_component, cost_moves_card_to_or_from_library,
     is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
     CardSelectionMode, ChoiceValue, ChosenAttribute, ContinuousModification,
     CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
     TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
-};
-use crate::types::ability_visit::{
-    visit_ability_def_costs_scoped, visit_ability_def_scoped, ResolutionScope,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
@@ -25,7 +23,6 @@ use crate::types::player::PlayerId;
 use crate::types::statics::StaticModeKind;
 use crate::types::zones::Zone;
 use std::collections::HashSet;
-use std::ops::ControlFlow;
 
 use super::casting::activated_ability_granting_object;
 use super::cost_payability::{eligible_exile_cost_objects, exile_cost_effective_zone};
@@ -112,63 +109,12 @@ fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
     // off the instant-speed mana-ability path.
     // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
-    if mana_sources::cost_has_component(&ability_def.cost, |c| {
+    if cost_has_component(&ability_def.cost, |c| {
         matches!(c, AbilityCost::Loyalty { .. })
     }) {
         return false;
     }
     true
-}
-
-/// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
-/// resolution move a card to or from a library? Walks the head effect, the
-/// cost's embedded effects, and the `sub_ability` / `else_ability` /
-/// `mode_abilities` chain, stopping at the CR 603.3 boundary owned by
-/// [`ResolutionScope::OwnResolutionOnly`] — so a payload that is merely
-/// *registered* to resolve later (a CR 603.7a delayed trigger, a CR 603.12
-/// reflexive trigger, a CR 614.1 replacement, an emblem, a token's granted
-/// abilities) is not attributed to this ability.
-fn chain_moves_card_to_or_from_library(ability_def: &AbilityDefinition) -> bool {
-    visit_ability_def_scoped(
-        ability_def,
-        ResolutionScope::OwnResolutionOnly,
-        &mut |effect| {
-            if effect.moves_card_to_or_from_library() {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        },
-    )
-    .is_break()
-}
-
-/// CR 605.1a "its cost": the root activation cost (CR 602.1a — "the activation
-/// cost is everything before the colon"), PLUS every cost paid during this
-/// ability's own resolution, which CR 118.12a -> CR 118.12 classifies as a cost
-/// ("the action [do something] is a cost, paid when the spell or ability
-/// resolves") and CR 608.2c therefore places under "its effect":
-/// `unless_pay.cost` and the `cost` on every `sub_ability` / `else_ability` /
-/// `mode_abilities` link.
-///
-/// This CANNOT be folded into [`chain_moves_card_to_or_from_library`]: that
-/// walk's visitor is `FnMut(&Effect)`, and `AbilityCost::Mill` / `Exile` /
-/// `ExileWithAggregate` / `ReturnToHand` carry no nested `Effect` at all, so they
-/// are structurally invisible to it. That is a type-level gap, not a missing
-/// match arm — see `ability_visit::visit_ability_def_costs_scoped`.
-fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition) -> bool {
-    visit_ability_def_costs_scoped(
-        ability_def,
-        ResolutionScope::OwnResolutionOnly,
-        &mut |cost| {
-            if cost.moves_card_to_or_from_library() {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        },
-    )
-    .is_break()
 }
 
 /// CR 605.1a: the single authority for "is this activated ability a mana
@@ -215,30 +161,13 @@ pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
         && !chain_moves_card_to_or_from_library(ability_def)
 }
 
-/// CR 605.1a: semantic support check for a complete activated ability,
-/// including mana produced after another instruction. The legacy inline router
-/// (`is_mana_ability`) requires a Mana root; using that narrower admission here
-/// would let the parser newly support a linked cast on an ordinary stack
-/// ability even though the whole ability must resolve immediately. This check
-/// does not widen runtime admission for other mixed chains. The shared own-
-/// resolution walk supplies mana/target semantics; cost/library exclusions use
-/// the same authorities as the existing activated classifier.
-pub(crate) fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
-    could_be_triggered_mana_ability_body(def)
-        && !mana_sources::cost_has_component(&def.cost, |cost| {
-            matches!(cost, AbilityCost::Loyalty { .. })
-        })
-        && !cost_moves_card_to_or_from_library(def)
-        && !chain_moves_card_to_or_from_library(def)
-}
-
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.
 ///
 /// Also detects a self-`ReturnToHand` cost: either form removes the source from
 /// the battlefield. Restricted to [`TargetFilter::SelfRef`] on purpose: a
 /// sac-outlet mana ability that eats *other* permanents (Skirk Prospector,
 /// "Sacrifice a Goblin: Add {R}") keeps its source on the battlefield and stays
-/// renewable. Delegates to [`mana_sources::cost_has_component`] so a **bare**
+/// renewable. Delegates to [`crate::types::ability::cost_has_component`] so a **bare**
 /// component and one nested in a `Composite` are both matched.
 ///
 /// Deliberately private, but privacy is a signpost rather than a barrier: it
@@ -257,7 +186,7 @@ pub(crate) fn could_be_activated_mana_ability(def: &AbilityDefinition) -> bool {
 /// only exported composition is `.any(is_renewable_mana_ability)`, which *is*
 /// the per-ability filter.
 fn cost_removes_self_from_battlefield(cost: &Option<AbilityCost>) -> bool {
-    mana_sources::cost_has_component(cost, |c| {
+    cost_has_component(cost, |c| {
         matches!(
             c,
             AbilityCost::Sacrifice(s) if s.target == TargetFilter::SelfRef
@@ -558,36 +487,6 @@ pub fn resolve_triggered_mana_ability_inline(
         state.current_triggered_mana_override = previous_mana_override;
         state.current_trigger_event = previous_trigger_event;
     });
-}
-
-/// CR 605.1b: could this triggered ability body — if its trigger observed an
-/// activated mana ability — be a triggered mana ability? True when its OWN
-/// resolution could add mana (any reachable `Effect::Mana`, whatever else the
-/// chain does or in whatever order) and it requires no target anywhere in that
-/// resolution (CR 115.6). Separately registered payloads (delayed, reflexive,
-/// replacement bodies) are not this ability's resolution and are not walked
-/// (`ResolutionScope::OwnResolutionOnly`). A static, parse-time classification:
-/// target slots are read through the same per-effect slot authority
-/// (`triggers::extract_target_filter_from_effect`) trigger announcement uses.
-pub(crate) fn could_be_triggered_mana_ability_body(def: &AbilityDefinition) -> bool {
-    let mut adds_mana = false;
-    let mut targets = false;
-    let _ = visit_ability_def_scoped(def, ResolutionScope::OwnResolutionOnly, &mut |effect| {
-        if let Effect::Mana { target, .. } = effect {
-            adds_mana = true;
-            if target
-                .as_ref()
-                .is_some_and(|role| role.declared_filters().next().is_some())
-            {
-                targets = true;
-            }
-        }
-        if super::triggers::extract_target_filter_from_effect(effect).is_some() {
-            targets = true;
-        }
-        ControlFlow::Continue(())
-    });
-    adds_mana && !targets
 }
 
 /// CR 605.2: Mana abilities don't use the stack — they can't be targeted, countered, or responded to.
@@ -6777,7 +6676,7 @@ mod tests {
     }
 
     /// V2 — cost recursion reaches `Composite`, `OneOf`, and `PerCounter.base`.
-    /// The last two are exactly what `mana_sources::cost_has_component` cannot
+    /// The last two are exactly what `types::ability::cost_has_component` cannot
     /// see, which is why this criterion has its own recursive predicate.
     #[test]
     fn nested_cost_shapes_reach_the_library_predicate() {

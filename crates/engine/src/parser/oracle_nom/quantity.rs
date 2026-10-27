@@ -5804,7 +5804,7 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // would turn a conservative never-fires into an over-permit. Those sites are covered by the
         // `coverage.rs` classifier instead.
         EnteredControlBinding::EntryEvent(player) => {
-            if !crate::game::restrictions::ledger_filter_is_evaluable(&filter) {
+            if !crate::types::ability::ledger_filter_is_evaluable(&filter) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Fail,

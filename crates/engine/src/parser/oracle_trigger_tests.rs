@@ -38644,7 +38644,7 @@ fn a_perpetual_zone_list_subject_in_a_trigger_never_lowers_to_a_pump() {
 /// `TriggeringSource`, so Valki exiles itself and its ETB re-fires.
 #[test]
 fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lift() {
-    use crate::game::effects::reveal_hand::effect_parks_reveal_card_choice;
+    use crate::types::ability::effect_parks_reveal_card_choice;
 
     // (i) Valki, God of Lies — verbatim ETB.
     let valki = parse_trigger_line(
