@@ -260,6 +260,13 @@ describe("HudBadges designation art", () => {
       "src",
       "https://img.example/ref/The Ring.jpg",
     );
+    // Fallback diamond beside the two active-level diamonds until load, then
+    // just the level diamonds once the emblem art arrives.
+    expect(img).toHaveClass("hidden");
+    expect(screen.getAllByText("◆")).toHaveLength(3);
+    fireEvent.load(img);
+    expect(img).not.toHaveClass("hidden");
+    expect(screen.getAllByText("◆")).toHaveLength(2);
   });
 
   describe("DayNightBadge", () => {

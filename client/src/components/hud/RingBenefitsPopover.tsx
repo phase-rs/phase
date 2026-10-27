@@ -68,7 +68,11 @@ export function RingBenefitsPopover({ anchorEl, level, bearerName }: Props) {
           <DesignationArt
             art="ring"
             className="h-8 w-8 shrink-0 rounded-full object-cover ring-1 ring-amber-300/50"
-            fallback={null}
+            fallback={
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-[14px] leading-none text-amber-300 ring-1 ring-amber-300/50">
+                ◆
+              </span>
+            }
           />
           <div className="text-[12px] font-bold tracking-wide text-amber-200">
             {t("badges.ringTooltip", { level })}
