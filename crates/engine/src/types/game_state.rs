@@ -27811,6 +27811,30 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     source_operand,
                     Some(TargetFilter::ChosenDamageSource { .. })
                 );
+                // A complete unmoved current-turn window supplies birth AFTER
+                // role; it supplies neither role nor invocation.
+                let unmoved_installed_source = || {
+                    let id = node_source_id(installed)?;
+                    let unmoved = value
+                        .get("zone_changes_this_turn")
+                        .and_then(Value::as_array)
+                        .is_some_and(|records| {
+                            records.iter().enumerate().all(|(index, record)| {
+                                record.get("recorded_turn_number") == value.get("turn_number")
+                                    && record.get("turn_zone_change_index").and_then(Value::as_u64)
+                                        == Some(index as u64)
+                                    && record.get("object_id").and_then(Value::as_u64) != Some(id.0)
+                            })
+                        });
+                    let object = scratch.objects.get(&id).filter(|object| {
+                        unmoved
+                            && object.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+                    })?;
+                    object
+                        .snapshot_for_zone_change(id, Some(object.zone), object.zone)
+                        .trigger_source_context()
+                        .cloned()
+                };
                 if chosen && owner.context.damage_source_choice.is_none() {
                     // Invocation and typed source role are already established.
                     // Only this definition's owned continuation may lend context.
@@ -27819,42 +27843,11 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         .as_deref()
                         .and_then(|rider| rider.context.damage_source_choice.clone());
                     if owner.context.damage_source_choice.is_none() {
-                        // A complete unmoved current-turn window supplies birth
-                        // AFTER role; it supplies neither role nor invocation.
-                        if let Some(id) = node_source_id(installed) {
-                            let unmoved = value
-                                .get("zone_changes_this_turn")
-                                .and_then(Value::as_array)
-                                .is_some_and(|records| {
-                                    records.iter().enumerate().all(|(index, record)| {
-                                        record.get("recorded_turn_number")
-                                            == value.get("turn_number")
-                                            && record
-                                                .get("turn_zone_change_index")
-                                                .and_then(Value::as_u64)
-                                                == Some(index as u64)
-                                            && record.get("object_id").and_then(Value::as_u64)
-                                                != Some(id.0)
-                                    })
-                                });
-                            if let Some(object) = scratch.objects.get(&id).filter(|object| {
-                                unmoved
-                                    && object.incarnation
-                                        != crate::types::identifiers::LEGACY_INCARNATION
-                            }) {
-                                owner.context.damage_source_choice = Some(ChosenDamageSource {
-                                    source: object
-                                        .snapshot_for_zone_change(
-                                            id,
-                                            Some(object.zone),
-                                            object.zone,
-                                        )
-                                        .trigger_source_context()
-                                        .cloned(),
-                                    candidate_filter: TargetFilter::Any,
-                                });
-                            }
-                        }
+                        owner.context.damage_source_choice =
+                            unmoved_installed_source().map(|source| ChosenDamageSource {
+                                source: Some(source),
+                                candidate_filter: TargetFilter::Any,
+                            });
                     }
                 }
                 let capture = chosen
@@ -27878,6 +27871,22 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         == crate::types::identifiers::LEGACY_INCARNATION
                         || Some(capture.identity.reference.object_id) != node_source_id(installed)
                 });
+                if capture.is_some_and(|capture| {
+                    Some(capture.identity.reference.object_id) != node_source_id(installed)
+                }) {
+                    // Diagnose this leaf only if its complete materialization
+                    // can produce THIS definition. Use the same bounded exact
+                    // source solely for that applicability check; retain the
+                    // actual capture's contradiction and never recover this
+                    // substituted context as authority. No output field is
+                    // erased: recipient, source qualifier, rider and lifetime
+                    // must all pass the full typed comparison below.
+                    let Some(source) = unmoved_installed_source() else {
+                        evidence.push(Err(None));
+                        return;
+                    };
+                    owner.context.damage_source_choice.as_mut().unwrap().source = Some(source);
+                }
                 let mut materialized = scratch.clone();
                 materialized.pending_damage_replacements.clear();
                 for object in materialized.objects.values_mut() {
@@ -27903,7 +27912,6 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     evidence.push(Err(None));
                     return;
                 }
-                let mut found = false;
                 for candidate in materialized.pending_damage_replacements.iter().chain(
                     materialized
                         .objects
@@ -27916,7 +27924,6 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     expected.selected_damage_source = None;
                     candidate.is_consumed = expected.is_consumed;
                     if candidate == expected {
-                        found = true;
                         if invalid_capture {
                             evidence.push(Err(Some(
                                 "incoherent retained selected-source owner and installed predicate"
@@ -27927,12 +27934,8 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         }
                     }
                 }
-                // A corrupted owned selection may prevent installation before
-                // comparison. Keep its error pending until all native/unknown
-                // alternatives have been considered.
-                if invalid_capture && !found {
-                    evidence.push(Err(None));
-                }
+                // A fully materialized incompatible leaf supplies no meaning
+                // for THIS definition, including when its capture is invalid.
             }
             examine(&root, true, value, &installed, &scratch, &mut evidence);
         }

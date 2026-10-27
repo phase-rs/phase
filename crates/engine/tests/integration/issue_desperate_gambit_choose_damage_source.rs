@@ -2554,6 +2554,15 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
                     generic: 3,
                 })
                 .id();
+            let other_source = scenario
+                .add_creature_from_oracle(
+                    P1,
+                    "Thrashing Wumpus",
+                    3,
+                    3,
+                    "{B}: This creature deals 1 damage to each creature and each player.",
+                )
+                .id();
             let reverse = if old_typed_continuous {
                 // Authentic old TYPED Continuous/rider custody. Rider cloning
                 // and recursive cast stamping predate the new capture field;
@@ -2629,6 +2638,28 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
                 .unwrap()
                 .identity
                 .reference;
+            let other_reference = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == other_source)
+                .expect("a second lawful source is genuinely offered")
+                .identity
+                .reference;
+            let other_capture = runner
+                .state()
+                .resolution_stack
+                .active_ability_continuation()
+                .expect("the actual source prompt owns its captures")
+                .pending
+                .damage_source_candidates
+                .iter()
+                .find(|capture| capture.identity.reference == other_reference)
+                .expect("use the complete real offered capture, not synthetic LKI")
+                .clone();
+            assert_ne!(other_reference.object_id, reference.object_id);
+            assert_ne!(
+                other_reference.incarnation,
+                engine::types::identifiers::LEGACY_INCARNATION
+            );
             runner
                 .act(GameAction::ChooseDamageSource { source: reference })
                 .unwrap();
@@ -2741,6 +2772,100 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
                 assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
             }
 
+            for explicit_null in [true, false] {
+                let mut hostile = current.clone();
+                if explicit_null {
+                    hostile["pending_damage_replacements"][0]["selected_damage_source"] =
+                        serde_json::Value::Null;
+                } else {
+                    hostile["pending_damage_replacements"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("selected_damage_source");
+                }
+                // Corrupt every admitted copy of THIS cast's original with
+                // the coherent capture of the other actually offered source.
+                // Keep the installed source predicate, cast-owned rider and
+                // current-turn spell record intact so the ID contradiction
+                // reaches installed_owner rather than generic schema checks.
+                let mut original_paths = vec!["/resolving_stack_entry/kind/data/ability".into()];
+                for index in 0..hostile["resolved_rules_journal"]["entries"]
+                    .as_array()
+                    .unwrap()
+                    .len()
+                {
+                    for command in ["StackPush", "StackRemoval"] {
+                        original_paths.push(format!(
+                            "/resolved_rules_journal/entries/{index}/command/{command}/entry/kind/data/ability"
+                        ));
+                    }
+                }
+                let mut corrupted = 0;
+                for path in &original_paths {
+                    if let Some(root) = hostile.pointer_mut(path) {
+                        if root["source_id"] == serde_json::json!(reverse)
+                            && root["cast_occurrence"]
+                                == serde_json::json!(original.cast_occurrence)
+                        {
+                            root["context"]["damage_source_choice"] = serde_json::json!({
+                                "source": other_capture, "candidate_filter": {"type": "Any"}
+                            });
+                            corrupted += 1;
+                        }
+                    }
+                }
+                assert!(
+                    corrupted > 0,
+                    "the actual cast-bound original was corrupted"
+                );
+                for path in &original_paths {
+                    if let Some(root) = hostile.pointer(path) {
+                        if root["source_id"] == serde_json::json!(reverse)
+                            && root["cast_occurrence"]
+                                == serde_json::json!(original.cast_occurrence)
+                        {
+                            assert_eq!(
+                                root["context"]["damage_source_choice"]["source"],
+                                serde_json::to_value(&other_capture).unwrap(),
+                                "every admitted retained original agrees on the wrong source"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(
+                    hostile["pending_damage_replacements"][0]["damage_source_filter"],
+                    current["pending_damage_replacements"][0]["damage_source_filter"]
+                );
+                assert_eq!(
+                    hostile["pending_damage_replacements"][0]["runtime_execute"],
+                    current["pending_damage_replacements"][0]["runtime_execute"]
+                );
+                assert_eq!(
+                    hostile["spells_cast_this_turn_by_player"],
+                    current["spells_cast_this_turn_by_player"]
+                );
+                let bytes = serde_json::to_vec(&hostile).unwrap();
+                let before = serde_json::to_value(runner.state()).unwrap();
+                let error = decode_source_state(hostile.clone(), wire)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("pending_damage_replacements/0")
+                        && error.contains(
+                            "incoherent retained selected-source owner and installed predicate"
+                        ),
+                    "the owned wrong-ID capture has precise incoherence: {error}"
+                );
+                if explicit_null {
+                    assert!(
+                        error.contains("incoherent explicit null selected damage-source capture")
+                    );
+                }
+                assert!(!error.contains("source-origin ambiguity"));
+                assert_eq!(serde_json::to_vec(&hostile).unwrap(), bytes);
+                assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+            }
+
             let mut moved = GameRunner::from_state(runner.state().clone());
             moved.cast(blink).target_object(source).resolve();
             assert_ne!(
@@ -2806,6 +2931,185 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
                 "stored Continuous keeps its actual typed meaning; full current Reverse spends once");
             assert_source_program_complete(&runner);
         }
+    }
+}
+
+#[test]
+fn incompatible_same_cast_chosen_leaf_cannot_turn_its_wrong_capture_into_installed_incoherence() {
+    use engine::types::ability::*;
+    for wire in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mut sources = Vec::new();
+        for _ in 0..2 {
+            sources.push(
+                scenario
+                    .add_creature_from_oracle(
+                        P0,
+                        "Thrashing Wumpus",
+                        3,
+                        3,
+                        "{B}: This creature deals 1 damage to each creature and each player.",
+                    )
+                    .id(),
+            );
+        }
+        // Supported typed alternatives, not a printed-card claim. Both are
+        // chosen-source materializers in one actual recursively stamped cast;
+        // their independently different lifetimes cannot install the same leaf.
+        let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+            .abilities[0].clone();
+        let Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } = chosen.effect.as_mut()
+        else {
+            panic!("complete chosen-source materializer");
+        };
+        *damage_source_filter = Some(TargetFilter::ChosenDamageSource {
+            chooser: None,
+            filter: None,
+        });
+        let mut incompatible = chosen.clone();
+        let Effect::PreventDamage { lifetime, .. } = incompatible.effect.as_mut() else {
+            unreachable!()
+        };
+        *lifetime = RedirectionLifetime::Continuous;
+        chosen.condition = Some(AbilityCondition::QuantityCheck {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeTotal {
+                    player: PlayerScope::Controller,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 20 },
+        });
+        chosen.else_ability = Some(Box::new(incompatible));
+        let mut program = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseDamageSource {
+                source_filter: TargetFilter::Any,
+            },
+        );
+        program.sub_ability = Some(Box::new(chosen));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Typed incompatible chosen alternatives", true)
+            .with_ability_definition(program)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let mut runner = scenario.build();
+        add_mana(
+            &mut runner,
+            &[ManaType::Colorless, ManaType::Black, ManaType::Black],
+        );
+        runner.cast(spell).resolve();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("the paid composition reaches its actual source prompt");
+        };
+        let reference = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == sources[0])
+            .unwrap()
+            .identity
+            .reference;
+        let other_reference = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == sources[1])
+            .unwrap()
+            .identity
+            .reference;
+        let other_capture = runner
+            .state()
+            .resolution_stack
+            .active_ability_continuation()
+            .unwrap()
+            .pending
+            .damage_source_candidates
+            .iter()
+            .find(|capture| capture.identity.reference == other_reference)
+            .unwrap()
+            .clone();
+        assert_ne!(reference.object_id, other_reference.object_id);
+        runner
+            .act(GameAction::ChooseDamageSource { source: reference })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_source_program_complete(&runner);
+        assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+        let expected = runner.state().pending_damage_replacements.clone();
+        assert_eq!(expected[0].kind, ShieldKind::PreventionOneShot);
+        let original = assert_installed_cast_owner(&runner);
+        let selected = original.sub_ability.as_ref().unwrap();
+        let alternative = selected.else_ability.as_ref().unwrap();
+        assert_eq!(selected.cast_occurrence, original.cast_occurrence);
+        assert_eq!(alternative.cast_occurrence, original.cast_occurrence);
+        assert!(matches!(
+            alternative.effect,
+            Effect::PreventDamage {
+                lifetime: RedirectionLifetime::Continuous,
+                ..
+            }
+        ));
+        assert_eq!(
+            expected[0]
+                .selected_damage_source
+                .as_ref()
+                .unwrap()
+                .identity
+                .reference,
+            reference
+        );
+        let mut legacy = source_state_value(&runner, wire);
+        legacy["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
+        let mut original_paths = vec!["/resolving_stack_entry/kind/data/ability".into()];
+        for index in 0..legacy["resolved_rules_journal"]["entries"]
+            .as_array()
+            .unwrap()
+            .len()
+        {
+            for command in ["StackPush", "StackRemoval"] {
+                original_paths.push(format!("/resolved_rules_journal/entries/{index}/command/{command}/entry/kind/data/ability"));
+            }
+        }
+        let mut corrupted = 0;
+        for path in original_paths {
+            if let Some(root) = legacy.pointer_mut(&path) {
+                if root["source_id"] == serde_json::json!(spell)
+                    && root["cast_occurrence"] == serde_json::json!(original.cast_occurrence)
+                {
+                    let alternative = &mut root["sub_ability"]["else_ability"];
+                    assert_eq!(
+                        alternative["cast_occurrence"],
+                        serde_json::json!(original.cast_occurrence)
+                    );
+                    alternative["context"]["damage_source_choice"] = serde_json::json!({
+                        "source": other_capture, "candidate_filter": {"type": "Any"}
+                    });
+                    corrupted += 1;
+                }
+            }
+        }
+        assert!(
+            corrupted > 0,
+            "the genuine incompatible resolved alternative was reached"
+        );
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        let before = serde_json::to_value(runner.state()).unwrap();
+        let restored = decode_source_state(legacy.clone(), wire).unwrap();
+        assert_eq!(restored.pending_damage_replacements, expected,
+            "the incompatible chosen leaf cannot erase the sufficient matching chosen meaning or manufacture an error");
+        assert_eq!(serde_json::to_vec(&legacy).unwrap(), bytes);
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+        *runner.state_mut() = restored;
+        runner.activate(sources[0], 0).resolve();
+        assert_eq!((runner.life(P0), runner.life(P1)), (21, 19));
+        assert_source_program_complete(&runner);
+        runner.activate(sources[0], 0).resolve();
+        assert_eq!((runner.life(P0), runner.life(P1)), (20, 18));
+        assert_source_program_complete(&runner);
     }
 }
 
