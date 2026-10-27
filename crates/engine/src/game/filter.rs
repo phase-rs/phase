@@ -9255,7 +9255,7 @@ fn zone_change_filter_inner(
                 return false;
             }
 
-            let source_ctx = source_context_from_filter(
+            let mut source_ctx = source_context_from_filter(
                 state,
                 source_id,
                 source_controller,
@@ -9265,6 +9265,13 @@ fn zone_change_filter_inner(
                 triggering_object,
                 ctx.granting_object,
             );
+            // R2: suspension-resume reads carry no ability, but the parked
+            // frame kept the node's targets — carry that parked reference
+            // into the record-side context exactly like the live-object
+            // door, so a record-side selected reference (`SharesQuality`
+            // against `ParentTarget`) reads the same target. Every other
+            // context leaves it `None`.
+            source_ctx.ability_targets = ctx.ability_targets;
 
             // CR 400.1 + CR 109.4: a zone without controllers answers the controller axis
             // for every seat reading the same container, like the live-object door.
@@ -12532,7 +12539,8 @@ pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
 /// 1. **Snapshot-derivable.** Read directly from the captured record — P/T, colors, CMC,
 ///    keywords, supertypes, types, owner/controller, name.
 /// 2. **Source/event relational.** Compare the record against the source object or its
-///    chosen attributes — `Another`, `Owned`, `IsChosenCreatureType`, `Named`.
+///    chosen attributes — `Another`, `Owned`, `IsChosenCreatureType`, `Named`,
+///    `SharesQuality` (`None` and direct-`ParentTarget` references only).
 /// 3. **Combat snapshot state.** Attacking/blocking/unblocked predicates read
 ///    `ZoneChangeRecord::combat_status`, because leaving a zone removes the
 ///    object from live combat.
@@ -12695,6 +12703,38 @@ fn zone_change_record_matches_property(
         // target (parent target). Mirrors the live-object evaluator.
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
+        // CR 608.2c + CR 400.7j + CR 608.2h: a departed member judged
+        // against the resolving ability's selected target reads the same
+        // reference the live door reads — `parent_target_shared_quality_values`,
+        // including its parked ladder (the record-side context carries the
+        // parked targets) — and compares it against the record's own
+        // event-time characteristics. `reference = None` is the vacuous
+        // per-object pass the live door gives (the CR 608.2b group
+        // constraint is validated at resolution, not per member). Any
+        // other reference needs the live reference-population scan, which a
+        // snapshot cannot run — fail closed.
+        FilterProp::SharesQuality {
+            quality,
+            reference,
+            relation,
+        } => {
+            let shares = match reference.as_deref() {
+                None => true,
+                Some(TargetFilter::ParentTarget) => {
+                    parent_target_shared_quality_values(state, source, quality).is_some_and(|values| {
+                        quality_sets_overlap(
+                            &record_shared_quality_values(record, quality, &state.all_creature_types),
+                            &values,
+                        )
+                    })
+                }
+                Some(_) => return false,
+            };
+            match relation {
+                SharedQualityRelation::Shares => shares,
+                SharedQualityRelation::DoesNotShare => !shares,
+            }
+        }
         FilterProp::SameNameAsExiledBySource => {
             crate::game::exile_links::live_links_for_source(state, source.id).any(|link| {
                 state
@@ -13021,7 +13061,9 @@ fn zone_change_record_matches_property(
         // zone-change snapshot cannot represent it. Fail closed.
         | FilterProp::DistinctFrom { .. }
         | FilterProp::InAnyZone { .. }
-        | FilterProp::SharesQuality { .. }
+        // `SharesQuality` is answered by its own Group-2 arm above —
+        // `None` and direct-`ParentTarget` references compare against the
+        // record; any other reference stays fail-closed there.
         | FilterProp::EnteredThisTurn
         // CR 302.6: continuity flag lives on the battlefield object, not on a
         // zone-change snapshot record. Fail closed.
@@ -13303,6 +13345,31 @@ pub(crate) fn lki_shared_quality_values(
             subtypes: &lki.subtypes,
             colors: &lki.colors,
             keywords: &lki.keywords,
+        },
+        quality,
+        all_creature_types,
+    )
+}
+
+/// CR 608.2h: the values of `quality` read from a zone-change event
+/// snapshot. Mirrors `lki_shared_quality_values` — both are snapshots, so
+/// both read plain (already-effective) colors and mana value rather than
+/// the live object's split-card/X-aware accessors.
+fn record_shared_quality_values(
+    record: &ZoneChangeRecord,
+    quality: &SharedQuality,
+    all_creature_types: &[String],
+) -> HashSet<String> {
+    shared_quality_values(
+        SharedQualitySource {
+            name: &record.name,
+            power: record.power,
+            toughness: record.toughness,
+            mana_value: record.mana_value,
+            core_types: &record.core_types,
+            subtypes: &record.subtypes,
+            colors: &record.colors,
+            keywords: &record.keywords,
         },
         quality,
         all_creature_types,

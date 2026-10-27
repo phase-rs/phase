@@ -23175,6 +23175,269 @@ mod tests {
         );
     }
 
+    /// R2b fixture: the R2 staged set — a 5-power Creature brute (also the
+    /// ability's selected target) and a 7-power Artifact bauble — except the
+    /// brute REALLY departs: battlefield→graveyard through the production
+    /// zone pipeline, then publication with a per-member `Destroyed` cause,
+    /// so the member carries a verified producing origin and reads its
+    /// departure snapshot through the record door. The live bauble takes no
+    /// cause and keeps the legacy live read. A CardType `SharesQuality`
+    /// member filter against the selected target must admit the departed
+    /// brute (its exit-time Creature type) and exclude the bauble, so a
+    /// power sum reads 5 with the non-sharing control embedded.
+    fn r2b_departed_shares_fixture() -> (GameState, ResolvedAbility, TargetFilter) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(550),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let brute = create_object(
+            &mut state,
+            CardId(551),
+            PlayerId(0),
+            "Brute".to_string(),
+            Zone::Battlefield,
+        );
+        let bauble = create_object(
+            &mut state,
+            CardId(552),
+            PlayerId(0),
+            "Bauble".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let brute_obj = state.objects.get_mut(&brute).unwrap();
+            brute_obj.power = Some(5);
+            brute_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        }
+        {
+            let bauble_obj = state.objects.get_mut(&bauble).unwrap();
+            bauble_obj.power = Some(7);
+            bauble_obj.card_types.core_types = vec![crate::types::card_type::CoreType::Artifact];
+        }
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(brute)],
+            source,
+            PlayerId(0),
+        );
+        ability.announce_target_pins(&state);
+        // Real departure BEFORE publication: the zone pipeline captures the
+        // exit LKI and journals the transition, so publication stamps the
+        // verified producing origin instead of a hand-built one.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, brute, Zone::Graveyard, &mut events);
+        crate::game::effects::publish_tracked_set_with_causes(
+            &mut state,
+            vec![
+                (brute, Some(crate::types::ability::ThisWayCause::Destroyed)),
+                (bauble, None),
+            ],
+        );
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }]),
+        );
+        (state, ability, filter)
+    }
+
+    /// R2b: reach guard shared by the departed-member tests — the brute must
+    /// read through the Snapshot arm (verified origin + captured exit LKI),
+    /// never legacy-live, or the record door under test is bypassed.
+    fn assert_brute_reads_departure_snapshot(state: &GameState) {
+        let brute = state
+            .objects
+            .iter()
+            .find(|(_, obj)| obj.name == "Brute")
+            .map(|(id, _)| *id)
+            .expect("staged brute");
+        let live_incarnation = state.objects.get(&brute).unwrap().incarnation;
+        let set_id = state
+            .tracked_object_sets
+            .iter()
+            .max_by_key(|(id, _)| id.0)
+            .map(|(id, _)| *id)
+            .expect("published set");
+        assert_eq!(
+            state
+                .tracked_set_member_origins
+                .get(&set_id)
+                .and_then(|origins| origins.get(&brute)),
+            Some(&crate::types::game_state::TrackedMemberOrigin {
+                departed_from: Zone::Battlefield,
+                departure_incarnation: live_incarnation - 1,
+            }),
+            "reach guard: publication must stamp the verified battlefield departure"
+        );
+        assert!(
+            state
+                .lki_by_incarnation
+                .get(&brute)
+                .is_some_and(|history| history.contains_key(&(live_incarnation - 1))),
+            "reach guard: the exit LKI must be captured under the departure incarnation"
+        );
+    }
+
+    /// R2b: a departed member judged through a Typed `SharesQuality` filter
+    /// reads its departure record against the first selected target — the
+    /// exit-time Creature brute contributes its snapshot power 5, the live
+    /// non-sharing bauble nothing. Red while the record door fail-closes
+    /// (0: both members excluded).
+    #[test]
+    fn departed_shares_member_filter_reads_the_departure_record() {
+        let (state, ability, filter) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(filter),
+                    },
+                )
+                .expect("filtered ChainSet is admitted"),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            5,
+            "the departed sharing member contributes 5, the bauble nothing"
+        );
+    }
+
+    /// R2b keep-pause twin: the departed member reads the same first
+    /// selected target after a production capture and resume — natural 10
+    /// + 5 = 15. Dropping the parked reference at the record-door boundary
+    /// excludes the departed member and emits 10.
+    #[test]
+    fn parked_departed_shares_member_filter_reads_the_selected_target() {
+        let (mut state, ability, filter) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let captured = crate::game::targeting::capture_parked_slot_context(&state, &ability);
+        assert_eq!(
+            captured.declared_targets.len(),
+            1,
+            "reach guard: the selected target must travel"
+        );
+        let illegal = crate::game::targeting::carrier_illegal_slots(&state, &ability);
+        let modifier = crate::types::ability::DieRollModifier::Add {
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::PropertyAggregate(
+                    crate::types::ability::PropertyAggregate::new(
+                        AggregateFunction::Sum,
+                        ObjectProperty::Power,
+                        CardTypeSetSource::TrackedSet {
+                            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(filter),
+                        },
+                    )
+                    .expect("filtered ChainSet is admitted"),
+                ),
+            },
+        };
+        let pending = crate::types::resolution::PendingDieRoll {
+            source_id: ability.source_id,
+            controller: PlayerId(0),
+            roller: PlayerId(0),
+            quantity_controller: None,
+            scoped_player: None,
+            targets: ability.targets.clone(),
+            sides: 20,
+            results: vec![10],
+            ignore_rules: vec![],
+            results_table: vec![],
+            modifier: Some(modifier),
+            die_result: None,
+            next_index: 0,
+            running_total: 0,
+            rolled_any: false,
+            forced_ignored: vec![],
+            chain_root_targets: ability.context.chain_root_targets.clone(),
+            trigger_context: None,
+            illegal_target_slots: illegal,
+            chain_root_target_pins: vec![],
+            declared_capture: Some((&captured).into()),
+            local_target_pins: captured.local_pins,
+            keyed_target_incarnations: captured.keyed_target_incarnations,
+            declared_player: Some(captured.declared_player),
+        };
+        let mut events = Vec::new();
+        crate::game::effects::roll_die::resume_after_ignore(
+            &mut state,
+            pending,
+            Vec::new(),
+            &mut events,
+            None,
+        )
+        .expect("resuming the parked roll must not error");
+        let rolls: Vec<u8> = events
+            .iter()
+            .filter_map(|event| match event {
+                crate::types::events::GameEvent::DieRolled {
+                    result: Some(total),
+                    ..
+                } => Some(*total),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rolls,
+            vec![15],
+            "the departed sharing member contributes 5 (10 + 5); dropping the parked reference emits 10"
+        );
+    }
+
+    /// R2b: `reference = None` is the vacuous per-object pass the live door
+    /// gives (the CR 608.2b group constraint is validated at resolution, not
+    /// per member) — the departed brute and the live bauble are both
+    /// admitted, so the power sum reads 12. Red while the record door
+    /// fail-closes (7: the departed member excluded).
+    #[test]
+    fn none_reference_member_filter_admits_departed_members_vacuously() {
+        let (state, ability, _) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: None,
+                    relation: crate::types::ability::SharedQualityRelation::Shares,
+                }]),
+        );
+        let aggregate = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: Some(filter),
+                    },
+                )
+                .expect("filtered ChainSet is admitted"),
+            ),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &aggregate, &ability),
+            12,
+            "both members admitted vacuously (5 + 7)"
+        );
+    }
+
     /// MED1: hand-built refused shapes fail closed at resolution. A
     /// `DistinctFrom{ParentTarget}` member filter over the R2 staged set
     /// ([brute 5, bauble 7], ability targeting the brute) contributes
