@@ -472,6 +472,12 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "Resolution") {
     return undefined;
   }
+  if (data.resume.type === "TurnFaceUp") {
+    return (data.resume.source?.object_id ?? data.resume.object_id) as ObjectId;
+  }
+  if (data.resume.type === "SpellCost") {
+    return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
+  }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
 
@@ -526,9 +532,24 @@ function tapCreaturesAggregateSelection(aggregate: TapCreaturesAggregate): Board
   }
 }
 
+function isCancellablePayCost(
+  resume: Extract<WaitingFor, { type: "PayCost" }>["data"]["resume"],
+  allowsCancelCast?: boolean,
+): boolean {
+  if (allowsCancelCast !== undefined) {
+    return allowsCancelCast;
+  }
+  return (
+    resume.type === "Spell" ||
+    resume.type === "SpellCost" ||
+    resume.type === "TurnFaceUp"
+  );
+}
+
 export function getBoardChoiceView(
   waitingFor: WaitingFor | null | undefined,
   objects?: Record<ObjectId, GameObject | undefined>,
+  allowsCancelCast?: boolean,
 ): BoardChoiceView | null {
   switch (waitingFor?.type) {
     case "EffectZoneChoice": {
@@ -604,6 +625,8 @@ export function getBoardChoiceView(
     }
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
+      const canCancel = isCancellablePayCost(waitingFor.data.resume, allowsCancelCast);
+      const cancelAction = canCancel ? { type: "CancelCast" as const } : undefined;
       switch (waitingFor.data.kind.type) {
         case "Sacrifice":
           return {
@@ -613,7 +636,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "ReturnToHand":
           return {
@@ -623,7 +646,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "ExilePermanent":
           return {
@@ -633,7 +656,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "TapCreatures": {
           const { mode } = waitingFor.data.kind;
@@ -647,7 +670,7 @@ export function getBoardChoiceView(
                 : confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         }
         default:

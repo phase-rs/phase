@@ -5661,6 +5661,7 @@ fn keyword_supported(kw: &Keyword) -> bool {
     match kw {
         Keyword::Unknown(_) => false,
         Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
+        Keyword::Morph(cost) => cost.is_supported(),
         kw if printed_color_set_protection_is_unexpanded(kw) => false,
         _ => true,
     }
@@ -5671,6 +5672,9 @@ fn keyword_gap_label(kw: &Keyword) -> Option<String> {
         Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
         Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
             Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
+        }
+        Keyword::Morph(cost) if !cost.is_supported() => {
+            Some("Keyword:MorphUnsupportedCost".to_string())
         }
         kw if printed_color_set_protection_is_unexpanded(kw) => {
             Some("Keyword:ProtectionColorSetUnexpanded".to_string())

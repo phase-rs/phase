@@ -9375,6 +9375,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
         // CR 606.4 + CR 616.1: a fully-prevented loyalty counter add (e.g. an
@@ -9403,18 +9404,23 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::LoyaltyActivation { .. }
                     | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
                     | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                    | PendingCostMoveResume::TurnFaceUpCostMove { .. }
             )
         ),
-        CostMoveDrainBoundary::PriorityBoundary => matches!(
-            state.pending_cost_move_resume,
-            Some(
-                PendingCostMoveResume::Cast {
-                    completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
-                    ..
-                } | PendingCostMoveResume::ManaAbilityPayment { .. }
-                    | PendingCostMoveResume::CounterCostRemovalPayment { .. }
-            )
-        ),
+        CostMoveDrainBoundary::PriorityBoundary => {
+            state.pending_replacement.is_none()
+                && matches!(
+                    state.pending_cost_move_resume,
+                    Some(
+                        PendingCostMoveResume::Cast {
+                            completion: PendingCostMoveCompletion::FinalizeDelvedCast { .. },
+                            ..
+                        } | PendingCostMoveResume::ManaAbilityPayment { .. }
+                            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                            | PendingCostMoveResume::TurnFaceUpCostMove { .. }
+                    )
+                )
+        }
     };
     if !eligible {
         return Ok(None);
@@ -9490,6 +9496,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         // returns a replacement choice; the delivered boundary resumes the
         // payment through its already-authorized paid epilogue.
         engine_payment_choices::resume_random_discard_unless_payment(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
+    ) {
+        super::morph::resume_turn_face_up_cost_move(state, events, action_event_start)?
     } else {
         unreachable!("eligible cost-move root must remain parked")
     };
@@ -10039,6 +10050,20 @@ fn drain_pending_deferred_life_cost_resume(
                     state, player, *resume, events,
                 )
             }
+            crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
+                player,
+                source,
+                cost_source,
+                resume_at_resolution_depth: _,
+                remaining_cost,
+            } => super::morph::finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            ),
         }
     })();
     if result.is_err()
@@ -12146,10 +12171,11 @@ fn apply_action(
     // CR 104.3a: A player may concede at any time. Concede bypasses the WaitingFor
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
-    // owned it (see `eliminate_player`).
+    // owned it (see `elimination::concede`), and queues what the departure triggered
+    // (CR 603.6c), since no pipeline scans this action's events.
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
-        super::elimination::eliminate_player(state, player_id, &mut events);
+        super::elimination::concede(state, player_id, &mut events);
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
@@ -13527,9 +13553,9 @@ fn apply_non_priority_pass_action(
                     "Counter-cost distribution is not valid for mana abilities".to_string(),
                 ));
             }
-            CostResume::Resolution => {
+            CostResume::Resolution | CostResume::TurnFaceUp { .. } => {
                 return Err(EngineError::InvalidAction(
-                    "Counter-cost distribution is not valid for resolution costs".to_string(),
+                    "Counter-cost distribution is not valid for this cost".to_string(),
                 ));
             }
         },
@@ -13872,6 +13898,84 @@ fn apply_non_priority_pass_action(
                     ));
                 }
             },
+            CostResume::TurnFaceUp {
+                source,
+                cost_source,
+                remaining_cost,
+            } => {
+                if chosen.len() != *count {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Must choose exactly {} permanent(s)/card(s)",
+                        count
+                    )));
+                }
+                // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
+                let mut seen = std::collections::HashSet::new();
+                for &id in chosen.iter() {
+                    if !seen.insert(id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected cards/permanents must be distinct".into(),
+                        ));
+                    }
+                    if !choices.contains(&id) {
+                        return Err(EngineError::InvalidAction(
+                            "Selected card or permanent is not eligible".to_string(),
+                        ));
+                    }
+                }
+                match kind {
+                    PayCostKind::ReturnToHand | PayCostKind::Discard | PayCostKind::Sacrifice => {
+                        use crate::types::game_state::TurnFaceUpMoveKind;
+                        let move_kind = match kind {
+                            PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
+                            PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
+                            _ => TurnFaceUpMoveKind::Sacrifice,
+                        };
+                        // CR 702.37e + CR 118.3: the selected objects move together as
+                        // one cost component through the shared turn-face-up move loop.
+                        let cost_event_start = events.len();
+                        super::morph::move_turn_face_up_cost_objects(
+                            state,
+                            super::morph::TurnFaceUpCostMoveRequest {
+                                player: *player,
+                                source: *source,
+                                cost_source: *cost_source,
+                                move_kind,
+                                chosen: chosen.clone(),
+                                start_at_index: 0,
+                                remaining_cost: remaining_cost.clone(),
+                            },
+                            super::casting_costs::CostMoveLedger::default(),
+                            cost_event_start,
+                            &mut events,
+                        )?
+                    }
+                    PayCostKind::Reveal => {
+                        let revealed_names = chosen
+                            .iter()
+                            .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                            .collect();
+                        events.push(GameEvent::CardsRevealed {
+                            player: *player,
+                            card_ids: chosen.to_vec(),
+                            card_names: revealed_names,
+                        });
+                        super::morph::finish_or_continue_turn_face_up(
+                            state,
+                            *player,
+                            *source,
+                            *cost_source,
+                            remaining_cost.clone(),
+                            &mut events,
+                        )?
+                    }
+                    _ => {
+                        return Err(EngineError::InvalidAction(
+                            "Cost kind cannot resume a turn-face-up PayCost".into(),
+                        ));
+                    }
+                }
+            }
         },
         // CR 601.2: Player backed out of a cost-payment choice. Only spell
         // casts can be cancelled; mana-ability cost payment has no cancel path.
@@ -13890,6 +13994,17 @@ fn apply_non_priority_pass_action(
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events)?,
+        (
+            WaitingFor::PayCost {
+                player,
+                resume: CostResume::TurnFaceUp { .. },
+                ..
+            },
+            GameAction::CancelCast,
+        ) => {
+            state.waiting_for = WaitingFor::Priority { player: *player };
+            state.waiting_for.clone()
+        }
         // CR 118.3: Player selected permanents to sacrifice as cost.
         (
             WaitingFor::ActivationCostOneOfChoice {
@@ -21403,7 +21518,7 @@ mod priority_principal_tests {
             object.base_card_types = object.card_types.clone();
             object.mana_cost = ManaCost::generic(8);
             object.base_mana_cost = object.mana_cost.clone();
-            object.keywords = vec![Keyword::Morph(ManaCost::generic(5))];
+            object.keywords = vec![Keyword::morph(ManaCost::generic(5))];
             object.base_keywords = object.keywords.clone();
         }
         let sibling_spell = zones::create_object(

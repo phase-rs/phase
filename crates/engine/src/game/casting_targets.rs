@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    AbilityCost, AbilityTag, AdditionalCost, Effect, ModalChoice, QuantityExpr, ResolvedAbility,
-    TargetRef, TargetSelectionMode,
+    AbilityCost, AbilityTag, Effect, ModalChoice, QuantityExpr, ResolvedAbility, TargetRef,
+    TargetSelectionMode,
 };
 use crate::types::casting_costs::SettledTail;
 use crate::types::events::GameEvent;
@@ -24,7 +24,7 @@ use super::ability_utils::{
 use super::announcement_triggers::stage_announcement_trigger_events;
 use super::casting_costs::{
     cost_has_x, drain_deferred_triggers_after_stack_object_announcement, enter_payment_step,
-    finish_pending_cast_cost_or_pay,
+    finish_pending_cast_cost_or_pay, split_declared_mana_addition_and_residual,
     target_first_activation_defers_interactive_costs_to_payment_boundary,
     TargetFirstPaymentHandoff,
 };
@@ -136,10 +136,6 @@ pub(crate) fn handle_select_modes(
                 pending.ability.chosen_x,
             );
         }
-    }
-    if let Some(cost) = escalate_cost_for_selected_modes(state, controller, &pending, indices.len())
-    {
-        pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
     }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
@@ -648,18 +644,42 @@ pub(crate) fn compute_modal_total_cost(
 
     // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
     if indices.len() == modal.mode_count {
-        if let Some(ref entwine_cost) = modal.entwine_cost {
-            total = restrictions::add_mana_cost(&total, entwine_cost);
+        if let Some(entwine_cost) = modal.entwine_cost.as_deref() {
+            if let Ok(split) =
+                split_declared_mana_addition_and_residual(None, None, entwine_cost.clone())
+            {
+                for declared_mana in split.declared {
+                    total = restrictions::add_mana_cost(&total, &declared_mana);
+                }
+            }
         }
     }
 
     total
 }
 
-fn escalate_cost_for_selected_modes(
+/// CR 702.42a: Returns the non-mana portion of the entwine cost if present.
+pub(crate) fn extract_entwine_additional_cost(
+    modal: &ModalChoice,
+    indices: &[usize],
+) -> Option<AbilityCost> {
+    if indices.len() == modal.mode_count {
+        let entwine_cost = modal.entwine_cost.as_deref()?;
+        match split_declared_mana_addition_and_residual(None, None, entwine_cost.clone()) {
+            Ok(split) => split.residual,
+            // CR 601.2h: If the entwine cost cannot be split (e.g. an unresolved choice cost),
+            // preserve the full cost as the additional cost rather than letting it become free.
+            Err(_) => Some(entwine_cost.clone()),
+        }
+    } else {
+        None
+    }
+}
+
+pub(crate) fn escalate_cost_for_selected_modes_count(
     state: &GameState,
     player: PlayerId,
-    pending: &PendingCast,
+    object_id: ObjectId,
     selected_mode_count: usize,
 ) -> Option<AbilityCost> {
     let additional_modes = selected_mode_count.checked_sub(1)?;
@@ -673,7 +693,7 @@ fn escalate_cost_for_selected_modes(
     // `CastWithKeyword` `affected` filter keyed on the combined mana value / colors
     // — a class that does not arise for Escalate. If a fused split spell were ever
     // granted Escalate by a value-keyed static, this would need the `_for` variant.
-    let cost = super::casting::effective_spell_keywords(state, player, pending.object_id)
+    let cost = super::casting::effective_spell_keywords(state, player, object_id)
         .into_iter()
         .find_map(|keyword| match keyword {
             Keyword::Escalate(cost) => Some(cost),
@@ -885,7 +905,9 @@ mod tests {
             min_choices: 1,
             max_choices: 2,
             mode_count: 2,
-            entwine_cost: Some(ManaCost::generic(2)),
+            entwine_cost: Some(Box::new(AbilityCost::Mana {
+                cost: ManaCost::generic(2),
+            })),
             ..ModalChoice::default()
         };
         let base = ManaCost::zero();

@@ -70,7 +70,7 @@ fn a_face_down_creature_spell_gets_kadenas_reduction() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     scenario.with_mana_pool(P0, colorless(3));
@@ -101,7 +101,7 @@ fn dream_chisels_unconditional_reduction_reaches_a_face_down_spell() {
     scenario.add_creature_from_oracle(P0, "Chisel Bearer", 2, 2, DREAM_CHISEL_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     scenario.with_mana_pool(P0, colorless(3));
@@ -135,12 +135,12 @@ fn only_the_first_face_down_spell_each_turn_is_reduced() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let first = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     let second = scenario
         .add_creature_to_hand(P0, "Second Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     // Exactly enough for a reduced first cast ({0}) plus a full second one ({3}).
@@ -187,7 +187,7 @@ fn kadena_lets_a_face_down_creature_be_cast_with_an_empty_pool() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     // No mana at all.
@@ -219,7 +219,7 @@ fn the_face_down_offer_shows_the_reduced_cost() {
     scenario.add_creature_from_oracle(P0, "Snake Sorcerer", 3, 3, KADENA_TEXT);
     let morph = scenario
         .add_creature_to_hand(P0, "Secret Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(5))
         .id();
     // Enough for the printed {5} too, so the player is given the CHOICE menu
@@ -253,7 +253,7 @@ fn off_color_mana_pays_the_generic_face_down_cost() {
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_hand(P0, "Ainok Survivalist", 2, 1)
-        .with_keyword(Keyword::Morph(ManaCost::Cost {
+        .with_keyword(Keyword::morph(ManaCost::Cost {
             shards: vec![ManaCostShard::Green],
             generic: 1,
         }))
@@ -327,7 +327,7 @@ fn exile_morph_with_competing_permissions(
     scenario.at_phase(Phase::PreCombatMain);
     let morph = scenario
         .add_creature_to_exile(P0, "Foretold Beast", 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4)))
+        .with_keyword(Keyword::morph(ManaCost::generic(4)))
         .with_mana_cost(ManaCost::generic(4))
         .id();
     scenario.with_mana_pool(P0, colorless(pool));

@@ -980,16 +980,10 @@ impl PendingActivationTriggerCollection {
         for operation in self.operation_journal {
             let _ = TriggerCollectionSession::apply_operation(state, operation);
         }
-        for context in self.pending_contexts {
-            if super::players::is_alive(state, context.pending.controller) {
-                deferred_contexts.push(context);
-            } else {
-                crate::game::lifecycle::record_delayed_terminal(
-                    context.firing(),
-                    crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
-                );
-            }
-        }
+        deferred_contexts.extend(retire_departed_controller_contexts(
+            state,
+            self.pending_contexts,
+        ));
     }
 
     fn rebuild_staged_state(&self, state: &GameState) -> GameState {
@@ -2645,9 +2639,7 @@ pub(crate) fn allocate_logical_zone_change_group(
     state: &mut GameState,
     announced_members: &[ObjectId],
 ) -> LogicalZoneChangeGroup {
-    let mut immediately_before_state = state.clone();
-    super::layers::flush_layers(&mut immediately_before_state);
-    reconcile_off_zone_keyword_triggers(&mut immediately_before_state);
+    let immediately_before_state = immediately_before_projection(state);
     let mut group = state.allocate_logical_zone_change_group(announced_members);
     latch_logical_zone_change_group_immediately_before(&immediately_before_state, &mut group);
     group
@@ -5745,30 +5737,51 @@ fn collect_pending_triggers_with_collection(
                 // damage-history conditions to choose between accepting every
                 // off-battlefield same-id source or rejecting valid co-death
                 // LKI. The record context preserves both cases precisely.
-                let observer_source_context = events.iter().find_map(|observer_event| {
-                    let GameEvent::ZoneChanged {
-                        object_id,
-                        record,
-                        ..
-                    } = observer_event
-                    else {
-                        return None;
-                    };
-                    if *object_id != observer_id || !record.co_departed.contains(moved_id) {
-                        return None;
-                    }
-                    match crate::types::game_state::battlefield_departure_trigger_source_context(
-                        observer_event,
-                    ) {
-                        crate::types::game_state::BattlefieldDepartureSourceContext::Present(
-                            context,
-                        ) => Some(context),
-                        crate::types::game_state::BattlefieldDepartureSourceContext::Absent
-                        | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
-                            None
+                // CR 608.2h: A replacement-paused cost move can deliver the
+                // observer's departure in an earlier action fragment, so it is
+                // absent from `events`; its stamped per-turn record is the same
+                // authority and is consulted when the event is not at hand.
+                let observer_source_context = events
+                    .iter()
+                    .find_map(|observer_event| {
+                        let GameEvent::ZoneChanged {
+                            object_id,
+                            record,
+                            ..
+                        } = observer_event
+                        else {
+                            return None;
+                        };
+                        if *object_id != observer_id || !record.co_departed.contains(moved_id) {
+                            return None;
                         }
-                    }
-                });
+                        match crate::types::game_state::battlefield_departure_trigger_source_context(
+                            observer_event,
+                        ) {
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                                context,
+                            ) => Some(context),
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                            | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                                None
+                            }
+                        }
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        let record = co_departed_observer_record(state, observer_id, *moved_id)?;
+                        match crate::types::game_state::battlefield_departure_source_context_from_record(
+                            record,
+                        ) {
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Present(
+                                context,
+                            ) => Some(context.clone()),
+                            crate::types::game_state::BattlefieldDepartureSourceContext::Absent
+                            | crate::types::game_state::BattlefieldDepartureSourceContext::Malformed => {
+                                None
+                            }
+                        }
+                    });
                 let Some(observer_source_context) = observer_source_context else {
                     continue;
                 };
@@ -5777,19 +5790,25 @@ fn collect_pending_triggers_with_collection(
                 // correctly for co-departed Curse Auras whose live
                 // `attached_to` was cleared by
                 // `sever_battlefield_attachment_graph_on_exit`.
-                let lki_attached_to = events.iter().find_map(|ev| {
-                    if let GameEvent::ZoneChanged {
-                        object_id: oid,
-                        record: rec,
-                        ..
-                    } = ev
-                    {
-                        if *oid == observer_id {
-                            return rec.attached_to;
+                let lki_attached_to = events
+                    .iter()
+                    .find_map(|ev| {
+                        if let GameEvent::ZoneChanged {
+                            object_id: oid,
+                            record: rec,
+                            ..
+                        } = ev
+                        {
+                            if *oid == observer_id {
+                                return rec.attached_to;
+                            }
                         }
-                    }
-                    None
-                });
+                        None
+                    })
+                    .or_else(|| {
+                        co_departed_observer_record(state, observer_id, *moved_id)
+                            .and_then(|record| record.attached_to)
+                    });
                 // The save/mutate/collect/restore discipline lives in one place
                 // and is shared with the CR 603.10f player-loss arm below.
                 let matched_triggers = collect_observer_triggers_under_lki_attachment(
@@ -5798,7 +5817,7 @@ fn collect_pending_triggers_with_collection(
                     lki_attached_to,
                     event,
                     events,
-                    observer_source_context,
+                    &observer_source_context,
                     &mut batched_this_pass,
                     &mut registered_this_event,
                     &active_suppress_triggers,
@@ -6880,6 +6899,10 @@ fn collect_pending_triggers_with_collection(
     // then clone matching pending triggers.
     apply_trigger_doubling(state, &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
+
+    // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities
+    // look back to a controller who may have left with it (CR 603.10a).
+    let mut pending = retire_departed_controller_contexts(state, pending);
 
     // CR 603.3b + CR 101.4 + CR 805.6/805.7: Stack-placement order is full
     // APNAP turn order. Shared-team-turn formats rank/order by team while
@@ -8568,6 +8591,140 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
+/// CR 800.4d: a triggered ability that would be controlled by a player who has
+/// left the game isn't put on the stack. Retires each such context as
+/// `Eliminated` and returns the rest in their order.
+pub(crate) fn retire_departed_controller_contexts(
+    state: &GameState,
+    contexts: Vec<PendingTriggerContext>,
+) -> Vec<PendingTriggerContext> {
+    let (live, departed): (Vec<_>, Vec<_>) = contexts
+        .into_iter()
+        .partition(|context| super::players::is_alive(state, context.pending.controller));
+    for context in departed {
+        crate::game::lifecycle::record_delayed_terminal(
+            context.firing(),
+            crate::game::lifecycle::DelayedTerminalDisposition::Eliminated,
+        );
+    }
+    live
+}
+
+/// CR 603.10: the game as it was immediately before an event, with layers
+/// flushed and off-zone keyword triggers reconciled: the authority that
+/// look-back triggers read their sources from. Shared by the logical
+/// zone-change owner and the player-leaves-game procedure.
+fn immediately_before_projection(state: &GameState) -> GameState {
+    let mut immediately_before_state = state.clone();
+    super::layers::flush_layers(&mut immediately_before_state);
+    reconcile_off_zone_keyword_triggers(&mut immediately_before_state);
+    immediately_before_state
+}
+
+/// CR 603.10 + CR 603.10a + CR 603.3a: the observers of an event batch as they
+/// were immediately before it, latched before the batch happens. A
+/// leaves-the-battlefield ability looks back in time: it triggers, and its
+/// controller is the player who controlled its source, as the source appeared
+/// immediately before the event: when a player leaves the game, their objects
+/// leave in the same event that ends their control effects (CR 800.4a), and
+/// the look-back reads an observer they had stolen as theirs.
+pub(crate) struct ImmediatelyBeforeObservers {
+    state: GameState,
+}
+
+impl ImmediatelyBeforeObservers {
+    pub(crate) fn latch(state: &GameState) -> Self {
+        Self {
+            state: immediately_before_projection(state),
+        }
+    }
+
+    /// Collect the ordinary triggered abilities `events` trigger, matched
+    /// against the latched observers, into `state.deferred_triggers`. The
+    /// collector's ledger operations are replayed onto `state`, and a context
+    /// whose controller has left the game is retired against `state`
+    /// (CR 800.4d), the same commit an announcement-local collection makes.
+    fn collect_into_deferred(mut self, state: &mut GameState, events: &[GameEvent]) {
+        let mut session = TriggerCollectionSession::transactional(
+            TriggerCollectionOverlay::default(),
+            Vec::new(),
+        );
+        let contexts = collect_pending_triggers_with_collection(
+            &mut self.state,
+            events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut session,
+        );
+        for operation in session.into_operation_journal() {
+            let _ = TriggerCollectionSession::apply_operation(state, operation);
+        }
+        let live = retire_departed_controller_contexts(state, contexts);
+        state.deferred_triggers.extend(live);
+    }
+}
+
+/// CR 603.10: the events of a player's departure that the abilities they
+/// trigger look back on: an object leaving the game with its owner
+/// (CR 603.10a: leaves-the-battlefield abilities are the only ones that see it),
+/// an Aura or Equipment becoming unattached from it (CR 603.10c), and a
+/// permanent phasing out (CR 603.10b). Everything else, such as the monarch or
+/// the initiative changing hands, is checked immediately after it.
+fn departure_event_looks_back(event: &GameEvent) -> bool {
+    match event {
+        GameEvent::ZoneChanged { record, .. } => record.departure.left_game(),
+        GameEvent::Unattached { .. } | GameEvent::PermanentPhasedOut { .. } => true,
+        _ => false,
+    }
+}
+
+/// CR 603.2 + CR 603.2c + CR 603.7: Collect the ordinary and delayed triggered
+/// abilities that `events[event_start..]` trigger into `state.deferred_triggers`,
+/// skipping occurrences a collector already claimed. For an action whose events
+/// no post-action pipeline scans (a concession, CR 104.3a): the same collect step
+/// the pipeline runs, without its dispatch.
+///
+/// `looked_back` names the observers latched before `events[event_start..split]`
+/// happened; that prefix's look-back events (objects leaving the game and
+/// becoming unattached, CR 603.10a + CR 603.10c) are matched against them,
+/// every other event against the live game.
+/// Delayed abilities carry their controller from creation and are matched live.
+pub(crate) fn collect_unclaimed_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    looked_back: Option<(ImmediatelyBeforeObservers, usize)>,
+) {
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let mut ordinary =
+        filter_already_collected_trigger_events_from(state, events, event_start, &consumed);
+    if let Some((observers, split)) = looked_back {
+        // CR 603.10: only the departure's look-back events are matched against
+        // the observers as they were before it (`departure_event_looks_back`);
+        // every other event of the prefix (the monarch or the initiative
+        // changing hands, the player leaving) is checked against the game
+        // immediately after it, like the rest.
+        let looked_back_events: Vec<GameEvent> = filter_already_collected_trigger_events_from(
+            state,
+            &events[..split],
+            event_start,
+            &consumed,
+        )
+        .into_iter()
+        .filter(departure_event_looks_back)
+        .collect();
+        ordinary.retain(|event| !looked_back_events.contains(event));
+        observers.collect_into_deferred(state, &looked_back_events);
+    }
+    collect_triggers_into_deferred(state, &ordinary);
+    let delayed = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Delayed,
+        &consumed,
+    );
+    collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
+}
+
 /// Collect a completed SBA batch that paused on an SBA-owned player choice.
 ///
 /// The marker is a narrow scheduling ownership record, not a general queue
@@ -8671,6 +8828,20 @@ pub(crate) fn take_sba_choice_trigger_batch(
     sba_choice
 }
 
+/// CR 603.10a + CR 608.2h: The most recent battlefield-departure record of
+/// `observer_id` that names `moved_id` in its simultaneous-departure group.
+fn co_departed_observer_record(
+    state: &GameState,
+    observer_id: ObjectId,
+    moved_id: ObjectId,
+) -> Option<&crate::types::game_state::ZoneChangeRecord> {
+    state.zone_changes_this_turn.iter().rev().find(|record| {
+        record.object_id == observer_id
+            && record.from_zone == Some(Zone::Battlefield)
+            && record.co_departed.contains(&moved_id)
+    })
+}
+
 /// CR 603.2 + CR 603.3b: Park observer triggers emitted during a resolution-time
 /// player choice that pauses on another prompt before the action settles.
 /// Mirrors `batch_or_drain_observer_triggers`' B2 branch: events are queued in
@@ -8709,6 +8880,28 @@ pub(crate) fn park_observer_triggers_if_paused(
     if !trigger_events.is_empty() {
         collect_triggers_into_deferred(state, &trigger_events);
     }
+}
+
+/// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
+/// before reaching priority.
+pub(crate) fn park_delayed_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &[GameEvent],
+    slice_start: usize,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    let unclaimed = unclaimed_trigger_events_from(
+        events,
+        slice_start,
+        TriggerCollectionRequester::Delayed,
+        &state.consumed_before_priority_trigger_events,
+    );
+    collect_unclaimed_delayed_triggers_into_deferred(state, events, &unclaimed);
 }
 
 /// CR 603.2c + CR 614.12a: of the already-unclaimed `candidates`, the observer
@@ -14891,7 +15084,7 @@ fn collect_matching_delayed_triggers(
     }
 
     let mut consumed_events = Vec::new();
-    let mut pending: Vec<PendingTriggerContext> = to_fire
+    let pending: Vec<PendingTriggerContext> = to_fire
         .into_iter()
         .map(
             |(mut trigger, consume, trigger_events, removed_one_shot, matched_alternative)| {
@@ -14932,6 +15125,9 @@ fn collect_matching_delayed_triggers(
             },
         )
         .collect();
+    // CR 800.4d: a delayed ability whose controller left the game fires into
+    // nothing; its one-shot record is already gone.
+    let mut pending = retire_departed_controller_contexts(state, pending);
 
     // CR 603.3b + CR 101.4: APNAP stack-placement order for the firing batch.
     // Stable sort; the per-batch timestamp (state.turn_number) is constant, so it
@@ -15419,13 +15615,15 @@ fn delayed_trigger_event_with_index(
                 .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
                 .map(|(idx, event)| (idx, event.clone()))
         }
+        // CR 603.6c + CR 702.26k: a phased-in permanent leaving the game with its
+        // owner leaves the battlefield; a phased-out one triggers nothing.
         DelayedTriggerCondition::WhenLeavesPlay { object_id } => events
             .iter()
             .enumerate()
             .find(|(_, e)| {
                 matches!(e,
-                    GameEvent::ZoneChanged { object_id: id, from: Some(Zone::Battlefield), .. }
-                    if *id == *object_id
+                    GameEvent::ZoneChanged { object_id: id, from: Some(Zone::Battlefield), record, .. }
+                    if *id == *object_id && record.departure.observed_leaving_battlefield(false)
                 )
             })
             .map(|(idx, event)| (idx, event.clone())),
@@ -15467,6 +15665,7 @@ fn delayed_trigger_event_with_index(
             )
         }
         // "when [object] dies or is exiled" — zone change to graveyard OR exile from battlefield.
+        // CR 800.4a: an object that left the game with its owner was not exiled.
         DelayedTriggerCondition::WhenDiesOrExiled { filter } => events
             .iter()
             .enumerate()
@@ -15476,8 +15675,9 @@ fn delayed_trigger_event_with_index(
                     GameEvent::ZoneChanged {
                         from: Some(Zone::Battlefield),
                         to: Zone::Graveyard | Zone::Exile,
+                        record,
                         ..
-                    }
+                    } if record.departure.observed_leaving_battlefield(true)
                 ) && matches!(
                     e,
                     GameEvent::ZoneChanged { object_id, .. }
@@ -15579,9 +15779,15 @@ fn delayed_zone_change_event_with_index(
                     object_id,
                     from: event_from,
                     to: event_to,
-                    ..
+                    record,
                 } if from.is_none_or(|zone| *event_from == Some(zone))
                     && to.is_none_or(|zone| *event_to == zone)
+                    // CR 800.4a + CR 603.6c: an object that left the game with its
+                    // owner went to no zone; only a leaves-the-battlefield watcher
+                    // naming no destination sees it.
+                    && (record.departure.is_moved()
+                        || (from == Some(Zone::Battlefield)
+                            && record.departure.observed_leaving_battlefield(to.is_some())))
                     && delayed_zone_change_filter_matches(
                         state,
                         *object_id,
@@ -15593,6 +15799,41 @@ fn delayed_zone_change_event_with_index(
             )
         })
         .map(|(idx, event)| (idx, event.clone()))
+}
+
+/// CR 603.2 + CR 503.1a + CR 117.3a: Is a beginning-of-phase trigger `def`, on a permanent
+/// `controller` controls, scoped to fire during `active`'s turn? "At the beginning of your
+/// upkeep" fires only on its controller's turn; "each player's" (no turn constraint) fires on
+/// every player's. Only the turn-scoping constraints narrow it; per-turn counters, class levels
+/// and event-source constraints don't decide whose phase it is and answer yes. Read-only, for
+/// callers asking whether a phase will open with a trigger, where yes is the conservative answer.
+pub fn phase_trigger_scoped_to_turn_of(
+    state: &GameState,
+    def: &crate::types::ability::TriggerDefinition,
+    controller: PlayerId,
+    active: PlayerId,
+) -> bool {
+    use crate::types::ability::TriggerConstraint;
+    match &def.constraint {
+        None => true,
+        Some(
+            TriggerConstraint::OnlyDuringYourTurn | TriggerConstraint::OnlyDuringYourMainPhase,
+        ) => active == controller,
+        // CR 102.3: team-aware, the same authority as the live constraint check.
+        Some(TriggerConstraint::OnlyDuringOpponentsTurn) => {
+            super::players::is_opponent(state, controller, active)
+        }
+        Some(
+            TriggerConstraint::OncePerTurn
+            | TriggerConstraint::OncePerGame
+            | TriggerConstraint::NthSpellThisTurn { .. }
+            | TriggerConstraint::NthDrawThisTurn { .. }
+            | TriggerConstraint::AtClassLevel { .. }
+            | TriggerConstraint::MaxTimesPerTurn { .. }
+            | TriggerConstraint::OncePerOpponentPerTurn
+            | TriggerConstraint::EventSourceControlledBy { .. },
+        ) => true,
+    }
 }
 
 /// Match a delayed zone-change subject against its condition filter.
