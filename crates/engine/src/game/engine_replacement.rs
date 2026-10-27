@@ -377,6 +377,7 @@ fn handle_replacement_choice_inner(
     if let Some(delivery) = parked_zone_change_delivery.as_ref() {
         effects::normalize_warp_zone_delivery_tail(state, delivery);
     }
+    let parked_aggregate_opportunity = super::replacement::pending_damage_has_opportunity(state);
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -624,7 +625,12 @@ fn handle_replacement_choice_inner(
                     // leg still gains the combined lifelink total.
                     ctx.excess_recipient = parked_excess_recipient;
                     ctx.lifelink_bonus = parked_lifelink_bonus;
-                    let _ = apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    if !parked_aggregate_opportunity || is_combat {
+                        let _ =
+                            apply_damage_after_replacement(state, &ctx, damage, is_combat, events);
+                    }
+                    // Otherwise the opportunity owner retained this exact event
+                    // on its existing ApplyPost continuation before its gain.
                 }
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).

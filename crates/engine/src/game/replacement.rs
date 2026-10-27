@@ -10163,9 +10163,9 @@ fn apply_single_replacement_with_definition(
                 // `PostReplacementDamageSource` reflection target) is the per-source
                 // marker; Inkshield/New Way Forward carry neither and keep batching.
                 //
-                // A next-time source shield covers the source's complete
-                // simultaneous opportunity too. Its captured rider belongs to
-                // the same aggregate path, including after a replacement pause.
+                // A next-time GainLife rider is instead frozen by the shared
+                // opportunity owner and runs before damage results. Other
+                // runtime riders retain this existing aggregate disposition.
                 let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                     && repl_def.runtime_execute.is_some()
                     && !repl_def
@@ -10892,7 +10892,59 @@ fn apply_single_replacement_and_dirty(
     result
 }
 
-pub(crate) fn noncombat_opportunity_rider(definition: &ReplacementDefinition) -> bool {
+/// CR 120.4c + CR 120.4d: evaluate mandatory typed life floors against the
+/// modified event, after immediate prevention gains. Reuse the existing full
+/// matcher, including its independently live condition/recipient/source facts.
+/// Optional floors keep their chosen damage-stage behavior.
+pub(crate) fn apply_damage_result_life_floor(
+    state: &GameState,
+    mut event: ProposedEvent,
+    source: Option<&TriggerSourceContext>,
+) -> ProposedEvent {
+    fn minimum(state: &GameState, rid: ReplacementId) -> Option<i32> {
+        let definition = replacement_definition_for_id(state, rid)?;
+        if !matches!(definition.mode, ReplacementMode::Mandatory) {
+            return None;
+        }
+        match definition.damage_modification {
+            Some(DamageModification::LifeFloor { minimum }) => Some(minimum),
+            _ => None,
+        }
+    }
+    let ProposedEvent::Damage {
+        target: TargetRef::Player(player),
+        ..
+    } = &event
+    else {
+        return event;
+    };
+    let player = *player;
+    let mut probe = event.clone();
+    probe
+        .applied_set_mut()
+        .retain(|key| minimum(state, key.as_replacement_id()).is_none());
+    let candidates = find_applicable_replacements_with_damage_source_context(
+        state,
+        &probe,
+        replacement_registry(),
+        source,
+    );
+    if let ProposedEvent::Damage { amount, .. } = &mut event {
+        let life = state
+            .players
+            .iter()
+            .find(|candidate| candidate.id == player)
+            .map_or(0, |player| player.life);
+        for floor in candidates.into_iter().filter_map(|rid| minimum(state, rid)) {
+            if life >= floor {
+                *amount = (*amount).min(life.saturating_sub(floor).max(0) as u32);
+            }
+        }
+    }
+    event
+}
+
+pub(crate) fn immediate_opportunity_gain_rider(definition: &ReplacementDefinition) -> bool {
     matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
         && definition.runtime_execute.as_deref().is_some_and(|rider| {
             rider.repeat_for.is_none()
@@ -10905,7 +10957,7 @@ pub(crate) fn noncombat_opportunity_rider(definition: &ReplacementDefinition) ->
 /// Convert the owned total into the rider's existing quantity before parking it,
 /// so an interactive gain and independent following instructions cannot reread a
 /// later event's count. Definitions and amounts never enter ordinary children.
-pub(crate) fn take_noncombat_opportunity_riders(
+pub(crate) fn take_immediate_opportunity_gain_riders(
     state: &mut GameState,
     opportunity: &mut crate::types::ability::DamageOpportunity,
 ) -> Option<ResolvedAbility> {
@@ -10967,17 +11019,16 @@ fn apply_single_replacement_and_record_opportunity(
         })
         .cloned();
     let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-    // CR 615.5 + CR 615.8: this rider belongs to the complete noncombat
+    // CR 615.5 + CR 615.8: this rider belongs to the complete damage
     // instance. Keep its actual definition in the opportunity; the individual
     // recipient applies prevention without stashing the same rider again.
     let aggregate_amount = match &proposed {
-        ProposedEvent::Damage {
-            amount,
-            is_combat: false,
-            ..
-        } if opportunity.prevention_tally.is_some()
-            && matches!(branch, ReplacementBranch::Execute)
-            && before.as_ref().is_some_and(noncombat_opportunity_rider) =>
+        ProposedEvent::Damage { amount, .. }
+            if opportunity.prevention_tally.is_some()
+                && matches!(branch, ReplacementBranch::Execute)
+                && before
+                    .as_ref()
+                    .is_some_and(immediate_opportunity_gain_rider) =>
         {
             Some(*amount)
         }
@@ -10989,6 +11040,22 @@ fn apply_single_replacement_and_record_opportunity(
         if let Some(definition) = individual.as_mut() {
             definition.runtime_execute = None;
         }
+    }
+    // CR 120.4c + CR 120.4d: a mandatory life floor is a damage-result
+    // decision. In an owned batch, prevention and its immediate gain finish
+    // first; the existing delivery seam then uses the same typed matcher.
+    if is_damage
+        && opportunity.prevention_tally.is_some()
+        && before.as_ref().is_some_and(|definition| {
+            matches!(definition.mode, ReplacementMode::Mandatory)
+                && matches!(
+                    definition.damage_modification,
+                    Some(DamageModification::LifeFloor { .. })
+                )
+        })
+    {
+        individual = before.clone();
+        individual.as_mut().unwrap().damage_modification = None;
     }
     let result = apply_single_replacement_and_dirty(
         state,
@@ -11004,7 +11071,7 @@ fn apply_single_replacement_and_record_opportunity(
         let tally = opportunity
             .prevention_tally
             .as_mut()
-            .expect("owned noncombat tally");
+            .expect("owned immediate-gain tally");
         if let Some((_, total)) = tally.iter_mut().find(|(used, _)| *used == key) {
             *total += amount as i32;
         } else {
@@ -12909,6 +12976,27 @@ pub(crate) fn replace_combat_damage_batch(
             }
         }
         let Some(event) = work.remaining.pop_front() else {
+            // CR 120.4b + CR 120.4c + CR 120.4d + CR 615.5: the whole one-shot prevention gain is
+            // part of this modified event, before damage results are decided.
+            // Consume its tally before running it; a paused gain leaves the
+            // completed survivors on this same combat replacement-work owner.
+            if let Some(rider) =
+                take_immediate_opportunity_gain_riders(state, &mut work.opportunity)
+            {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                state.install_ready_continuation(PostReplacementContinuation::Resolved(Box::new(
+                    rider,
+                )));
+                if let Some(waiting) =
+                    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    )
+                {
+                    return Some(waiting);
+                }
+            }
             return None;
         };
         let source = work
@@ -13004,12 +13092,54 @@ fn continue_search_found_after_decline(
     }
 }
 
+pub(crate) fn same_damage_opportunity_work(
+    left: &crate::types::ability::DamageOpportunity,
+    right: &crate::types::ability::DamageOpportunity,
+) -> bool {
+    left.definitions == right.definitions
+        && left.prevention_tally.as_deref().unwrap_or_default()
+            == right.prevention_tally.as_deref().unwrap_or_default()
+}
+
+/// A real damage continuation or nonempty event map owns the bounded batch.
+/// The empty-map serde omission does not remove its marked raw continuation.
+pub(crate) fn pending_damage_has_opportunity(state: &GameState) -> bool {
+    state.pending_replacement.as_ref().is_some_and(|pending| {
+        matches!(
+            pending.proposed,
+            ProposedEvent::Damage {
+                is_combat: false,
+                ..
+            }
+        ) && (!pending.damage_opportunity.is_empty()
+            || pending.damage_opportunity.prevention_tally.is_some()
+            || state
+                .active_ability_continuation()
+                .is_some_and(|continuation| {
+                    continuation
+                        .chain
+                        .context
+                        .damage_opportunity
+                        .as_ref()
+                        .is_some_and(|owned| {
+                            same_damage_opportunity_work(owned, &pending.damage_opportunity)
+                        })
+                }))
+    })
+}
+
 fn continue_replacement_impl(
     state: &mut GameState,
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     let child_boundary = state.resolution_stack.capture_child_boundary();
+    let owns_damage_opportunity = pending_damage_has_opportunity(state);
+    let pending_damage = state
+        .pending_replacement
+        .as_ref()
+        .filter(|_| owns_damage_opportunity)
+        .cloned();
     let continuation_before = state.active_ability_continuation_frame().cloned();
     let combat_event = state.pending_replacement.as_ref().is_some_and(|pending| {
         matches!(
@@ -13029,12 +13159,23 @@ fn continue_replacement_impl(
         .as_ref()
         .map(|pending| pending.damage_opportunity.clone())
         .unwrap_or_default();
+    // A serialized empty map may omit its field. The actual parked Damage
+    // event still owns this occurrence; unrelated child events start empty.
+    if owns_damage_opportunity || combat_event {
+        opportunity.prevention_tally.get_or_insert_with(Vec::new);
+    }
     let owns_remainder = state
         .pending_replacement
         .as_ref()
         .is_some_and(|pending| matches!(pending.proposed, ProposedEvent::Damage { .. }))
         && continuation_before.as_ref().is_some_and(|frame| {
-            frame.pending.chain.context.damage_opportunity.as_ref() == Some(&opportunity)
+            frame
+                .pending
+                .chain
+                .context
+                .damage_opportunity
+                .as_ref()
+                .is_some_and(|owned| same_damage_opportunity_work(owned, &opportunity))
         });
     let result = continue_replacement_in_opportunity(state, chosen_index, events, &mut opportunity);
     if let Some(work) = state
@@ -13061,8 +13202,40 @@ fn continue_replacement_impl(
             node = current.sub_ability.as_deref_mut();
         }
     }
+    if let (
+        Some(pending),
+        ReplacementResult::Execute(event @ ProposedEvent::Damage { source_id, .. }),
+    ) = (&pending_damage, &result)
+    {
+        let mut ctx = if let Some(source) = pending.damage_source_context.as_deref() {
+            crate::game::effects::deal_damage::DamageContext::from_trigger_source(state, source)
+                .expect("the continued damage event validated its exact source authority")
+        } else {
+            crate::game::effects::deal_damage::DamageContext::from_source(state, *source_id)
+                .unwrap_or_else(|| {
+                    crate::game::effects::deal_damage::DamageContext::fallback(
+                        *source_id,
+                        state.active_player,
+                    )
+                })
+        };
+        ctx.excess_recipient = pending.excess_recipient;
+        ctx.lifelink_bonus = pending.lifelink_bonus;
+        let mut delivery_opportunity = opportunity.clone();
+        if !owns_remainder {
+            // The completed owner's real gain is frozen below, before this
+            // post-replacement delivery; it cannot remain owed a second time.
+            delivery_opportunity.prevention_tally = None;
+        }
+        crate::game::effects::deal_damage::park_resumed_opportunity_survivor(
+            state,
+            ctx,
+            event,
+            delivery_opportunity,
+        );
+    }
     if !combat_event && !owns_remainder && !matches!(result, ReplacementResult::NeedsChoice(_)) {
-        if let Some(rider) = take_noncombat_opportunity_riders(state, &mut opportunity) {
+        if let Some(rider) = take_immediate_opportunity_gain_riders(state, &mut opportunity) {
             if state.resolution_stack.capture_child_boundary() > child_boundary {
                 let pending = PendingContinuation::new(Box::new(rider), state);
                 state.insert_ability_continuation_parent_at_child_boundary(pending, child_boundary)

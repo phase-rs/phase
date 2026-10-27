@@ -1635,6 +1635,7 @@ pub(crate) fn apply_combat_damage(
     }
 
     let mut work = crate::types::game_state::PendingCombatReplacementWork::new(proposed_events);
+    work.opportunity.prevention_tally = Some(Vec::new());
     work.entries = entries
         .into_iter()
         .map(|entry| crate::types::game_state::PendingCombatDamageEntry {
@@ -1667,6 +1668,29 @@ fn finish_combat_replacements(
         .replacement_work
         .take()
         .expect("replacement work is owned");
+    // Canonical older work may retain this one-shot gain on the former combat
+    // tally. Its complete saved definition determines the same immediate stage.
+    // Move that owed amount once, preserving continuous/distributive riders.
+    for (key, total) in std::mem::take(&mut record.prevention_tally) {
+        if work.opportunity.iter().any(|(used, definition)| {
+            *used == key && replacement::immediate_opportunity_gain_rider(definition)
+        }) {
+            let tally = work
+                .opportunity
+                .prevention_tally
+                .get_or_insert_with(Vec::new);
+            if let Some((_, amount)) = tally.iter_mut().find(|(used, _)| *used == key) {
+                *amount += total;
+            } else {
+                tally.push((key, total));
+            }
+        } else {
+            record.prevention_tally.push((key, total));
+        }
+    }
+    work.opportunity
+        .prevention_tally
+        .get_or_insert_with(Vec::new);
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(record.prevention_tally.iter().copied().collect());
     let pause =
@@ -6004,6 +6028,239 @@ mod tests {
                 );
                 assert!(resumed.state().owed_spell_final_part().is_none());
                 assert!(combat(&resumed).regular_damage_done);
+            }
+        }
+    }
+
+    #[test]
+    fn paid_awe_worship_modified_combat_event_keeps_the_cr120_4d_life_total() {
+        use crate::types::ability::ReplacementMode;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::resolution::ResolutionStateWire;
+        for use_awe in [false, true] {
+            for pause_gain in [false, true] {
+                if !use_awe && pause_gain {
+                    continue;
+                }
+                for wire in [false, true] {
+                    let mut scenario = GameScenario::new();
+                    scenario.at_phase(Phase::PreCombatMain).with_life(P1, 2);
+                    let first = scenario.add_creature(P0, "First attacker", 5, 5).id();
+                    let second = scenario.add_creature(P0, "Second attacker", 5, 5).id();
+                    scenario.add_creature(P1, "Worship creature", 0, 5);
+                    let worship = scenario.add_enchantment_from_oracle(P1, "Worship", "If you control a creature, damage that would reduce your life total to less than 1 reduces it to 1 instead.").id();
+                    let awe = scenario.add_spell_to_hand_from_oracle(P1, "Awe Strike", true,
+                        "The next time target creature would deal damage this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+                        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 0 }).id();
+                    scenario.with_mana_pool(
+                        P1,
+                        vec![ManaUnit::new(ManaType::White, ObjectId(0), false, vec![])],
+                    );
+                    let mut runner = scenario.build();
+                    if use_awe {
+                        runner.act(GameAction::PassPriority).unwrap();
+                        runner.cast(awe).target_object(first).resolve();
+                        assert!(
+                            runner.state().players[1].mana_pool.is_empty(),
+                            "the full spell actually paid W"
+                        );
+                        assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+                        if pause_gain {
+                            runner.state_mut().pending_damage_replacements.push(
+                                ReplacementDefinition::new(ReplacementEvent::GainLife)
+                                    .mode(ReplacementMode::Optional { decline: None }),
+                            );
+                            let mut competitor =
+                                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                                    .damage_source_filter(TargetFilter::SpecificObject {
+                                        id: second,
+                                    })
+                                    .damage_modification(DamageModification::Double)
+                                    .mode(ReplacementMode::Optional { decline: None });
+                            competitor.source_controller = Some(P1);
+                            runner
+                                .state_mut()
+                                .pending_damage_replacements
+                                .push(competitor);
+                        }
+                    }
+                    drive_to_combat_damage(&mut runner, &[first, second], vec![]);
+                    assert_eq!(runner.state().phase, Phase::CombatDamage);
+                    let mut gains = Vec::new();
+                    if use_awe {
+                        let pending = runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .expect("Awe and Worship require an actual ordering choice");
+                        assert!(
+                            matches!(pending.proposed, ProposedEvent::Damage { source_id, amount: 5, .. } if source_id == first)
+                        );
+                        let choice = pending
+                            .candidates
+                            .iter()
+                            .position(|rid| rid.source == ObjectId(0) && rid.index == 0)
+                            .unwrap();
+                        assert!(
+                            pending.candidates.iter().any(|rid| rid.source == worship),
+                            "the exact Worship competitor is reached"
+                        );
+                        let saved = if wire {
+                            serde_json::to_value(ResolutionStateWire::from_game_state(
+                                runner.state().clone(),
+                            ))
+                            .unwrap()
+                        } else {
+                            serde_json::to_value(runner.state()).unwrap()
+                        };
+                        *runner.state_mut() = if wire {
+                            serde_json::from_value::<ResolutionStateWire>(saved)
+                                .unwrap()
+                                .into_game_state()
+                        } else {
+                            serde_json::from_value(saved).unwrap()
+                        };
+                        let result = runner
+                            .act(GameAction::ChooseReplacement { index: choice })
+                            .unwrap();
+                        gains.extend(result.events.iter().filter_map(|event| match event {
+                            GameEvent::LifeChanged {
+                                player_id, amount, ..
+                            } if *player_id == P1 && *amount > 0 => Some(*amount),
+                            _ => None,
+                        }));
+                        if pause_gain {
+                            assert!(matches!(runner.state().pending_replacement.as_ref().unwrap().proposed, ProposedEvent::Damage { source_id, amount: 5, .. } if source_id == second), "the second source's actual replacement pause follows completed Awe prevention");
+                            let batch = runner.state().pending_combat_lifelink.as_ref().unwrap();
+                            let tally = batch
+                                .replacement_work
+                                .as_ref()
+                                .unwrap()
+                                .opportunity
+                                .prevention_tally
+                                .as_ref()
+                                .unwrap();
+                            assert_eq!(tally.iter().map(|(_, amount)| *amount).sum::<i32>(), 5);
+                            // The prior aggregate writer parked this owed one-shot
+                            // amount on the existing combat tally. Preserve that
+                            // determinate saved work, at its corrected stage.
+                            let old_tally = tally.clone();
+                            let mut saved = if wire {
+                                serde_json::to_value(ResolutionStateWire::from_game_state(
+                                    runner.state().clone(),
+                                ))
+                                .unwrap()
+                            } else {
+                                serde_json::to_value(runner.state()).unwrap()
+                            };
+                            saved["pending_combat_lifelink"]["prevention_tally"] =
+                                serde_json::to_value(old_tally).unwrap();
+                            saved["pending_combat_lifelink"]["replacement_work"]["opportunity"]
+                                ["prevention_tally"] = serde_json::Value::Null;
+                            saved["pending_replacement"]["damage_opportunity"]
+                                ["prevention_tally"] = serde_json::Value::Null;
+                            *runner.state_mut() = if wire {
+                                serde_json::from_value::<ResolutionStateWire>(saved)
+                                    .unwrap()
+                                    .into_game_state()
+                            } else {
+                                serde_json::from_value(saved).unwrap()
+                            };
+                            let pending = runner.state().pending_replacement.as_ref().unwrap();
+                            let order = pending
+                                .candidates
+                                .iter()
+                                .position(|rid| rid.source == ObjectId(0) && rid.index == 2)
+                                .unwrap();
+                            runner
+                                .act(GameAction::ChooseReplacement { index: order })
+                                .unwrap();
+                            assert!(
+                                runner
+                                    .state()
+                                    .pending_replacement
+                                    .as_ref()
+                                    .unwrap()
+                                    .is_optional,
+                                "the chosen damage modifier has its own actual accept/decline"
+                            );
+                            let result = runner
+                                .act(GameAction::ChooseReplacement { index: 1 })
+                                .unwrap();
+                            gains.extend(result.events.iter().filter_map(|event| match event {
+                                GameEvent::LifeChanged {
+                                    player_id, amount, ..
+                                } if *player_id == P1 && *amount > 0 => Some(*amount),
+                                _ => None,
+                            }));
+                            assert!(
+                                matches!(runner.state().pending_replacement.as_ref().unwrap().proposed, ProposedEvent::LifeGain { player_id, amount: 5, .. } if player_id == P1)
+                            );
+                            assert_eq!(
+                                runner.life(P1),
+                                2,
+                                "no survivor damage result precedes the paused prevention gain"
+                            );
+                            let work = runner
+                                .state()
+                                .pending_combat_lifelink
+                                .as_ref()
+                                .unwrap()
+                                .replacement_work
+                                .as_ref()
+                                .unwrap();
+                            assert!(
+                                work.remaining.is_empty() && work.survivors.len() == 2,
+                                "the actual completed replacement pass retains its survivors"
+                            );
+                            assert!(
+                                work.opportunity.prevention_tally.is_none(),
+                                "the real paused gain owns its frozen five exactly once"
+                            );
+                            let saved = if wire {
+                                serde_json::to_value(ResolutionStateWire::from_game_state(
+                                    runner.state().clone(),
+                                ))
+                                .unwrap()
+                            } else {
+                                serde_json::to_value(runner.state()).unwrap()
+                            };
+                            *runner.state_mut() = if wire {
+                                serde_json::from_value::<ResolutionStateWire>(saved)
+                                    .unwrap()
+                                    .into_game_state()
+                            } else {
+                                serde_json::from_value(saved).unwrap()
+                            };
+                            let result = runner
+                                .act(GameAction::ChooseReplacement { index: 1 })
+                                .unwrap();
+                            gains.extend(result.events.iter().filter_map(|event| match event {
+                                GameEvent::LifeChanged {
+                                    player_id, amount, ..
+                                } if *player_id == P1 && *amount > 0 => Some(*amount),
+                                _ => None,
+                            }));
+                        }
+                        assert_eq!(gains, vec![5]);
+                    }
+                    assert_eq!(runner.life(P1), if use_awe { 2 } else { 1 }, "CR 120.4d: remaining five damage and prevention gain five form the same modified event; reached no-Awe control still reaches Worship");
+                    assert!(combat(&runner).regular_damage_done);
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        runner.state().pending_replacement.is_none()
+                            && runner.state().pending_combat_lifelink.is_none()
+                    );
+                    assert!(
+                        runner.state().stack.is_empty()
+                            && runner.state().resolution_stack.is_empty()
+                            && runner.state().deferred_triggers.is_empty()
+                    );
+                    assert!(runner.state().owed_spell_final_part().is_none());
+                }
             }
         }
     }

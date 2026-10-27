@@ -28294,15 +28294,15 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 Value::String(tag) => tag == "ChosenDamageSource",
                 Value::Object(object) => {
                     if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource") {
-                        return true;
+                        return object.get("chooser").is_none_or(Value::is_null);
                     }
-                    if matches!(
-                        object.get("type").and_then(Value::as_str),
-                        Some("CreateDelayedTrigger" | "AddTargetReplacement" | "CreateEmblem")
-                    ) {
-                        return false;
-                    }
-                    object.values().any(has_reader)
+                    let effect_type = object.get("type").and_then(Value::as_str);
+                    object.iter().any(|(key, child)| {
+                        !crate::types::ability::is_registered_damage_source_payload(
+                            effect_type,
+                            key,
+                        ) && has_reader(child)
+                    })
                 }
                 Value::Array(array) => array.iter().any(has_reader),
                 _ => false,
@@ -28428,14 +28428,17 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         }
                         return;
                     }
-                    if matches!(
-                        object.get("type").and_then(Value::as_str),
-                        Some("CreateDelayedTrigger" | "AddTargetReplacement" | "CreateEmblem")
-                    ) {
-                        return;
-                    }
-                    for child in object.values_mut() {
-                        retain_historical_recheck(child, qualifier);
+                    let effect_type = object
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    for (key, child) in object.iter_mut() {
+                        if !crate::types::ability::is_registered_damage_source_payload(
+                            effect_type.as_deref(),
+                            key,
+                        ) {
+                            retain_historical_recheck(child, qualifier);
+                        }
                     }
                 }
                 Value::Array(array) => {
@@ -28591,7 +28594,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                                 || !rider_keys.insert(*key)
                                 || !map.iter().any(|(owned, definition)| {
                                     owned == key
-                                        && crate::game::replacement::noncombat_opportunity_rider(
+                                        && crate::game::replacement::immediate_opportunity_gain_rider(
                                             definition,
                                         )
                                 })
@@ -30066,7 +30069,10 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 pub struct PendingReplacement {
     /// CR 609.7a + CR 615.8: same-operation consumed definitions for this exact
     /// parked event, including the final recipient with no later continuation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ability::DamageOpportunity::is_empty"
+    )]
     pub damage_opportunity: crate::types::ability::DamageOpportunity,
     /// Private source authority for this exact damage event, established before
     /// any replacement consult, including synchronous replay.

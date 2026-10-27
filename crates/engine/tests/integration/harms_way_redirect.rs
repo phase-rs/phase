@@ -406,10 +406,12 @@ fn harms_way_redirects_a_lightning_strike_on_the_stack_to_a_chosen_creature() {
     );
     strike_commit
         .act(GameAction::ChooseDamageSource {
-            source: engine::types::identifiers::ObjectIncarnationRef::of(
-                strike,
-                runner.state().objects[&strike].incarnation,
-            ),
+            source: options
+                .iter()
+                .find(|option| option.identity.reference.object_id == strike)
+                .expect("the asserted offered Lightning Strike source")
+                .identity
+                .reference,
         })
         .expect("P0 chooses Lightning Strike as the source");
 

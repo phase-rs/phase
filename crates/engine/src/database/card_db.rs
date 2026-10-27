@@ -3407,7 +3407,11 @@ mod complete_source_choice_publication_tests {
 
     // CR 608.2c + CR 614.1: the same-resolution reader follows its producer;
     // a registered replacement's substitute resolves at its own later event.
-    fn assert_source_program_public_flow(face: &CardFace, canonical: Option<bool>) {
+    fn assert_source_program_public_flow(
+        face: &CardFace,
+        canonical: Option<bool>,
+        selected_scalar: bool,
+    ) {
         use crate::game::scenario::{GameScenario, P0};
         use crate::types::ability::*;
         use crate::types::actions::GameAction;
@@ -3416,8 +3420,33 @@ mod complete_source_choice_publication_tests {
         use crate::types::mana::{ManaType, ManaUnit};
         use crate::types::phase::Phase;
         use crate::types::replacements::ReplacementEvent;
+        let mut face = face.clone();
+        if selected_scalar {
+            let own_reader = face.abilities[0].sub_ability.take().unwrap();
+            face.abilities[0].effect = Box::new(Effect::ChooseDamageSource {
+                source_filter: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::You),
+                ),
+            });
+            face.abilities[0].sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(own_reader.clone()),
+                    lose_effect: Some(own_reader),
+                    flipper: TargetFilter::Controller,
+                },
+            )));
+        }
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
+        if selected_scalar {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+        }
         scenario.with_library_top(P0, &["Library A", "Library B"]);
         let damage = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -3472,6 +3501,126 @@ mod complete_source_choice_publication_tests {
         runner
             .act(GameAction::ChooseDamageSource { source: first_ref })
             .unwrap();
+        if selected_scalar {
+            let WaitingFor::CoinFlipKeepChoice {
+                keep_count,
+                results,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("public source answer must reach its actual selected flip pause");
+            };
+            assert_eq!(*keep_count, 1);
+            assert_eq!(results.len(), 2);
+            assert_eq!(
+                runner
+                    .state()
+                    .active_coin_flip_frame()
+                    .unwrap()
+                    .branch_context
+                    .damage_source_choice
+                    .as_ref()
+                    .unwrap()
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .identity
+                    .reference,
+                first_ref
+            );
+            let wire = canonical.expect("selected scalar exercises canonical owners");
+            let mut raw = if wire {
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(
+                        runner.state().clone(),
+                    ),
+                )
+                .unwrap()
+            } else {
+                serde_json::to_value(runner.state()).unwrap()
+            };
+            let frames = if wire {
+                "resolution_frames"
+            } else {
+                "resolution_stack"
+            };
+            raw["last_chosen_damage_source"] = serde_json::json!({"source_id":first, "source_filter":TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You))});
+            raw.as_object_mut()
+                .unwrap()
+                .remove("resolved_rules_journal");
+            for frame in raw[frames]["frames"].as_array_mut().unwrap() {
+                if frame["type"] == "CoinFlip" {
+                    frame["data"]["branch_context"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("damage_source_choice");
+                }
+            }
+            omit_source_choosers(&mut raw, false);
+            let mut solely_registered = raw.clone();
+            fn remove_own_readers(node: &mut serde_json::Value) {
+                match node {
+                    serde_json::Value::Object(object) => {
+                        if object.get("type").and_then(serde_json::Value::as_str)
+                            == Some("ChosenDamageSource")
+                        {
+                            *node = serde_json::json!({"type":"Any"});
+                            return;
+                        }
+                        let effect_type = object
+                            .get("type")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned);
+                        for (key, child) in object.iter_mut() {
+                            if !crate::types::ability::is_registered_damage_source_payload(
+                                effect_type.as_deref(),
+                                key,
+                            ) {
+                                remove_own_readers(child);
+                            }
+                        }
+                    }
+                    serde_json::Value::Array(values) => {
+                        for child in values {
+                            remove_own_readers(child);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for frame in solely_registered[frames]["frames"].as_array_mut().unwrap() {
+                if frame["type"] == "CoinFlip" {
+                    remove_own_readers(&mut frame["data"]);
+                }
+            }
+            let error = if wire {
+                serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    solely_registered,
+                )
+                .unwrap_err()
+                .to_string()
+            } else {
+                serde_json::from_value::<crate::types::game_state::GameState>(solely_registered)
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(
+                error.contains("selected-source continuation owner is incoherent"),
+                "a solely registered later reader cannot own this scalar: {error}"
+            );
+            *runner.state_mut() = if wire {
+                serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(raw)
+                    .unwrap()
+                    .into_game_state()
+            } else {
+                serde_json::from_value(raw).unwrap()
+            };
+            runner
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                })
+                .unwrap();
+        }
         runner.advance_until_stack_empty();
         let installed = &runner.state().pending_damage_replacements;
         assert!(
@@ -3484,6 +3633,22 @@ mod complete_source_choice_publication_tests {
             ),
             "the actual own-resolution reader installs its chosen-source shield"
         );
+        if selected_scalar {
+            assert!(
+                installed
+                    .iter()
+                    .any(|definition| definition.damage_source_filter
+                        == Some(TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::SpecificObject { id: first },
+                                TargetFilter::Typed(
+                                    TypedFilter::default().controller(ControllerRef::You)
+                                )
+                            ]
+                        })),
+                "the rightful old own reader retains its actual continuing qualifier"
+            );
+        }
         assert!(installed.iter().any(
             |definition| definition.event == ReplacementEvent::Draw && !definition.is_consumed
         ));
@@ -3527,6 +3692,21 @@ mod complete_source_choice_publication_tests {
                 ),
             "the later body binds its own answer, never the first choice"
         );
+        if selected_scalar {
+            assert!(
+                runner
+                    .state()
+                    .pending_damage_replacements
+                    .iter()
+                    .any(|definition| definition
+                        .selected_damage_source
+                        .as_ref()
+                        .is_some_and(|source| source.identity.reference == second_ref)
+                        && definition.damage_source_filter
+                            == Some(TargetFilter::SpecificObject { id: second })),
+                "the later fresh producer never receives the old owner's continuing You qualifier"
+            );
+        }
         assert_eq!(
             runner.state().players[0].library.len(),
             2,
@@ -3590,6 +3770,7 @@ mod complete_source_choice_publication_tests {
                 assert_source_program_public_flow(
                     db.get_face_by_name(&expected.name).unwrap(),
                     None,
+                    false,
                 );
             }
         }
@@ -3598,7 +3779,14 @@ mod complete_source_choice_publication_tests {
     #[test]
     fn both_canonical_legacy_readers_keep_later_fresh_choice_and_genuine_own_reader() {
         for wire in [false, true] {
-            assert_source_program_public_flow(&source_program_face(), Some(wire));
+            assert_source_program_public_flow(&source_program_face(), Some(wire), false);
+        }
+    }
+
+    #[test]
+    fn both_canonical_selected_scalar_readers_preserve_own_recheck_and_later_fresh_prompt() {
+        for wire in [false, true] {
+            assert_source_program_public_flow(&source_program_face(), Some(wire), true);
         }
     }
 

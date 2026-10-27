@@ -2314,6 +2314,24 @@ pub fn continuous_prevention_lifetime() -> RedirectionLifetime {
     RedirectionLifetime::Continuous
 }
 
+/// Independent payload fields from ability_visit::visit_effect_scoped. Keep raw
+/// ingress ownership on the same own-resolution/registered-later boundary.
+pub(crate) fn is_registered_damage_source_payload(effect_type: Option<&str>, key: &str) -> bool {
+    matches!(
+        (effect_type, key),
+        (
+            Some("CreateDrawReplacement" | "CreatePlaneswalkReplacement"),
+            "replacement_effect"
+        ) | (Some("CreateDelayedTrigger"), "effect")
+            | (Some("CreateBoon"), "trigger")
+            | (Some("GenericEffect" | "Token"), "static_abilities")
+            | (Some("AddTargetReplacement"), "replacement")
+            | (Some("Counter"), "source_rider")
+            | (Some("CreateEmblem"), "statics" | "triggers")
+            | (Some("ReturnAsAura"), "grants")
+    )
+}
+
 /// Normalize legacy chooser omission while the complete lexical program is owned.
 /// Generic serde remains format-generic; only complete JSON ingress calls this.
 pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Value) {
@@ -2354,19 +2372,8 @@ pub(crate) fn normalize_legacy_damage_source_program(value: &mut serde_json::Val
                     // the producer. Match the registered payload boundaries of
                     // ability_visit::visit_effect_scoped, not all of the creator's
                     // operands: each later program begins its own scope.
-                    let registered_payload = matches!(
-                        (effect_type.as_deref(), key.as_str()),
-                        (
-                            Some("CreateDrawReplacement" | "CreatePlaneswalkReplacement"),
-                            "replacement_effect"
-                        ) | (Some("CreateDelayedTrigger"), "effect")
-                            | (Some("CreateBoon"), "trigger")
-                            | (Some("GenericEffect" | "Token"), "static_abilities")
-                            | (Some("AddTargetReplacement"), "replacement")
-                            | (Some("Counter"), "source_rider")
-                            | (Some("CreateEmblem"), "statics" | "triggers")
-                            | (Some("ReturnAsAura"), "grants")
-                    );
+                    let registered_payload =
+                        is_registered_damage_source_payload(effect_type.as_deref(), key);
                     let owned = !registered_payload
                         && (inherited || selected || (producer && key == "sub_ability"));
                     walk(child, owned);
@@ -35463,7 +35470,8 @@ pub struct PendingForwardedZoneResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DamageOpportunity {
     pub definitions: Vec<(AppliedReplacementKey, ReplacementDefinition)>,
-    /// CR 615.5 + CR 615.8: settle a next-instance rider after all recipients.
+    /// CR 615.5 + CR 615.8 + CR 120.4c: settle the next-instance gain after
+    /// every recipient's prevention, before processing surviving damage results.
     #[serde(default)]
     pub prevention_tally: Option<Vec<(AppliedReplacementKey, i32)>>,
 }
