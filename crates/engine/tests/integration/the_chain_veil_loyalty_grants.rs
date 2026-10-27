@@ -144,6 +144,7 @@ fn install_competing_counter_addition_replacements(state: &mut GameState) {
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
     ResolvedAbility {
         detached_remainder: engine::types::ability::DetachedRemainder::NoProducer,
+        coin_branch_target_abilities: Vec::new(),
         effect: Effect::GrantExtraLoyaltyActivations {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
