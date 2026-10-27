@@ -5797,6 +5797,7 @@ fn build_continuous_clause(
     names_deferred: bool,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
+    let normalized_lower = normalized.to_lowercase();
     // CR 702.14a + CR 608.2d: a chosen landwalk parameter needs the basic-land
     // choice bound by the resolving ability. A literal Landwalk(String) cannot
     // carry that binding, and must not absorb its duration as a subtype name.
@@ -5811,7 +5812,7 @@ fn build_continuous_clause(
             value((), eof),
         ))),
     )
-        .parse(normalized.to_lowercase().as_str())
+        .parse(normalized_lower.as_str())
         .is_ok()
     {
         return Some(super::parsed_clause(Effect::unimplemented(
