@@ -11931,7 +11931,7 @@ fn latched_doubler_property(
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::ControllerMatches { .. }
-        | FilterProp::WasPlayed { .. }
+        | FilterProp::WasPlayed
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -11999,7 +11999,7 @@ fn latched_doubler_property(
         | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
-        | FilterProp::WasKicked { .. }
+        | FilterProp::WasKicked
         | FilterProp::HasManaAbility
         | FilterProp::HasNoAbilities
         | FilterProp::Named { .. }
