@@ -1323,7 +1323,14 @@ fn extract_token_static_abilities(text: &str, token_name: &str) -> Vec<StaticDef
             break;
         };
         let quoted = &text[abs_start..abs_start + end];
-        push_parsed_statics(quoted.trim(), token_name, &mut statics);
+        // In Oracle's quoted-ability enumeration the separating comma can be
+        // printed before the closing quotation mark. It is punctuation of
+        // the enumeration, not an incomplete inner rules instruction.
+        push_parsed_statics(
+            quoted.trim().trim_end_matches(',').trim_end(),
+            token_name,
+            &mut statics,
+        );
         pos = abs_start + end + '"'.len_utf8();
     }
 

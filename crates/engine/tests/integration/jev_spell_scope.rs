@@ -26,6 +26,674 @@ const CHOICE: &str = "Seek two cards. You may shuffle them into your library. If
 const DISCOVER: &str = "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"";
 const TEFERI: &str = "Counter target spell. Each card in its controller's graveyard, hand, and library with the same name as that spell perpetually gains \"This spell costs {2} more to cast.\"";
 
+#[test]
+fn refused_standing_cast_permission_preserves_its_whole_rarity_restriction() {
+    const ORACLE: &str = "You may look at the top card of your library any time.\nYou may cast common spells from the top of your library.\nGuests you control get +1/+1.";
+    let parsed = parse_oracle_text(
+        ORACLE,
+        "Lila, Hospitality Hostess",
+        &[],
+        &["Creature".into()],
+        &["Elf".into(), "Employee".into()],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        2,
+        "independent complete standing abilities survive: {parsed:#?}"
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    assert_eq!(
+        parsed.abilities[0].effect.unimplemented_description(),
+        Some("You may cast common spells from the top of your library.")
+    );
+    assert!(
+        parsed.abilities[0].sub_ability.is_none(),
+        "a partial cast permission must not survive beneath the whole refusal"
+    );
+}
+
+#[test]
+fn preserved_numeric_block_limit_allows_one_blocker_and_refuses_two() {
+    const ROCKSTEADY: &str = "Rocksteady can't be blocked by more than one creature.\nBoars you control can't be blocked by more than one creature.\nForestcycling {2} ({2}, Discard this card: Search your library for a Forest card, reveal it, put it into your hand, then shuffle.)";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rocksteady = scenario
+        .add_creature_from_oracle(P0, "Rocksteady, Crash Courser", 7, 7, ROCKSTEADY)
+        .with_subtypes(vec!["Boar", "Mutant"])
+        .id();
+    let boar = scenario
+        .add_creature(P0, "Other Boar", 2, 2)
+        .with_subtypes(vec!["Boar"])
+        .id();
+    let first = scenario.add_creature(P1, "First legal blocker", 1, 3).id();
+    let second = scenario.add_creature(P1, "Second legal blocker", 1, 3).id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (rocksteady, AttackTarget::Player(P1)),
+            (boar, AttackTarget::Player(P1)),
+        ])
+        .unwrap();
+    runner.advance_to_phase(Phase::DeclareBlockers);
+    // The numeric restriction is neither a broad creature-type exclusion nor
+    // unblockable: one ordinary creature can legally block each attacker.
+    assert!(runner
+        .declare_blockers(&[(first, rocksteady), (second, rocksteady)])
+        .is_err());
+    runner
+        .declare_blockers(&[(first, rocksteady), (second, boar)])
+        .unwrap();
+    runner.combat_damage();
+    assert_eq!(runner.state().players[1].life, 20);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn preserved_definite_creature_slot_pumps_only_the_announced_fighter() {
+    for (name, oracle, cost, colors, generic, power, instant) in [
+        ("Tail Swipe", "Choose target creature you control and target creature you don't control. If you cast this spell during your main phase, the creature you control gets +1/+1 until end of turn. Then those creatures fight each other. (Each deals damage equal to its power to the other.)", "{G}", vec![ManaType::Green], 0, 3, true),
+        ("Joust", "Choose target creature you control and target creature you don't control. The creature you control gets +2/+1 until end of turn if it's a Knight. Then those creatures fight each other. (Each deals damage equal to its power to the other.)", "{1}{R}", vec![ManaType::Red], 1, 4, false),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(generic, &colors));
+        let chosen = scenario.add_creature(P0, "Chosen Knight", 2, 5).with_subtypes(vec!["Knight"]).id();
+        let bystander = scenario.add_creature(P0, "Other Knight", 2, 5).with_subtypes(vec!["Knight"]).id();
+        let opponent = scenario.add_creature(P1, "Other fighter", 3, 8).id();
+        let spell = scenario.add_spell_to_hand_from_oracle(P0, name, instant, oracle).with_mana_cost(printed_cost(cost)).id();
+        let mut runner = scenario.build();
+        let outcome = runner.cast(spell).target_objects(&[chosen, opponent]).resolve();
+        // CR 608.2c: the definite description reads the declared friendly slot.
+        assert_eq!(outcome.state().objects[&chosen].power, Some(power));
+        assert_eq!(outcome.state().objects[&opponent].damage_marked, power as u32);
+        assert_eq!(outcome.state().objects[&bystander].power, Some(2));
+        assert_eq!(outcome.state().objects[&bystander].damage_marked, 0);
+        assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+        assert_spell_complete(outcome.state());
+    }
+}
+
+#[test]
+fn preserved_singular_damage_keeps_its_source_when_the_recipient_is_announced() {
+    const AMBUSCADE: &str = "Target creature you control gets +1/+0 until end of turn. It deals damage equal to its power to target creature an opponent controls.";
+    for remove_source in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(2, &[ManaType::Green]));
+        scenario.with_mana_pool(P1, spell_pool(0, &[ManaType::Blue]));
+        let source = scenario
+            .add_creature(P0, "Lifelink source", 2, 4)
+            .with_keyword(Keyword::Lifelink)
+            .id();
+        let recipient = scenario.add_creature(P1, "Damage recipient", 7, 8).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Ambuscade", true, AMBUSCADE)
+            .with_mana_cost(printed_cost("{2}{G}"))
+            .id();
+        let response = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Unsummon",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .with_mana_cost(printed_cost("{U}"))
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .cast(spell)
+            .target_objects(&[source, recipient])
+            .commit();
+        if remove_source {
+            if runner.state().priority_player == P0 {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            runner.cast(response).target_object(source).resolve();
+        } else {
+            runner.advance_until_stack_empty();
+        }
+        // CR 120.1 + CR 608.2b: the recipient never becomes the damage source;
+        // a source removed in response cannot deal damage using its old power.
+        assert_eq!(
+            runner.state().objects[&recipient].damage_marked,
+            if remove_source { 0 } else { 3 }
+        );
+        assert_eq!(
+            runner.state().players[0].life,
+            if remove_source { 20 } else { 23 }
+        );
+        assert_eq!(runner.state().objects[&source].damage_marked, 0);
+        assert_eq!(
+            runner.state().objects[&source].zone,
+            if remove_source {
+                Zone::Hand
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_spell_complete(runner.state());
+    }
+}
+
+#[test]
+fn preserved_named_permanent_damage_uses_the_countered_permanent_not_the_cast_spell() {
+    const RIPLEY: &str = "Whenever you cast your third spell each turn, put a +1/+1 counter on Captain Ripley Vance, then it deals damage equal to its power to any target.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let captain = scenario
+        .add_creature_from_oracle(P0, "Captain Ripley Vance", 3, 2, RIPLEY)
+        .id();
+    let recipient = scenario.add_creature(P1, "Ripley recipient", 9, 10).id();
+    let spells: Vec<_> = (0..3)
+        .map(|_| {
+            scenario
+                .add_creature_to_hand_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
+                .as_artifact_creature()
+                .with_mana_cost(printed_cost("{0}"))
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    for spell in &spells[..2] {
+        runner.cast(*spell).resolve();
+        assert_eq!(runner.state().objects[&recipient].damage_marked, 0);
+    }
+    let outcome = runner.cast(spells[2]).target_object(recipient).resolve();
+    assert_eq!(outcome.state().objects[&captain].power, Some(4));
+    assert_eq!(outcome.state().objects[&recipient].damage_marked, 4);
+    assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::DamageDealt { source_id, target: engine::types::ability::TargetRef::Object(id), amount: 4, .. } if *source_id == captain && *id == recipient)));
+    assert!(outcome.events().iter().all(|event| !matches!(event, GameEvent::DamageDealt { source_id, .. } if spells.contains(source_id))));
+    assert_spell_complete(outcome.state());
+}
+
+#[test]
+fn preserved_counter_threshold_damage_keeps_the_artifact_source_across_the_cast_event() {
+    const RECORDING: &str = "Whenever you cast an instant or sorcery spell, put a time counter on this artifact. Then if there are seven or more time counters on it, remove those counters and it deals 20 damage to you.\n{T}: When you next cast an instant or sorcery spell this turn, copy that spell. You may choose new targets for the copy.";
+    let mut scenario = GameScenario::new();
+    scenario
+        .at_phase(Phase::PreCombatMain)
+        .with_life(P0, 40)
+        .with_life(P1, 40);
+    scenario.with_mana_pool(P0, spell_pool(0, &[ManaType::Red; 7]));
+    let recording = scenario
+        .add_artifact_from_oracle(P0, "Cursed Recording", RECORDING)
+        .id();
+    let spells: Vec<_> = (0..7)
+        .map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Shock",
+                    true,
+                    "Shock deals 2 damage to any target.",
+                )
+                .with_mana_cost(printed_cost("{R}"))
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    for spell in &spells[..6] {
+        runner.cast(*spell).target_player(P1).resolve();
+        assert_eq!(runner.state().players[0].life, 40);
+    }
+    let outcome = runner.cast(spells[6]).target_player(P1).resolve();
+    assert_eq!(outcome.state().players[0].life, 20);
+    assert_eq!(outcome.state().players[1].life, 26);
+    assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::DamageDealt { source_id, target: engine::types::ability::TargetRef::Player(P0), amount: 20, .. } if *source_id == recording)));
+    assert!(outcome.state().objects[&recording]
+        .counters
+        .get(&engine::types::counter::CounterType::Time)
+        .is_none_or(|count| *count == 0));
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(outcome.state());
+}
+
+#[test]
+fn preserved_spell_self_damage_keeps_the_spell_as_source_after_the_victim_reference() {
+    const LESSON: &str = "Kicker {4} (You may pay an additional {4} as you cast this spell.)\nFirebending Lesson deals 2 damage to target creature. If this spell was kicked, it deals 5 damage to that creature instead.";
+    for kicked in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(if kicked { 4 } else { 0 }, &[ManaType::Red]));
+        let recipient = scenario.add_creature(P1, "Lesson recipient", 7, 10).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Firebending Lesson", true, LESSON)
+            .with_mana_cost(printed_cost("{R}"))
+            .id();
+        let mut runner = scenario.build();
+        let cast = runner.cast(spell).target_object(recipient);
+        let outcome = if kicked {
+            cast.accept_optional().resolve()
+        } else {
+            cast.decline_optional().resolve()
+        };
+        let expected = if kicked { 5 } else { 2 };
+        assert_eq!(outcome.state().objects[&recipient].damage_marked, expected);
+        assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::DamageDealt { source_id, target: engine::types::ability::TargetRef::Object(id), amount, .. } if *source_id == spell && *id == recipient && *amount == expected)));
+        assert!(outcome.events().iter().all(|event| !matches!(event, GameEvent::DamageDealt { source_id, .. } if *source_id == recipient)));
+        assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        assert_spell_complete(outcome.state());
+    }
+}
+
+#[test]
+fn preserved_keyword_replication_checks_each_keyword_independently_at_resolution() {
+    use engine::game::keywords::object_has_effective_keyword_kind;
+    use engine::types::keywords::KeywordKind;
+    const ORATOR: &str = "Vigilance\nWhenever this creature attacks, it gains flying until end of turn if you control a creature with flying. The same is true for first strike, double strike, deathtouch, indestructible, lifelink, menace, and trample.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let orator = scenario
+        .add_creature_from_oracle(P0, "Thunderous Orator", 2, 2, ORATOR)
+        .id();
+    scenario
+        .add_creature(P0, "Trample witness", 3, 3)
+        .with_keyword(Keyword::Trample);
+    scenario
+        .add_creature(P1, "Opponent flying witness", 1, 1)
+        .with_keyword(Keyword::Flying);
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(orator, AttackTarget::Player(P1))])
+        .unwrap();
+    runner.advance_until_stack_empty();
+    // CR 608.2c + CR 611.2c: the missing flying witness cannot suppress trample,
+    // and the opponent's flyer cannot grant flying to the attacking Orator.
+    assert!(object_has_effective_keyword_kind(
+        runner.state(),
+        orator,
+        KeywordKind::Trample
+    ));
+    assert!(!object_has_effective_keyword_kind(
+        runner.state(),
+        orator,
+        KeywordKind::Flying
+    ));
+    assert!(!object_has_effective_keyword_kind(
+        runner.state(),
+        orator,
+        KeywordKind::DoubleStrike
+    ));
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn preserved_plural_affected_subject_reads_the_nearer_mass_population() {
+    use engine::game::keywords::object_has_effective_keyword_kind;
+    use engine::types::keywords::KeywordKind;
+    const ARDBERT: &str = "Whenever you cast a white spell, put a +1/+1 counter on each legendary creature you control. They gain vigilance until end of turn.\nWhenever you cast a black spell, put a +1/+1 counter on each legendary creature you control. They gain menace until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(0, &[ManaType::White]));
+    let ardbert = scenario
+        .add_creature_from_oracle(P0, "Ardbert, Warrior of Darkness", 2, 2, ARDBERT)
+        .as_legendary()
+        .id();
+    let other = scenario
+        .add_creature(P0, "Own legendary recipient", 3, 3)
+        .as_legendary()
+        .id();
+    let own_decoy = scenario.add_creature(P0, "Own ordinary decoy", 3, 3).id();
+    let foreign = scenario
+        .add_creature(P1, "Foreign legendary decoy", 3, 3)
+        .as_legendary()
+        .id();
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Healing Salve", true, "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage that would be dealt to any target this turn.").with_color(vec![ManaColor::White]).with_mana_cost(printed_cost("{W}")).id();
+    let mut runner = scenario.build();
+    runner.cast(spell).modes(&[0]).target_player(P0).resolve();
+    for (id, power) in [(ardbert, 3), (other, 4)] {
+        assert_eq!(runner.state().objects[&id].power, Some(power));
+        assert!(object_has_effective_keyword_kind(
+            runner.state(),
+            id,
+            KeywordKind::Vigilance
+        ));
+        assert!(!object_has_effective_keyword_kind(
+            runner.state(),
+            id,
+            KeywordKind::Menace
+        ));
+    }
+    for decoy in [own_decoy, foreign] {
+        assert_eq!(runner.state().objects[&decoy].power, Some(3));
+        assert!(!object_has_effective_keyword_kind(
+            runner.state(),
+            decoy,
+            KeywordKind::Vigilance
+        ));
+    }
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn preserved_cohort_count_selects_two_spells_and_disposes_only_the_other_revealed_cards() {
+    const PIECES: &str = "Reveal the top five cards of your library. Put up to two instant and/or sorcery cards from among them into your hand and the rest into your graveyard.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(2, &[ManaType::Blue]));
+    let outside = scenario.add_land_to_library_top(P0, "Unrevealed land").id();
+    let land_a = scenario.add_land_to_library_top(P0, "Revealed land A").id();
+    let land_b = scenario.add_land_to_library_top(P0, "Revealed land B").id();
+    let sorcery = scenario
+        .add_spell_to_library_top(P0, "Selected sorcery", false)
+        .id();
+    let instant = scenario
+        .add_spell_to_library_top(P0, "Selected instant", true)
+        .id();
+    let unselected = scenario
+        .add_spell_to_library_top(P0, "Unselected instant", true)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pieces of the Puzzle", false, PIECES)
+        .with_mana_cost(printed_cost("{2}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .effect_zone(&[instant, sorcery])
+        .resolve();
+    // CR 608.2c: selection is capped at two within this revealed cohort.
+    outcome.assert_zone(&[instant, sorcery], Zone::Hand);
+    outcome.assert_zone(&[unselected, land_a, land_b], Zone::Graveyard);
+    outcome.assert_zone(&[outside], Zone::Library);
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(outcome.state());
+}
+
+#[test]
+fn preserved_conjunct_duration_expires_the_inherited_first_strike() {
+    use engine::game::keywords::object_has_effective_keyword_kind;
+    use engine::types::keywords::KeywordKind;
+    const LEGION: &str =
+        "Until end of turn, double target creature's power and it gains first strike.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.with_library_top(P0, &["Next draw P0", "Reserve P0"]);
+    scenario.with_library_top(P1, &["Next draw P1", "Reserve P1"]);
+    scenario.with_mana_pool(P0, spell_pool(1, &[ManaType::White]));
+    let target = scenario.add_creature(P0, "Leadership target", 3, 4).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Legion Leadership", true, LEGION)
+        .with_mana_cost(printed_cost("{1}{R/W}"))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(spell).target_object(target).resolve();
+    assert_eq!(runner.state().objects[&target].power, Some(6));
+    assert!(object_has_effective_keyword_kind(
+        runner.state(),
+        target,
+        KeywordKind::FirstStrike
+    ));
+    assert_spell_complete(runner.state());
+    runner.advance_to_upkeep();
+    // CR 611.2a: both conjuncts end at the same printed window.
+    assert_eq!(runner.state().objects[&target].power, Some(3));
+    assert!(!object_has_effective_keyword_kind(
+        runner.state(),
+        target,
+        KeywordKind::FirstStrike
+    ));
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn preserved_granted_conditional_trigger_uses_its_otherwise_branch_before_the_monarch_pump() {
+    const REGAL: &str = "Sliver creatures you control have \"When this creature enters, Slivers you control get +1/+1 until end of turn if you're the monarch. Otherwise, you become the monarch.\"";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(P0, spell_pool(4, &[ManaType::White]));
+    let own_decoy = scenario.add_creature(P0, "Own nonsliver", 3, 3).id();
+    let opponent_decoy = scenario
+        .add_creature(P1, "Opponent Sliver", 2, 2)
+        .with_subtypes(vec!["Sliver"])
+        .id();
+    let regal = scenario
+        .add_creature_to_hand_from_oracle(P0, "Regal Sliver", 3, 3, REGAL)
+        .with_subtypes(vec!["Sliver"])
+        .with_mana_cost(printed_cost("{3}{W}"))
+        .id();
+    let metallic = scenario
+        .add_creature_to_hand_from_oracle(P0, "Metallic Sliver", 1, 1, "")
+        .as_artifact_creature()
+        .with_subtypes(vec!["Sliver"])
+        .with_mana_cost(printed_cost("{1}"))
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(regal).resolve();
+    assert_eq!(runner.state().monarch, Some(P0));
+    assert_eq!(runner.state().objects[&regal].power, Some(3));
+    assert_spell_complete(runner.state());
+    runner.cast(metallic).resolve();
+    assert_eq!(runner.state().objects[&regal].power, Some(4));
+    assert_eq!(runner.state().objects[&metallic].power, Some(2));
+    assert_eq!(runner.state().objects[&own_decoy].power, Some(3));
+    assert_eq!(runner.state().objects[&opponent_decoy].power, Some(2));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(runner.state());
+}
+
+#[test]
+fn preserved_temporary_cost_grant_snapshots_life_and_retains_its_spell_color_scope() {
+    const WILL: &str = "Vigilance\n{T}: Spells you cast this turn that are white and/or blue cost {X} less to cast, where X is the amount of life you gained this turn. Activate only as a sorcery.";
+    const SALVE: &str = "Choose one —\n• Target player gains 3 life.\n• Prevent the next 3 damage that would be dealt to any target this turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        spell_pool(
+            5,
+            &[
+                ManaType::White,
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Blue,
+                ManaType::Red,
+            ],
+        ),
+    );
+    scenario.with_library_top(
+        P0,
+        &[
+            "Opportunity A",
+            "Opportunity B",
+            "Opportunity C",
+            "Opportunity D",
+            "Reserve",
+        ],
+    );
+    let will = scenario
+        .add_creature_from_oracle(P0, "Will, Scion of Peace", 2, 4, WILL)
+        .with_color(vec![ManaColor::White, ManaColor::Blue])
+        .id();
+    let first_salve = scenario
+        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, SALVE)
+        .with_color(vec![ManaColor::White])
+        .with_mana_cost(printed_cost("{W}"))
+        .id();
+    let later_salve = scenario
+        .add_spell_to_hand_from_oracle(P0, "Healing Salve", true, SALVE)
+        .with_color(vec![ManaColor::White])
+        .with_mana_cost(printed_cost("{W}"))
+        .id();
+    let outside_color = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lava Axe",
+            false,
+            "Lava Axe deals 5 damage to target player or planeswalker.",
+        )
+        .with_color(vec![ManaColor::Red])
+        .with_mana_cost(printed_cost("{4}{R}"))
+        .id();
+    let reduced = scenario
+        .add_spell_to_hand_from_oracle(P0, "Opportunity", true, "Target player draws four cards.")
+        .with_color(vec![ManaColor::Blue])
+        .with_mana_cost(printed_cost("{4}{U}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .cast(first_salve)
+        .modes(&[0])
+        .target_player(P0)
+        .resolve();
+    runner.activate(will, 0).resolve();
+    assert!(runner.state().objects[&will].tapped);
+    runner
+        .cast(later_salve)
+        .modes(&[0])
+        .target_player(P0)
+        .resolve();
+    assert_eq!(runner.state().players[0].life, 26);
+    // Will's ruling fixes X at resolution (three), and red is outside the
+    // printed white/blue union. Later life gain cannot make X six.
+    runner.cast(outside_color).target_player(P1).resolve();
+    assert_eq!(runner.state().players[1].life, 15);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+    let outcome = runner.cast(reduced).target_player(P0).resolve();
+    outcome.assert_hand_drawn(P0, 4);
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert_spell_complete(outcome.state());
+}
+
+#[test]
+fn preserved_hand_choice_keeps_the_targeted_opponents_hand_and_chosen_identity() {
+    const PRISON: &str = "Imprint — When this artifact enters, you may have target player reveal their hand. If you do, choose a nonland card from it and exile that card.\nWhenever a player casts a spell that shares a color or mana value with the exiled card, this artifact deals 2 damage to that player.";
+    for accept in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(5, &[]));
+        let own = scenario
+            .add_spell_to_hand(P0, "Own nonland decoy", true)
+            .id();
+        let first = scenario
+            .add_spell_to_hand(P1, "Opponent first nonland", true)
+            .id();
+        let second = scenario
+            .add_spell_to_hand(P1, "Opponent chosen nonland", false)
+            .id();
+        let land = scenario.add_land_to_hand(P1, "Opponent land decoy").id();
+        let prison = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Thought Prison", PRISON)
+            .with_mana_cost(printed_cost("{5}"))
+            .id();
+        let mut runner = scenario.build();
+        let cast = runner.cast(prison).target_player(P1).commit();
+        if accept {
+            cast.accept_optional().resolve();
+        } else {
+            cast.decline_optional().resolve();
+        }
+        if accept {
+            let WaitingFor::RevealChoice {
+                player,
+                cards,
+                optional,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "required opponent hand choice: {:?}",
+                    runner.state().waiting_for
+                )
+            };
+            assert_eq!(*player, P0);
+            assert!(!*optional);
+            assert!(cards.contains(&first) && cards.contains(&second));
+            assert!(!cards.contains(&own) && !cards.contains(&land));
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![second],
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+        }
+        // CR 608.2c: only the chosen card from the targeted hand is exiled.
+        assert_eq!(
+            runner.state().objects[&second].zone,
+            if accept { Zone::Exile } else { Zone::Hand }
+        );
+        for decoy in [own, first, land] {
+            assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
+        }
+        assert_eq!(runner.state().objects[&prison].zone, Zone::Battlefield);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_spell_complete(runner.state());
+    }
+}
+
+#[test]
+fn preserved_delayed_zone_gate_reads_the_sought_card_at_the_later_end_step() {
+    const CALL: &str = "Choose one —\n• Seek a Kithkin card. At the beginning of the next end step, if that card is in your hand, exile it.\n• Creature cards in your hand perpetually get +1/+1.";
+    for discard_before_end in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_mana_pool(P0, spell_pool(0, &[ManaType::White]));
+        scenario.with_mana_pool(P1, spell_pool(0, &[ManaType::Black]));
+        let sought = scenario
+            .add_spell_to_library_top(P0, "Unique Kithkin", false)
+            .as_creature()
+            .with_subtypes(vec!["Kithkin"])
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Thoughtweft's Call", false, CALL)
+            .with_mana_cost(printed_cost("{W}"))
+            .id();
+        let discard = scenario.add_spell_to_hand_from_oracle(P1, "Funeral Charm", true, "Choose one —\n• Target player discards a card.\n• Target creature gets +2/-1 until end of turn.\n• Target creature gains swampwalk until end of turn. (It can\'t be blocked as long as defending player controls a Swamp.)").with_mana_cost(printed_cost("{B}")).id();
+        let mut runner = scenario.build();
+        runner.cast(spell).modes(&[0]).resolve();
+        assert_eq!(runner.state().objects[&sought].zone, Zone::Hand);
+        assert_eq!(runner.state().delayed_triggers.len(), 1);
+        // This reach guard distinguishes the printed live hand condition from
+        // the separate object-occurrence protection exercised by the move below.
+        let gate = runner.state().delayed_triggers[0]
+            .ability
+            .condition
+            .as_ref()
+            .expect("the later payload owns the live zone condition");
+        assert!(
+            matches!(gate, engine::types::ability::AbilityCondition::TargetMatchesFilter { filter: engine::types::ability::TargetFilter::Typed(filter), use_lki: false, subject_slot: None } if filter.controller == Some(engine::types::ability::ControllerRef::You) && filter.properties.contains(&engine::types::ability::FilterProp::InZone { zone: Zone::Hand })),
+            "{gate:#?}"
+        );
+        assert_spell_complete(runner.state());
+        if discard_before_end {
+            if runner.state().priority_player == P0 {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            runner
+                .cast(discard)
+                .modes(&[0])
+                .target_player(P0)
+                .discard(&[sought])
+                .resolve();
+            assert_eq!(runner.state().objects[&sought].zone, Zone::Graveyard);
+        }
+        runner.advance_to_end_step();
+        runner.advance_until_stack_empty();
+        // CR 603.7c + CR 400.7: a moved object is outside the printed hand gate.
+        assert_eq!(
+            runner.state().objects[&sought].zone,
+            if discard_before_end {
+                Zone::Graveyard
+            } else {
+                Zone::Exile
+            }
+        );
+        assert_eq!(
+            runner.state().objects[&discard].zone,
+            if discard_before_end {
+                Zone::Graveyard
+            } else {
+                Zone::Hand
+            }
+        );
+        assert_spell_complete(runner.state());
+    }
+}
+
 fn printed_cost(text: &str) -> ManaCost {
     all_consuming(parse_mana_cost).parse(text).unwrap().1
 }

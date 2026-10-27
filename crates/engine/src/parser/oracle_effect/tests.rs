@@ -303,6 +303,7 @@ fn contextual_hand_refusal_is_transactional_in_each_real_client() {
         let mut ctx = ParseContext::default();
         ctx.chosen_color_qualifier = ChosenColorQualifierScope::ChainBound;
         ctx.relative_player_scope = Some(ControllerRef::Opponent);
+        ctx.chain_prior_hand_reveal_target = Some(TargetFilter::Player);
         assert_eq!(ctx.pending_printed_color_choice, None);
         let before = format!("{ctx:?}");
         let command = "you choose a nonland card of the color of your choice from it";
@@ -315,6 +316,7 @@ fn contextual_hand_refusal_is_transactional_in_each_real_client() {
                 ImperativeFamilyAst::Structured(ImperativeAst::Choose(
                     ChooseImperativeAst::RevealHandFilter {
                         card_filter,
+                        target: TargetFilter::Player,
                         choice_optional: false,
                     },
                 )) => card_filter,
@@ -485,6 +487,7 @@ fn contextual_hand_addle_explicit_color_and_strict_anaphor_clients() {
         for client in 0..3 {
             let mut ctx = ParseContext::default();
             ctx.pending_choice_type = Some(ChoiceType::color());
+            ctx.chain_prior_hand_reveal_target = Some(TargetFilter::Player);
             let command = format!("you choose a card {suffix} from it");
             let fused = format!("reveals their hand and {command}");
             let actual = match client {
@@ -544,6 +547,7 @@ fn contextual_hand_addle_explicit_color_and_strict_anaphor_clients() {
         ] {
             let mut ctx = ParseContext::default();
             ctx.pending_choice_type = domain;
+            ctx.chain_prior_hand_reveal_target = Some(TargetFilter::Player);
             let command = format!("you choose a card {suffix} from it");
             let before = format!("{ctx:?}");
             assert!(parse_choose_filter(&command, &mut ctx).is_err());

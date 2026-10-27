@@ -1967,7 +1967,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // body shape the override sentence is printed on; every other body keeps the
     // sentence in its text (strict failure).
     let mut illegal_targets_disposition = IllegalTargetsDisposition::default();
-    let optional_payment = split_reflexive_optional_payment(&effect_for_parse);
+    let optional_payment =
+        split_reflexive_optional_payment_with_context(&effect_for_parse, &effect_ctx);
     let body = if !effect_for_parse.is_empty() {
         if let Some(Ok((cost, connector, reflexive_effect_text))) = &optional_payment {
             optional = false;
@@ -5104,9 +5105,17 @@ fn infer_pronoun_unless_payer(
 /// fully recognized. A recognized singleton sacrifice with an affirmative
 /// connector commits either a complete cost or an exact-source refusal, so an
 /// invalid cost cannot fall through to ordinary partial sacrifice semantics.
+#[cfg(test)]
 fn split_reflexive_optional_payment(
     effect_text: &str,
 ) -> Option<Result<(AbilityCost, AbilityCondition, String), &str>> {
+    split_reflexive_optional_payment_with_context(effect_text, &ParseContext::default())
+}
+
+fn split_reflexive_optional_payment_with_context<'a>(
+    effect_text: &'a str,
+    ctx: &ParseContext,
+) -> Option<Result<(AbilityCost, AbilityCondition, String), &'a str>> {
     let lower = effect_text.to_lowercase();
     let (after_prefix, _) = tag::<_, _, OracleError<'_>>("you may ")
         .parse(lower.as_str())
@@ -5130,12 +5139,79 @@ fn split_reflexive_optional_payment(
     if !conditional && reflexive_optional_cost_payable_by_resolution_prompt(&cost) {
         return Some(Ok((cost, connector, body_text.to_string())));
     }
-    Some(
-        super::oracle_cost::parse_complete_fixed_typed_sacrifice(cost_text)?
-            .and_then(|cost| if conditional { Err(()) } else { Ok(cost) })
-            .map(|cost| (cost, connector, body_text.to_owned()))
-            .map_err(|()| effect_text),
-    )
+    let singleton = super::oracle_cost::parse_complete_fixed_typed_sacrifice(cost_text)?;
+    if !conditional {
+        if let Ok(cost) = &singleton {
+            return Some(Ok((cost.clone(), connector, body_text.to_owned())));
+        }
+    }
+    // The immediate PayCost adapter does not own every sacrifice. Complete
+    // sacrifice effects already implement optional selection and If/When gates,
+    // including source references, unions and variable-cardinality selections.
+    // Let that existing owner retain its authority instead of replacing it with
+    // a failed singleton cost adaptation.
+    let mut sacrifice_ctx = ctx.clone();
+    if !conditional {
+        let complete = parse_effect_chain_ir(cost_text, AbilityKind::Spell, &mut ctx.clone());
+        if !matches!(complete.clauses.as_slice(), [clause]
+            if matches!(clause.parsed.effect, Effect::Sacrifice { .. }))
+        {
+            return Some(Err(effect_text));
+        }
+        if let Some(crate::parser::oracle_ir::ast::TargetedImperativeAst::Sacrifice {
+            target,
+            count,
+            ..
+        }) = super::oracle_effect::imperative::parse_targeted_action_ast(
+            cost_text,
+            cost_lower,
+            &mut sacrifice_ctx,
+        ) {
+            let has_population = match &target {
+                TargetFilter::SelfRef
+                | TargetFilter::GrantingObject { .. }
+                | TargetFilter::TriggeringSource
+                | TargetFilter::TrackedSet { .. }
+                | TargetFilter::Or { .. } => true,
+                TargetFilter::Typed(typed) => {
+                    typed.properties.contains(&FilterProp::Token)
+                        || (matches!(&count, QuantityExpr::UpTo { .. })
+                            && typed.has_meaningful_type_constraint())
+                }
+                _ => false,
+            };
+            let has_count = !matches!(&count, QuantityExpr::Fixed { value } if *value <= 0)
+                && !matches!(
+                    &count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                );
+            // A source sacrifice cannot bind "that card" to the creature card
+            // of an earlier death event through SelfRef. Keep this dependent
+            // return atomic until it has its own event-card authority.
+            let unbound_return = matches!(&target, TargetFilter::SelfRef)
+                && tag::<_, _, OracleError<'_>>("return that card ")
+                    .parse(body_lower)
+                    .is_ok()
+                && parse_effect_chain_ir(body_text, AbilityKind::Spell, &mut ctx.clone())
+                    .clauses
+                    .first()
+                    .is_some_and(|clause| {
+                        matches!(
+                            clause.parsed.effect,
+                            Effect::ChangeZone {
+                                target: TargetFilter::SelfRef,
+                                ..
+                            }
+                        )
+                    });
+            if has_population && has_count && !unbound_return {
+                return None;
+            }
+        }
+    }
+    Some(Err(effect_text))
 }
 
 #[cfg(test)]
@@ -5174,15 +5250,11 @@ fn optional_sacrifice_root_owns_its_source_without_broadening_recursive_costs() 
     for cost in [
         "sacrifice zero Islands",
         "sacrifice X Islands",
-        "sacrifice any number of Islands",
-        "sacrifice one or more Islands",
         "sacrifice all permanents",
         "sacrifice Islands",
         "sacrifice other creatures",
         "sacrifice an unknown noun",
         "sacrifice another",
-        "sacrifice ~",
-        "sacrifice this creature",
         "sacrifice a card",
         "sacrifice a player",
         "sacrifice two Islands if you control a creature",
@@ -5191,6 +5263,8 @@ fn optional_sacrifice_root_owns_its_source_without_broadening_recursive_costs() 
         "sacrifice two Islands and draw a card",
         "sacrifice two Islands otherwise draw a card",
         "sacrifice two Islands with different names",
+        "sacrifice a token, draw a card",
+        "sacrifice all permanents with an unknown restriction",
     ] {
         let body = format!("you may {cost}. If you do, untap ~.");
         assert_eq!(
@@ -5210,6 +5284,34 @@ fn optional_sacrifice_root_owns_its_source_without_broadening_recursive_costs() 
         };
         assert_eq!(name, "reflexive optional payment");
         assert_eq!(description.as_deref(), Some(body.as_str()));
+    }
+    for cost in [
+        "sacrifice any number of Islands",
+        "sacrifice one or more Islands",
+        "sacrifice ~",
+        "sacrifice this creature",
+        "sacrifice a token",
+        "sacrifice another creature or an artifact",
+    ] {
+        let source = format!("you may {cost}. If you do, untap ~.");
+        assert!(
+            split_reflexive_optional_payment(&source).is_none(),
+            "the existing complete optional sacrifice owns {source}"
+        );
+        let trigger = parse_trigger_line(
+            &format!("At the beginning of your upkeep, {source}"),
+            "Grammar Control",
+        );
+        let root = trigger.execute.as_deref().unwrap();
+        assert!(root.optional, "the sacrifice remains optional: {source}");
+        assert!(
+            matches!(*root.effect, Effect::Sacrifice { .. }),
+            "{source}: {root:?}"
+        );
+        assert!(
+            root.sub_ability.is_some(),
+            "the dependent reward is retained"
+        );
     }
     for source in [
         "you may pay {1}. If you do, draw a card.",
@@ -7834,6 +7936,22 @@ fn extract_if_condition_with_card_name(
 ) -> IfExtraction {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+    // A keyword predicate on an attached host is not an existential test for
+    // a creature the Aura's controller controls. The current generic controls
+    // condition cannot bind that host, so keep the dependent operation atomic.
+    if (
+        tag::<_, _, OracleError<'_>>("if enchanted "),
+        super::oracle_nom::target::parse_type_filter_word,
+        space1,
+        alt((tag("has "), tag("have "))),
+        nom_primitives::parse_keyword_name,
+        tag(", "),
+    )
+        .parse(lower.trim_start())
+        .is_ok()
+    {
+        return IfExtraction::refused(text);
+    }
     // Only a proven self-trigger may use the source-bound "it's on the
     // battlefield" shorthand. On a non-self zone-change trigger, "it" is
     // the event object, so the simple source-condition table must not steal it.
@@ -12594,6 +12712,12 @@ pub(crate) fn find_effect_boundary(lower: &str) -> Option<usize> {
     let mut search_start = 0;
     while let Ok((_, (before, after))) = split_once_on(&lower[search_start..], ", ") {
         let comma_pos = search_start + before.len();
+        if all_consuming(parse_beginning_phase_trigger_head)
+            .parse(&lower[..comma_pos])
+            .is_ok()
+        {
+            return Some(comma_pos);
+        }
         if !continues_type_list_final_leg(after)
             && !continues_action_verb_list(&lower[..comma_pos], after)
             && !continues_player_action_list(after)
@@ -13487,6 +13611,24 @@ pub(crate) fn parse_trigger_condition(
 
     // Parse event verb from the remaining text.
     if let Some((mode, mut def)) = try_parse_event(&subject, rest, &lower, ctx) {
+        // Departure matching cannot evaluate the live goaded designation from
+        // the current LKI filter representation. Retain the whole event as
+        // unsupported rather than publish a trigger which can never fire.
+        fn needs_live_goaded(filter: &TargetFilter) -> bool {
+            match filter {
+                TargetFilter::Typed(typed) => typed.properties.contains(&FilterProp::Goaded),
+                TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                    filters.iter().any(needs_live_goaded)
+                }
+                _ => false,
+            }
+        }
+        if mode == TriggerMode::ChangesZone
+            && def.origin == Some(Zone::Battlefield)
+            && needs_live_goaded(&subject)
+        {
+            return unknown_trigger_definition(condition);
+        }
         // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
         ctx.diagnostics.extend(subject_diagnostics);
         // CR 109.2: the type-phrase parser swallows the trailing "card" of "a
@@ -19975,6 +20117,12 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
             definition.mode = TriggerMode::Phase;
             definition.phase = Some(phase);
             definition.constraint = parse_turn_constraint(phase_text);
+            if all_consuming(tag::<_, _, OracleError<'_>>("the first upkeep of the game"))
+                .parse(phase_text)
+                .is_ok()
+            {
+                definition.constraint = Some(TriggerConstraint::OncePerGame);
+            }
             return Some((TriggerMode::Phase, definition));
         }
     }
@@ -24004,6 +24152,14 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
 }
 
 fn parse_beginning_phase_trigger_head(input: &str) -> OracleResult<'_, Phase> {
+    if let Ok(result) = value(
+        Phase::Upkeep,
+        tag::<_, _, OracleError<'_>>("at the beginning of the first upkeep of the game"),
+    )
+    .parse(input)
+    {
+        return Ok(result);
+    }
     terminated(
         preceded(
             (tag("at the beginning "), opt(tag("of "))),
@@ -24014,14 +24170,21 @@ fn parse_beginning_phase_trigger_head(input: &str) -> OracleResult<'_, Phase> {
                         parse_phase_determiner_prefix,
                     ))),
                     opt(tag("next ")),
-                    terminated(parse_phase_keyword, opt(tag("s"))),
+                    terminated(
+                        parse_phase_keyword,
+                        (opt(tag("s")), opt(alt((tag(" step"), tag(" phase"))))),
+                    ),
                 ),
                 |(_, _, phase)| phase,
             ),
         ),
         (opt(preceded(
-            tag(" "),
-            alt((tag("on your turn"), tag("on each of your turns"))),
+            tag(" on "),
+            alt((
+                value((), parse_during_turn_spec),
+                value((), tag("each player's turn")),
+                value((), tag("each players turn")),
+            )),
         )),),
     )
     .parse(input)
@@ -24043,11 +24206,13 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Suffix-based: "combat on your turn", "each combat on your turn"
     let mut remaining = phase_text;
     while !remaining.is_empty() {
-        if tag::<_, _, OracleError<'_>>("on your turn")
-            .parse(remaining)
-            .is_ok()
+        if let Ok((_, constraint)) = preceded(
+            tag::<_, _, OracleError<'_>>("on "),
+            all_consuming(parse_during_turn_spec),
+        )
+        .parse(remaining)
         {
-            return Some(TriggerConstraint::OnlyDuringYourTurn);
+            return Some(constraint);
         }
         remaining = remaining
             .find(' ')
@@ -25786,5 +25951,86 @@ mod retained_compound_phase_tests {
                 trigger.mode
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod preserved_phase_and_departure_admission_tests {
+    use super::*;
+
+    #[test]
+    fn concrete_phase_heads_consume_their_units_and_keep_turn_authority() {
+        for (source, phase, constraint) in [
+            (
+                "At the beginning of your combat step, tap ~.",
+                Phase::BeginCombat,
+                Some(TriggerConstraint::OnlyDuringYourTurn),
+            ),
+            (
+                "At the beginning of combat on each opponent's turn, draw a card.",
+                Phase::BeginCombat,
+                Some(TriggerConstraint::OnlyDuringOpponentsTurn),
+            ),
+            (
+                "At the beginning of the first upkeep of the game, draw a card.",
+                Phase::Upkeep,
+                Some(TriggerConstraint::OncePerGame),
+            ),
+        ] {
+            let trigger = parse_trigger_line(source, "Grammar Control");
+            assert_eq!(trigger.mode, TriggerMode::Phase, "{source}");
+            assert_eq!(trigger.phase, Some(phase));
+            assert_eq!(trigger.constraint, constraint);
+            assert!(trigger.execute.is_some());
+        }
+        for source in [
+            "at the beginning of your combat step unexpectedly",
+            "at the beginning of your combat phase on somebody's turn",
+            "at the beginning of the first upkeep of the game unexpectedly",
+        ] {
+            assert!(
+                parse_dangling_phase_trigger_head(source).is_err(),
+                "{source}"
+            );
+        }
+        let arming = "At the beginning of your end step, creatures you control and creature cards in your hand, library, and graveyard perpetually get +1/+1.";
+        let (condition, body) = split_trigger(TextPair::new(arming, &arming.to_lowercase()));
+        assert_eq!(condition, "At the beginning of your end step");
+        assert_eq!(body, "creatures you control and creature cards in your hand, library, and graveyard perpetually get +1/+1.");
+        let planeswalk = parse_trigger_lines("Whenever you planeswalk to Two Streams Facility and at the beginning of the first upkeep of the game, each player chooses green anchor or red waterfall.", "Two Streams Facility");
+        assert_eq!(planeswalk.len(), 2);
+        assert!(planeswalk.iter().any(|trigger| matches!(
+            trigger.mode,
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        )));
+        assert!(planeswalk
+            .iter()
+            .any(|trigger| trigger.phase == Some(Phase::Upkeep)
+                && trigger.constraint == Some(TriggerConstraint::OncePerGame)));
+    }
+
+    #[test]
+    fn unsupported_attached_keyword_gate_cannot_publish_partial_green_body() {
+        let parsed = crate::parser::parse_oracle_text(
+            "Enchant creature\nWhen this Aura enters, if enchanted creature has flying, this Aura deals 2 damage to that creature and this Aura gains \"Enchanted creature loses flying.\"",
+            "Earthbind", &[], &["Enchantment".into()], &["Aura".into()]);
+        assert_eq!(parsed.triggers.len(), 1);
+        let body = parsed.triggers[0].execute.as_deref().unwrap();
+        assert!(matches!(*body.effect, Effect::Unimplemented { .. }));
+        assert!(
+            body.sub_ability.is_none(),
+            "the entire dependent operation is atomic"
+        );
+    }
+
+    #[test]
+    fn unsupported_live_goaded_departure_is_an_unknown_whole_event() {
+        let trigger = parse_trigger_line(
+            "Whenever a goaded attacking or blocking creature dies, you create a Treasure token.",
+            "Baeloth Barrityl, Entertainer",
+        );
+        assert!(matches!(trigger.mode, TriggerMode::Unknown(_)));
     }
 }

@@ -9424,6 +9424,36 @@ fn is_all_revealed_result_consumer(text: &str) -> bool {
 }
 
 pub(crate) fn parse_effect_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    // The permanence marker and its definition belong to one edit. Peeling the
+    // where-X clause first strands "it perpetually" on the subject grammar.
+    let full_lower = text.to_lowercase();
+    if let Some(effect) = try_parse_perpetual_modify_pt_dynamic(TextPair::new(text, &full_lower))
+        .filter(|effect| {
+            !matches!(
+                effect,
+                Effect::ApplyPerpetual {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ) || ctx.object_pronoun_ref.is_some()
+                || ctx.parent_target_available
+        })
+    {
+        let mut effect = effect;
+        if let Effect::ApplyPerpetual { target, .. } = &mut effect {
+            if matches!(target, TargetFilter::ParentTarget) {
+                if let Some(reference) = &ctx.object_pronoun_ref {
+                    *target = reference.clone();
+                }
+            }
+        }
+        return parsed_clause(effect);
+    }
+    if let Some(clause) =
+        try_parse_temporary_spell_cost_modification(TextPair::new(text, &full_lower))
+    {
+        return clause;
+    }
     // CR 608.2c: retain the complete following instruction until its consumer exists.
     if is_all_revealed_result_consumer(text) {
         return parsed_clause(Effect::unimplemented("all_revealed_result_consumer", text));
@@ -13510,14 +13540,34 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Opt
 
     // Anaphoric back-reference: "it perpetually gets +1/+0".
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("it perpetually ").parse(lower) {
+        let target = ctx.object_pronoun_ref.clone().or_else(|| {
+            ctx.parent_target_available
+                .then_some(TargetFilter::ParentTarget)
+        })?;
         let (rest, _) = alt((
             tag::<_, _, OracleError<'_>>("gets "),
             tag::<_, _, OracleError<'_>>("get "),
         ))
         .parse(rest)
         .ok()?;
-        let (rest, (power_delta, toughness_delta)) =
-            nom_primitives::parse_pt_modifier(rest).ok()?;
+        let (rest, delta) =
+            nom::bytes::complete::take_while1::<_, _, OracleError<'_>>(|ch: char| {
+                !ch.is_whitespace() && ch != '.'
+            })
+            .parse(rest)
+            .ok()?;
+        let (power_delta, toughness_delta) = lower::parse_pt_modifier(delta)?;
+        let quantity = |value: PtValue| match value {
+            PtValue::Fixed(value) => Some(QuantityExpr::Fixed { value }),
+            PtValue::Variable(alias) if alias.eq_ignore_ascii_case("X") => {
+                Some(QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_owned(),
+                    },
+                })
+            }
+            _ => None,
+        };
         // Mixed "… and gains [keywords]" rider (Jaheira's boon inner): a bare
         // "it" is only bound when the enclosing trigger body pinned an
         // object-pronoun antecedent. Standalone ("It perpetually gets +1/+1
@@ -13532,12 +13582,10 @@ fn try_parse_perpetual_modify_pt_single(tp: TextPair, ctx: &ParseContext) -> Opt
             (rest, Vec::new())
         };
         return tail_done(rest).then_some(Effect::ApplyPerpetual {
-            target: TargetFilter::ParentTarget,
+            target,
             modification: crate::types::ability::PerpetualModification::ModifyPowerToughness {
-                power: QuantityExpr::Fixed { value: power_delta },
-                toughness: QuantityExpr::Fixed {
-                    value: toughness_delta,
-                },
+                power: quantity(power_delta)?,
+                toughness: quantity(toughness_delta)?,
                 keywords,
             },
         });
@@ -20579,6 +20627,15 @@ fn thread_for_each_subject(effect: Effect, original: &str, ctx: &mut ParseContex
 #[tracing::instrument(level = "trace")]
 fn parse_clause_ast(text: &str, ctx: &mut ParseContext) -> ClauseAst {
     let text = text.trim();
+    let lower = text.to_lowercase();
+    let complete = TextPair::new(text, &lower);
+    if try_parse_perpetual_modify_pt_single(complete, ctx).is_some()
+        || try_parse_temporary_spell_cost_modification(complete).is_some()
+    {
+        return ClauseAst::Imperative {
+            text: text.to_string(),
+        };
+    }
 
     // Mirror the CubeArtisan grammar's high-level sentence shapes:
     // 1) conditionals ("if X, Y"), 2) subject + verb phrase, 3) bare imperative.
@@ -21540,7 +21597,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // permission ("you may play that card for as long as you control ~") was
     // classified as a one-shot resolution offer and its "may" became an
     // `OptionalEffectChoice` whose decline destroyed the grant.
-    if clause.duration.is_none() {
+    if duration_is_unset_sentinel(&clause.duration) {
         if let Some(duration) = duration {
             spread_duration_over_exile_conjuncts(&mut clause, &duration);
             clause = with_clause_duration(clause, duration);
@@ -30817,6 +30874,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     let Some(subject_filter) = subject.target.clone().or_else(|| subject.affected.clone()) else {
         return;
     };
+    if matches!(subject_filter, TargetFilter::SelfRef) {
+        if let Effect::DealDamage {
+            amount,
+            damage_source,
+            ..
+        }
+        | Effect::DamageAll {
+            amount,
+            damage_source,
+            ..
+        } = effect
+        {
+            rebind_anaphoric_object_scope(amount, ObjectScope::Source);
+            *damage_source = None;
+            return;
+        }
+    }
     // The carried player is a player by construction, though `ParentTarget` can
     // also name an object and so fails the shared predicate.
     let subject_names_player = target_filter_can_target_player(&subject_filter)
@@ -31373,20 +31447,31 @@ fn try_parse_boon_creation(lower: &str, original: &str) -> Option<Effect> {
                     controller: Some(ControllerRef::Opponent),
                     properties: Vec::new(),
                 }),
-                tag("target opponent gets a one-time boon with "),
+                (
+                    tag("target opponent gets a "),
+                    opt(tag("one-time ")),
+                    tag("boon with "),
+                ),
             ),
             value(
                 TargetFilter::TriggeringPlayer,
-                tag("that player gets a one-time boon with "),
+                (
+                    tag("that player gets a "),
+                    opt(tag("one-time ")),
+                    tag("boon with "),
+                ),
             ),
             value(
                 TargetFilter::Controller,
-                tag("you get a one-time boon with "),
+                (tag("you get a "), opt(tag("one-time ")), tag("boon with ")),
             ),
-            value(TargetFilter::Controller, tag("get a one-time boon with ")),
+            value(
+                TargetFilter::Controller,
+                (tag("get a "), opt(tag("one-time ")), tag("boon with ")),
+            ),
             value(
                 TargetFilter::ParentTarget,
-                tag("gets a one-time boon with "),
+                (tag("gets a "), opt(tag("one-time ")), tag("boon with ")),
             ),
         ))
         .parse(i)
@@ -33368,6 +33453,26 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     ))
     .parse(lower)
     .ok()?;
+
+    // Rarity is not a card-type predicate. Until the cast filter can carry it,
+    // the complete permission remains unsupported instead of becoming Any.
+    if preceded(
+        opt(super::oracle_nom::primitives::parse_article),
+        terminated(
+            alt((
+                tag::<_, _, E>("mythic rare"),
+                tag("uncommon"),
+                tag("common"),
+                tag("rare"),
+            )),
+            space1,
+        ),
+    )
+    .parse(rest)
+    .is_ok()
+    {
+        return Some(Effect::unimplemented("cast_rarity_filter", lower));
+    }
 
     // CR 305.2a: A bare "play lands" fragment is not an effect granting a
     // zone-scoped play permission. Static permission parsers own sourced forms
@@ -35393,6 +35498,9 @@ fn try_parse_exile_until_opponent_becomes_monarch_clause(
 }
 
 fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> ParsedEffectClause {
+    if let Some(effect) = try_parse_perpetual_modify_pt_single(tp, ctx) {
+        return parsed_clause(effect);
+    }
     if let Some(clause) = try_parse_exile_until_opponent_becomes_monarch_clause(tp, ctx) {
         return clause;
     }
@@ -36573,6 +36681,26 @@ fn parse_hand_choice_filter<'a>(
 ) -> Result<Option<Option<TargetFilter>>, OracleError<'a>> {
     let lower = text.to_lowercase();
     let input = lower.trim();
+    // A card choice alone does not identify a hand: library reveals use the
+    // same "from among them" grammar. Only its lexical producer supplies one.
+    if ctx.chain_prior_hand_reveal_target.is_none()
+        && nom_primitives::scan_at_word_boundaries(input, |i| {
+            (
+                alt((tag::<_, _, OracleError<'_>>("from "), tag("in "))),
+                opt(alt((tag("your "), tag("their "), tag("that player's ")))),
+                tag("hand"),
+                peek(alt((
+                    value((), space1),
+                    value((), eof),
+                    value((), tag(".")),
+                ))),
+            )
+                .parse(i)
+        })
+        .is_none()
+    {
+        return Ok(None);
+    }
     let choice_body = parse_hand_choice_command(input)
         .map(|(body, _)| body)
         .or_else(|_| parse_hand_choice_sentence_command(input).map(|(body, _)| body));
@@ -43525,8 +43653,31 @@ fn refuse_unrepresentable_relation_units(
                 ))
                 .parse(noun)
                 {
-                    if search::parse_search_filter(descriptor, &mut ParseContext::default())
-                        .is_err()
+                    let descriptor = opt(alt((
+                        value((), tag::<_, _, OracleError<'_>>("any number of ")),
+                        value(
+                            (),
+                            preceded(
+                                opt(tag("up to ")),
+                                terminated(nom_primitives::parse_number_or_x, space1),
+                            ),
+                        ),
+                    )))
+                    .parse(descriptor)
+                    .map(|(descriptor, _)| descriptor)
+                    .unwrap_or(descriptor);
+                    let is_card_selection =
+                        nom_primitives::scan_at_word_boundaries(descriptor, |i| {
+                            terminated(
+                                alt((tag::<_, _, OracleError<'_>>("cards"), tag("card"))),
+                                peek(alt((value((), space1), value((), eof)))),
+                            )
+                            .parse(i)
+                        })
+                        .is_some();
+                    if is_card_selection
+                        && search::parse_search_filter(descriptor, &mut ParseContext::default())
+                            .is_err()
                     {
                         gap = Some("qualified_cohort_selection");
                     }
@@ -43549,6 +43700,61 @@ fn try_contextual_ir(
     *ctx = trial;
     Some(ir)
 }
+
+/// A printed live-zone gate inside a delayed program belongs to that later
+/// resolution, rather than to registration of the program.
+fn delayed_object_zone_gate(text: &str) -> Option<(AbilityCondition, &str)> {
+    let lower = text.to_lowercase();
+    let ((zone, controller), body) = nom_on_lower(text, &lower, |input| {
+        let (input, _) = (
+            tag::<_, _, OracleError<'_>>("if "),
+            alt((
+                tag("that card"),
+                tag("that creature"),
+                tag("that permanent"),
+                tag("it"),
+            )),
+            tag(" is "),
+        )
+            .parse(input)?;
+        terminated(
+            alt((
+                map(
+                    preceded(
+                        tag("in your "),
+                        verify(super::oracle_target::parse_zone_word, |zone| {
+                            matches!(zone, Zone::Hand | Zone::Library | Zone::Graveyard)
+                        }),
+                    ),
+                    |zone| (zone, Some(ControllerRef::You)),
+                ),
+                map(
+                    preceded(
+                        tag("on the "),
+                        verify(super::oracle_target::parse_zone_word, |zone| {
+                            *zone == Zone::Battlefield
+                        }),
+                    ),
+                    |zone| (zone, None),
+                ),
+            )),
+            tag(", "),
+        )
+        .parse(input)
+    })?;
+    Some((
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: Vec::new(),
+                controller,
+                properties: vec![FilterProp::InZone { zone }],
+            }),
+            use_lki: false,
+            subject_slot: None,
+        },
+        body,
+    ))
+}
 fn parse_effect_chain_ir_body(
     text: &str,
     kind: AbilityKind,
@@ -43558,6 +43764,49 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
+    let complete_lower = text.to_lowercase();
+    if let Some(mut effect) =
+        try_parse_perpetual_modify_pt_dynamic(TextPair::new(text, &complete_lower))
+    {
+        let bound = if let Effect::ApplyPerpetual { target, .. } = &mut effect {
+            if matches!(target, TargetFilter::ParentTarget) {
+                ctx.object_pronoun_ref
+                    .clone()
+                    .or_else(|| {
+                        ctx.parent_target_available
+                            .then_some(TargetFilter::ParentTarget)
+                    })
+                    .map(|reference| *target = reference)
+                    .is_some()
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        if bound {
+            return EffectChainIr::single_clause(
+                text,
+                kind,
+                parsed_clause(effect),
+                None,
+                ctx.actor.clone(),
+                ctx.in_trigger,
+            );
+        }
+    }
+    if let Some(clause) =
+        try_parse_temporary_spell_cost_modification(TextPair::new(text, &complete_lower))
+    {
+        return EffectChainIr::single_clause(
+            text,
+            kind,
+            clause,
+            None,
+            ctx.actor.clone(),
+            ctx.in_trigger,
+        );
+    }
     if let Some(ir) = try_contextual_ir(ctx, |trial| {
         parse_reciprocal_graveyard_choice_ir(text, kind, trial)
     }) {
@@ -43885,7 +44134,8 @@ fn parse_effect_chain_ir_body(
             }?;
             matches!(
                 reference,
-                TargetFilter::AttachedTo
+                TargetFilter::SelfRef
+                    | TargetFilter::AttachedTo
                     | TargetFilter::ParentTarget
                     | TargetFilter::ParentTargetSlot { .. }
                     | TargetFilter::TriggeringSource
@@ -47085,6 +47335,10 @@ fn parse_effect_chain_ir_body(
                 .and_then(|expr| expr.clone())
         });
         if let Some(prefix_condition) = prefix_delayed {
+            let zone_gate = delayed_object_zone_gate(text_after_prefix);
+            let text_after_prefix = zone_gate
+                .as_ref()
+                .map_or(text_after_prefix, |(_, body)| *body);
             let (inner_text, inner_multi_target) =
                 if imperative::aggregate_return_choice_cardinality(text_after_prefix, ctx).is_some()
                 {
@@ -47094,6 +47348,12 @@ fn parse_effect_chain_ir_body(
                 };
             let inner_ir = parse_effect_chain_ir(&inner_text, kind, ctx);
             let mut inner_def = lower_effect_chain_ir(&inner_ir);
+            if let Some((gate, _)) = zone_gate {
+                inner_def.condition = Some(crate::parser::oracle::merge_ability_condition(
+                    inner_def.condition.take(),
+                    gate,
+                ));
+            }
             if let Some(spec) = inner_multi_target {
                 inner_def = inner_def.multi_target(spec);
             }

@@ -7651,16 +7651,11 @@ fn parse_normalized_oracle_ir(
                 && prepare_spell_resolution_line(&line).is_some_and(|prepared| {
                     should_defer_spell_to_effect(&prepared.effect_text.to_lowercase())
                 }));
-        // CR 111.3 + CR 111.4: retain the compatibility quote view for creation
-        // lines outside the owned command category. White Sun's numeric
-        // "You gain" head now defers through the shared outer owner. The view
-        // feeds only static classification; the original
-        // text still reaches semantic parsing with recipient grants intact.
-        let static_classify_view = if is_spell && scan_contains(&lower, "create") {
-            crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower)
-        } else {
-            std::borrow::Cow::Borrowed(lower.as_str())
-        };
+        // Quoted grants describe a child ability, not the outer instruction's
+        // kind. Classify the outer line with quotes masked, then pass the full
+        // original text to its semantic owner (including loyalty/emblem grants).
+        let static_classify_view =
+            crate::parser::oracle_nom::primitives::strip_double_quoted_spans(&lower);
         if !defer_to_effect_parser && is_static_pattern(&static_classify_view) {
             if result.strive_cost.is_some() && parse_strive_cost_line(&line).is_some() {
                 i += 1;
@@ -7917,7 +7912,14 @@ fn parse_normalized_oracle_ir(
             // becomes a Moved replacement) and silently drops the permission's unmodeled
             // prefix, so emit the same typed `static_structure` residual the generic
             // unsupported dispatch would.
-            if is_graveyard_cast_permission_lead(&lower) {
+            if is_graveyard_cast_permission_lead(&lower)
+                || (!is_spell
+                    && !has_trigger_prefix(&static_classify_view)
+                    && find_activated_colon(&line).is_none())
+            {
+                // A permanent's recognized standing ability cannot become a
+                // resolving Spell effect merely because its static owner refused
+                // a condition or population. Preserve the whole source as a gap.
                 emitter.unsupported_ir_at(
                     item_line,
                     UnsupportedAbilityIr::new(

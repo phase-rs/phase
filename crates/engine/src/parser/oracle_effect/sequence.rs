@@ -1547,6 +1547,23 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                 in_single_quote = false;
                 single_quote_is_ability = false;
                 let remainder = chars.clone().collect::<String>();
+                // CR 205.1b: a still-a-type rider retains every prior type,
+                // rather than re-adding only the named type after replacement.
+                // Keep it with its animation so the descriptor owner receives
+                // that policy before publishing layer-4 modifications.
+                if nom_primitives::scan_at_word_boundaries(
+                    &current.to_lowercase(),
+                    parse_become_verb,
+                )
+                .is_some()
+                    && crate::parser::oracle_static::parse_type_retention_clause(
+                        &remainder.trim_start().to_lowercase(),
+                    )
+                    .is_ok()
+                {
+                    current.push(ch);
+                    continue;
+                }
                 if (inline_delayed_sticky
                     || opens_inline_delayed_trigger(&current.to_ascii_lowercase()))
                     && continues_inline_delayed_body(&remainder.trim_start().to_ascii_lowercase())
@@ -4824,6 +4841,33 @@ fn severed_prefix_end(body: &str, sub: &[ClauseChunk], ctx: &ParseContext) -> Op
     // so two different bodies reaching it compare EQUAL. "The parser did not understand
     // the body" is not evidence of prefix consumption — decline.
     if matches!(whole.effect, Effect::Unimplemented { .. }) {
+        // A complete modifier followed by an independently modeled mass-block
+        // instruction is two owned clauses even when the single-modifier
+        // recognizer correctly refuses to swallow their combined sentence.
+        if let [head, tail] = sub {
+            let tail_lower = tail.text.to_lowercase();
+            let mut tail_context = ctx.clone();
+            let diagnostic_count = tail_context.diagnostics.len();
+            super::try_parse_mass_forced_block(
+                TextPair::new(&tail.text, &tail_lower),
+                &mut tail_context,
+            )?;
+            if tail_context.diagnostics.len() != diagnostic_count {
+                return None;
+            }
+            let first = super::parse_effect_clause(&head.text, &mut ctx.clone());
+            if matches!(
+                first.effect,
+                Effect::GenericEffect {
+                    target: Some(_),
+                    ..
+                }
+            ) && first.unlowered_guard.is_none()
+                && first.sub_ability.is_none()
+            {
+                return chunk_end_offset(body, sub, 0);
+            }
+        }
         return None;
     }
     (0..sub.len() - 1).find_map(|k| {

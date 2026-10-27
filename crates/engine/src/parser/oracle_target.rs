@@ -170,6 +170,25 @@ mod qualified_adjective_tests {
     use super::*;
 
     #[test]
+    fn standalone_known_negated_types_remain_complete_qualifiers() {
+        for (phrase, kind) in [
+            ("noncreature", TypeFilter::Creature),
+            ("nonartifact", TypeFilter::Artifact),
+            ("nonland", TypeFilter::Land),
+        ] {
+            let (actual, rest) = parse_type_phrase_folding(phrase);
+            assert_eq!(rest, "");
+            assert_eq!(
+                actual,
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(kind))))
+            );
+        }
+        let (actual, rest) = parse_type_phrase_folding("nonspooky");
+        assert_eq!(rest, "nonspooky");
+        assert_eq!(actual, TargetFilter::Typed(TypedFilter::default()));
+    }
+
+    #[test]
     fn qualified_adjectives_compose_in_either_order_with_complete_nouns() {
         // SHAPE: the same typed predicates survive adjective reordering.
         for phrase in [
@@ -3259,6 +3278,20 @@ fn parse_type_phrase_folding_core<'a>(
     ctx: &mut ParseContext,
     hand_resolution_domain: Option<ChoiceType>,
 ) -> (TargetFilter, &'a str) {
+    // A standalone negated type is a complete qualifier ("noncreature
+    // spell"). It is distinct from an adjective missing its head noun.
+    let lower = text.to_lowercase();
+    if let Ok((_, kind)) = all_consuming(preceded(
+        (tag::<_, _, OracleError<'_>>("non"), opt(tag("-"))),
+        nom_target::parse_type_filter_word,
+    ))
+    .parse(lower.trim())
+    {
+        return (
+            TypedFilter::new(TypeFilter::Non(Box::new(kind))).into(),
+            &text[text.len()..],
+        );
+    }
     if let Some(population) = parse_prior_controller_population(text, ctx) {
         return population;
     }
@@ -4576,7 +4609,7 @@ fn parse_type_phrase_folding_core<'a>(
     // on opponent-choice effects. The actual choice is handled by the WaitingFor state machine.
     let remaining_choice = lower[pos..].trim_start();
     let choice_offset = lower[pos..].len() - remaining_choice.len();
-    for suffix in &["of their choice", "of his or her choice"] {
+    for suffix in &["of their choice", "of his or her choice", "of your choice"] {
         if tag::<_, _, OracleError<'_>>(*suffix)
             .parse(remaining_choice)
             .is_ok()
@@ -4780,6 +4813,27 @@ fn parse_type_phrase_folding_core<'a>(
             .collect::<Vec<_>>()
     };
 
+    let excludes_dying_card = left_card_suffix
+        && ctx.trigger_zone_change.as_pair()
+            == Some((
+                crate::types::zones::Zone::Battlefield,
+                crate::types::zones::Zone::Graveyard,
+            ))
+        && properties.contains(&FilterProp::Another)
+        && properties.iter().any(|property| {
+            matches!(
+                property,
+                FilterProp::Cmc {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOn {
+                            scope: ObjectScope::EventSource,
+                            ..
+                        }
+                    },
+                    ..
+                }
+            )
+        });
     let property_branches = if property_disjunction_ranges.is_empty() {
         vec![properties]
     } else {
@@ -4818,7 +4872,18 @@ fn parse_type_phrase_folding_core<'a>(
             let typed = TypedFilter {
                 type_filters: type_filters.clone(),
                 controller: controller.clone(),
-                properties: properties.clone(),
+                properties: properties
+                    .iter()
+                    .map(|property| {
+                        if excludes_dying_card && *property == FilterProp::Another {
+                            FilterProp::DistinctFrom {
+                                reference: Box::new(TargetFilter::TriggeringSource),
+                            }
+                        } else {
+                            property.clone()
+                        }
+                    })
+                    .collect(),
             };
             if relative_token_legs.is_empty() {
                 filters.push(TargetFilter::Typed(typed));
@@ -7793,7 +7858,23 @@ pub(crate) fn parse_mana_value_suffix(
             Err(nom::Err::Error(_)) => None,
             Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
         };
-        let (qty, after) = if let Some((after, qty)) = bounded {
+        let (qty, after) = if let Some((after, mut qty)) = bounded {
+            if ctx.trigger_zone_change.as_pair()
+                == Some((
+                    crate::types::zones::Zone::Battlefield,
+                    crate::types::zones::Zone::Graveyard,
+                ))
+                && ctx.declared_target_slots.is_empty()
+                && !ctx.parent_target_available
+            {
+                if let QuantityRef::CountersOn {
+                    scope: scope @ ObjectScope::Target,
+                    ..
+                } = &mut qty
+                {
+                    *scope = ObjectScope::EventSource;
+                }
+            }
             (qty, after)
         } else if let Ok((a2, _)) = tag::<_, _, Vbe>("that ").parse(a) {
             // CR 120.3: "that damage" — the damage amount captured by the trigger

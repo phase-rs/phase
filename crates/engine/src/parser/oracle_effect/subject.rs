@@ -970,11 +970,18 @@ fn build_conditional_continuous_members(
         let member_duration = member_duration
             .or_else(|| duration.clone())
             .or(Some(Duration::Permanent));
-        let board_gate = match condition {
-            Some(condition) => Some(super::conditions::static_condition_to_ability_condition(
-                &condition, ctx,
-            )?),
-            None => None,
+        let keyword_member = modifications
+            .iter()
+            .any(|modification| matches!(modification, ContinuousModification::AddKeyword { .. }));
+        let board_gate = if keyword_member {
+            None
+        } else {
+            match condition.as_ref() {
+                Some(condition) => Some(super::conditions::static_condition_to_ability_condition(
+                    condition, ctx,
+                )?),
+                None => None,
+            }
         };
         let (member_affected, recipient_gate) = match recipient {
             Some(filter) if bound_target => (
@@ -1001,6 +1008,10 @@ fn build_conditional_continuous_members(
         let mut definition = StaticDefinition::continuous()
             .affected(member_affected)
             .modifications(modifications);
+        // GenericEffect evaluates its static gates when the effect resolves.
+        // Keep the gate with its member so "the same is true" can clone and
+        // substitute each keyword independently.
+        definition.condition = keyword_member.then_some(condition).flatten();
         crate::parser::oracle_static::bind_counter_anaphor_to_recipient(&mut definition);
         let mut member = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -3165,6 +3176,29 @@ fn parse_subject_application_for(
 
     let lower = subject.to_lowercase();
 
+    // A definite description of one of the declared targets reads that slot;
+    // it does not select every matching creature again at resolution.
+    if let Ok((description, _)) = tag::<_, _, OracleError<'_>>("the ").parse(lower.as_str()) {
+        let (filter, remainder) =
+            parse_type_phrase_folding_with_ctx(description, &mut ctx.clone_player_antecedents());
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any | TargetFilter::None)
+        {
+            let mut matching = ctx
+                .declared_target_slots
+                .iter()
+                .enumerate()
+                .filter(|(_, declared)| **declared == filter);
+            if let Some((index, _)) = matching.next() {
+                if matching.next().is_none() {
+                    return subject_filter_application(
+                        TargetFilter::ParentTargetSlot { index },
+                        false,
+                    );
+                }
+            }
+        }
+    }
+
     // CR 608.2c + CR 115.10a: preserve the entire selected-controller
     // population. The generic universal-subject merger tolerates residual
     // descriptors; this relation cannot discard one and still claim support.
@@ -4674,6 +4708,13 @@ fn strip_possessive_subject_suffix(subject: &str) -> &str {
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
 fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> TargetFilter {
+    // An affected-object pronoun reads the nearer population produced by this
+    // instruction chain, before an enclosing trigger's player/source frame.
+    if consumer == AnaphorConsumer::AffectedObject {
+        if let Some(population) = &ctx.chain_prior_mass_population {
+            return population.clone();
+        }
+    }
     // CR 608.2c + CR 611.2c: an iterated-player frame (a fan-out vote body, an
     // each-player or each-upkeep scope) is the referent of a bare "they" unless
     // the nearest earlier clause acted on an object set and "they" is the affected
@@ -4733,7 +4774,9 @@ fn resolve_they_pronoun(ctx: &mut ParseContext, consumer: AnaphorConsumer) -> Ta
     if matches!(
         ctx.relative_player_scope,
         Some(ControllerRef::TargetPlayer | ControllerRef::TriggeringPlayer)
-    ) {
+    ) && !(consumer == AnaphorConsumer::AffectedObject
+        && ctx.chain_prior_mass_population.is_some())
+    {
         return TargetFilter::TriggeringPlayer;
     }
     // CR 608.2c + CR 109.4: "They" after a `Choose(Player)` clause refers to
@@ -5132,6 +5175,7 @@ pub(super) fn is_single_object_ref(filter: &TargetFilter) -> bool {
             | TargetFilter::TriggeringSource
             | TargetFilter::AttachedTo
             | TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetSlot { .. }
     )
 }
 
@@ -5723,7 +5767,9 @@ pub(super) fn retain_fallback_grant_duration(
         original,
         &definition.modifications,
         local,
-        ctx.stated_clause_duration.clone(),
+        ctx.stated_clause_duration
+            .clone()
+            .or_else(|| clause.duration.clone()),
         clause_names_deferred_parser(original),
     );
     if let Some(window) = window {
@@ -5811,7 +5857,8 @@ fn build_continuous_clause(
     let (without_where, _) = super::strip_trailing_where_x(norm_tp);
     let duration = super::lower::duration_before_for_each(without_where.original);
 
-    let (predicate_text, fallback_duration) = super::strip_trailing_duration(&normalized);
+    let (predicate_body, fallback_duration) = strip_continuous_duration(&normalized);
+    let predicate_text = predicate_body.as_ref();
     let duration = duration.or(fallback_duration);
 
     if let Some(static_abilities) =
@@ -6162,13 +6209,35 @@ fn monarch_subject_target(application: &SubjectApplication) -> Option<TargetFilt
     }
 }
 
+fn strip_continuous_duration(predicate: &str) -> (std::borrow::Cow<'_, str>, Option<Duration>) {
+    let lower = predicate.to_lowercase();
+    if let Some((descriptor, _)) = crate::parser::oracle_static::split_type_retention_clause(&lower)
+    {
+        let descriptor_end = descriptor.trim_end().len();
+        let descriptor = predicate[..descriptor_end]
+            .trim_end()
+            .trim_end_matches('.')
+            .trim_end();
+        let (body, duration) = super::strip_trailing_duration(descriptor);
+        if duration.is_some() {
+            return (
+                std::borrow::Cow::Owned(format!("{body}. {}", predicate[descriptor_end..].trim())),
+                duration,
+            );
+        }
+    }
+    let (body, duration) = super::strip_trailing_duration(predicate);
+    (std::borrow::Cow::Borrowed(body), duration)
+}
+
 fn build_become_clause(
     application: SubjectApplication,
     predicate: &str,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let normalized = deconjugate_verb(predicate);
-    let (predicate, stated_duration) = super::strip_trailing_duration(&normalized);
+    let (predicate_body, stated_duration) = strip_continuous_duration(&normalized);
+    let predicate = predicate_body.as_ref();
     // CR 725.1: "become the monarch" sets the monarch designation, not an animation.
     let predicate_lower = predicate.to_lowercase();
     let (become_rest, _) = tag::<_, _, OracleError<'_>>("become ")
@@ -7904,6 +7973,20 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
         }]);
     }
     // CR 509.1b: "can't be blocked by <filter>" — blocker restriction
+    if let Ok((_, max)) = all_consuming(terminated(
+        preceded(
+            (
+                alt((tag::<_, _, OracleError<'_>>("can't"), tag("cannot"))),
+                tag(" be blocked by more than "),
+            ),
+            nom_primitives::parse_number,
+        ),
+        (alt((tag(" creatures"), tag(" creature"))), opt(tag("."))),
+    ))
+    .parse(lower)
+    {
+        return Some(vec![StaticMode::CantBeBlockedByMoreThan { max }]);
+    }
     if let Ok((by_rest, _)) = alt((
         tag::<_, _, OracleError<'_>>("can't be blocked by "),
         tag("cannot be blocked by "),
@@ -8435,9 +8518,6 @@ pub(super) fn try_parse_each_source_deals_damage(
         if !matches!(
             reference,
             TargetFilter::AttachedTo
-                | TargetFilter::ParentTarget
-                | TargetFilter::ParentTargetSlot { .. }
-                | TargetFilter::TriggeringSource
                 | TargetFilter::SpecificObject { .. }
                 | TargetFilter::CostPaidObject { .. }
         ) {
@@ -9035,7 +9115,10 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         if ch.is_whitespace() {
             if let Some(start) = word_start.take() {
                 let token = &lower[start..idx];
-                if !is_embedded_relative_clause_verb(prev_token, token, &lower[idx..])
+                let relative_cast =
+                    token == "cast" && prev_token == Some("you") && start > "you ".len();
+                if !relative_cast
+                    && !is_embedded_relative_clause_verb(prev_token, token, &lower[idx..])
                     && token_starts_predicate(token)
                 {
                     return Some(start);

@@ -1768,7 +1768,7 @@ pub(super) fn aggregate_return_choice_cardinality(
     .then_some(cardinality)
 }
 
-pub(super) fn parse_targeted_action_ast(
+pub(crate) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
@@ -1932,6 +1932,9 @@ pub(super) fn parse_targeted_action_ast(
                     .parse(folded_rest.trim())
                     .is_err())
         {
+            return None;
+        }
+        if !next_instruction && !terminal_punctuation_only(folded_rest) {
             return None;
         }
         // CR 701.21a: When the count expression already carries a typed filter
@@ -4144,7 +4147,12 @@ fn parse_hand_reveal_target_and_card_filter<'a>(
         if let Ok((choice, _)) =
             (space0, tag::<_, _, OracleError<'_>>("and "), space0).parse(after_hand)
         {
-            match super::parse_hand_choice_filter(choice, ctx)? {
+            let mut hand_ctx = ctx.clone();
+            hand_ctx.chain_prior_hand_reveal_target = Some(target.clone());
+            let choice_filter = super::parse_hand_choice_filter(choice, &mut hand_ctx)?;
+            hand_ctx.chain_prior_hand_reveal_target = ctx.chain_prior_hand_reveal_target.clone();
+            *ctx = hand_ctx;
+            match choice_filter {
                 Some(Some(filter)) => return Ok((target, filter)),
                 Some(None) => return Ok((target, TargetFilter::Typed(TypedFilter::card()))),
                 None => return Err(OracleError::new(input, nom::error::ErrorKind::Verify)),
@@ -4891,6 +4899,10 @@ pub(super) fn parse_choose_ast<'a>(
     let ast = match selected {
         Some(Some(card_filter)) => Some(ChooseImperativeAst::RevealHandFilter {
             card_filter,
+            target: trial
+                .chain_prior_hand_reveal_target
+                .clone()
+                .ok_or_else(|| OracleError::new(text, nom::error::ErrorKind::Verify))?,
             choice_optional: super::sequence::reveal_choice_is_optional(lower),
         }),
         Some(None) | None => parse_choose_ast_inner(text, lower, &mut trial),
@@ -6883,9 +6895,10 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         },
         ChooseImperativeAst::RevealHandFilter {
             card_filter,
+            target,
             choice_optional,
         } => Effect::RevealHand {
-            target: TargetFilter::Any,
+            target,
             card_filter,
             count: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -10951,7 +10964,21 @@ pub(super) fn parse_destroy_ast<'a>(
     ctx: &mut ParseContext,
 ) -> Option<Result<ZoneCounterImperativeAst, &'a str>> {
     let (ast, remainder, tentative) = parse_destroy_target_core(text, lower, ctx)?;
-    if !terminal_punctuation_only(remainder) {
+    let lower_remainder = remainder.to_lowercase();
+    let owned_total_budget = super::lower::parse_total_mana_value_target_constraint(text).is_some()
+        && all_consuming(terminated(
+            preceded(
+                (
+                    space0,
+                    tag::<_, _, OracleError<'_>>("with total mana value "),
+                ),
+                (nom_quantity::parse_quantity_expr_number, tag(" or less")),
+            ),
+            (space0, opt(tag(".")), space0),
+        ))
+        .parse(lower_remainder.as_str())
+        .is_ok();
+    if !terminal_punctuation_only(remainder) && !owned_total_budget {
         return Some(Err(text));
     }
     *ctx = tentative;

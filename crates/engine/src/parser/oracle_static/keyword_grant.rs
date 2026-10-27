@@ -319,6 +319,14 @@ pub(crate) fn try_parse_graveyard_keyword_grant_source(
     }
     let stripped = strip_reminder_text(line);
     let lower = stripped.to_lowercase();
+    if super::type_change::parse_arcane_adaptation_chosen_type_static(
+        &TextPair::new(&stripped, &lower),
+        &stripped,
+    )
+    .is_some()
+    {
+        return None;
+    }
     let (condition, body) = nom_on_lower(&stripped, &lower, |input| {
         opt(super::parse_leading_turn_scope).parse(input)
     })?;
@@ -1532,16 +1540,25 @@ fn parse_all_land_types_modification(text: &str) -> Option<ContinuousModificatio
         )))
         .parse(i)?;
         // Longer phrase first so "all basic land types" wins over "all land types".
-        all_consuming(alt((
-            value(
-                ContinuousModification::AddAllBasicLandTypes,
-                tag("all basic land types"),
-            ),
-            value(
-                ContinuousModification::AddAllLandTypes,
-                tag("all land types"),
-            ),
-        )))
+        all_consuming(terminated(
+            alt((
+                value(
+                    ContinuousModification::AddAllBasicLandTypes,
+                    alt((tag("all basic land types"), tag("every basic land type"))),
+                ),
+                value(
+                    ContinuousModification::AddAllLandTypes,
+                    tag("all land types"),
+                ),
+            )),
+            opt((
+                tag(" in addition to "),
+                alt((tag("its"), tag("their"))),
+                tag(" other "),
+                opt(tag("land ")),
+                tag("types"),
+            )),
+        ))
         .parse(i)
     })
 }
@@ -1567,20 +1584,32 @@ enum LastChosenCharacteristic {
 fn parse_last_chosen_characteristic_list(
     input: &str,
 ) -> OracleResult<'_, Vec<LastChosenCharacteristic>> {
-    preceded(
+    let characteristic = || {
+        alt((
+            value(LastChosenCharacteristic::CreatureType, tag("creature type")),
+            value(LastChosenCharacteristic::Name, tag("name")),
+        ))
+    };
+    let (input, subjects) = preceded(
         tag("its "),
         terminated(
             separated_list1(
                 alt((tag(", and "), tag(" and "), tag(", "))),
-                alt((
-                    value(LastChosenCharacteristic::CreatureType, tag("creature type")),
-                    value(LastChosenCharacteristic::Name, tag("name")),
-                )),
+                characteristic(),
             ),
             (alt((tag(" is "), tag(" are "))), tag("the last chosen ")),
         ),
     )
-    .parse(input)
+    .parse(input)?;
+    let (input, objects) = separated_list1(
+        alt((tag(", and "), tag(" and "), tag(", "))),
+        characteristic(),
+    )
+    .parse(input)?;
+    if subjects != objects {
+        return Err(super::oracle_nom::error::oracle_err(input));
+    }
+    Ok((input, subjects))
 }
 
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
@@ -2092,6 +2121,10 @@ pub(crate) fn parse_complete_continuous_modifications(
 ) -> Option<Vec<ContinuousModification>> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+    if let Some((_, _)) = super::split_type_retention_clause(&lower) {
+        return complete_modification_clause(text, None, ContinuousVerb::Unbound)
+            .map(|(modifications, _)| modifications);
+    }
     let (predicate, protection_rider) =
         if let Some((first, rider)) = tp.split_around_outside_quotes(". ") {
             complete_protection_rider(rider.original)?;
@@ -2370,6 +2403,19 @@ fn complete_static_where_x<'a>(
         .trim_end_matches('.')
         .trim_start()
         .trim_end();
+    if let Some((x, y)) = expression.split_around_outside_quotes(", and y is ") {
+        all_consuming(super::oracle_nom::quantity::parse_quantity)
+            .parse(x.lower)
+            .ok()?;
+        all_consuming(super::oracle_nom::quantity::parse_quantity)
+            .parse(y.lower)
+            .ok()?;
+        let predicate = tp
+            .slice(0, tp.len() - rest.len())
+            .trim_end_matches(',')
+            .trim_end();
+        return Some((predicate, Some(expression.original), None));
+    }
     let (remaining, _) = super::oracle_nom::quantity::parse_quantity
         .parse(expression.lower)
         .ok()?;
@@ -2430,7 +2476,15 @@ fn complete_modification_clause(
         return None;
     }
     let lower = text.to_lowercase();
+    let text = nom_tag_lower(text, &lower, "it ")
+        .or_else(|| nom_tag_lower(text, &lower, "they "))
+        .or_else(|| nom_tag_lower(text, &lower, "also "))
+        .unwrap_or(text);
+    let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+    if let Some(modification) = parse_all_land_types_modification(text) {
+        return Some((vec![modification], inherited_verb));
+    }
     let (body, verb) = match alt((
         value(
             ContinuousVerb::Pump,
@@ -2459,16 +2513,61 @@ fn complete_modification_clause(
         )
         .parse(input)
     }) {
-        if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        // The basic-land setter owns printed-ability suppression as well as
+        // subtype replacement; a generic animation is not equivalent.
+        let land_descriptor = nom_primitives::parse_article
+            .parse(descriptor)
+            .map_or(descriptor, |(rest, _)| rest);
+        let land_sentence = format!("Lands are {land_descriptor}");
+        let land_lower = land_sentence.to_lowercase();
+        if let Some(definition) = super::type_change::parse_land_type_change(
+            &TextPair::new(&land_sentence, &land_lower),
+            &land_sentence,
+        ) {
+            return Some((definition.modifications, ContinuousVerb::Unbound));
+        }
+        let descriptor_lower = descriptor.to_lowercase();
+        let descriptor_tp = TextPair::new(descriptor, &descriptor_lower);
+        let animation = super::oracle_effect::animation::parse_animation_spec(
             descriptor,
             &mut ParseContext::default(),
-        ) {
+        )
+        .map(|spec| (spec, Vec::new()))
+        .or_else(|| {
+            let (base, grant) = descriptor_tp.split_around_outside_quotes(" with ")?;
+            let grant = if let Some((before, _)) = super::split_type_retention_clause(grant.lower) {
+                grant
+                    .slice(0, before.len())
+                    .trim_end()
+                    .trim_end_matches('.')
+            } else {
+                grant
+            };
+            let (_, inner) = all_consuming(nom::sequence::delimited(
+                tag::<_, _, OracleError<'_>>("\""),
+                take_until("\""),
+                tag("\""),
+            ))
+            .parse(grant.original.trim())
+            .ok()?;
+            let modifications = classify_quoted_inner(inner);
+            if modifications.is_empty() {
+                return None;
+            }
+            let spec = super::oracle_effect::animation::parse_animation_spec(
+                base.original,
+                &mut ParseContext::default(),
+            )?;
+            Some((spec, modifications))
+        });
+        if let Some((spec, grants)) = animation {
             let additive =
                 super::oracle_effect::animation::has_in_addition_to_other_types(descriptor);
             let mut modifications =
                 super::oracle_effect::animation::animation_modifications_with_replacement(
                     &spec, additive,
                 );
+            modifications.extend(grants);
             if super::oracle_effect::animation::has_in_addition_to_other_colors(descriptor) {
                 modifications = modifications
                     .into_iter()
@@ -2657,6 +2756,11 @@ fn complete_modification_clause(
         let mods = classify_quoted_inner(inner);
         return (!mods.is_empty()).then_some((mods, verb));
     }
+    // Resolve explicit companion predicates before a deferred quantity owner
+    // can interpret their words as part of its population description.
+    if let Some(sequence) = complete_modification_sequence(text, where_x, inherited_verb) {
+        return Some(sequence);
+    }
     let body_lower = body.to_lowercase();
     if matches!(verb, ContinuousVerb::Pump)
         || alt((tag::<_, _, OracleError<'_>>("+"), tag("-")))
@@ -2688,13 +2792,9 @@ fn complete_modification_clause(
                 }
             }
         }
-        if all_consuming((
-            super::anthem::parse_base_pt_side,
-            tag::<_, _, OracleError<'_>>("/"),
-            super::anthem::parse_base_pt_side,
-        ))
-        .parse(body_lower.as_str())
-        .is_ok()
+        if all_consuming(parse_variable_pt_pattern)
+            .parse(body_lower.as_str())
+            .is_ok()
         {
             return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
                 .map(|modifications| (modifications, verb));
@@ -2776,6 +2876,27 @@ fn complete_modification_clause(
     if let Some(modification) = parse_all_land_types_modification(text) {
         return Some((vec![modification], verb));
     }
+    // CR 508.1d + CR 509.1c: a positive combat requirement is its own
+    // complete member of a keyword/modifier conjunction, with the same
+    // recipient and duration as the surrounding resolving instruction.
+    if let Ok((_, requirement)) =
+        all_consuming(parse_rule_static_predicate_nom).parse(lower.as_str())
+    {
+        if matches!(
+            requirement,
+            RuleStaticPredicate::MustAttack
+                | RuleStaticPredicate::MustBlock
+                | RuleStaticPredicate::MustBeBlocked
+        ) {
+            let definition = lower_rule_static(requirement, None, TargetFilter::SelfRef, text);
+            return Some((
+                vec![ContinuousModification::AddStaticMode {
+                    mode: definition.mode,
+                }],
+                verb,
+            ));
+        }
+    }
     // Restriction parsing already requires its complete clause.
     if let Some(modes) = parse_restriction_modes(lower.as_str()) {
         let mods: Vec<_> = modes
@@ -2786,6 +2907,20 @@ fn complete_modification_clause(
         if !mods.is_empty() {
             return Some((mods, verb));
         }
+    }
+    if all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("can't become suspected"),
+        tag("cant become suspected"),
+    )))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return Some((
+            vec![ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantBecomeSuspected,
+            }],
+            verb,
+        ));
     }
     // A type companion ends at its modeled additive suffix. The type grammar
     // must own every word before that suffix, as well as the complete suffix.
@@ -2821,6 +2956,16 @@ fn complete_modification_clause(
             }
         }
     }
+    complete_modification_sequence(text, where_x, inherited_verb)
+}
+
+fn complete_modification_sequence(
+    text: &str,
+    where_x: Option<&str>,
+    inherited_verb: ContinuousVerb,
+) -> Option<(Vec<ContinuousModification>, ContinuousVerb)> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
     // Try every OUTSIDE-QUOTE connector transactionally. A failed split leaves
     // the original predicate intact, including all intervening semantic text.
     let mut scan = tp;

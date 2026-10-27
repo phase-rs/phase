@@ -41,6 +41,69 @@ const DRAGONBORN: &str = "{2}{R}: This creature gets +1/+0 until end of turn.\nG
 const MEPHITS: &str = "This sorcery deals 4 damage to target creature or planeswalker. If excess damage was dealt this way, note that excess damage, then you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+0, where X is the noted number.\"";
 const MOLTEN: &str = "This sorcery deals 4 damage to target creature or planeswalker. If excess damage was dealt this way, note that excess damage, then you get a one-time boon with \"When you cast an instant or sorcery spell, this boon deals damage equal to the noted number to target creature or planeswalker an opponent controls.\"";
 const ROTHGA: &str = "Trample\nWhen Rothga, Bonded Engulfer enters, you get a one-time boon with \"When you cast a creature spell, it perpetually gets +X/+X, where X is its power.\"";
+
+#[test]
+fn printed_boon_without_one_time_marker_owns_the_next_creature_edit() {
+    use engine::types::mana::{ManaType, ManaUnit};
+    const DUSKGUARD: &str = "When Flaming Fist Duskguard enters the battlefield, you get a boon with \"When you cast your next creature spell, it perpetually gets +1/+0.\"";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Green,
+            ManaType::Green,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let source = scenario
+        .add_creature_to_hand_from_oracle(P0, "Flaming Fist Duskguard", 3, 1, DUSKGUARD)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![engine::types::mana::ManaCostShard::White],
+        })
+        .id();
+    let first = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+        })
+        .id();
+    let second = scenario
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(source).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(held_boons(&runner), vec![P0]);
+    runner.cast(first).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().objects[&first].power, Some(3));
+    assert_eq!(frozen_perpetual_pt(&runner, first), vec![(1, 0)]);
+    assert!(held_boons(&runner).is_empty());
+    runner.cast(second).resolve();
+    drain_stack(&mut runner);
+    assert_eq!(runner.state().objects[&second].power, Some(2));
+    assert!(frozen_perpetual_pt(&runner, second).is_empty());
+    assert_eq!(runner.state().objects[&source].power, Some(3));
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().resolution_stack.is_empty());
+}
 // Jaheira, Stirring Harper's boon body on a drivable ETB grantor: Jaheira
 // herself grants on specialize, which has no scenario driver, so the runtime
 // pins the shared inner shape while `boon_jaheira_stirring_harper` pins her

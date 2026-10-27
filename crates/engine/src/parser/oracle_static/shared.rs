@@ -3076,10 +3076,23 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
 
+    if let Some(definition) = super::evasion::parse_combat_tax_static(&tp, &stripped) {
+        return vec![definition];
+    }
+
     // CR 611.3a: hosted member predicates stay live, with their own complete
     // recipient and board gates. No prefix is published on a refused member.
     if let Some(definitions) = parse_continuous_subject_predicate(&tp, |subject, predicate| {
         let affected = parse_continuous_subject_filter(subject)?;
+        // Combat payment conditions are enforced by declaration, not by the
+        // layer system. Keep their complete predicate with the rule owner.
+        let predicate_lower = predicate.to_lowercase();
+        let predicate_tp = TextPair::new(predicate, &predicate_lower);
+        if let Some((body, _)) = predicate_tp.split_around_outside_quotes(" unless ") {
+            if parse_rule_static_predicate(body.original).is_some() {
+                return None;
+            }
+        }
         let members = super::keyword_grant::parse_complete_continuous_members(predicate)?;
         if members.len() < 2
             || members.iter().any(|(_, _, _, duration)| duration.is_some())
@@ -5569,6 +5582,15 @@ pub(crate) fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFil
     let trimmed = subject.trim();
     let lower = trimmed.to_lowercase();
     let tp = TextPair::new(trimmed, &lower);
+
+    if let Ok((_, base)) = all_consuming(terminated(
+        take_until::<_, _, OracleError<'_>>(" also"),
+        tag(" also"),
+    ))
+    .parse(tp.lower)
+    {
+        return parse_continuous_subject_filter(tp.original[..base.len()].trim());
+    }
 
     let (base, attachment) = strip_attachment_relative_clause(trimmed);
     if let Some(property) = attachment {

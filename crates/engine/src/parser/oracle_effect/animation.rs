@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
+use nom::bytes::complete::{tag, tag_no_case, take, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{eof, opt, peek, recognize, value};
 use nom::multi::{many0, separated_list1};
@@ -45,7 +45,30 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         let (remaining, _) =
             crate::parser::oracle_static::parse_type_retention_clause(&lower).ok()?;
         eof::<_, OracleError<'_>>.parse(remaining.trim()).ok()?;
-        rest = rest[..end].trim_end();
+        rest = rest[..end].trim_end().trim_end_matches('.').trim_end();
+    }
+
+    // The additive suffix scopes the whole descriptor, including a trailing
+    // base-P/T clause or keyword list. Remove it before those complete owners
+    // run; callers retain its type/color policy from the original descriptor.
+    let rest_lower = rest.to_lowercase();
+    if let Some((descriptor, marker)) = split_in_addition_tail(&rest_lower) {
+        let (tail, _) = tag::<_, _, OracleError<'_>>(marker)
+            .parse(rest_lower[descriptor.len()..].trim_start())
+            .ok()?;
+        eof::<_, OracleError<'_>>.parse(tail.trim()).ok()?;
+        rest = rest[..descriptor.len()].trim_end();
+    } else if let Ok((_, descriptor)) = nom::combinator::all_consuming(nom::sequence::terminated(
+        take_until::<_, _, OracleError<'_>>(" in addition to "),
+        (
+            tag(" in addition to "),
+            alt((tag("its"), tag("their"))),
+            tag(" other colors"),
+        ),
+    ))
+    .parse(rest_lower.as_str())
+    {
+        rest = rest[..descriptor.len()].trim_end();
     }
 
     // Check for ability-loss suffixes using pre-lowered text
@@ -586,27 +609,8 @@ fn parse_animation_supertype(input: &str) -> OracleResult<'_, AnimationTypeToken
 /// tokens (`X` in "X/X"), lowercase connectives (`and`, `gets`, `gains`,
 /// `until`), and mid-word positions (if followed by `/`, `:`, digits, etc.).
 fn parse_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
-    let (rest, word) = recognize(pair(
-        // First char: capital letter.
-        satisfy(|c: char| c.is_ascii_uppercase()),
-        // Second char must be alphabetic (no leading-hyphen tokens like "A-B").
-        // Subsequent chars may be alphabetic or hyphen (for "Power-Plant").
-        pair(
-            satisfy(|c: char| c.is_ascii_alphabetic()),
-            many0(satisfy(|c: char| c.is_ascii_alphabetic() || c == '-')),
-        ),
-    ))
-    .parse(input)?;
-    // Word-boundary: reject follow-ups like `/`, `:`, digits, `{`, `+`, `"` —
-    // these indicate we landed mid-P/T-token (`Dragon3/3`) or mid-cost (`B:`).
-    let (rest, _) = peek(alt((
-        nom::combinator::eof,
-        recognize(satisfy(|c: char| {
-            c.is_whitespace() || matches!(c, ',' | '.' | ';' | ')' | '!' | '?')
-        })),
-    )))
-    .parse(rest)?;
-    Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
+    peek(satisfy(|c: char| c.is_ascii_uppercase())).parse(input)?;
+    parse_animation_subtype_loose(input)
 }
 
 fn parse_animation_type_token(input: &str) -> OracleResult<'_, AnimationTypeToken> {
@@ -624,22 +628,14 @@ fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationT
     separated_list1(multispace1, parse_animation_type_token).parse(input)
 }
 
-/// CR 205.3: Case-insensitive subtype grammar — accepts either a capitalized
-/// proper noun (standard form) OR a lowercase alphabetic word (≥ 2 chars,
-/// optionally hyphenated). Used only in the "loose" type-sequence parse path
-/// which requires the trailing "in addition to its other [creature ]types"
-/// structural signal that guarantees the preceding phrase is a type
-/// expression (e.g., trigger-effect text that has been pre-lowercased by the
-/// oracle_trigger pipeline).
+/// CR 205.3: Canonical, case-insensitive subtype grammar shared with the
+/// ordinary target parser. This also accepts pre-lowered trigger text and
+/// canonicalizes plural spellings without accepting arbitrary proper nouns.
 fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeToken> {
-    let (rest, word) = recognize(pair(
-        satisfy(|c: char| c.is_ascii_alphabetic()),
-        pair(
-            satisfy(|c: char| c.is_ascii_alphabetic()),
-            many0(satisfy(|c: char| c.is_ascii_alphabetic() || c == '-')),
-        ),
-    ))
-    .parse(input)?;
+    peek(satisfy(|c: char| c.is_ascii_alphabetic())).parse(input)?;
+    let (canonical, consumed) =
+        crate::parser::oracle_util::parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (rest, _) = take(consumed).parse(input)?;
     let (rest, _) = peek(alt((
         nom::combinator::eof,
         recognize(satisfy(|c: char| {
@@ -647,7 +643,7 @@ fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeT
         })),
     )))
     .parse(rest)?;
-    Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
+    Ok((rest, AnimationTypeToken::Subtype(canonical)))
 }
 
 /// Case-insensitive type-token parser: core type / supertype / subtype,
@@ -685,6 +681,14 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
         return Some(tokens);
     }
 
+    // Case carries no semantic authority once each token must belong to the
+    // canonical subtype vocabulary. This also preserves pre-lowered triggers.
+    if let Ok((rest, tokens)) = parse_animation_type_sequence_loose(input) {
+        if rest.trim().is_empty() {
+            return Some(tokens);
+        }
+    }
+
     // Loose fallback: only fires when the trailing "in addition to its other
     // [creature ]types" marker is present, which structurally guarantees the
     // preceding phrase is a type expression. Because the loose subtype
@@ -715,6 +719,11 @@ fn parse_complete_animation_types(input: &str) -> Option<Vec<AnimationTypeToken>
             if eof::<_, OracleError<'_>>.parse(rest.trim()).is_ok() {
                 return Some(tokens);
             }
+        }
+    }
+    if let Ok((rest, tokens)) = parse_animation_type_sequence_loose(input) {
+        if rest.trim().is_empty() {
+            return Some(tokens);
         }
     }
     let (prefix, marker) = split_in_addition_tail(input)?;
@@ -1134,12 +1143,24 @@ mod test_den_bugbear {
     #[test]
     fn test_animation_with_quoted_trigger() {
         let text = r#"a 3/2 red Goblin creature with "Whenever this creature attacks, create a 1/1 red Goblin creature token that's tapped and attacking." It's still a land"#;
-        let spec = parse_animation_spec(text, &mut ParseContext::default());
-        eprintln!("spec = {:?}", spec);
-        assert!(spec.is_some(), "animation spec should be Some");
-        let spec = spec.unwrap();
+        let modifications = crate::parser::oracle_static::parse_complete_continuous_modifications(
+            &format!("become {text}"),
+        )
+        .expect("complete animation owns both the descriptor and its quoted trigger");
+        let spec = parse_animation_spec("a 3/2 red Goblin creature", &mut ParseContext::default())
+            .unwrap();
         assert_eq!(spec.power, Some(3));
         assert_eq!(spec.toughness, Some(2));
+        assert!(modifications.contains(&ContinuousModification::SetPower { value: 3 }));
+        assert!(modifications.contains(&ContinuousModification::SetToughness { value: 2 }));
+        assert!(modifications.iter().any(|modification| matches!(modification,
+            ContinuousModification::GrantTrigger { trigger }
+                if matches!(trigger.execute.as_deref().map(|definition| definition.effect.as_ref()), Some(crate::types::ability::Effect::Token { .. }))
+        )));
+        assert!(
+            parse_animation_spec(text, &mut ParseContext::default()).is_none(),
+            "a descriptor-only spec does not claim consumption of a quoted program"
+        );
     }
 
     /// Regression: parse_animation_type_parts must halt at connectives and

@@ -403,6 +403,10 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    if let Some(definition) = super::evasion::parse_combat_tax_static(&tp, text) {
+        return Some(definition);
+    }
+
     // CR 611.3a + CR 109.5 + CR 301.5a: peel a leading "During your turn, as long
     // as <cond>, " condition prefix onto the recursively-parsed remainder static
     // (Cloud, Planet's Champion). Runs first so the intrinsic conditional gate is
@@ -511,7 +515,8 @@ pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDef
 
     let predicate_tp = TextPair::new(predicate, predicate_lower);
     if let Some((before_cond, after_cond)) = predicate_tp.split_around(" as long as ") {
-        let modifications = parse_additive_type_clause_modifications(before_cond.original)?;
+        let modifications =
+            super::keyword_grant::parse_complete_continuous_modifications(before_cond.original)?;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         let condition = parse_static_condition(condition_text).unwrap_or_else(|| {
             unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
@@ -525,7 +530,7 @@ pub(crate) fn parse_subject_additive_type_static(text: &str) -> Option<StaticDef
         );
     }
 
-    let modifications = parse_additive_type_clause_modifications(predicate)?;
+    let modifications = super::keyword_grant::parse_complete_continuous_modifications(predicate)?;
     Some(
         StaticDefinition::continuous()
             .affected(affected)
@@ -847,11 +852,33 @@ pub(crate) fn parse_soulbond_paired_static(
         return None;
     }
     let predicate = strip_granted_predicate_period(&predicate);
+    // CR 702.95b + CR 611.3a: a following conditional sentence refers to the
+    // paired PARTNER, not independently to either recipient of the first grant.
+    // Preserve the complete first grant, but do not erase the partner condition
+    // or publish its grant unconditionally when that authority is unrepresented.
+    // allow-noncombinator: TextPair structural sentence split preserves quoted original text
+    let (predicate, partner_tail) =
+        match predicate.split_around_outside_quotes(". if that creature ") {
+            Some((head, tail)) => (head, Some(tail)),
+            None => (predicate, None),
+        };
     let mut def = parse_continuous_gets_has(
         predicate.original,
         TargetFilter::SourceOrPaired,
         description,
     )?;
+    if let Some(tail) = partner_tail {
+        def.modifications
+            .push(ContinuousModification::GrantAbility {
+                definition: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    crate::types::ability::Effect::unimplemented(
+                        "paired_partner_conditional_grant",
+                        format!("If that creature {}", tail.original),
+                    ),
+                )),
+            });
+    }
     def.condition = Some(StaticCondition::SourceIsPaired);
     Some(def)
 }

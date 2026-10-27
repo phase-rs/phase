@@ -158,23 +158,13 @@ fn rewrite_dr_julius(face: &mut CardFace) {
         trigger.mode = TriggerMode::ChangesZone;
         trigger.origin = None;
         trigger.destination = Some(Zone::Battlefield);
-        trigger.execute = Some(Box::new(
-            AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::ChooseAugmentAndCombineWithHost {
-                    zones: vec![Zone::Graveyard, Zone::Library],
-                    filter: Box::new(augment_card_filter()),
-                    host: Box::new(TargetFilter::TriggeringSource),
-                },
-            )
-            .optional()
-            .sub_ability(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Shuffle {
-                    target: TargetFilter::Controller,
-                },
-            )),
-        ));
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::unimplemented(
+                "conditional augment library search",
+                trigger.description.as_deref().unwrap_or_default(),
+            ),
+        )));
     }
 }
 
@@ -289,4 +279,42 @@ fn controlled_host_filter() -> TargetFilter {
             value: Supertype::Host,
         }])
         .into()
+}
+
+#[cfg(test)]
+mod conditional_library_search_tests {
+    use super::*;
+
+    #[test]
+    fn optional_multi_zone_augment_search_stays_honest_and_library_only_search_survives() {
+        use crate::database::{mtgjson::AtomicCard, synthesis::build_oracle_face};
+        for printed in [
+            r###"{"name":"Dr. Julius Jumblemorph","manaCost":"{2}{G}{W}","manaValue":4.0,"type":"Legendary Creature","types":["Creature"],"subtypes":[],"supertypes":["Legendary"],"colors":["G","W"],"colorIdentity":["G","W"],"power":"4","toughness":"4","layout":"normal","text":"Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.","identifiers":{"scryfallOracleId":"38f43685-7aab-4a0e-8a46-717632b50694"}}"###,
+            r###"{"name":"Teacher's Pet","manaCost":"{1}{W}","manaValue":2.0,"type":"Creature — Cat Bird Scientist","types":["Creature"],"subtypes":["Cat","Bird","Scientist"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"2","toughness":"1","layout":"normal","text":"{2}{W}, Sacrifice this creature: Search your library for a card with augment, combine it with target host you control, then shuffle.","identifiers":{"scryfallOracleId":"e2794c12-c375-4e95-94ad-51901499c35f"}}"###,
+        ] {
+            let card: AtomicCard = serde_json::from_str(printed).unwrap();
+            let face = build_oracle_face(&card, card.identifiers.scryfall_oracle_id.clone());
+            if face.name == "Dr. Julius Jumblemorph" {
+                let trigger = face
+                    .triggers
+                    .iter()
+                    .find(|trigger| trigger.mode == TriggerMode::ChangesZone)
+                    .unwrap();
+                let body = trigger.execute.as_deref().unwrap();
+                assert!(
+                    matches!(body.effect.as_ref(), Effect::Unimplemented { name, .. } if name == "conditional augment library search")
+                );
+                assert!(
+                    body.sub_ability.is_none(),
+                    "no unconditional shuffle survives the refused library election"
+                );
+            } else {
+                assert!(face.abilities.iter().any(|ability| matches!(ability.effect.as_ref(), Effect::ChooseAugmentAndCombineWithHost { zones, .. } if zones == &[Zone::Library])));
+                assert!(face.abilities.iter().any(|ability| ability
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|next| matches!(next.effect.as_ref(), Effect::Shuffle { .. }))));
+            }
+        }
+    }
 }

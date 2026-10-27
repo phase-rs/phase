@@ -1392,6 +1392,22 @@ pub(crate) fn parse_cant_cast_type_spells(
 
     let trimmed = after_cant_cast.trim_end_matches('.');
 
+    // The generic quantity reader has source-relative `you`, not the caster
+    // bound by this distributive subject. Refuse that unresolved authority
+    // rather than compare every opponent to the source controller's lands.
+    if nom_primitives::scan_at_word_boundaries(trimmed, |input| {
+        (
+            tag::<_, _, OracleError<'_>>("that player"),
+            space1,
+            tag("controls"),
+        )
+            .parse(input)
+    })
+    .is_some()
+    {
+        return None;
+    }
+
     // --- "spells with mana value N or less/greater" ---
     if let Some(rest) = nom_tag_lower(trimmed, trimmed, "spells with mana value ") {
         return attach_parsed_static_gate(

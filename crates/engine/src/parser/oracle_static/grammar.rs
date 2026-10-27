@@ -1139,8 +1139,19 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // attach any trailing `suffix_condition` (Heroic Defiance: "gets +3/+3
         // unless it shares a color with the most common color among all
         // permanents"), rather than parsing the whole predicate and dropping it.
-        if let Some(mut def) =
-            parse_continuous_gets_has(body_tp.original, affected.clone(), description)
+        let grant_body = match extract_must_be_blocked_by_conjunct(body_tp.original) {
+            Some(MustBeBlockedByConjunct::Recognized(_)) => terminated(
+                take_until::<_, _, OracleError<'_>>(" and must be blocked by "),
+                tag(" and must be blocked by "),
+            )
+            .parse(body_tp.lower)
+            .ok()
+            .map_or(body_tp.original, |(_, prefix)| {
+                &body_tp.original[..prefix.len()]
+            }),
+            _ => body_tp.original,
+        };
+        if let Some(mut def) = parse_continuous_gets_has(grant_body, affected.clone(), description)
         {
             if let Some(condition) = &suffix_condition {
                 // Same enforcement-point bar as the evasion branches above: a
@@ -1506,7 +1517,14 @@ pub(crate) fn split_type_retention_clause(input: &str) -> Option<(&str, CoreType
 
 pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreType> {
     let (input, is_plural) = alt((
-        value(false, alt((tag("it's still "), tag("that's still ")))),
+        value(
+            false,
+            alt((
+                tag("it's still "),
+                tag("it is still "),
+                tag("that's still "),
+            )),
+        ),
         value(true, tag("they're still ")),
         // CR 205.1b: relative-clause retention attached to a plural/singular
         // subject — "[plural] that are still lands", "[singular] that is still
@@ -1526,21 +1544,21 @@ pub(crate) fn parse_type_retention_clause(input: &str) -> OracleResult<'_, CoreT
     };
 
     alt((
-        value(CoreType::Artifact, alt((tag("artifact"), tag("artifacts")))),
-        value(CoreType::Battle, alt((tag("battle"), tag("battles")))),
-        value(CoreType::Creature, alt((tag("creature"), tag("creatures")))),
+        value(CoreType::Artifact, alt((tag("artifacts"), tag("artifact")))),
+        value(CoreType::Battle, alt((tag("battles"), tag("battle")))),
+        value(CoreType::Creature, alt((tag("creatures"), tag("creature")))),
         value(
             CoreType::Enchantment,
-            alt((tag("enchantment"), tag("enchantments"))),
+            alt((tag("enchantments"), tag("enchantment"))),
         ),
-        value(CoreType::Instant, alt((tag("instant"), tag("instants")))),
-        value(CoreType::Kindred, alt((tag("kindred"), tag("kindreds")))),
-        value(CoreType::Land, alt((tag("land"), tag("lands")))),
+        value(CoreType::Instant, alt((tag("instants"), tag("instant")))),
+        value(CoreType::Kindred, alt((tag("kindreds"), tag("kindred")))),
+        value(CoreType::Land, alt((tag("lands"), tag("land")))),
         value(
             CoreType::Planeswalker,
-            alt((tag("planeswalker"), tag("planeswalkers"))),
+            alt((tag("planeswalkers"), tag("planeswalker"))),
         ),
-        value(CoreType::Sorcery, alt((tag("sorcery"), tag("sorceries")))),
+        value(CoreType::Sorcery, alt((tag("sorceries"), tag("sorcery")))),
     ))
     .parse(input)
 }

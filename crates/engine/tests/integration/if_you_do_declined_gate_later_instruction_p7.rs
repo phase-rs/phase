@@ -566,6 +566,11 @@ fn wyll_declined_still_adds_the_additional_phases() {
     );
     assert!(runner.state().objects[&wyll].tapped, "Wyll is not untapped");
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Battlefield);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
 }
 
 /// J-2f paid: the sacrifice, the untap and the additional phases all happen.
@@ -576,6 +581,11 @@ fn wyll_paid_untaps_and_adds_the_additional_phases() {
     assert!(!runner.state().extra_phases.is_empty());
     assert!(!runner.state().objects[&wyll].tapped);
     assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
 }
 
 fn choice_of_fortunes(accept: bool) -> (GameRunner, Vec<GameEvent>) {

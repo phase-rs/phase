@@ -805,3 +805,136 @@ fn lord_each_casters_first_spell_includes_its_controller_and_resets_on_real_next
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     assert_eq!(runner.state().players[1].mana_pool.total(), 0);
 }
+
+#[test]
+fn puca_death_counters_bound_announced_return_before_the_selected_card() {
+    // CR 122.2 + CR 603.10a + CR 601.2c: announcement reads the actual departure snapshot.
+    use engine::types::counter::CounterType;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_enchantment_from_oracle(P0, "Puca's Covenant", "Whenever a creature you control with a counter on it dies, you may return another target permanent card with mana value less than or equal to the number of counters on that creature from your graveyard to your hand. Do this only once each turn.").id();
+    let dying = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Actual sacrificed creature",
+            2,
+            2,
+            "Sacrifice this creature: You gain 1 life.",
+        )
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.with_counter(dying, CounterType::Generic("charge".into()), 3);
+    let chosen = scenario
+        .add_artifact_from_oracle(P0, "Zero-counter MV two", "")
+        .with_mana_cost(ManaCost::generic(2))
+        .id();
+    let high = scenario
+        .add_artifact_from_oracle(P0, "Over-cap MV four", "")
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let decoy = scenario
+        .add_creature(P0, "Unrelated seven-counter creature", 2, 2)
+        .id();
+    scenario.with_counter(decoy, CounterType::Generic("charge".into()), 7);
+    let mut runner = scenario.build();
+    for id in [chosen, high] {
+        move_to_zone(runner.state_mut(), id, Zone::Graveyard, &mut vec![]);
+    }
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: dying,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Puca's real death-trigger target announcement: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let legal = &target_slots[selection.current_slot].legal_targets;
+    assert!(
+        legal.contains(&TargetRef::Object(chosen)),
+        "three death counters admit MV two despite zero returned-card counters"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(high)),
+        "unrelated live counters cannot expand the death-event cap"
+    );
+    assert!(
+        !legal.contains(&TargetRef::Object(dying)),
+        "another excludes the dying card, not the enchantment"
+    );
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(chosen)),
+        })
+        .unwrap();
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source)
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    complete(&mut runner);
+    assert_eq!(runner.state().objects[&chosen].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&high].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&dying].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    assert_eq!(runner.life(P0), 21);
+}
+
+#[test]
+fn combat_step_head_fires_before_declaration_only_on_its_own_turn() {
+    // CR 500.1 + CR 603.2b: a beginning-of-combat trigger precedes attackers on that turn.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let oracle = "At the beginning of your combat step, tap Aggressive Crag.\n{T}: Add {R} or {W}.";
+    let own = scenario
+        .add_land_from_oracle(P0, "Aggressive Crag", oracle)
+        .id();
+    let foreign = scenario
+        .add_land_from_oracle(P1, "Aggressive Crag", oracle)
+        .id();
+    let mut runner = scenario.build();
+    runner.advance_to_combat();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::DeclareAttackers { player: P0, .. }
+    ));
+    assert!(runner.state().objects[&own].tapped);
+    assert!(!runner.state().objects[&foreign].tapped);
+    assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+}

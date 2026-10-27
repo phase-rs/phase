@@ -1737,6 +1737,7 @@ pub(crate) enum ChooseImperativeAst {
     },
     RevealHandFilter {
         card_filter: TargetFilter,
+        target: TargetFilter,
         choice_optional: bool,
     },
     /// "choose N of them/those [cards]" — anaphoric reference to a previously

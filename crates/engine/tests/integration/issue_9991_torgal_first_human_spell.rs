@@ -459,3 +459,58 @@ fn k_entry_counters_enable_beastbond_outcaster_etb_draw() {
         "ETB observed the counter-enhanced power"
     );
 }
+
+#[test]
+fn first_noncreature_count_ignores_earlier_creature_and_later_matching_cast() {
+    // CR 603.2: the specified event counts qualifying noncreature casts by this opponent.
+    use super::jev_defining_destroy::settled;
+    use engine::types::mana::{ManaType, ManaUnit};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Shadow in the Warp", "The first creature spell you cast each turn costs {2} less to cast.\nWhenever an opponent casts their first noncreature spell each turn, this enchantment deals 2 damage to that player.");
+    let creature = scenario
+        .add_creature_to_hand(P1, "Earlier creature", 1, 1)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let first = scenario
+        .add_spell_to_hand_from_oracle(P1, "First matching instant", true, "You gain 1 life.")
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let second = scenario
+        .add_spell_to_hand_from_oracle(P1, "Second matching instant", true, "You gain 1 life.")
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.with_mana_pool(
+        P1,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.cast(creature).resolve();
+    settled(&runner);
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "a creature cannot consume the noncreature event ordinal"
+    );
+    runner.cast(first).resolve();
+    settled(&runner);
+    assert_eq!(
+        runner.life(P1),
+        19,
+        "first noncreature gains one and takes two"
+    );
+    runner.cast(second).resolve();
+    settled(&runner);
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "the second noncreature is not a second trigger"
+    );
+    assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+    assert_eq!(runner.state().spells_cast_this_turn_by_player[&P1].len(), 3);
+}

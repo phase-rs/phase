@@ -312,6 +312,20 @@ fn parse_cost_mod_spell_type_prefix(type_desc: &str) -> Option<TargetFilter> {
     filter.map(remap_cost_mod_imprint_exile_reference)
 }
 
+fn parse_cost_cast_origins(input: &str) -> OracleResult<'_, Vec<Zone>> {
+    preceded(
+        nom::combinator::peek(tag("from ")),
+        separated_list1(
+            tag(" or "),
+            preceded(
+                (opt(tag("from ")), opt(alt((tag("your "), tag("a "))))),
+                super::super::oracle_target::parse_zone_word,
+            ),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 105.1 + CR 601.2f: Decompose a compound BARE-color cost-mod subject —
 /// "<color>[ spells] and <color>[ spells]" — into an `Or` of `HasColor` typed
 /// filters. Each operand is a color name (`nom_primitives::parse_color`)
@@ -639,39 +653,23 @@ pub(crate) fn try_parse_cost_modification(
     // Extract "from [zone(s)]" clause between player scope and "cost".
     // E.g., "cast from graveyards or from exile" → [Graveyard, Exile]
     // This must be extracted before type parsing so it doesn't pollute type_desc.
-    let cast_from_zones: Vec<Zone> = {
-        let mut zones = Vec::new();
-        // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-        if let Some(cost_idx) = lower.find(" cost") {
-            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            let prefix = &lower[..cost_idx];
-            // Look for "from <zone> or from <zone>" or "from <zone>" after "cast".
-            // Use the first " from " to capture compound patterns like
-            // "from graveyards or from exile".
-            // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-            if let Some(from_idx) = prefix.find(" from ") {
-                // allow-noncombinator: moved legacy static parser code; refactor-only split preserves behavior.
-                let from_text = &prefix[from_idx..];
-                // Skip "from anywhere other than" — that's a negation pattern
-                // requiring a Not filter, not a direct zone match.
-                if !nom_primitives::scan_contains(from_text, "anywhere other than") {
-                    if nom_primitives::scan_contains(from_text, "graveyard") {
-                        zones.push(Zone::Graveyard);
-                    }
-                    if nom_primitives::scan_contains(from_text, "exile") {
-                        zones.push(Zone::Exile);
-                    }
-                    if nom_primitives::scan_contains(from_text, "hand") {
-                        zones.push(Zone::Hand);
-                    }
-                    if nom_primitives::scan_contains(from_text, "command zone") {
-                        zones.push(Zone::Command);
-                    }
+    let cast_from_zones: Vec<Zone> =
+        if let Ok((_, prefix)) = take_until::<_, _, OracleError<'_>>(" cost").parse(lower) {
+            if let Ok((suffix, _)) = take_until::<_, _, OracleError<'_>>(" from ").parse(prefix) {
+                if nom_primitives::scan_contains(suffix, "anywhere other than") {
+                    Vec::new()
+                } else {
+                    all_consuming(parse_cost_cast_origins)
+                        .parse(suffix.trim_start())
+                        .ok()?
+                        .1
                 }
+            } else {
+                Vec::new()
             }
-        }
-        zones
-    };
+        } else {
+            Vec::new()
+        };
 
     // Extract spell type filter from the text before "cost"
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
@@ -701,8 +699,8 @@ pub(crate) fn try_parse_cost_modification(
             if let Ok((suffix, before)) =
                 take_until::<_, _, OracleError<'_>>(" from ").parse(prefix)
             {
-                let (_, _, consumed) = crate::parser::oracle_target::parse_zone_suffix(suffix)?;
-                if !suffix[consumed..].trim().is_empty() {
+                let (remaining, _) = parse_cost_cast_origins(suffix.trim_start()).ok()?;
+                if !remaining.trim().is_empty() {
                     return None;
                 }
                 before
@@ -902,9 +900,15 @@ pub(crate) fn try_parse_cost_modification(
     if dynamic_count.is_none() && amount_is_variable_x {
         let (_, where_x_text) = super::oracle_effect::strip_trailing_where_x(cost_tp);
         if let Some(expression) = where_x_text {
-            if let Some(QuantityExpr::Ref { qty }) = parse_cda_quantity(&expression) {
-                dynamic_count = Some(qty);
-            }
+            dynamic_count = nom_quantity::parse_quantity_ref_complete(&expression.to_lowercase())
+                .ok()
+                .map(|(_, qty)| qty)
+                .or_else(|| {
+                    parse_cda_quantity(&expression).and_then(|quantity| match quantity {
+                        QuantityExpr::Ref { qty } => Some(qty),
+                        _ => None,
+                    })
+                });
         }
     }
 
@@ -1033,7 +1037,29 @@ pub(crate) fn try_parse_cost_modification(
             ))
             .parse(gate_text)
             .is_ok();
-            if targets_gate_consumed && gate_is_targets_clause {
+            let spell_keyword_gate = nom::combinator::all_consuming(preceded(
+                alt((
+                    tag::<_, _, OracleError<'_>>("it has "),
+                    tag("this spell has "),
+                )),
+                nom_primitives::parse_alt_cost_keyword_name_to_kind,
+            ))
+            .parse(gate_text)
+            .ok();
+            if let Some((_, keyword)) = spell_keyword_gate {
+                let predicate = TargetFilter::Typed(
+                    TypedFilter::card()
+                        .properties(vec![FilterProp::HasKeywordKind { value: keyword }]),
+                );
+                if let StaticMode::ModifyCost { spell_filter, .. } = &mut definition.mode {
+                    *spell_filter = Some(match spell_filter.take() {
+                        Some(filter) => TargetFilter::And {
+                            filters: vec![filter, predicate],
+                        },
+                        None => predicate,
+                    });
+                }
+            } else if targets_gate_consumed && gate_is_targets_clause {
                 // Lowered into `spell_filter` above.
             } else if definition.condition.is_some() {
                 // A leading/branch gate plus a trailing gate: the single condition

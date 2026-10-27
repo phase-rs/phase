@@ -4227,3 +4227,247 @@ fn declined_search_paid_target_metrics_keep_the_actual_payment_subject() {
         assert_settled(&runner);
     }
 }
+
+#[test]
+fn conjunctive_search_pays_for_five_distinct_matching_slots_and_rejects_duplicates() {
+    // CR 608.2c + CR 701.23a: each printed card description owns one search member.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Conflux", false,
+        "Search your library for a white card, a blue card, a black card, a red card, and a green card. Reveal those cards, put them into your hand, then shuffle.")
+        .with_mana_cost(super::jev_defining_destroy::cost("{3}{W}{U}{B}{R}{G}")).id();
+    fund(
+        &mut scenario,
+        3,
+        &[
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+    );
+    let mut choices = Vec::new();
+    for (name, color) in [
+        ("White one", ManaColor::White),
+        ("Blue", ManaColor::Blue),
+        ("Black", ManaColor::Black),
+        ("Red", ManaColor::Red),
+        ("Green", ManaColor::Green),
+        ("White two", ManaColor::White),
+    ] {
+        choices.push(
+            scenario
+                .add_spell_to_library_top(P0, name, true)
+                .with_color(vec![color])
+                .id(),
+        );
+    }
+    let mut runner = scenario.build();
+    runner.cast(spell).commit();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    let mut events = Vec::new();
+    pass_to_pause(&mut runner, &mut events);
+    let WaitingFor::SearchChoice {
+        player,
+        cards,
+        count,
+        reveal,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "Conflux must reach one complete search: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 5);
+    assert!(*reveal);
+    assert_eq!(cards.len(), 6);
+    for id in &choices {
+        assert!(cards.contains(id));
+    }
+    let before = serde_json::to_value(runner.state()).unwrap();
+    assert!(
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![choices[0], choices[5], choices[2], choices[3], choices[4]]
+            })
+            .is_err(),
+        "two white-only cards cannot fill the missing blue slot"
+    );
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+    let selected = vec![choices[4], choices[2], choices[0], choices[3], choices[1]];
+    let last = runner
+        .act(GameAction::SelectCards {
+            cards: selected.clone(),
+        })
+        .unwrap()
+        .events;
+    assert_complete(&runner, &last);
+    for id in &selected {
+        assert_eq!(runner.state().objects[id].zone, Zone::Hand);
+    }
+    assert_eq!(runner.state().objects[&choices[5]].zone, Zone::Library);
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    let revealed = last
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(revealed, selected.into_iter().collect());
+}
+
+const CONJUNCTIVE_SEARCH_PRINTED: &[(i32, &str)] = &[
+    (
+        2,
+        r###"{"name":"Yasharn, Implacable Earth","manaCost":"{2}{G}{W}","manaValue":4.0,"type":"Legendary Creature — Elemental Boar","types":["Creature"],"subtypes":["Elemental","Boar"],"supertypes":["Legendary"],"colors":["G","W"],"colorIdentity":["G","W"],"power":"4","toughness":"4","layout":"normal","text":"When Yasharn enters, search your library for a basic Forest card and a basic Plains card, reveal those cards, put them into your hand, then shuffle.\nPlayers can't pay life or sacrifice nonland permanents to cast spells or activate abilities.","identifiers":{"scryfallOracleId":"6dc23410-4d8f-4c8a-92b4-a8b3fae1af4e"}}"###,
+    ),
+    (
+        5,
+        r###"{"name":"Gaea's Balance","manaCost":"{3}{G}","manaValue":4.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"As an additional cost to cast this spell, sacrifice five lands.\nSearch your library for a land card of each basic land type, put those cards onto the battlefield, then shuffle.","identifiers":{"scryfallOracleId":"5aadbd03-c459-4893-aa1b-efcf193faa1b"}}"###,
+    ),
+    (
+        2,
+        r###"{"name":"Corpse Harvester","manaCost":"{3}{B}{B}","manaValue":5.0,"type":"Creature — Zombie Wizard","types":["Creature"],"subtypes":["Zombie","Wizard"],"supertypes":[],"colors":["B"],"colorIdentity":["B"],"power":"3","toughness":"3","layout":"normal","text":"{1}{B}, {T}, Sacrifice a creature: Search your library for a Zombie card and a Swamp card, reveal them, put them into your hand, then shuffle.","identifiers":{"scryfallOracleId":"f02ad6fa-7a82-471a-979e-0bb9ba866ef6"}}"###,
+    ),
+    (
+        2,
+        r###"{"name":"Krosan Verge","manaValue":0.0,"type":"Land","types":["Land"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"This land enters tapped.\n{T}: Add {C}.\n{2}, {T}, Sacrifice this land: Search your library for a Forest card and a Plains card, put them onto the battlefield tapped, then shuffle.","identifiers":{"scryfallOracleId":"d9a10971-f32b-4978-952d-fed0a5bc9e36"}}"###,
+    ),
+    (
+        5,
+        r###"{"name":"Conflux","manaCost":"{3}{W}{U}{B}{R}{G}","manaValue":8.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["B","G","R","U","W"],"colorIdentity":["B","G","R","U","W"],"layout":"normal","text":"Search your library for a white card, a blue card, a black card, a red card, and a green card. Reveal those cards, put them into your hand, then shuffle.","identifiers":{"scryfallOracleId":"32ebb029-9f03-49c9-b9bb-cb1954e2a324"}}"###,
+    ),
+    (
+        3,
+        r###"{"name":"Lotuslight Dancers","manaCost":"{2}{B}{G}{U}","manaValue":5.0,"type":"Creature — Zombie Bard","types":["Creature"],"subtypes":["Zombie","Bard"],"supertypes":[],"colors":["B","G","U"],"colorIdentity":["B","G","U"],"power":"3","toughness":"6","layout":"normal","text":"Lifelink\nWhen this creature enters, search your library for a black card, a green card, and a blue card. Put those cards into your graveyard, then shuffle.","keywords":["Lifelink"],"identifiers":{"scryfallOracleId":"83c8f1ca-194e-4cb6-9d5f-029133c1edbc"}}"###,
+    ),
+    (
+        3,
+        r###"{"name":"Gem of Becoming","manaCost":"{3}","manaValue":3.0,"type":"Artifact","types":["Artifact"],"subtypes":[],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"{3}, {T}, Sacrifice this artifact: Search your library for an Island card, a Swamp card, and a Mountain card. Reveal those cards, put them into your hand, then shuffle.","identifiers":{"scryfallOracleId":"6b1e4940-11ac-4d85-98f4-3f50d1060b96"}}"###,
+    ),
+    (
+        4,
+        r###"{"name":"Shard Convergence","manaCost":"{3}{G}","manaValue":4.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"Search your library for a Plains card, an Island card, a Swamp card, and a Mountain card. Reveal those cards, put them into your hand, then shuffle.","identifiers":{"scryfallOracleId":"c51fc4f2-76a6-4337-ab8f-1b3e84f82019"}}"###,
+    ),
+    (
+        3,
+        r###"{"name":"Nissa's Encouragement","manaCost":"{4}{G}","manaValue":5.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","text":"Search your library and graveyard for a card named Forest, a card named Brambleweft Behemoth, and a card named Nissa, Genesis Mage. Reveal those cards, put them into your hand, then shuffle.","identifiers":{"scryfallOracleId":"55e897e9-5c70-4e32-8f24-3e0fefa319cd"}}"###,
+    ),
+    (
+        2,
+        r###"{"name":"Aang's Journey","manaCost":"{2}","manaValue":2.0,"type":"Sorcery — Lesson","types":["Sorcery"],"subtypes":["Lesson"],"supertypes":[],"colors":[],"colorIdentity":[],"layout":"normal","text":"Kicker {2} (You may pay an additional {2} as you cast this spell.)\nSearch your library for a basic land card. If this spell was kicked, instead search your library for a basic land card and a Shrine card. Reveal those cards, put them into your hand, then shuffle.\nYou gain 2 life.","keywords":["Kicker"],"identifiers":{"scryfallOracleId":"ddf461b9-a205-4dc7-a9c3-c047b1ff709f"}}"###,
+    ),
+];
+
+#[test]
+fn complete_search_faces_retain_count_and_independent_filter_slots() {
+    // SHAPE: complete-card filter/count preservation supplements the paid Conflux regression.
+    use engine::database::{mtgjson::AtomicCard, synthesis::build_oracle_face};
+    for (expected, printed) in CONJUNCTIVE_SEARCH_PRINTED {
+        let card: AtomicCard = serde_json::from_str(printed).unwrap();
+        let face = build_oracle_face(&card, card.identifiers.scryfall_oracle_id.clone());
+        let mut found = false;
+        for ability in face.abilities.iter().chain(
+            face.triggers
+                .iter()
+                .filter_map(|trigger| trigger.execute.as_deref()),
+        ) {
+            let _ = engine::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+                if let Effect::SearchLibrary {
+                    count: QuantityExpr::Fixed { value },
+                    selection_constraint: SearchSelectionConstraint::MatchEachFilter { filters },
+                    ..
+                } = effect
+                {
+                    if value == expected {
+                        assert_eq!(filters.len(), *expected as usize, "{}", face.name);
+                        let leaf = |index: usize| {
+                            let TargetFilter::Typed(typed) = &filters[index] else {
+                                panic!("independent described search member: {:?}", filters[index]);
+                            };
+                            typed
+                        };
+                        let basic = FilterProp::HasSupertype {
+                            value: engine::types::card_type::Supertype::Basic,
+                        };
+                        match face.name.as_str() {
+                            "Yasharn, Implacable Earth" => {
+                                assert!(leaf(0)
+                                    .type_filters
+                                    .contains(&TypeFilter::Subtype("Forest".into())));
+                                assert!(leaf(1)
+                                    .type_filters
+                                    .contains(&TypeFilter::Subtype("Plains".into())));
+                                assert!(
+                                    leaf(0).properties.contains(&basic)
+                                        && leaf(1).properties.contains(&basic)
+                                );
+                            }
+                            "Gaea's Balance" => {
+                                for (index, name) in
+                                    ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+                                        .iter()
+                                        .enumerate()
+                                {
+                                    assert!(leaf(index)
+                                        .type_filters
+                                        .contains(&TypeFilter::Subtype((*name).into())));
+                                    assert!(
+                                        !leaf(index).properties.contains(&basic),
+                                        "a basic land type does not require a basic land"
+                                    );
+                                }
+                            }
+                            "Aang's Journey" => {
+                                assert!(leaf(0).properties.contains(&basic));
+                                assert!(leaf(1)
+                                    .type_filters
+                                    .contains(&TypeFilter::Subtype("Shrine".into())));
+                                assert!(
+                                    !leaf(1).properties.contains(&basic),
+                                    "basic is local to the land member"
+                                );
+                            }
+                            "Nissa's Encouragement" => {
+                                for (index, name) in
+                                    ["forest", "brambleweft behemoth", "nissa, genesis mage"]
+                                        .iter()
+                                        .enumerate()
+                                {
+                                    assert!(leaf(index).properties.iter().any(|property| matches!(property, FilterProp::Named { name: actual } if actual.eq_ignore_ascii_case(name))));
+                                }
+                            }
+                            "Gem of Becoming" | "Shard Convergence" => {
+                                let expected = if face.name == "Gem of Becoming" {
+                                    vec!["Island", "Swamp", "Mountain"]
+                                } else {
+                                    vec!["Plains", "Island", "Swamp", "Mountain"]
+                                };
+                                for (index, name) in expected.iter().enumerate() {
+                                    assert!(leaf(index)
+                                        .type_filters
+                                        .contains(&TypeFilter::Subtype((*name).into())));
+                                }
+                            }
+                            _ => {}
+                        }
+                        found = true;
+                    }
+                }
+                std::ops::ControlFlow::Continue(())
+            });
+        }
+        assert!(
+            found,
+            "whole Oracle search must reach all printed slots: {}",
+            face.name
+        );
+    }
+}

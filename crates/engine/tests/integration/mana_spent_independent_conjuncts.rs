@@ -7,6 +7,35 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
+#[test]
+fn study_hall_keeps_mana_but_refuses_the_complete_spell_specific_count() {
+    use engine::parser::parse_oracle_text;
+    use engine::types::ability::Effect;
+    const ORACLE: &str = "{T}: Add {C}.\n{1}, {T}: Add one mana of any color. When you spend this mana to cast your commander, scry X, where X is the number of times it's been cast from the command zone this game.";
+    const CLAUSE: &str = "When you spend this mana to cast your commander, scry X, where X is the number of times it's been cast from the command zone this game.";
+    let parsed = parse_oracle_text(ORACLE, "Study Hall", &[], &["Land".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 2, "{parsed:#?}");
+    for ability in &parsed.abilities {
+        assert!(
+            matches!(ability.effect.as_ref(), Effect::Mana { grants, .. } if grants.is_empty()),
+            "independent mana production survives: {parsed:#?}"
+        );
+    }
+    let residual = parsed.abilities[1]
+        .sub_ability
+        .as_deref()
+        .expect("the whole unsupported spend clause must remain");
+    let description = residual
+        .effect
+        .unimplemented_description()
+        .expect("no aggregate commander count may masquerade as this spell's count");
+    assert_eq!(
+        description, CLAUSE,
+        "the printed count definition must not disappear"
+    );
+    assert!(residual.sub_ability.is_none(), "{parsed:#?}");
+}
+
 fn add_mana(runner: &mut GameRunner, mana_type: ManaType, amount: u32) {
     let pool = &mut runner
         .state_mut()

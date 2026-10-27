@@ -2664,7 +2664,25 @@ pub(crate) fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
         return None;
     }
     // Parse the reflexive effect (scry N, gain N life, draw a card, copy that spell…).
-    let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
+    let (effect_body, where_x) =
+        super::strip_trailing_where_x(TextPair::new(effect_text, effect_text));
+    let mut ability = super::parse_effect_chain(effect_body.original, AbilityKind::Activated);
+    if let Effect::Scry { count, .. }
+    | Effect::GainLife { amount: count, .. }
+    | Effect::Draw { count, .. } = &mut *ability.effect
+    {
+        *count =
+            super::lower::apply_where_x_quantity_expression(count.clone(), where_x.as_deref())?;
+        // This quantity aggregates all of the controller's commanders; a
+        // spent-mana trigger instead names the particular spell just cast.
+        if where_x.is_some()
+            && count.any_ref(&mut |reference| {
+                matches!(reference, QuantityRef::CommanderCastFromCommandZoneCount)
+            })
+        {
+            return None;
+        }
+    }
     // COVERAGE-HONESTY ALLOWLIST — what it is actually for (CR 608.2c):
     // `parse_effect_chain` parses some spell-referencing effects only PARTIALLY and
     // silently swallows the remainder. Jade Orb of Dragonkind's "it enters with an

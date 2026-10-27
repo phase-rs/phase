@@ -119,11 +119,17 @@ fn parse_search_library_details_inner(
 
     // Fallback: "for N cards" / "for X cards" without "up to".
     let for_match = if up_to_match.is_none() && any_number_tail.is_none() {
-        scan_preceded(lower, "for ", nom_quantity::parse_quantity_expr_number)
-            // Require a word break after the number (" cards" / " creature ...").
-            // Guards against matching "for a", "for an", etc. where parse_number fails
-            // (good) but also avoids partial matches like "for the".
-            .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
+        scan_preceded(lower, "for ", |input| {
+            preceded(
+                nom::combinator::not(nom_primitives::parse_article),
+                nom_quantity::parse_quantity_expr_number,
+            )
+            .parse(input)
+        })
+        // Require a word break after the number (" cards" / " creature ...").
+        // Guards against matching "for a", "for an", etc. where parse_number fails
+        // (good) but also avoids partial matches like "for the".
+        .filter(|(_, off)| lower.as_bytes().get(*off).is_some_and(|b| *b == b' '))
     } else {
         None
     };
@@ -450,7 +456,7 @@ fn parse_search_selection_quality(
 /// boundary (e.g., `"..., put them onto the battlefield tapped, then shuffle"`)
 /// because anything after that belongs to the destination / action chain — not
 /// to the filter expression. Serial-list commas stay in the filter region.
-fn parse_search_filter_with_extras(
+pub(super) fn parse_search_filter_with_extras(
     tail: &str,
     ctx: &mut ParseContext,
 ) -> Result<(TargetFilter, Vec<TargetFilter>), String> {
