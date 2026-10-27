@@ -365,6 +365,7 @@ fn assert_source_program_complete(runner: &engine::game::scenario::GameRunner) {
     assert!(runner.state().deferred_triggers.is_empty());
     assert!(runner.state().owed_spell_final_part().is_none());
     assert!(runner.state().pending_replacement.is_none());
+    assert!(runner.state().pending_combat_lifelink.is_none());
 }
 
 #[test]
@@ -1543,6 +1544,95 @@ fn countered_selected_permanent_spell_never_acquires_a_later_recast_successor_in
     }
 }
 
+fn source_state_value(
+    runner: &engine::game::scenario::GameRunner,
+    wire: bool,
+) -> serde_json::Value {
+    if wire {
+        serde_json::to_value(
+            engine::types::resolution::ResolutionStateWire::from_game_state(runner.state().clone()),
+        )
+        .unwrap()
+    } else {
+        serde_json::to_value(runner.state()).unwrap()
+    }
+}
+
+fn decode_source_state(
+    value: serde_json::Value,
+    wire: bool,
+) -> Result<engine::types::game_state::GameState, serde_json::Error> {
+    if wire {
+        serde_json::from_value::<engine::types::resolution::ResolutionStateWire>(value)
+            .map(|wire| wire.into_game_state())
+    } else {
+        serde_json::from_value(value)
+    }
+}
+
+fn assert_source_origin_refusal_preserves_input(
+    runner: &engine::game::scenario::GameRunner,
+    old: serde_json::Value,
+    wire: bool,
+    index: usize,
+) {
+    let bytes = serde_json::to_vec(&old).unwrap();
+    let before = serde_json::to_value(runner.state()).unwrap();
+    let error = decode_source_state(old.clone(), wire)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&format!("pending_damage_replacements/{index}"))
+        && error.contains("unrecoverable damage source-origin ambiguity between native and selected-source materializers"),
+        "the unbound actual common image has precise origin ambiguity: {error}");
+    assert_eq!(serde_json::to_vec(&old).unwrap(), bytes);
+    assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+}
+
+fn assert_installed_cast_owner(runner: &engine::game::scenario::GameRunner) -> ResolvedAbility {
+    use engine::types::game_state::StackEntryKind;
+    let installed = &runner.state().pending_damage_replacements[0];
+    let rider = installed
+        .runtime_execute
+        .as_deref()
+        .expect("actual installed continuation");
+    let occurrence = rider
+        .cast_occurrence
+        .expect("actual recursive cast stamp on THIS rider");
+    assert_eq!(
+        runner.state().spells_cast_this_turn_by_player[&occurrence.caster]
+            [occurrence.turn_journal_index as usize]
+            .spell_object_id,
+        Some(rider.source_id)
+    );
+    let raw = serde_json::to_value(runner.state()).unwrap();
+    let root = raw["resolved_rules_journal"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.pointer("/command/StackRemoval/entry"))
+        .filter_map(|entry| {
+            serde_json::from_value::<engine::types::game_state::StackEntry>(entry.clone()).ok()
+        })
+        .find_map(|entry| match entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(root),
+                ..
+            } if root.source_id == rider.source_id
+                && root.controller == rider.controller
+                && root.cast_occurrence == Some(occurrence) =>
+            {
+                Some(*root)
+            }
+            _ => None,
+        })
+        .expect("the actual finalized Spell root, not a similar activation");
+    if let (Some(left), Some(right)) = (rider.source_incarnation, root.source_incarnation) {
+        assert_eq!(left, right);
+        assert_ne!(left, engine::types::identifiers::LEGACY_INCARNATION);
+    }
+    root
+}
+
 fn restore_installed_legacy_with_retained_original(
     runner: &mut engine::game::scenario::GameRunner,
     wire: bool,
@@ -1554,16 +1644,34 @@ fn restore_installed_legacy_with_retained_original(
     } else {
         serde_json::to_value(runner.state()).unwrap()
     };
+    let original = assert_installed_cast_owner(runner);
+    let Effect::PreventDamage {
+        damage_source_filter: Some(source),
+        ..
+    } = &original.effect
+    else {
+        panic!("the definition-owned cast must retain its actual original source operand");
+    };
     assert!(
-        installed["resolved_rules_journal"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry
-                .pointer("/command/StackRemoval/entry/kind/data/ability")
-                .is_some()),
-        "the actual finalized original program remains on its owning stack-removal command"
+        matches!(source, TargetFilter::ChosenDamageSource { .. })
+            || matches!(source, TargetFilter::And { filters } if filters.iter().any(|filter|
+            matches!(filter, TargetFilter::ParentTargetSlot { .. }))),
+        "full-equality recovery needs THIS cast's chosen role or declared-source target pin"
     );
+    if !matches!(source, TargetFilter::ChosenDamageSource { .. }) {
+        assert!(!original.targets.is_empty());
+        assert!(
+            original
+                .target_occurrences()
+                .iter()
+                .any(|(_, pin)| pin.is_some()),
+            "the actual announced source target has an occurrence pin"
+        );
+        assert_eq!(
+            expected.runtime_execute.as_ref().unwrap().cast_occurrence,
+            original.cast_occurrence
+        );
+    }
     installed["pending_damage_replacements"][0]
         .as_object_mut()
         .unwrap()
@@ -1679,7 +1787,17 @@ fn authentic_direct_typed_program_restores_continuous_native_id_predicate_withou
         assert!(runner.state().pending_damage_replacements[0]
             .selected_damage_source
             .is_none());
-        restore_installed_legacy_with_retained_original(&mut runner, wire);
+        let current = source_state_value(&runner, wire);
+        let expected = runner.state().pending_damage_replacements.clone();
+        let restored = decode_source_state(current.clone(), wire).unwrap();
+        assert_eq!(restored.pending_damage_replacements, expected);
+        let mut old_installed = current;
+        old_installed["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
+        assert_source_origin_refusal_preserves_input(&runner, old_installed, wire, 0);
+        *runner.state_mut() = restored;
         let original_birth = runner.state().objects[&source].incarnation;
         runner.cast(blink).target_object(source).resolve();
         assert_ne!(runner.state().objects[&source].incarnation, original_birth);
@@ -2191,9 +2309,28 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
         program.cost = Some(AbilityCost::Mana {
             cost: ManaCost::generic(1),
         });
+        let Effect::FlipCoins {
+            lose_effect: Some(losing),
+            ..
+        } = program.sub_ability.as_ref().unwrap().effect.as_ref()
+        else {
+            panic!("the complete DG producer has its real losing prevention body");
+        };
+        let mut native = losing.as_ref().clone();
+        native.kind = program.kind;
+        native.cost = program.cost.clone();
+        let Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } = native.effect.as_mut()
+        else {
+            panic!("clone the whole actual losing body");
+        };
+        *damage_source_filter = Some(TargetFilter::SpecificObject { id: source });
         let installer = scenario
             .add_artifact_from_oracle(P0, "Typed chosen-source branch witness", "")
             .with_ability_definition(program)
+            .with_ability_definition(native)
             .id();
         let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
             "Exile target creature you control, then return that card to the battlefield under your control.")
@@ -2201,7 +2338,12 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
         let mut runner = scenario.build();
         add_mana(
             &mut runner,
-            &[ManaType::Colorless, ManaType::White, ManaType::Black],
+            &[
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::White,
+                ManaType::Black,
+            ],
         );
         let seed = (0..256)
             .find(|seed| {
@@ -2279,76 +2421,94 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
             serde_json::from_value(current.clone()).unwrap()
         };
         assert_eq!(coherent.pending_damage_replacements[0], expected);
-        for invalid_owned_capture in [false, true] {
-            let mut hostile = current.clone();
-            hostile["pending_damage_replacements"][0]["selected_damage_source"] =
-                serde_json::Value::Null;
-            if invalid_owned_capture {
-                let frame = hostile["resolved_rules_journal"]["entries"]
-                    .as_array_mut()
-                    .unwrap()
-                    .iter_mut()
-                    .find_map(|entry| {
-                        entry
-                            .pointer_mut("/command/FrameTransition/transition/Push/frame")
-                            .filter(|frame| frame["type"] == "CoinFlip")
-                    })
-                    .expect("the actual retained lexical flip owner");
-                let selected = &mut frame["data"]["branch_context"]["damage_source_choice"]
-                    ["source"]["identity"]["reference"];
-                assert_eq!(
-                    selected["object_id"],
-                    serde_json::json!(reference.object_id)
-                );
-                assert_eq!(
-                    selected["incarnation"],
-                    serde_json::json!(reference.incarnation)
-                );
-                selected["incarnation"] = serde_json::json!(0);
-            }
-            let input_bytes = serde_json::to_vec(&hostile).unwrap();
-            let game_before = serde_json::to_value(runner.state()).unwrap();
-            let error = if wire {
-                serde_json::from_value::<ResolutionStateWire>(hostile.clone())
-                    .unwrap_err()
-                    .to_string()
-            } else {
-                serde_json::from_value::<GameState>(hostile.clone())
-                    .unwrap_err()
-                    .to_string()
-            };
-            assert!(
-                error.contains("pending_damage_replacements/0")
-                    && error.contains("incoherent explicit null selected damage-source capture")
-                    && error.contains("retained selected-source owner"),
-                "the actual installed lexical owner contradicts null: {error}"
-            );
-            if invalid_owned_capture {
-                assert!(error
-                    .contains("incoherent retained selected-source owner and installed predicate"));
-            }
-            assert!(!error.contains("source-origin ambiguity"));
-            assert_eq!(serde_json::to_vec(&hostile).unwrap(), input_bytes);
-            assert_eq!(serde_json::to_value(runner.state()).unwrap(), game_before);
-        }
+        // This actual no-rider original proves lexical choice, but does not
+        // identify which activation installed an erased definition.
         let mut old = current;
         old["pending_damage_replacements"][0]
             .as_object_mut()
             .unwrap()
             .remove("selected_damage_source");
-        *runner.state_mut() = if wire {
-            serde_json::from_value::<ResolutionStateWire>(old)
-                .unwrap()
-                .into_game_state()
-        } else {
-            serde_json::from_value(old).unwrap()
-        };
-        assert_eq!(runner.state().pending_damage_replacements[0], expected);
+        assert_source_origin_refusal_preserves_input(&runner, old, wire, 0);
+        *runner.state_mut() = coherent;
+        let mut selected_only = GameRunner::from_state(runner.state().clone());
+        selected_only.activate(source, 0).resolve();
+        assert_eq!((selected_only.life(P0), selected_only.life(P1)), (20, 20));
+        assert_source_program_complete(&selected_only);
+
+        runner.activate(installer, 1).resolve();
+        let definitions = runner.state().pending_damage_replacements.clone();
+        assert_eq!(
+            definitions.len(),
+            2,
+            "two paid activations on the SAME unmoved installer"
+        );
+        assert_eq!(definitions[0], expected);
+        assert!(definitions[0].runtime_execute.is_none());
+        assert!(definitions[1].runtime_execute.is_none());
+        assert!(definitions[1].selected_damage_source.is_none());
+        let mut selected_without_capture = definitions[0].clone();
+        selected_without_capture.selected_damage_source = None;
+        assert_eq!(
+            selected_without_capture, definitions[1],
+            "ENTIRE definitions differ ONLY by selected Some/native None"
+        );
+        let current = source_state_value(&runner, wire);
+        let restored = decode_source_state(current, wire).unwrap();
+        assert_eq!(
+            restored.pending_damage_replacements, definitions,
+            "BOTH canonical owners preserve the DEEP entire two-definition vector"
+        );
+        *runner.state_mut() = restored;
+        let mut both_matching = GameRunner::from_state(runner.state().clone());
+        both_matching.activate(source, 0).resolve();
+        let mut ordered = 0;
+        while matches!(
+            both_matching.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            let pending = both_matching.state().pending_replacement.as_ref().unwrap();
+            let index = pending
+                .candidates
+                .iter()
+                .position(|candidate| candidate.index == 1)
+                .expect("the actual native definition is offered for this matching source");
+            both_matching
+                .act(GameAction::ChooseReplacement { index })
+                .unwrap();
+            ordered += 1;
+            assert!(ordered <= 8);
+        }
+        both_matching.advance_until_stack_empty();
+        assert!(
+            ordered > 0,
+            "two real matching shields require actual ordering"
+        );
+        assert_eq!((both_matching.life(P0), both_matching.life(P1)), (20, 20));
+        assert!(!both_matching.state().pending_damage_replacements[0].is_consumed);
+        assert!(both_matching.state().pending_damage_replacements[1].is_consumed);
+        assert_source_program_complete(&both_matching);
         let mut matching = GameRunner::from_state(runner.state().clone());
+        matching.state_mut().pending_damage_replacements.truncate(1);
         matching.activate(source, 0).resolve();
         assert_eq!((matching.life(P0), matching.life(P1)), (20, 20));
         assert_eq!(matching.state().objects[&source].damage_marked, 0);
         assert_source_program_complete(&matching);
+        let mut selected_blink = GameRunner::from_state(runner.state().clone());
+        selected_blink
+            .state_mut()
+            .pending_damage_replacements
+            .truncate(1);
+        // CR 400.7 + CR 609.7a: the returned permanent is a different
+        // chosen source; the native predicate keeps its stored ID meaning.
+        selected_blink.cast(blink).target_object(source).resolve();
+        assert_ne!(
+            selected_blink.state().objects[&source].incarnation,
+            reference.incarnation
+        );
+        selected_blink.activate(source, 0).resolve();
+        assert_eq!((selected_blink.life(P0), selected_blink.life(P1)), (19, 19));
+        assert!(!selected_blink.state().pending_damage_replacements[0].is_consumed);
+        assert_source_program_complete(&selected_blink);
         runner.cast(blink).target_object(source).resolve();
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
         assert_ne!(
@@ -2356,8 +2516,985 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
             reference.incarnation
         );
         runner.activate(source, 0).resolve();
-        assert_eq!((runner.life(P0), runner.life(P1)), (19, 19));
-        assert!(!runner.state().pending_damage_replacements[0].is_consumed);
+        assert_eq!(
+            (runner.life(P0), runner.life(P1)),
+            (20, 20),
+            "native ID predicate prevents the returned birth"
+        );
+        assert_eq!(runner.state().objects[&source].damage_marked, 0);
+        assert!(
+            !runner.state().pending_damage_replacements[0].is_consumed,
+            "selected old birth excludes the new source and remains unspent"
+        );
+        assert!(runner.state().pending_damage_replacements[1].is_consumed);
         assert_source_program_complete(&runner);
+    }
+}
+
+#[test]
+fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_refuses() {
+    use engine::game::combat::AttackTarget;
+    use engine::game::scenario::GameRunner;
+    use engine::types::ability::*;
+    const REVERSE: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.";
+    for wire in [false, true] {
+        for old_typed_continuous in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_creature_from_oracle(
+                    P1,
+                    "Thrashing Wumpus",
+                    3,
+                    3,
+                    "{B}: This creature deals 1 damage to each creature and each player.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                    generic: 3,
+                })
+                .id();
+            let reverse = if old_typed_continuous {
+                // Authentic old TYPED Continuous/rider custody. Rider cloning
+                // and recursive cast stamping predate the new capture field;
+                // this does not claim the old full Reverse parser attached it.
+                let mut program = parse_oracle_text(REVERSE).abilities[0].clone();
+                let Effect::PreventDamage { lifetime, .. } = program.effect.as_mut() else {
+                    panic!("complete typed prevention program");
+                };
+                *lifetime = RedirectionLifetime::Continuous;
+                scenario
+                    .add_spell_to_hand(P0, "Old typed continuous source rider", true)
+                    .with_ability_definition(program)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::White, ManaCostShard::White],
+                        generic: 1,
+                    })
+                    .id()
+            } else {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, "Reverse Damage", true, REVERSE)
+                    .with_mana_cost(ManaCost::Cost {
+                        shards: vec![ManaCostShard::White, ManaCostShard::White],
+                        generic: 1,
+                    })
+                    .id()
+            };
+            let blink = scenario.add_spell_to_hand_from_oracle(P1, "Cloudshift", true,
+                "Exile target creature you control, then return that card to the battlefield under your control.")
+                .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 0 }).id();
+            scenario.with_mana_pool(
+                P1,
+                [ManaType::White, ManaType::Black]
+                    .into_iter()
+                    .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            let mut runner = scenario.build();
+            // Lawful fixture setup before announcement: P1 attacks this turn,
+            // P0 pays for its instant while P1's permanent is the chosen source.
+            runner.state_mut().active_player = P1;
+            runner.state_mut().priority_player = P1;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+            add_mana(
+                &mut runner,
+                &[ManaType::White, ManaType::White, ManaType::Colorless],
+            );
+            if old_typed_continuous {
+                let mut old_program = source_state_value(&runner, wire);
+                for field in ["abilities", "base_abilities"] {
+                    old_program["objects"][reverse.0.to_string()][field][0]["effect"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("lifetime");
+                }
+                *runner.state_mut() = decode_source_state(old_program, wire).unwrap();
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P0 }
+            ));
+            runner.cast(reverse).resolve();
+            let WaitingFor::DamageSourceChoice {
+                player, options, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("full paid source prevention reaches its public prompt");
+            };
+            assert_eq!(*player, P0);
+            let reference = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == source)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: reference })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_source_program_complete(&runner);
+            assert_eq!(runner.state().pending_damage_replacements.len(), 1);
+            let expected = runner.state().pending_damage_replacements.clone();
+            assert_eq!(
+                expected[0]
+                    .selected_damage_source
+                    .as_ref()
+                    .unwrap()
+                    .identity
+                    .reference,
+                reference
+            );
+            let original = assert_installed_cast_owner(&runner);
+            assert!(matches!(
+                original.effect,
+                Effect::PreventDamage {
+                    damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                        chooser: Some(_),
+                        ..
+                    }),
+                    ..
+                }
+            ));
+            assert_eq!(
+                original.cast_occurrence,
+                expected[0]
+                    .runtime_execute
+                    .as_ref()
+                    .unwrap()
+                    .cast_occurrence
+            );
+            assert!(runner.state().zone_changes_this_turn.iter().enumerate().all(|(index, record)|
+                record.recorded_turn_number == runner.state().turn_number
+                    && record.turn_zone_change_index == index && record.object_id != source),
+                "complete actual current-turn ledger supplies birth only AFTER original chosen role");
+            let current = source_state_value(&runner, wire);
+            assert_eq!(
+                decode_source_state(current.clone(), wire)
+                    .unwrap()
+                    .pending_damage_replacements,
+                expected
+            );
+            restore_installed_legacy_with_retained_original(&mut runner, wire);
+            assert_eq!(
+                runner.state().pending_damage_replacements,
+                expected,
+                "BOTH owners recover the FULL definition, including its real cast-owned rider"
+            );
+
+            for invalid_owned_capture in [false, true] {
+                let mut hostile = current.clone();
+                hostile["pending_damage_replacements"][0]["selected_damage_source"] =
+                    serde_json::Value::Null;
+                if invalid_owned_capture {
+                    // Hostile corruption of the actual CAST-BOUND original,
+                    // not a similarly shaped unrelated flip frame. The actual
+                    // positive original has no selection at announcement.
+                    let mut corrupted = false;
+                    for entry in hostile["resolved_rules_journal"]["entries"]
+                        .as_array_mut()
+                        .unwrap()
+                    {
+                        for command in ["StackPush", "StackRemoval"] {
+                            if let Some(root) = entry
+                                .pointer_mut(&format!("/command/{command}/entry/kind/data/ability"))
+                            {
+                                if root["source_id"] == serde_json::json!(reverse)
+                                    && root["cast_occurrence"]
+                                        == serde_json::json!(original.cast_occurrence)
+                                {
+                                    let mut capture = serde_json::to_value(
+                                        expected[0].selected_damage_source.as_ref().unwrap(),
+                                    )
+                                    .unwrap();
+                                    capture["identity"]["reference"]["incarnation"] =
+                                        serde_json::json!(0);
+                                    root["context"]["damage_source_choice"] = serde_json::json!({
+                                        "source": capture, "candidate_filter": {"type": "Any"}
+                                    });
+                                    corrupted = true;
+                                }
+                            }
+                        }
+                    }
+                    assert!(corrupted, "the actual stamped original was corrupted");
+                }
+                let bytes = serde_json::to_vec(&hostile).unwrap();
+                let before = serde_json::to_value(runner.state()).unwrap();
+                let error = decode_source_state(hostile.clone(), wire)
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("pending_damage_replacements/0")
+                        && error
+                            .contains("incoherent explicit null selected damage-source capture")
+                        && error.contains("retained selected-source owner"),
+                    "precise owned contradiction: {error}"
+                );
+                if invalid_owned_capture {
+                    assert!(error.contains(
+                        "incoherent retained selected-source owner and installed predicate"
+                    ));
+                }
+                assert!(!error.contains("source-origin ambiguity"));
+                assert_eq!(serde_json::to_vec(&hostile).unwrap(), bytes);
+                assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+            }
+
+            let mut moved = GameRunner::from_state(runner.state().clone());
+            moved.cast(blink).target_object(source).resolve();
+            assert_ne!(
+                moved.state().objects[&source].incarnation,
+                reference.incarnation
+            );
+            moved.activate(source, 0).resolve();
+            assert_eq!((moved.life(P0), moved.life(P1)), (19, 19));
+            assert!(!moved.state().pending_damage_replacements[0].is_consumed);
+            assert_source_program_complete(&moved);
+
+            // CR 615.5 + CR 615.8: prevent one instance and gain its actual
+            // prevented amount immediately afterward, once for full Reverse.
+            // Wumpus deals ONE to each recipient when activated. Use its real
+            // 3/3 combat for the required single three-to-protected-player event.
+            runner.advance_to_combat();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareAttackers { player: P1, .. }
+            ));
+            runner
+                .declare_attackers(&[(source, AttackTarget::Player(P0))])
+                .unwrap();
+            runner.advance_to_phase(Phase::DeclareBlockers);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { player: P0, .. }
+            ));
+            runner.declare_blockers(&[]).unwrap();
+            let combat = runner.combat_damage();
+            assert!(matches!(
+                runner.state().phase,
+                Phase::EndCombat | Phase::PostCombatMain
+            ));
+            let gains: Vec<_> = combat
+                .events()
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    } if *player_id == P0 && *amount > 0 => Some(*amount),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                gains,
+                vec![3],
+                "one real three-damage event is prevented and gains three immediately"
+            );
+            assert_eq!((runner.life(P0), runner.life(P1)), (23, 20));
+            assert_source_program_complete(&runner);
+            // Mana pools empty when phases end, so fund the independent paid activation now.
+            runner
+                .state_mut()
+                .players
+                .iter_mut()
+                .find(|player| player.id == P1)
+                .unwrap()
+                .mana_pool
+                .add(ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]));
+            runner.activate(source, 0).resolve();
+            assert_eq!((runner.life(P0), runner.life(P1)), if old_typed_continuous { (24, 19) } else { (22, 19) },
+                "stored Continuous keeps its actual typed meaning; full current Reverse spends once");
+            assert_source_program_complete(&runner);
+        }
+    }
+}
+
+#[test]
+fn same_cast_resolved_native_and_chosen_alternatives_cannot_lend_each_other_source_role() {
+    use engine::types::ability::*;
+    for wire in [false, true] {
+        for native_run in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_life(P0, if native_run { 20 } else { 19 });
+            let source = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Thrashing Wumpus",
+                    3,
+                    3,
+                    "{B}: This creature deals 1 damage to each creature and each player.",
+                )
+                .id();
+            // Supported typed conditional composition, not printed Oracle.
+            let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+                .abilities[0].clone();
+            let Effect::PreventDamage {
+                damage_source_filter,
+                ..
+            } = chosen.effect.as_mut()
+            else {
+                panic!("complete selected materializer and GainLife rider");
+            };
+            *damage_source_filter = Some(TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            });
+            let mut native = chosen.clone();
+            let Effect::PreventDamage {
+                damage_source_filter,
+                ..
+            } = native.effect.as_mut()
+            else {
+                unreachable!()
+            };
+            *damage_source_filter = Some(TargetFilter::SpecificObject { id: source });
+            native.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 20 },
+            });
+            native.else_ability = Some(Box::new(chosen));
+            let mut program = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseDamageSource {
+                    source_filter: TargetFilter::Any,
+                },
+            );
+            program.sub_ability = Some(Box::new(native));
+            let spell = scenario
+                .add_spell_to_hand(P0, "Typed same-cast source alternatives", true)
+                .with_ability_definition(program)
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            let mut runner = scenario.build();
+            add_mana(&mut runner, &[ManaType::Colorless, ManaType::Black]);
+            runner.cast(spell).resolve();
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("the paid composition publishes its actual source choice");
+            };
+            let reference = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == source)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: reference })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_source_program_complete(&runner);
+            let definition = runner.state().pending_damage_replacements[0].clone();
+            assert_eq!(
+                definition.selected_damage_source.is_none(),
+                native_run,
+                "separate real runs actually execute native and chosen branches"
+            );
+            let original = assert_installed_cast_owner(&runner);
+            let native = original.sub_ability.as_ref().unwrap();
+            let chosen = native.else_ability.as_ref().unwrap();
+            let occurrence = original.cast_occurrence.expect("real root cast");
+            assert_eq!(native.cast_occurrence, Some(occurrence));
+            assert_eq!(chosen.cast_occurrence, Some(occurrence));
+            assert_eq!(
+                native.sub_ability.as_ref().unwrap().cast_occurrence,
+                Some(occurrence)
+            );
+            assert_eq!(
+                chosen.sub_ability.as_ref().unwrap().cast_occurrence,
+                Some(occurrence)
+            );
+            assert_eq!(
+                definition.runtime_execute.as_ref().unwrap().cast_occurrence,
+                Some(occurrence)
+            );
+            let current = source_state_value(&runner, wire);
+            assert_eq!(
+                decode_source_state(current.clone(), wire)
+                    .unwrap()
+                    .pending_damage_replacements[0],
+                definition
+            );
+            let mut absent = current;
+            absent["pending_damage_replacements"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("selected_damage_source");
+            assert_source_origin_refusal_preserves_input(&runner, absent, wire, 0);
+            runner.activate(source, 0).resolve();
+            assert_eq!(
+                (runner.life(P0), runner.life(P1)),
+                (if native_run { 21 } else { 20 }, 19)
+            );
+            assert_source_program_complete(&runner);
+        }
+    }
+}
+
+#[test]
+fn own_resolution_nested_choice_keeps_its_actual_missing_cast_stamp_and_current_meaning() {
+    use engine::types::ability::*;
+    use engine::types::game_state::RandomDraw;
+    use rand::Rng;
+    for wire in [false, true] {
+        for flip in [false, true] {
+            for branch in [0, 1] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                if flip {
+                    scenario.add_artifact_from_oracle(
+                        P0,
+                        "Krark's Thumb",
+                        "If you would flip a coin, instead flip two coins and ignore one.",
+                    );
+                }
+                let source = scenario
+                    .add_creature_from_oracle(
+                        P0,
+                        "Thrashing Wumpus",
+                        3,
+                        3,
+                        "{B}: This creature deals 1 damage to each creature and each player.",
+                    )
+                    .id();
+                let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+                .abilities[0].clone();
+                let Effect::PreventDamage {
+                    damage_source_filter,
+                    ..
+                } = chosen.effect.as_mut()
+                else {
+                    unreachable!()
+                };
+                *damage_source_filter = Some(TargetFilter::ChosenDamageSource {
+                    chooser: None,
+                    filter: None,
+                });
+                let mut native = chosen.clone();
+                let Effect::PreventDamage {
+                    damage_source_filter,
+                    ..
+                } = native.effect.as_mut()
+                else {
+                    unreachable!()
+                };
+                *damage_source_filter = Some(TargetFilter::SpecificObject { id: source });
+                let nested = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    if flip {
+                        Effect::FlipCoins {
+                            flips: CoinFlipRun::single(),
+                            flipper: TargetFilter::Controller,
+                            win_effect: Some(Box::new(native)),
+                            lose_effect: Some(Box::new(chosen)),
+                        }
+                    } else {
+                        Effect::ChooseOneOf {
+                            chooser: PlayerFilter::Controller,
+                            branches: vec![native, chosen],
+                            kind: ChooseOneOfKind::Ordinary,
+                        }
+                    },
+                );
+                let mut program = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseDamageSource {
+                        source_filter: TargetFilter::Any,
+                    },
+                );
+                program.sub_ability = Some(Box::new(nested));
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Typed own-resolution source branches", true)
+                    .with_ability_definition(program)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id();
+                let mut runner = scenario.build();
+                add_mana(&mut runner, &[ManaType::Colorless, ManaType::Black]);
+                if flip {
+                    let seed = (0..256)
+                        .find(|seed| {
+                            let mut rng = GameRng::seed_from_u64(*seed);
+                            rng.draw(RandomDraw::Outcome).random_bool(0.5)
+                                != rng.draw(RandomDraw::Outcome).random_bool(0.5)
+                        })
+                        .unwrap();
+                    runner.state_mut().rng_seed = seed;
+                    runner.state_mut().rng_word_pos = 0;
+                    runner.state_mut().rng = GameRng::seed_from_u64(seed);
+                }
+                runner.cast(spell).resolve();
+                let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for
+                else {
+                    panic!("source prompt");
+                };
+                let reference = options
+                    .iter()
+                    .find(|option| option.identity.reference.object_id == source)
+                    .unwrap()
+                    .identity
+                    .reference;
+                runner
+                    .act(GameAction::ChooseDamageSource { source: reference })
+                    .unwrap();
+                if flip {
+                    let WaitingFor::CoinFlipKeepChoice { results, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!("actual Thumb replacement pauses the own-resolution flip");
+                    };
+                    let index = results
+                        .iter()
+                        .position(|won| *won == (branch == 0))
+                        .unwrap();
+                    runner
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![index],
+                        })
+                        .unwrap();
+                } else {
+                    let WaitingFor::ChooseOneOfBranch {
+                        player, branches, ..
+                    } = &runner.state().waiting_for
+                    else {
+                        panic!("actual nested own-resolution branch prompt");
+                    };
+                    assert_eq!(*player, P0);
+                    assert_eq!(branches.len(), 2);
+                    runner
+                        .act(GameAction::ChooseBranch { index: branch })
+                        .unwrap();
+                }
+                runner.advance_until_stack_empty();
+                let definition = runner.state().pending_damage_replacements[0].clone();
+                assert_eq!(definition.selected_damage_source.is_none(), branch == 0);
+                assert!(definition.runtime_execute.as_ref().unwrap().cast_occurrence.is_none(),
+                "actual newly built nested branch is NOT recursively stamped by the cast producer");
+                let raw = source_state_value(&runner, wire);
+                assert!(
+                    raw["resolved_rules_journal"]["entries"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|entry| entry
+                            .pointer(
+                                "/command/StackRemoval/entry/kind/data/ability/cast_occurrence"
+                            )
+                            .is_some_and(|occurrence| !occurrence.is_null())),
+                    "the paid outer Spell really WAS stamped"
+                );
+                assert_eq!(
+                    decode_source_state(raw.clone(), wire)
+                        .unwrap()
+                        .pending_damage_replacements[0],
+                    definition
+                );
+                let mut absent = raw;
+                absent["pending_damage_replacements"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("selected_damage_source");
+                assert_source_origin_refusal_preserves_input(&runner, absent, wire, 0);
+                runner.activate(source, 0).resolve();
+                assert_eq!((runner.life(P0), runner.life(P1)), (21, 19));
+                assert_source_program_complete(&runner);
+            }
+        }
+    }
+}
+
+#[test]
+fn actual_noncast_copy_retains_cloned_coordinate_but_cannot_borrow_the_original_cast_record() {
+    use engine::types::ability::*;
+    for wire in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Thrashing Wumpus",
+                3,
+                3,
+                "{B}: This creature deals 1 damage to each creature and each player.",
+            )
+            .id();
+        let reverse = scenario.add_spell_to_hand_from_oracle(P0, "Reverse Damage", true,
+            "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White, ManaCostShard::White], generic: 1 }).id();
+        let copier = scenario
+            .add_artifact_from_oracle(P0, "Typed paid spell-copy witness", "")
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::CopySpell {
+                        target: TargetFilter::StackSpell,
+                        retarget: CopyRetargetPermission::KeepOriginalTargets,
+                        copier: None,
+                        additional_modifications: vec![],
+                        starting_loyalty_from_casualty_sacrifice: false,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                }),
+            )
+            .id();
+        let mut runner = scenario.build();
+        add_mana(
+            &mut runner,
+            &[
+                ManaType::White,
+                ManaType::White,
+                ManaType::Colorless,
+                ManaType::Colorless,
+            ],
+        );
+        runner.cast(reverse).commit();
+        let original_occurrence = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == reverse)
+            .unwrap()
+            .ability()
+            .unwrap()
+            .cast_occurrence
+            .expect("actual original cast");
+        runner.activate(copier, 0).target_object(reverse).resolve();
+        for _ in 0..2 {
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("both actual copy and original independently ask for a source");
+            };
+            let reference = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == source)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: reference })
+                .unwrap();
+            runner.advance_until_stack_empty();
+        }
+        assert_source_program_complete(&runner);
+        let definitions = runner.state().pending_damage_replacements.clone();
+        assert_eq!(definitions.len(), 2);
+        let copy_rider = definitions[0].runtime_execute.as_ref().unwrap();
+        assert_ne!(copy_rider.source_id, reverse);
+        assert_eq!(
+            copy_rider.cast_occurrence,
+            Some(original_occurrence),
+            "assert actual copied metadata; do NOT assume this existing writer clears it"
+        );
+        assert_eq!(
+            runner.state().spells_cast_this_turn_by_player[&original_occurrence.caster]
+                [original_occurrence.turn_journal_index as usize]
+                .spell_object_id,
+            Some(reverse)
+        );
+        assert!(definitions
+            .iter()
+            .all(|definition| definition.selected_damage_source.is_some()));
+        let current = source_state_value(&runner, wire);
+        assert_eq!(
+            decode_source_state(current.clone(), wire)
+                .unwrap()
+                .pending_damage_replacements,
+            definitions
+        );
+        let mut absent = current.clone();
+        absent["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
+        assert_source_origin_refusal_preserves_input(&runner, absent, wire, 0);
+        // Supplemental stored-native control on this ACTUAL noncast custody:
+        // a coordinate naming a different source cannot contradict native null.
+        let mut native = current;
+        native["pending_damage_replacements"][0]["selected_damage_source"] =
+            serde_json::Value::Null;
+        let restored = decode_source_state(native, wire).unwrap();
+        assert!(restored.pending_damage_replacements[0]
+            .selected_damage_source
+            .is_none());
+        assert_eq!(restored.pending_damage_replacements[1], definitions[1]);
+    }
+}
+
+#[test]
+fn cast_owned_source_rider_does_not_borrow_a_registered_later_boon_body() {
+    use engine::types::ability::*;
+    use engine::types::triggers::TriggerMode;
+    for wire in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Thrashing Wumpus",
+                3,
+                3,
+                "{B}: This creature deals 1 damage to each creature and each player.",
+            )
+            .id();
+        let mut program = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+            .abilities[0].clone();
+        let mut later = program.clone();
+        let Effect::PreventDamage {
+            damage_source_filter,
+            ..
+        } = later.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        *damage_source_filter = Some(TargetFilter::SpecificObject { id: source });
+        let mut register = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateBoon {
+                recipient: TargetFilter::Controller,
+                trigger: Box::new(
+                    TriggerDefinition::new(TriggerMode::Phase)
+                        .phase(Phase::Upkeep)
+                        .execute(later),
+                ),
+            },
+        );
+        register.sub_link = SubAbilityLink::SequentialSibling;
+        program.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(register));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Typed source rider with registered later body", true)
+            .with_ability_definition(program)
+            .with_mana_cost(ManaCost::generic(1))
+            .id();
+        let mut runner = scenario.build();
+        add_mana(&mut runner, &[ManaType::Colorless, ManaType::Black]);
+        runner.cast(spell).resolve();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("actual paid source prompt");
+        };
+        let reference = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == source)
+            .unwrap()
+            .identity
+            .reference;
+        runner
+            .act(GameAction::ChooseDamageSource { source: reference })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let original = assert_installed_cast_owner(&runner);
+        let register = original
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap();
+        assert_eq!(register.cast_occurrence, original.cast_occurrence);
+        let Effect::CreateBoon { trigger, .. } = &register.effect else {
+            panic!("retained actual registered boundary");
+        };
+        let later = engine::game::ability_utils::build_resolved_from_def(
+            trigger.execute.as_ref().unwrap(),
+            original.source_id,
+            original.controller,
+        );
+        assert!(later.cast_occurrence.is_none());
+        assert!(
+            later.context.damage_source_choice.is_none(),
+            "registered future body has no invocation-owned selected context"
+        );
+        restore_installed_legacy_with_retained_original(&mut runner, wire);
+        runner.activate(source, 0).resolve();
+        assert_eq!((runner.life(P0), runner.life(P1)), (21, 19));
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            1,
+            "actual rider registers its separate future boon once"
+        );
+        assert_source_program_complete(&runner);
+    }
+}
+
+#[test]
+fn actual_recast_and_other_caster_coordinates_preserve_each_definition_owned_spell() {
+    use engine::types::game_state::CastOccurrence;
+    for wire in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Thrashing Wumpus",
+                3,
+                3,
+                "{B}: This creature deals 1 damage to each creature and each player.",
+            )
+            .id();
+        let text = "The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.";
+        let reverse = scenario
+            .add_spell_to_hand_from_oracle(P0, "Reverse Damage", true, text)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        let other = scenario
+            .add_spell_to_hand_from_oracle(P1, "Reverse Damage", true, text)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        let recall = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Call to Mind",
+                false,
+                "Return target instant or sorcery card from your graveyard to your hand.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            })
+            .id();
+        scenario.with_mana_pool(
+            P1,
+            [ManaType::White, ManaType::White, ManaType::Colorless]
+                .into_iter()
+                .map(|mana| ManaUnit::new(mana, ObjectId(0), false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        add_mana(
+            &mut runner,
+            &[
+                ManaType::White,
+                ManaType::White,
+                ManaType::White,
+                ManaType::White,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Blue,
+            ],
+        );
+        let select = |runner: &mut engine::game::scenario::GameRunner| {
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("each real paid cast reaches its own prompt");
+            };
+            let reference = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == source)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: reference })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_source_program_complete(runner);
+        };
+        runner.cast(reverse).resolve();
+        select(&mut runner);
+        runner.cast(recall).target_object(reverse).resolve();
+        assert_eq!(
+            runner.state().objects[&reverse].zone,
+            engine::types::zones::Zone::Hand
+        );
+        runner.cast(reverse).resolve();
+        select(&mut runner);
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P1 }
+        ));
+        runner.cast(other).resolve();
+        select(&mut runner);
+        let definitions = runner.state().pending_damage_replacements.clone();
+        assert_eq!(definitions.len(), 3);
+        let coordinates: Vec<_> = definitions
+            .iter()
+            .map(|definition| {
+                definition
+                    .runtime_execute
+                    .as_ref()
+                    .unwrap()
+                    .cast_occurrence
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            coordinates,
+            vec![
+                CastOccurrence {
+                    caster: P0,
+                    turn_journal_index: 0
+                },
+                CastOccurrence {
+                    caster: P0,
+                    turn_journal_index: 2
+                },
+                CastOccurrence {
+                    caster: P1,
+                    turn_journal_index: 0
+                }
+            ]
+        );
+        assert_eq!(
+            runner.state().spells_cast_this_turn_by_player[&P0][0].spell_object_id,
+            Some(reverse)
+        );
+        assert_eq!(
+            runner.state().spells_cast_this_turn_by_player[&P0][2].spell_object_id,
+            Some(reverse)
+        );
+        assert_eq!(
+            runner.state().spells_cast_this_turn_by_player[&P1][0].spell_object_id,
+            Some(other)
+        );
+        let current = source_state_value(&runner, wire);
+        assert_eq!(
+            decode_source_state(current.clone(), wire)
+                .unwrap()
+                .pending_damage_replacements,
+            definitions
+        );
+        for index in 0..definitions.len() {
+            let mut absent = current.clone();
+            absent["pending_damage_replacements"][index]
+                .as_object_mut()
+                .unwrap()
+                .remove("selected_damage_source");
+            assert_eq!(decode_source_state(absent, wire).unwrap().pending_damage_replacements, definitions,
+                "another cast of the same storage ID or another caster's index0 cannot supply this leaf's meaning");
+        }
+        // Supplemental field-loss control on a reached real three-cast state.
+        // Missing a coordinate alone does not change coherent Some or native null.
+        let mut missing = current;
+        missing["pending_damage_replacements"][0]["runtime_execute"]
+            .as_object_mut()
+            .unwrap()
+            .remove("cast_occurrence");
+        let retained = decode_source_state(missing.clone(), wire).unwrap();
+        assert_eq!(
+            retained.pending_damage_replacements[0].selected_damage_source,
+            definitions[0].selected_damage_source
+        );
+        missing["pending_damage_replacements"][0]["selected_damage_source"] =
+            serde_json::Value::Null;
+        let native = decode_source_state(missing.clone(), wire).unwrap();
+        assert!(native.pending_damage_replacements[0]
+            .selected_damage_source
+            .is_none());
+        missing["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
+        assert_source_origin_refusal_preserves_input(&runner, missing, wire, 0);
     }
 }

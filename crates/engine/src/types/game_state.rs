@@ -27604,14 +27604,28 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
         let Ok(installed) = serde_json::from_value::<ReplacementDefinition>(node.clone()) else {
             return Ok(None);
         };
-        let Some(installer) = installed
-            .runtime_execute
-            .as_deref()
-            .map(|rider| rider.source_id)
-            .or(installed.source_object)
-        else {
+        // The detached rider belongs to this definition. Installer identity,
+        // two absent coordinates, and output equality do not identify an
+        // invocation: one permanent can install identical native/chosen shields.
+        let Some(rider) = installed.runtime_execute.as_deref() else {
             return Ok(None);
         };
+        let Some(occurrence) = rider.cast_occurrence else {
+            return Ok(None);
+        };
+        let installer = rider.source_id;
+        let cast_record = value
+            .get("spells_cast_this_turn_by_player")
+            .and_then(|players| players.get(occurrence.caster.0.to_string()))
+            .and_then(Value::as_array)
+            .and_then(|records| records.get(occurrence.turn_journal_index as usize));
+        if cast_record
+            .and_then(|record| record.get("spell_object_id"))
+            .and_then(Value::as_u64)
+            != Some(installer.0)
+        {
+            return Ok(None);
+        }
         let mut originals = Vec::new();
         if let Some(entry) = value
             .get("resolving_stack_entry")
@@ -27634,9 +27648,16 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 originals.push(original.clone());
             }
         }
-        let mut evidence: Vec<Option<TriggerSourceContext>> = Vec::new();
-        let mut missing_chosen_identity = false;
+        // Ok is a complete matching meaning; Err(None) is unresolved,
+        // Err(Some) is a positively chosen but invalid/unrecoverable meaning.
+        let mut evidence: Vec<Result<Option<TriggerSourceContext>, Option<String>>> = Vec::new();
         for original in originals {
+            if original.pointer("/kind/type").and_then(Value::as_str) != Some("Spell")
+                || original.get("id").and_then(Value::as_u64) != Some(installer.0)
+                || original.get("source_id").and_then(Value::as_u64) != Some(installer.0)
+            {
+                continue;
+            }
             let Some(root) = original
                 .pointer("/kind/data/ability")
                 .filter(|root| !root.is_null())
@@ -27652,10 +27673,11 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 || installed
                     .source_controller
                     .is_some_and(|controller| controller != root.controller)
-                || installed.runtime_execute.as_deref().is_some_and(|rider| {
-                    rider.source_incarnation != root.source_incarnation
-                        || rider.cast_occurrence != root.cast_occurrence
-                })
+                || root.controller != rider.controller
+                || root.cast_occurrence != Some(occurrence)
+                || matches!((rider.source_incarnation, root.source_incarnation),
+                    (Some(left), Some(right)) if left != right
+                        || left == crate::types::identifiers::LEGACY_INCARNATION)
             {
                 continue;
             }
@@ -27686,75 +27708,83 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             scratch.resolving_stack_entry = serde_json::from_value(original_entry).ok();
             fn examine(
                 ability: &ResolvedAbility,
+                complete_context: bool,
                 value: &Value,
                 installed: &ReplacementDefinition,
                 scratch: &GameState,
-                evidence: &mut Vec<Option<TriggerSourceContext>>,
-                missing_chosen_identity: &mut bool,
-            ) -> Result<(), String> {
-                // A retained CoinFlip operand belongs to THIS lexical flip
-                // only when its entire branch programs, actor, targets and
-                // source agree. It cannot lend a choice to another program.
-                if let Effect::FlipCoins {
-                    win_effect,
-                    lose_effect,
-                    ..
-                } = &ability.effect
-                {
-                    for entry in value
-                        .pointer("/resolved_rules_journal/entries")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                    {
-                        let Some(transition) = entry
-                            .pointer("/command/FrameTransition/transition")
-                            .and_then(Value::as_object)
-                        else {
-                            continue;
-                        };
-                        for operand in transition.values() {
-                            let Some(frame) = operand.get("frame").filter(|frame| {
-                                frame.get("type").and_then(Value::as_str) == Some("CoinFlip")
-                            }) else {
-                                continue;
-                            };
-                            let Ok(frame) = serde_json::from_value::<
-                                crate::types::resolution::PendingCoinFlip,
-                            >(frame["data"].clone()) else {
-                                continue;
-                            };
-                            if frame.source_id != ability.source_id
-                                || frame.controller != ability.controller
-                                || frame.targets != ability.targets
-                                || frame.win_effect != *win_effect
-                                || frame.lose_effect != *lose_effect
-                            {
-                                continue;
-                            }
-                            for branch in
-                                [frame.win_effect.as_deref(), frame.lose_effect.as_deref()]
-                                    .into_iter()
-                                    .flatten()
-                            {
-                                let mut branch = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-                                    branch, frame.source_id, frame.controller, frame.targets.clone(), frame.chain_root_targets.clone());
-                                branch.source_incarnation = ability.source_incarnation;
-                                if !branch.effect.is_fresh_damage_source_producer() {
-                                    branch.context.damage_source_choice =
-                                        frame.branch_context.damage_source_choice.clone();
-                                }
-                                examine(
-                                    &branch,
-                                    value,
-                                    installed,
-                                    scratch,
-                                    evidence,
-                                    missing_chosen_identity,
-                                )?;
-                            }
-                        }
+                evidence: &mut Vec<Result<Option<TriggerSourceContext>, Option<String>>>,
+            ) {
+                use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
+                use std::ops::ControlFlow;
+
+                // Use the shared scoped carrier authority, including costs,
+                // decline/choice/flip/roll/vote/pile bodies. Do not borrow a
+                // similarly shaped journal frame's selection. These unresolved
+                // definitions do not acquire a cast stamp by being inspected.
+                let mut nested = Vec::new();
+                let mut collect = |node: DefinitionNode<'_>| {
+                    if let DefinitionNode::Ability(definition) = node {
+                        nested.push(crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                            definition, ability.source_id, ability.controller,
+                            ability.targets.clone(), ability.chain_root_targets.clone()));
                     }
+                    ControlFlow::Continue(())
+                };
+                let scope = ResolutionScope::OwnResolutionOnly;
+                let _ = direct_nodes::visit_effect_scoped(&ability.effect, scope, &mut collect);
+                if let Some(unless) = &ability.unless_pay {
+                    let _ = direct_nodes::visit_cost_scoped(&unless.cost, scope, &mut collect);
+                }
+                for mode in &ability.mode_abilities {
+                    if !mode
+                        .condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.has_when_you_do_marker())
+                    {
+                        let _ = direct_nodes::visit_ability_def_scoped(mode, scope, &mut collect);
+                    }
+                }
+                for child in &nested {
+                    examine(child, false, value, installed, scratch, evidence);
+                }
+                for child in [
+                    ability.sub_ability.as_deref(),
+                    ability.else_ability.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if child
+                        .condition
+                        .as_ref()
+                        .is_some_and(|condition| condition.has_when_you_do_marker())
+                        || (ability
+                            .sub_ability
+                            .as_deref()
+                            .is_some_and(|sub| std::ptr::eq(sub, child))
+                            && ability.effect.sub_ability_resolves_later(child.sub_link))
+                    {
+                        continue;
+                    }
+                    examine(child, complete_context, value, installed, scratch, evidence);
+                }
+                // EffectCost can carry an Effect directly, without an intervening
+                // AbilityDefinition for the direct-node visitor to surface.
+                if let Some(unless) = &ability.unless_pay {
+                    let _ = crate::types::ability_visit::visit_cost_scoped(
+                        &unless.cost,
+                        scope,
+                        &mut |effect| {
+                            if matches!(
+                                effect,
+                                Effect::PreventDamage { .. }
+                                    | Effect::CreateDamageReplacement { .. }
+                            ) {
+                                evidence.push(Err(None));
+                            }
+                            ControlFlow::Continue(())
+                        },
+                    );
                 }
                 let source_operand = match &ability.effect {
                     Effect::PreventDamage {
@@ -27762,194 +27792,173 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         ..
                     } => damage_source_filter,
                     Effect::CreateDamageReplacement { source_filter, .. } => source_filter,
-                    _ => {
-                        if let Some(child) = ability.sub_ability.as_deref() {
-                            examine(
-                                child,
-                                value,
-                                installed,
-                                scratch,
-                                evidence,
-                                missing_chosen_identity,
-                            )?;
-                        }
-                        return Ok(());
-                    }
+                    _ => return,
                 };
-                // A retained detached continuation links the definition to an
-                // exact producing occurrence; a floating installer's stored
-                // anchor links to its actual original activated program.
                 let linked = installed.runtime_execute.as_deref().is_some_and(|rider| {
-                    rider.source_id == ability.source_id
-                        && rider.controller == ability.controller
-                        && rider.source_incarnation.is_some()
-                        && rider.source_incarnation == ability.source_incarnation
-                }) || installed.source_object == Some(ability.source_id)
-                    && ability.source_incarnation.is_some_and(|birth| {
-                        scratch
-                            .objects
-                            .get(&ability.source_id)
-                            .is_some_and(|object| object.incarnation == birth)
-                    });
-                if linked {
-                    let mut owner = ability.clone();
-                    if matches!(
-                        source_operand,
-                        Some(TargetFilter::ChosenDamageSource { .. })
-                    ) {
-                        // Role came from the original operand. Only now may its
-                        // exact owned descendant selection supply the identity.
-                        if owner.context.damage_source_choice.is_none() {
-                            owner.context.damage_source_choice = installed
-                                .runtime_execute
-                                .as_deref()
-                                .and_then(|rider| rider.context.damage_source_choice.clone());
-                        }
-                        if owner.context.damage_source_choice.is_none() {
-                            // The original operand has already established the
-                            // selected role. A COMPLETE unmoved turn window is
-                            // now a birth proof, never an origin classifier.
-                            if let Some(id) = node_source_id(installed) {
-                                let unmoved = value
-                                    .get("zone_changes_this_turn")
-                                    .and_then(Value::as_array)
-                                    .is_some_and(|records| {
-                                        records.iter().enumerate().all(|(index, record)| {
-                                            record.get("recorded_turn_number")
-                                                == value.get("turn_number")
-                                                && record
-                                                    .get("turn_zone_change_index")
-                                                    .and_then(Value::as_u64)
-                                                    == Some(index as u64)
-                                                && record.get("object_id").and_then(Value::as_u64)
-                                                    != Some(id.0)
-                                        })
-                                    });
-                                if let Some(object) = scratch.objects.get(&id).filter(|object| {
-                                    unmoved
-                                        && object.incarnation
-                                            != crate::types::identifiers::LEGACY_INCARNATION
-                                }) {
-                                    owner.context.damage_source_choice = Some(ChosenDamageSource {
-                                        source: object
-                                            .snapshot_for_zone_change(
-                                                id,
-                                                Some(object.zone),
-                                                object.zone,
-                                            )
-                                            .trigger_source_context()
-                                            .cloned(),
-                                        candidate_filter: TargetFilter::Any,
-                                    });
-                                }
+                    ability.cast_occurrence.is_some()
+                        && ability.cast_occurrence == rider.cast_occurrence
+                        && ability.source_id == rider.source_id
+                        && ability.controller == rider.controller
+                });
+                if !complete_context || !linked {
+                    // A missing runtime context is a possible materializer,
+                    // never evidence that this leaf could not have installed.
+                    evidence.push(Err(None));
+                    return;
+                }
+                let mut owner = ability.clone();
+                let chosen = matches!(
+                    source_operand,
+                    Some(TargetFilter::ChosenDamageSource { .. })
+                );
+                if chosen && owner.context.damage_source_choice.is_none() {
+                    // Invocation and typed source role are already established.
+                    // Only this definition's owned continuation may lend context.
+                    owner.context.damage_source_choice = installed
+                        .runtime_execute
+                        .as_deref()
+                        .and_then(|rider| rider.context.damage_source_choice.clone());
+                    if owner.context.damage_source_choice.is_none() {
+                        // A complete unmoved current-turn window supplies birth
+                        // AFTER role; it supplies neither role nor invocation.
+                        if let Some(id) = node_source_id(installed) {
+                            let unmoved = value
+                                .get("zone_changes_this_turn")
+                                .and_then(Value::as_array)
+                                .is_some_and(|records| {
+                                    records.iter().enumerate().all(|(index, record)| {
+                                        record.get("recorded_turn_number")
+                                            == value.get("turn_number")
+                                            && record
+                                                .get("turn_zone_change_index")
+                                                .and_then(Value::as_u64)
+                                                == Some(index as u64)
+                                            && record.get("object_id").and_then(Value::as_u64)
+                                                != Some(id.0)
+                                    })
+                                });
+                            if let Some(object) = scratch.objects.get(&id).filter(|object| {
+                                unmoved
+                                    && object.incarnation
+                                        != crate::types::identifiers::LEGACY_INCARNATION
+                            }) {
+                                owner.context.damage_source_choice = Some(ChosenDamageSource {
+                                    source: object
+                                        .snapshot_for_zone_change(
+                                            id,
+                                            Some(object.zone),
+                                            object.zone,
+                                        )
+                                        .trigger_source_context()
+                                        .cloned(),
+                                    candidate_filter: TargetFilter::Any,
+                                });
                             }
                         }
                     }
-                    if matches!(
-                        source_operand,
-                        Some(TargetFilter::ChosenDamageSource { .. })
-                    ) {
-                        let capture = owner
+                }
+                let capture = chosen
+                    .then(|| {
+                        owner
                             .context
                             .damage_source_choice
                             .as_ref()
-                            .and_then(|choice| choice.source.as_ref());
-                        match capture {
-                            Some(capture)
-                                if capture.identity.reference.incarnation
-                                    == crate::types::identifiers::LEGACY_INCARNATION
-                                    || Some(capture.identity.reference.object_id)
-                                        != node_source_id(installed) =>
-                            {
-                                return Err("incoherent retained selected-source owner and installed predicate".into());
-                            }
-                            Some(_) => {}
-                            None => {
-                                *missing_chosen_identity = true;
-                                return Ok(());
-                            }
-                        }
+                            .and_then(|choice| choice.source.as_ref())
+                    })
+                    .flatten();
+                if chosen && capture.is_none() {
+                    evidence.push(Err(Some(
+                        "unrecoverable selected-source identity in the retained installed owner"
+                            .into(),
+                    )));
+                    return;
+                }
+                let invalid_capture = capture.is_some_and(|capture| {
+                    capture.identity.reference.incarnation
+                        == crate::types::identifiers::LEGACY_INCARNATION
+                        || Some(capture.identity.reference.object_id) != node_source_id(installed)
+                });
+                let mut materialized = scratch.clone();
+                materialized.pending_damage_replacements.clear();
+                for object in materialized.objects.values_mut() {
+                    object.replacement_definitions.clear();
+                }
+                let mut events = Vec::new();
+                let result = match &owner.effect {
+                    Effect::PreventDamage { .. } => crate::game::effects::prevent_damage::resolve(
+                        &mut materialized,
+                        &owner,
+                        &mut events,
+                    ),
+                    Effect::CreateDamageReplacement { .. } => {
+                        crate::game::effects::create_damage_replacement::resolve(
+                            &mut materialized,
+                            &owner,
+                            &mut events,
+                        )
                     }
-                    let mut materialized = scratch.clone();
-                    materialized.pending_damage_replacements.clear();
-                    for object in materialized.objects.values_mut() {
-                        object.replacement_definitions.clear();
-                    }
-                    let mut events = Vec::new();
-                    let result = match owner.effect {
-                        Effect::PreventDamage { .. } => {
-                            crate::game::effects::prevent_damage::resolve(
-                                &mut materialized,
-                                &owner,
-                                &mut events,
-                            )
-                        }
-                        Effect::CreateDamageReplacement { .. } => {
-                            crate::game::effects::create_damage_replacement::resolve(
-                                &mut materialized,
-                                &owner,
-                                &mut events,
-                            )
-                        }
-                        _ => unreachable!(),
-                    };
-                    if result.is_ok() {
-                        let mut matching = materialized
-                            .pending_damage_replacements
-                            .iter()
-                            .chain(
-                                materialized
-                                    .objects
-                                    .values()
-                                    .flat_map(|object| object.replacement_definitions.iter_all()),
-                            )
-                            .filter_map(|candidate| {
-                                let mut candidate = candidate.clone();
-                                let capture = candidate.selected_damage_source.take();
-                                let mut expected = installed.clone();
-                                expected.selected_damage_source = None;
-                                candidate.is_consumed = expected.is_consumed;
-                                (candidate == expected).then_some(capture)
-                            });
-                        if let Some(capture) = matching.next() {
-                            if matching.next().is_none() {
-                                evidence.push(capture);
-                            }
+                    _ => unreachable!(),
+                };
+                if result.is_err() {
+                    evidence.push(Err(None));
+                    return;
+                }
+                let mut found = false;
+                for candidate in materialized.pending_damage_replacements.iter().chain(
+                    materialized
+                        .objects
+                        .values()
+                        .flat_map(|object| object.replacement_definitions.iter_all()),
+                ) {
+                    let mut candidate = candidate.clone();
+                    let capture = candidate.selected_damage_source.take();
+                    let mut expected = installed.clone();
+                    expected.selected_damage_source = None;
+                    candidate.is_consumed = expected.is_consumed;
+                    if candidate == expected {
+                        found = true;
+                        if invalid_capture {
+                            evidence.push(Err(Some(
+                                "incoherent retained selected-source owner and installed predicate"
+                                    .into(),
+                            )));
+                        } else {
+                            evidence.push(Ok(capture));
                         }
                     }
                 }
-                if let Some(child) = ability.sub_ability.as_deref() {
-                    examine(
-                        child,
-                        value,
-                        installed,
-                        scratch,
-                        evidence,
-                        missing_chosen_identity,
-                    )?;
+                // A corrupted owned selection may prevent installation before
+                // comparison. Keep its error pending until all native/unknown
+                // alternatives have been considered.
+                if invalid_capture && !found {
+                    evidence.push(Err(None));
                 }
-                Ok(())
             }
-            examine(
-                &root,
-                value,
-                &installed,
-                &scratch,
-                &mut evidence,
-                &mut missing_chosen_identity,
-            )?;
+            examine(&root, true, value, &installed, &scratch, &mut evidence);
         }
-        let Some(first) = evidence.first() else {
-            return if missing_chosen_identity {
-                Err("unrecoverable selected-source identity in the retained installed owner".into())
-            } else {
-                Ok(None)
-            };
+        let native = evidence.iter().any(|meaning| matches!(meaning, Ok(None)));
+        let selected = evidence
+            .iter()
+            .any(|meaning| matches!(meaning, Ok(Some(_))));
+        if evidence.iter().any(|meaning| matches!(meaning, Err(None)))
+            || (native && (selected || evidence.iter().any(Result::is_err)))
+        {
+            return Ok(None);
+        }
+        if let Some(error) = evidence
+            .iter()
+            .find_map(|meaning| meaning.as_ref().err().and_then(Option::as_ref))
+        {
+            return Err(error.clone());
+        }
+        let mut meanings = evidence.into_iter().filter_map(Result::ok);
+        let Some(first) = meanings.next() else {
+            return Ok(None);
         };
-        if evidence.iter().any(|capture| capture != first) {
+        if meanings.any(|capture| capture != first) {
             return Err("conflicting retained installed damage-source owners".into());
         }
-        Ok(Some(first.clone()))
+        Ok(Some(first))
     }
 
     fn node_source_id(
