@@ -766,7 +766,7 @@ fn vestige_two_sources_new_birth_control_changes_live_lands_and_retired_reply() 
                 captured[i]
             );
         }
-        let mut retired_reply = None;
+        let mut retired_reply: Option<GameAction> = None;
         for (occurrence, newly_drawn) in [second_draw, first_draw].into_iter().enumerate() {
             runner.advance_until_stack_empty();
             let WaitingFor::OptionalEffectChoice {
