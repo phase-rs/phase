@@ -414,6 +414,11 @@ fn missing_coin_target_custody(ability: &ResolvedAbility) -> bool {
 /// Local declarations remain meaningful even when they selected nothing.
 pub(crate) fn coin_target_custody_is_empty(node: &ResolvedAbility) -> bool {
     canonical_custody_shape(node).is_ok()
+        // Shape normalization intentionally erases these inputs. Compare the
+        // entire capture projection separately so no meaningful input vanishes
+        // merely because the canonical definition has no targets.
+        && node.coin_target_input_projection()
+            == ResolvedAbility::new(node.effect.clone(), Vec::new(), node.source_id, node.controller)
         && !node.effect.is_fresh_damage_source_producer()
         && !node_has_stack_target_declaration(node)
         && node.declares_chosen_group.is_none()
@@ -635,6 +640,17 @@ pub(crate) fn validate_retained_coin_target_custody(
     owner: &ResolvedAbility,
     captured: &crate::types::resolution::FlipBranchContext,
 ) -> Result<(), String> {
+    // The ordinary writer may omit genuinely default, targetless scaffolding.
+    // This compares its meaning with the installed owner; absence alone never
+    // establishes an old program or supplies a missing local declaration.
+    if captured.coin_branch_target_abilities.is_empty()
+        && owner
+            .coin_branch_target_abilities
+            .iter()
+            .all(|(_, child)| coin_target_custody_is_empty(child))
+    {
+        return validate_coin_target_authority(owner);
+    }
     fn refines(original: &ResolvedAbility, current: &ResolvedAbility) -> bool {
         let original_occurrences = original.target_occurrences();
         let mut remaining = original_occurrences.as_slice();
@@ -30838,5 +30854,113 @@ mod coin_target_custody_tests {
         assert!(coin_target_custody_is_empty(&targetless));
         targetless.chosen_players.push(PlayerId(1));
         assert!(!coin_target_custody_is_empty(&targetless));
+    }
+
+    #[test]
+    fn every_nondefault_inherited_input_keeps_targetless_custody_serialized() {
+        use crate::types::ability::{
+            AbilityProvenance, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+        };
+        use crate::types::game_state::{
+            CastOccurrence, CastingVariant, GraveyardPermissionId, GraveyardPermissionLatch,
+            PermissionGrant,
+        };
+        use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
+        let empty = ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(10), PlayerId(0));
+        let frame = |child: ResolvedAbility| PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
+            source_id: child.source_id,
+            controller: child.controller,
+            flipper: child.controller,
+            targets: Vec::new(),
+            win_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::NoOp,
+            ))),
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+            chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext {
+                coin_branch_target_abilities: vec![(CoinFlipResult::Won, Box::new(child))],
+                ..FlipBranchContext::default()
+            },
+        };
+        assert!(frame(empty.clone()).branch_context.is_empty());
+        assert!(serde_json::to_value(frame(empty.clone()))
+            .unwrap()
+            .get("branch_context")
+            .is_none());
+        // Each previously omitted input is isolated: no declaration, target,
+        // capture map, pin, or produced state can make this test nonempty.
+        for case in 0..25 {
+            let mut child = empty.clone();
+            match case {
+                0 => child.original_controller = Some(PlayerId(1)),
+                1 => child.scoped_player = Some(PlayerId(1)),
+                2 => child.source_incarnation = Some(7),
+                3 => child.announced_source_incarnation = Some(7),
+                4 => {
+                    child.trigger_definition_ref = Some(TriggerDefinitionRef {
+                        source: ObjectIncarnationRef::of(ObjectId(10), 7),
+                        occurrence: TriggerDefinitionOccurrenceRef::Unmaterialized,
+                    })
+                }
+                5 => child.ability_index = Some(0),
+                6 => {
+                    child.cast_occurrence = Some(CastOccurrence {
+                        caster: PlayerId(0),
+                        turn_journal_index: 0,
+                    })
+                }
+                7 => child.context.outer_declared_players = vec![(ChosenGroupId(0), PlayerId(1))],
+                8 => child.context.announcing_opponent = Some(PlayerId(1)),
+                9 => child.context.gift_recipient = Some(PlayerId(1)),
+                10 => child.context.alt_cost_grant_source = Some(ObjectId(11)),
+                11 => child.context.graveyard_permission_authority = Some(CastingVariant::Escape),
+                12 => {
+                    child.context.graveyard_permission_latch = Some(GraveyardPermissionLatch {
+                        permission: GraveyardPermissionId {
+                            source: ObjectId(11),
+                            grant: PermissionGrant::Static { index: 0 },
+                        },
+                        extra_cost: None,
+                        enters_with_counter: None,
+                    })
+                }
+                13 => child.context.additional_cost_payment_count = 1,
+                14 => child.context.chosen_modes = vec![0],
+                15 => child.context.cast_from_zone = Some(Zone::Exile),
+                16 => child.context.cast_controller = Some(PlayerId(0)),
+                17 => child.context.cast_active_player = Some(PlayerId(1)),
+                18 => child.context.cast_phase = Some(crate::types::phase::Phase::PreCombatMain),
+                19 => child.context.chain_root_targets = vec![TargetRef::Player(PlayerId(1))],
+                20 => {
+                    child.context.controller_controlled_as_cast =
+                        vec![TargetFilter::Typed(TypedFilter::creature())]
+                }
+                21 => child.context.source_transformation_count = Some(0),
+                22 => child.context.source_ability_provenance = Some(AbilityProvenance::Granted),
+                23 => child.context.pay_cost_paid_life_amount = Some(0),
+                24 => child.context.cost_removed_counter_amount = Some(0),
+                _ => unreachable!(),
+            }
+            assert!(
+                canonical_custody_shape(&child).is_ok(),
+                "allowed input {case}"
+            );
+            assert!(
+                !coin_target_custody_is_empty(&child),
+                "meaningful input {case}"
+            );
+            let captured = frame(child);
+            assert!(!captured.branch_context.is_empty(), "input {case}");
+            let value = serde_json::to_value(&captured).unwrap();
+            assert_eq!(
+                value["branch_context"],
+                serde_json::to_value(&captured.branch_context).unwrap(),
+                "serialized complete input {case}"
+            );
+        }
     }
 }

@@ -1646,6 +1646,283 @@ fn nested_finished(game: &NestedGame, destroyed: &[ObjectId]) {
 }
 
 #[test]
+fn fresh_paradigm_copy_uses_the_selected_prefix_foreign_announcer() {
+    // Constructed composition of the full Mogg announcement/body and the
+    // existing Paradigm cast route. CR 601.2c / CR 702.192a: this fresh cast
+    // announces targets; CR 707.10c's retarget actor belongs to another route.
+    for codec in 0..4 {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario
+            .add_creature(P1, "First selected controller", 2, 3)
+            .id();
+        let b = scenario
+            .add_creature(P0, "Foreign nondefault second selection", 2, 3)
+            .id();
+        let decoy = scenario
+            .add_creature(P1, "Unselected alternative", 2, 3)
+            .id();
+        let program = parse_oracle_text(
+            MOGG_ASSASSIN.strip_prefix("{T}: ").unwrap(),
+            "Mogg Assassin",
+            &[],
+            &["Instant".into()],
+            &[],
+        )
+        .abilities[0]
+            .clone();
+        let source = scenario
+            .add_spell_to_hand(P0, "Constructed fresh Paradigm relation", true)
+            .with_mana_cost(ManaCost::generic(3))
+            .with_ability_definition(program)
+            .id();
+        let mut runner = scenario.build();
+        move_to_zone(runner.state_mut(), source, Zone::Exile, &mut Vec::new());
+        assert!(engine::game::effects::paradigm::arm_paradigm(
+            runner.state_mut(),
+            source,
+            P0,
+            "Constructed fresh Paradigm relation"
+        ));
+        assert!(engine::game::effects::paradigm::enqueue_offer_if_any(
+            runner.state_mut(),
+            P0
+        ));
+        runner.act(GameAction::CastParadigmCopy { source }).unwrap();
+        let copy_id = match &runner.state().waiting_for {
+            WaitingFor::CopyRetarget {
+                player,
+                current_slot,
+                mode,
+                copy_id,
+                target_slots,
+                ..
+            } => {
+                assert_eq!(*player, P0);
+                assert_eq!(*current_slot, 0);
+                assert_eq!(
+                    *mode,
+                    Some(engine::types::game_state::CopyChoiceMode::Announce)
+                );
+                assert!(!target_slots[0].can_keep);
+                assert!(target_slots[0]
+                    .legal_alternatives
+                    .contains(&TargetRef::Object(a)));
+                *copy_id
+            }
+            other => panic!("real fresh-copy announcement: {other:?}"),
+        };
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(a)),
+            })
+            .unwrap();
+        match &runner.state().waiting_for {
+            WaitingFor::CopyRetarget {
+                player,
+                controller,
+                current_slot,
+                target_slots,
+                ..
+            } => {
+                assert_eq!(
+                    *player, P1,
+                    "selected creature's controller owns the second announcement"
+                );
+                assert_eq!(*controller, Some(P0));
+                assert_eq!(*current_slot, 1);
+                assert!(target_slots[1]
+                    .legal_alternatives
+                    .contains(&TargetRef::Object(b)));
+                assert_ne!(
+                    target_slots[1].legal_alternatives.first(),
+                    Some(&TargetRef::Object(b))
+                );
+                assert!(!target_slots[1].can_keep);
+            }
+            other => panic!("mandatory dependent fresh-copy prompt: {other:?}"),
+        }
+        runner = nested_roundtrip(runner, codec);
+        assert!(engine::game::engine::apply(
+            runner.state_mut(),
+            P0,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(b))
+            }
+        )
+        .is_err());
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(b)),
+            })
+            .unwrap();
+        let announced = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == copy_id)
+            .unwrap()
+            .ability()
+            .unwrap();
+        assert_eq!(
+            engine::game::ability_utils::declared_targets_in_chain(announced),
+            vec![TargetRef::Object(a), TargetRef::Object(b)]
+        );
+        pin_mogg(&mut runner, &[false]);
+        pass_mogg_priority(&mut runner);
+        assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+        for id in [a, decoy] {
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        }
+        assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
+    }
+}
+
+#[test]
+fn missing_entire_current_pending_custody_rejects_at_both_readers_and_public_keep() {
+    use engine::types::resolution::ResolutionStateWire;
+    for branch_only in [false, true] {
+        let program = if branch_only {
+            nested_flip(
+                nested_declaration(2).sub_ability(nested_reader(2)),
+                nested_declaration(3).sub_ability(nested_reader(3)),
+            )
+        } else {
+            nested_program(false, false)
+        };
+        let mut game = nested_game(program, true);
+        if branch_only {
+            nested_begin(&mut game);
+            let (c, d) = (game.c, game.d);
+            nested_choose(&mut game, P0, c);
+            nested_choose(&mut game, P0, d);
+        } else {
+            nested_announce(&mut game, false, false);
+        }
+        pin_mogg(&mut game.runner, &[true, false]);
+        pass_mogg_priority(&mut game.runner);
+        assert!(
+            matches!(&game.runner.state().waiting_for, WaitingFor::CoinFlipKeepChoice { results, .. } if results == &vec![true, false])
+        );
+        let state = game.runner.state().clone();
+        let frame = state.active_coin_flip_frame().unwrap();
+        assert!(!frame.branch_context.coin_branch_target_abilities.is_empty());
+        assert_eq!(frame.source_id, game.spell);
+        if branch_only {
+            assert!(
+                frame.targets.is_empty(),
+                "no flat target can replace the local declaration"
+            );
+        }
+        // Valid current controls use each complete reader and the actual keep.
+        for codec in [0, 3] {
+            let mut valid = GameRunner::from_state(state.clone());
+            valid = nested_roundtrip(valid, codec);
+            valid
+                .act(GameAction::SelectCoinFlips {
+                    keep_indices: vec![1],
+                })
+                .unwrap();
+            valid.advance_until_stack_empty();
+            assert_eq!(
+                valid.state().objects[&if branch_only { game.d } else { game.b }].zone,
+                Zone::Graveyard
+            );
+            assert!(matches!(
+                valid.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(valid.state().stack.is_empty() && valid.state().resolution_stack.is_empty());
+        }
+        let mut hostile = state;
+        hostile
+            .active_coin_flip_frame_mut()
+            .unwrap()
+            .branch_context
+            .coin_branch_target_abilities
+            .clear();
+        let raw = serde_json::to_value(&hostile).unwrap();
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone())).unwrap();
+        assert!(
+            serde_json::to_value(hostile.active_coin_flip_frame().unwrap()).unwrap()
+                ["branch_context"]
+                .get("coin_branch_target_abilities")
+                .is_none(),
+            "the complete pending collection field is absent"
+        );
+        assert!(serde_json::from_value::<engine::types::game_state::GameState>(raw).is_err());
+        assert!(serde_json::from_value::<ResolutionStateWire>(wire).is_err());
+        let before = serde_json::to_value(&hostile).unwrap();
+        assert!(engine::game::engine::apply(
+            &mut hostile,
+            P0,
+            GameAction::SelectCoinFlips {
+                keep_indices: vec![1]
+            }
+        )
+        .is_err());
+        assert_eq!(
+            serde_json::to_value(&hostile).unwrap(),
+            before,
+            "missing current collection refuses before mutation"
+        );
+    }
+}
+
+#[test]
+fn targetless_selected_coin_body_keeps_original_controller_input_during_player_fanout() {
+    use engine::types::ability::{
+        AbilityKind, CoinFlipRun, PlayerFilter, QuantityExpr, TargetFilter,
+    };
+    // Constructed class composition. CR 109.5 / CR 608.2c: iteration's recipient
+    // does not replace the original ability controller named by its body.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut program = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::FlipCoins {
+            flips: CoinFlipRun::single(),
+            win_effect: Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    player: TargetFilter::OriginalController,
+                },
+            ))),
+            lose_effect: None,
+            flipper: TargetFilter::Controller,
+        },
+    );
+    program.player_scope = Some(PlayerFilter::All);
+    let spell = scenario
+        .add_spell_to_hand(
+            P0,
+            "Constructed targetless original-controller reader",
+            true,
+        )
+        .with_mana_cost(ManaCost::zero())
+        .with_ability_definition(program)
+        .id();
+    let mut runner = scenario.build();
+    pin_mogg(&mut runner, &[true, true]);
+    let outcome = runner.cast(spell).resolve();
+    outcome.assert_life_delta(P0, 4);
+    outcome.assert_life_delta(P1, 0);
+    outcome.assert_zone(&[spell], Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+}
+
+#[test]
 fn nested_paid_declarations_precede_both_coins_and_keep_local_external_roles_at_all_readers() {
     // CR 601.2c and CR 608.2c: declarations in both branches are announced;
     // selected instructions retain their written local/external referents.
@@ -1812,10 +2089,18 @@ fn nested_all_retarget_changes_exact_branch_address_and_copy_keeps_original_cust
                     ..
                 } = game.runner.state().waiting_for
                 else {
-                    panic!("foreign copy chooser")
+                    panic!("copy controller's second retarget decision")
                 };
-                assert_eq!(player, P1);
+                // CR 707.10c: the copy controller chooses every replacement;
+                // the original declaration's chooser does not own retargeting.
+                assert_eq!(player, P0);
                 assert_eq!(current_slot, 1);
+                assert!(engine::game::engine::apply(
+                    game.runner.state_mut(),
+                    P1,
+                    GameAction::ChooseTarget { target: None }
+                )
+                .is_err());
                 game.runner
                     .act(GameAction::ChooseTarget { target: None })
                     .unwrap();
@@ -3155,14 +3440,75 @@ fn authentic_old_coin_kinds_with_no_external_reader_keep_encoded_program_at_both
                 "authentic nonempty bare-target program is retained"
             );
             assert!(
-                runner
+                !runner
                     .state()
                     .active_coin_flip_frame()
                     .unwrap()
                     .branch_context
                     .is_empty(),
-                "genuine default old context, with no discarded current authority"
+                "current cast input authority is meaningful before old encoding"
             );
+            let current_context = &runner
+                .state()
+                .active_coin_flip_frame()
+                .unwrap()
+                .branch_context;
+            assert!(current_context
+                .coin_branch_target_abilities
+                .iter()
+                .any(|(_, child)| child.cast_occurrence.is_some()));
+            assert_eq!(
+                serde_json::to_value(runner.state().active_coin_flip_frame().unwrap()).unwrap()
+                    ["branch_context"],
+                serde_json::to_value(current_context).unwrap(),
+                "current writer retains the complete nondefault cast input"
+            );
+            for codec in [0, 3] {
+                let mut current =
+                    nested_roundtrip(GameRunner::from_state(runner.state().clone()), codec);
+                assert_eq!(
+                    &current
+                        .state()
+                        .active_coin_flip_frame()
+                        .unwrap()
+                        .branch_context,
+                    current_context
+                );
+                current
+                    .act(GameAction::SelectCoinFlips {
+                        keep_indices: vec![1],
+                    })
+                    .unwrap();
+                if matches!(old_kind, serde_json::Value::Object(ref map) if map.contains_key("FlipN"))
+                {
+                    assert!(
+                        matches!(&current.state().waiting_for, WaitingFor::CoinFlipKeepChoice { results, .. } if results == &vec![true, false])
+                    );
+                    current
+                        .act(GameAction::SelectCoinFlips {
+                            keep_indices: vec![0],
+                        })
+                        .unwrap();
+                }
+                current.advance_until_stack_empty();
+                assert_eq!(current.state().players[0].life, expected_life);
+                assert_eq!(
+                    current.state().objects[&victim].zone,
+                    if expected_life > 20 {
+                        Zone::Graveyard
+                    } else {
+                        Zone::Battlefield
+                    }
+                );
+                assert_eq!(current.state().objects[&decoy].zone, Zone::Battlefield);
+                assert!(matches!(
+                    current.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    current.state().stack.is_empty() && current.state().resolution_stack.is_empty()
+                );
+            }
             runner.state_mut().capture_rng_word_pos();
             let mut value = if persisted {
                 serde_json::to_value(PersistedGameState::capture(runner.state().clone())).unwrap()
@@ -3174,6 +3520,37 @@ fn authentic_old_coin_kinds_with_no_external_reader_keep_encoded_program_at_both
                 match value {
                     serde_json::Value::Object(fields) => {
                         let mut found = 0;
+                        if let Some(custody) = fields.remove("coin_branch_target_abilities") {
+                            // This is the authentic old writer's absent field,
+                            // not recovery of a malformed current capture.
+                            // Its bare program's only target/pin is still in
+                            // the original owner/frame; none is local here.
+                            fn no_local_authority(node: &ResolvedAbility) {
+                                assert!(node.declares_chosen_group.is_none());
+                                assert!(node.reads_chosen_group.is_none());
+                                assert!(node.chosen_target_slots.slots().is_empty());
+                                assert!(node.targets.is_empty() && node.target_pins.is_empty());
+                                assert!(node.target_incarnations.is_empty());
+                                assert!(node.context.chosen_group_targets.is_empty());
+                                for (_, child) in &node.coin_branch_target_abilities {
+                                    no_local_authority(child);
+                                }
+                                for child in
+                                    [node.sub_ability.as_deref(), node.else_ability.as_deref()]
+                                        .into_iter()
+                                        .flatten()
+                                {
+                                    no_local_authority(child);
+                                }
+                            }
+                            let custody: Vec<(
+                                engine::types::ability::CoinFlipResult,
+                                Box<ResolvedAbility>,
+                            )> = serde_json::from_value(custody).unwrap();
+                            for (_, child) in custody {
+                                no_local_authority(&child);
+                            }
+                        }
                         // Exact pre-v8 Effect writer shapes, including the
                         // Thumb's own old multiple-flip replacement program.
                         if fields.get("type").and_then(serde_json::Value::as_str)
@@ -3208,13 +3585,12 @@ fn authentic_old_coin_kinds_with_no_external_reader_keep_encoded_program_at_both
                             && fields.contains_key("chain_root_targets")
                             && fields.contains_key("kind")
                         {
-                            assert!(fields.get("branch_context").is_none_or(|context| context
-                                .get("chosen_group_targets")
-                                .is_none_or(|capture| capture
-                                    .as_array()
-                                    .is_some_and(Vec::is_empty))));
+                            if let Some(context) = fields.get_mut("branch_context") {
+                                found += old_frame(context, kind);
+                                assert_eq!(*context, serde_json::json!({}), "old program owes no chosen player/source/result or local target authority");
+                            }
                             fields.insert("kind".into(), kind.clone());
-                            fields.remove("branch_context"); // genuinely default old schema
+                            fields.remove("branch_context"); // old writer has no target-custody input copy
                             found += 1;
                         }
                         for child in fields.values_mut() {
@@ -3243,6 +3619,19 @@ fn authentic_old_coin_kinds_with_no_external_reader_keep_encoded_program_at_both
                         .into_game_state(),
                 )
             };
+            assert!(
+                runner
+                    .state()
+                    .active_coin_flip_frame()
+                    .unwrap()
+                    .branch_context
+                    .is_empty(),
+                "genuine default old context at both canonical readers"
+            );
+            assert_eq!(
+                runner.state().active_coin_flip_frame().unwrap().targets,
+                vec![TargetRef::Object(victim)]
+            );
             runner
                 .act(GameAction::SelectCoinFlips {
                     keep_indices: vec![1],

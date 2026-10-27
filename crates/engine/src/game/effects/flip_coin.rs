@@ -206,12 +206,27 @@ fn run_flip_branch(
             .find(|(candidate, _)| *candidate == outcome)
             .map(|(_, child)| child.as_ref())
             .filter(|child| !crate::game::ability_utils::coin_target_custody_is_empty(child));
+        // Meaningful inherited inputs must survive even when this canonical
+        // body owns no targets. Reset only the allowed input projection on a
+        // temporary view to distinguish that case from captured local targets,
+        // empty declarations, groups or pins. The actual inputs stay intact.
+        let input_only_custody = custody.is_some_and(|child| {
+            let mut target_view = child.clone();
+            let defaults = ResolvedAbility::new(
+                child.effect.clone(),
+                Vec::new(),
+                child.source_id,
+                child.controller,
+            );
+            target_view.inherit_coin_target_inputs(&defaults);
+            crate::game::ability_utils::coin_target_custody_is_empty(&target_view)
+        });
         let mut sub =
             crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
                 def,
                 source_id,
                 controller,
-                if custody.is_some() {
+                if custody.is_some() && !input_only_custody {
                     Vec::new()
                 } else {
                     targets.to_vec()
@@ -220,8 +235,10 @@ fn run_flip_branch(
             );
         if let Some(custody) = custody {
             sub.inherit_coin_target_inputs(&custody.coin_target_input_projection());
-            crate::game::ability_utils::transfer_coin_target_custody(&mut sub, custody)
-                .map_err(EffectError::InvalidParam)?;
+            if !input_only_custody {
+                crate::game::ability_utils::transfer_coin_target_custody(&mut sub, custody)
+                    .map_err(EffectError::InvalidParam)?;
+            }
         } else if sub.declares_chosen_group.is_some() {
             // The authentic flat encoded local producer owns exactly these old
             // occurrences. Preserve retained pins only when that original root
@@ -262,7 +279,7 @@ fn run_flip_branch(
         // its own pick ("choose a creature you control and an opponent"), and
         // handing it an object chosen before the flip would answer that choice
         // with the wrong object.
-        if custody.is_none() && !targets.is_empty() {
+        if (custody.is_none() || input_only_custody) && !targets.is_empty() {
             let mut probe = sub.clone();
             probe.clear_targets();
             if super::awaits_resolution_object_choice(&probe) {
@@ -727,10 +744,11 @@ pub(crate) fn validate_pending_coin_flip(
     state: &GameState,
     pending: &PendingCoinFlip,
 ) -> Result<(), EffectError> {
-    if !pending
-        .branch_context
-        .coin_branch_target_abilities
-        .is_empty()
+    if state.resolving_stack_entry.is_some()
+        || !pending
+            .branch_context
+            .coin_branch_target_abilities
+            .is_empty()
     {
         fn matches_owner(node: &ResolvedAbility, pending: &PendingCoinFlip) -> bool {
             let matches = node.source_id == pending.source_id

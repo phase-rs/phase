@@ -23,7 +23,8 @@
 
 use crate::game::ability_utils::{
     assign_selected_slots_in_chain, build_target_selection_progress_for_ability,
-    build_target_slots, choose_target_for_ability, TargetSelectionAdvance,
+    build_target_slots, choose_target_for_ability, target_announcer_for_selected_slot,
+    TargetSelectionAdvance,
 };
 use crate::game::casting_costs::{
     assign_next_announcing_opponent, next_announcing_opponent_choice,
@@ -226,7 +227,7 @@ pub(crate) fn walk_step(
             // CR 601.2c + CR 115.1: a slot "of an opponent's choice" is
             // announced by its chooser; CR 112.2: the copy stays its
             // controller's.
-            let chooser = slots[position].chooser.unwrap_or(walk.player);
+            let chooser = target_announcer_for_selected_slot(state, ability, &slots, &progress)?;
             let target_slots = slots
                 .iter()
                 .enumerate()

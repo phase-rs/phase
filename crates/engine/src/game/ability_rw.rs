@@ -4270,6 +4270,7 @@ fn walk_ability(
 ) {
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
+        coin_branch_target_abilities: _, // announcement custody; `effect` profiles the printed branch bodies once
         effect,
         sub_ability,
         else_ability,

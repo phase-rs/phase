@@ -479,6 +479,8 @@ fn rewrite_resolved_ability(
         activation_cost_reduction,
         repeat_until,
         mode_abilities,
+        // Canonical copies of the branch rules text, paired with captured targets.
+        coin_branch_target_abilities,
         // The rest of the chain is rewritten recursively.
         sub_ability,
         else_ability,
@@ -560,6 +562,13 @@ fn rewrite_resolved_ability(
     for next in [sub_ability, else_ability].into_iter().flatten() {
         occurrences += rewrite_resolved_ability(next, substitution);
     }
+    // CR 612.1 + CR 612.2: keep canonical custody coherent with the rewritten
+    // definitions in `effect`. Each copy is rewritten once; it contributes no
+    // additional printed word instances. The recursive field classification
+    // preserves its already captured targets, pins, actors and read inputs.
+    for (_, custody) in coin_branch_target_abilities {
+        rewrite_resolved_ability(custody, substitution);
+    }
     occurrences
 }
 
@@ -569,6 +578,169 @@ mod tests {
     use crate::types::ability::{AbilityCondition, BasicLandType, SpentColor, TriggerCondition};
     use crate::types::mana::ManaColor;
     use serde_json::json;
+
+    #[test]
+    fn resolving_text_change_keeps_coin_custody_canonical_and_captured() {
+        use crate::game::ability_utils::validate_coin_target_authority;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, CoinFlipRun, Duration, Effect, FilterProp, TargetRef,
+            TypedFilter,
+        };
+        use crate::types::game_state::WaitingFor;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        // Constructed typed composition: both outcomes own a local announced
+        // target followed by an untargeted color-word instruction. This is no
+        // printed-card Oracle claim and the payoff is independent of RNG.
+        let colored_creatures = |color| {
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::HasColor { color }]),
+            )
+        };
+        let branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DestroyAll {
+                target: colored_creatures(ManaColor::Green),
+                cant_regenerate: false,
+            },
+        ));
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(branch.clone())),
+                lose_effect: Some(Box::new(branch)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(
+                ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let anchor = scenario
+            .add_creature(P1, "Captured red target", 2, 2)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let green = scenario
+            .add_creature(P1, "Green control", 2, 2)
+            .with_color(vec![ManaColor::Green])
+            .id();
+        let blue = scenario
+            .add_creature(P1, "Blue payoff", 2, 2)
+            .with_color(vec![ManaColor::Blue])
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Constructed coin text change", false)
+            .with_mana_cost(ManaCost::generic(1))
+            .with_ability_definition(definition)
+            .id();
+        let mut runner = scenario.build();
+        let mut committed = runner
+            .cast(spell)
+            .target_objects(&[anchor, anchor])
+            .commit();
+        let before = committed
+            .state()
+            .stack
+            .back()
+            .unwrap()
+            .ability()
+            .unwrap()
+            .clone();
+        assert_eq!(before.coin_branch_target_abilities.len(), 2);
+        for (_, child) in &before.coin_branch_target_abilities {
+            assert_eq!(child.targets, vec![TargetRef::Object(anchor)]);
+            assert!(
+                child.target_occurrences()[0].1.is_some(),
+                "real announcement pin"
+            );
+        }
+        validate_coin_target_authority(&before).unwrap();
+        let substitution = TextSubstitution::color(ManaColor::Green, ManaColor::Blue).unwrap();
+        let mut rewritten = before.clone();
+        assert_eq!(
+            rewrite_resolved_ability(&mut rewritten, &substitution),
+            2,
+            "custody replicas add no printed word occurrences"
+        );
+        validate_coin_target_authority(&rewritten)
+            .expect("rewritten definitions and custody agree");
+        for ((outcome, old), (rewritten_outcome, new)) in before
+            .coin_branch_target_abilities
+            .iter()
+            .zip(&rewritten.coin_branch_target_abilities)
+        {
+            assert_eq!(outcome, rewritten_outcome);
+            assert_eq!(new.target_occurrences(), old.target_occurrences());
+            assert_eq!(new.target_incarnations, old.target_incarnations);
+            assert_eq!(new.chosen_target_slots, old.chosen_target_slots);
+            assert_eq!(new.source_id, old.source_id);
+            assert_eq!(new.source_incarnation, old.source_incarnation);
+            assert_eq!(
+                new.announced_source_incarnation,
+                old.announced_source_incarnation
+            );
+            assert_eq!(new.controller, old.controller);
+            assert_eq!(new.original_controller, old.original_controller);
+            assert_eq!(new.scoped_player, old.scoped_player);
+            assert_eq!(new.context, old.context);
+            assert_eq!(new.chosen_x, old.chosen_x);
+            assert_eq!(new.cost_paid_objects, old.cost_paid_objects);
+            assert_eq!(new.noted_mana_payment, old.noted_mana_payment);
+            assert_eq!(
+                new.coin_target_input_projection(),
+                old.coin_target_input_projection(),
+                "the unchanged declaration retains its complete captured input projection"
+            );
+            assert_eq!(
+                new.sub_ability.as_ref().unwrap().effect,
+                Effect::DestroyAll {
+                    target: colored_creatures(ManaColor::Blue),
+                    cant_regenerate: false,
+                }
+            );
+        }
+
+        // Install after announcement so the real stack resolution must rewrite
+        // its retained ability, rather than merely building from changed text.
+        committed.state_mut().add_transient_continuous_effect(
+            ObjectId(900),
+            P0,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: spell },
+            vec![ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Fixed(substitution),
+            }],
+            None,
+        );
+        let outcome = committed.resolve();
+        outcome.assert_zone(&[blue, spell], Zone::Graveyard);
+        outcome.assert_zone(&[green, anchor], Zone::Battlefield);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().continuation_stack.is_empty());
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    }
 
     #[test]
     fn land_word_rewrites_type_positions_but_not_names() {

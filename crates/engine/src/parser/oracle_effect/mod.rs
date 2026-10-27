@@ -42731,29 +42731,31 @@ fn refuse_untargeted_dynamic_graveyard_windows(
 
 // These are complete dependent instruction units. Refusal belongs to the
 // unit's source span; an independent later sentence remains executable.
-fn unsupported_relation_body(text: &str) -> Option<&'static str> {
+fn unsupported_relation_body(text: &str) -> Option<(&'static str, usize)> {
     let lower = text.to_ascii_lowercase();
-    if (
+    if let Ok((tail, _)) = (
         tag::<_, _, OracleError<'_>>("choose any number of target "),
         take_until(". for each of them, reveal "),
         tag(". for each of them, reveal "),
+        take_till(|c| c == '.'),
+        opt(tag(".")),
     )
         .parse(lower.as_str())
-        .is_ok()
     {
-        return Some("per_recipient_reveal_loop");
+        return Some(("per_recipient_reveal_loop", text.len() - tail.len()));
     }
-    if (
+    if let Ok((tail, _)) = (
         tag::<_, _, OracleError<'_>>("choose "),
         take_until(". "),
         tag(". "),
         alt((tag("increase or decrease "), tag("decrease or increase "))),
         tag("a number "),
+        take_till(|c| c == '.'),
+        opt(tag(".")),
     )
         .parse(lower.as_str())
-        .is_ok()
     {
-        return Some("chosen_object_number_change");
+        return Some(("chosen_object_number_change", text.len() - tail.len()));
     }
     None
 }
@@ -42788,7 +42790,13 @@ fn refuse_unrepresentable_relation_units(
             let remaining_lower = remaining.to_ascii_lowercase();
             // A random library exile whose qualification reads this damage
             // and whose following permission reads that card is one operation.
-            if let Ok((tail, _)) = (
+            if let Some((category, extent)) = unsupported_relation_body(remaining) {
+                let end = start + extent;
+                chunk.text = full_text[start..end].to_owned();
+                chunk.boundary_after = Some(ClauseBoundary::Sentence);
+                skip_until = end;
+                gap = Some(category);
+            } else if let Ok((tail, _)) = (
                 opt(tag::<_, _, OracleError<'_>>("then ")),
                 tag("exile from "),
                 take_until(" library "),
@@ -42877,21 +42885,6 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
-    if let Some(gap) = unsupported_relation_body(text) {
-        let mut builder = ClauseIrBuilder::with_context(text, ctx);
-        unimplemented_clause(&mut builder, gap, text, None);
-        return EffectChainIr {
-            clauses: builder.finish_with_context(ctx),
-            kind,
-            continuation_kind: None,
-            player_scope_rewrite: PlayerScopeRewrite::Apply,
-            chain_rounding: None,
-            actor: ctx.actor.clone(),
-            in_trigger: ctx.in_trigger,
-            repeat_until: None,
-            injected_color_choice: InjectedColorChoice::Permitted,
-        };
-    }
     if let Some(ir) = try_contextual_ir(ctx, |trial| {
         parse_reciprocal_graveyard_choice_ir(text, kind, trial)
     }) {

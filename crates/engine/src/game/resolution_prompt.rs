@@ -565,6 +565,7 @@ fn effect_offers_choice(e: &Effect) -> bool {
 pub(crate) fn chain_offers_choice(a: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
+        coin_branch_target_abilities: _, // announcement custody; `effect` already classifies FlipCoins as choice-bearing
         // ---- choice-bearing: folded into the verdict below ----
         effect,
         sub_ability,

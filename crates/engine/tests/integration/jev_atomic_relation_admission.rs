@@ -70,6 +70,76 @@ fn full_atomic_gap_fragments_preserve_every_independent_body() {
 }
 
 #[test]
+fn complete_refused_relation_prefixes_still_execute_their_independent_draw() {
+    // CR 608.2c: these explicitly constructed compositions retain the full
+    // printed unsupported operation and execute the following instruction.
+    for number_change in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let drawn = scenario.add_card_to_library_top(P0, "Independent draw payoff");
+        let source = if number_change {
+            let text = YOU.replacen(
+                "battlefield. (You can change numerals or number words.)",
+                "battlefield. Draw a card. (You can change numerals or number words.)",
+                1,
+            );
+            scenario
+                .add_creature_from_oracle(P0, "You, Iterative Playtester", 1, 3, &text)
+                .id()
+        } else {
+            scenario.with_mana_pool(
+                P0,
+                vec![
+                    unit(ManaType::Red),
+                    unit(ManaType::Colorless),
+                    unit(ManaType::Colorless),
+                    unit(ManaType::Colorless),
+                    unit(ManaType::Colorless),
+                ],
+            );
+            scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Kaboom!",
+                    false,
+                    &format!("{KABOOM} Draw a card."),
+                )
+                .with_mana_cost(cost(4, vec![ManaCostShard::Red]))
+                .id()
+        };
+        let mut runner = scenario.build();
+        let outcome = if number_change {
+            runner.activate(source, 0).resolve()
+        } else {
+            runner.cast(source).resolve()
+        };
+        outcome.assert_hand_drawn(P0, 1);
+        outcome.assert_zone(&[drawn], Zone::Hand);
+        outcome.assert_zone(
+            &[source],
+            if number_change {
+                Zone::Battlefield
+            } else {
+                Zone::Graveyard
+            },
+        );
+        if number_change {
+            assert!(
+                outcome.state().objects[&source].tapped,
+                "printed tap cost paid"
+            );
+        } else {
+            assert_eq!(outcome.mana_pool_total(P0), 0, "printed 4R paid");
+        }
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+    }
+}
+
+#[test]
 fn reverent_silence_ordinary_paid_cast_destroys_enchantments_and_never_gifts_life() {
     for forest in [false, true] {
         let mut scenario = GameScenario::new();

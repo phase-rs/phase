@@ -45005,7 +45005,9 @@ pub(crate) mod population_relation_publication {
                         ))
                         .description("Your opponents can't gain life.".into()),
                 );
-                let group = ChosenGroupId::declared_player(0);
+                // TargetOnly uses the existing chosen-object declaration
+                // namespace even when its target is a player.
+                let group = ChosenGroupId(0);
                 let mut choose = spell(
                     json!({"type":"TargetOnly","target":{"type":"PlayerMatching",
                     "player":{"type":"AllExcept","exclude":{"type":"TriggeringPlayer"}}}}),

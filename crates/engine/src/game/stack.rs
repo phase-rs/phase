@@ -4855,6 +4855,7 @@ fn self_counter_run_key<'a>(
 fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
+        coin_branch_target_abilities,
         effect,
         targets,
         declares_chosen_group,
@@ -4941,6 +4942,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     );
 
     self_counter
+        // This proof covers a leaf effect with no branch announcement authority.
+        && coin_branch_target_abilities.is_empty()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -5108,6 +5111,7 @@ fn fixed_controller_gain_life_run_key<'a>(
 fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
+        coin_branch_target_abilities,
         effect,
         targets,
         declares_chosen_group,
@@ -5193,6 +5197,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
     );
 
     fixed_controller_gain_life
+        // This proof covers a leaf effect with no branch announcement authority.
+        && coin_branch_target_abilities.is_empty()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -5340,6 +5346,7 @@ fn fixed_opponent_effect_run_key<'a>(
 fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
+        coin_branch_target_abilities,
         effect,
         targets,
         declares_chosen_group,
@@ -5429,6 +5436,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
     );
 
     fixed_opponent_effect
+        // This proof covers a leaf effect with no branch announcement authority.
+        && coin_branch_target_abilities.is_empty()
         && targets.is_empty()
         && declares_chosen_group.is_none()
         && reads_chosen_group.is_none()
@@ -5683,6 +5692,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
         effect: a_effect,
+        coin_branch_target_abilities: a_coin_branch_target_abilities,
         targets: a_targets,
         declares_chosen_group: a_declares_chosen_group,
         reads_chosen_group: a_reads_chosen_group,
@@ -5772,6 +5782,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     let ResolvedAbility {
         return_result_process: _, // invocation provenance is ignored in inert-trigger comparison
         effect: b_effect,
+        coin_branch_target_abilities: b_coin_branch_target_abilities,
         targets: b_targets,
         declares_chosen_group: b_declares_chosen_group,
         reads_chosen_group: b_reads_chosen_group,
@@ -5860,6 +5871,9 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
     } = b;
 
     a_effect == b_effect
+        // Custody contains exact occurrence and inherited-input authority, not
+        // merely source provenance; equality must retain the complete payload.
+        && a_coin_branch_target_abilities == b_coin_branch_target_abilities
         && a_targets == b_targets
         && a_declares_chosen_group == b_declares_chosen_group
         && a_reads_chosen_group == b_reads_chosen_group
@@ -6818,6 +6832,94 @@ mod tests {
         assert!(!fixed_opponent_effect_ability_is_batch_candidate(
             &divided_loss
         ));
+    }
+
+    #[test]
+    fn coin_target_custody_rejects_leaf_batches_and_preserves_run_identity() {
+        use crate::types::ability::CoinFlipResult;
+
+        let counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        let gain = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(2),
+            PlayerId(0),
+        );
+        let mut loss = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(3),
+            PlayerId(0),
+        );
+        loss.player_scope = Some(PlayerFilter::Opponent);
+        let candidates: [(ResolvedAbility, fn(&ResolvedAbility) -> bool); 3] = [
+            (counter, self_counter_ability_is_batch_candidate),
+            (gain, fixed_controller_gain_life_ability_is_batch_candidate),
+            (loss, fixed_opponent_effect_ability_is_batch_candidate),
+        ];
+        for (mut ability, candidate) in candidates {
+            assert!(candidate(&ability), "reach the accepted leaf shape first");
+            // Hostile non-coin shape: the narrow proof must reject this extra
+            // authority even before canonical admission diagnoses its owner.
+            ability.coin_branch_target_abilities.push((
+                CoinFlipResult::Won,
+                Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![TargetRef::Object(ObjectId(77))],
+                    ObjectId(1),
+                    PlayerId(0),
+                )),
+            ));
+            assert!(!candidate(&ability));
+            let mut other = ability.clone();
+            assert!(inert_trigger_abilities_eq_ignoring_provenance(
+                &ability, &other
+            ));
+            other.coin_branch_target_abilities[0].1.targets = vec![TargetRef::Object(ObjectId(78))];
+            assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                &ability, &other
+            ));
+            other = ability.clone();
+            other.coin_branch_target_abilities[0].0 = CoinFlipResult::Lost;
+            assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                &ability, &other
+            ));
+            other = ability.clone();
+            other.coin_branch_target_abilities[0]
+                .1
+                .replace_target_occurrences(vec![(
+                    TargetRef::Object(ObjectId(77)),
+                    Some(ObjectIncarnationRef::of(ObjectId(77), 9)),
+                )]);
+            assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                &ability, &other
+            ));
+            other = ability.clone();
+            other.coin_branch_target_abilities[0].1.chosen_x = Some(7);
+            assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                &ability, &other
+            ));
+            other = ability.clone();
+            other.coin_branch_target_abilities.clear();
+            assert!(!inert_trigger_abilities_eq_ignoring_provenance(
+                &ability, &other
+            ));
+        }
     }
 
     #[test]

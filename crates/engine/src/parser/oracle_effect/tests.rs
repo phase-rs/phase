@@ -22,6 +22,36 @@ fn parse_search_library_details(
 }
 
 #[test]
+fn unsupported_relation_units_keep_exact_extent_and_independent_draw_order() {
+    // SHAPE: CR 608.2c preserves the independent instruction after the entire
+    // dependent unit. These are compositions of full printed prefixes.
+    for (prefix, category) in [
+        ("Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, Kaboom! deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.", "per_recipient_reveal_loop"),
+        ("Choose another target playtest card. Increase or decrease a number of your choice on it by 1 for as long as it remains on the stack or battlefield.", "chosen_object_number_change"),
+    ] {
+        let text = format!("{prefix} Draw a card.");
+        let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert_eq!(ir.clauses[0].id, ClauseId(0));
+        assert_eq!(ir.clauses[1].id, ClauseId(1));
+        assert_eq!(ir.clauses[0].source.fragment(), Some(prefix));
+        assert_eq!(ir.clauses[1].source.fragment(), Some("Draw a card"));
+        for clause in &ir.clauses {
+            let span = clause.source.span();
+            assert_eq!(&text[span.start_byte..span.end_byte], clause.source.fragment().unwrap());
+            assert!(!span.is_exact(), "each clause retains its real chain-relative source");
+        }
+        assert_eq!(ir.clauses[0].parsed.effect, Effect::unimplemented(category, prefix));
+        assert!(matches!(&ir.clauses[1].parsed.effect, Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::Controller }));
+        let lowered = assembly::assemble_effect_chain(&ir);
+        assert_eq!(&*lowered.effect, &Effect::unimplemented(category, prefix));
+        let tail = lowered.sub_ability.as_deref().expect("independent lower tail");
+        assert!(matches!(&*tail.effect, Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::Controller }));
+        assert!(tail.sub_ability.is_none());
+    }
+}
+
+#[test]
 fn contextual_hand_complete_nouns_and_post_link_restrictions() {
     // SHAPE: the actual Card noun owns every adjective (CR 109.2a).
     let nonland = TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land)));

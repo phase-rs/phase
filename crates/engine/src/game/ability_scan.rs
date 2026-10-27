@@ -238,6 +238,7 @@ pub(crate) enum FilterReadContext {
 fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes {
     let ResolvedAbility {
         return_result_process: _, // invocation provenance; no additional read, choice or text
+        coin_branch_target_abilities: _, // announcement custody; `effect` already conservatively classifies FlipCoins
         // ---- read-bearing: scanned into `acc` below ----
         effect,
         sub_ability,
