@@ -52,7 +52,7 @@ fn face_down_morph_board(controller: PlayerId, mana: &[ManaType]) -> (GameRunner
     scenario.at_phase(Phase::PreCombatMain);
     let id = scenario
         .add_creature_to_hand(controller, "Coral Trickster", 2, 1)
-        .with_keyword(Keyword::Morph(morph_cost()))
+        .with_keyword(Keyword::morph(morph_cost()))
         .id();
     if !mana.is_empty() {
         scenario.with_mana_pool(controller, pool(mana));
@@ -354,10 +354,10 @@ fn a_paused_mana_source_resumes_the_locked_turn_face_up() {
                     &pending.resume,
                     ManaAbilityResume::TurnFaceUp {
                         player,
-                        object_id,
+                        source,
                         announced_x: Some(0),
                         ..
-                    } if *player == P0 && *object_id == id
+                    } if *player == P0 && source.object_id == id
                 )
         ),
         "the typed continuation names the action to finish"

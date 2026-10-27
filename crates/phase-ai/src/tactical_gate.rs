@@ -1,8 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use engine::ai_support::{
-    is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext, CandidateAction,
-    TargetedExchangeVerdict,
+    candidate_actions, is_targeted_exchange_root, targeted_exchange_verdict, AiDecisionContext,
+    CandidateAction, TargetedExchangeVerdict,
+};
+use engine::game::ability_utils::{
+    ability_target_legality_needs_chosen_x, build_resolved_from_def, build_target_slots,
+    declared_targets_in_chain, has_legal_target_assignment_for_ability,
+    modal_spell_mode_ability_refs,
 };
 use engine::game::casting::{
     activated_ability_definitions, activation_source_and_activator_are_structurally_eligible,
@@ -13,6 +18,7 @@ use engine::game::casting::{
     StructurallySelectableAlternateSpellPayload,
 };
 use engine::game::combat::AttackTarget;
+use engine::game::engine::apply_interaction_for_simulation;
 use engine::game::functioning_abilities::{
     active_replacements, active_trigger_definitions, battlefield_active_triggers,
     game_active_statics, game_functioning_statics,
@@ -25,19 +31,23 @@ use engine::game::quantity::{
     static_definition_is_cast_stable_for_pre_cast, trigger_definition_is_cast_stable_for_pre_cast,
     try_resolve_quantity_in_source_context,
 };
+use engine::game::stack::stack_object_controller;
+use engine::game::targeting::find_legal_targets;
 use engine::game::triggers::{
     synthetic_keyword_spell_cast_trigger_applies, trigger_definition_functions_in_zone,
 };
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    ContinuousModification, CostCategory, Effect, PtValue, TargetFilter, TargetRef, TypeFilter,
-    TypedFilter,
+    ContinuousModification, CostCategory, Effect, PtValue, ResolvedAbility, TargetFilter,
+    TargetRef, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use engine::types::ability_visit::visit_ability_def;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{CastPaymentMode, DayNight, GameState, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::game_state::{
+    CastPaymentMode, DayNight, GameState, PendingCast, StackEntryKind, WaitingFor,
+};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::mana::{ManaSourcePenalty, ManaType};
 use engine::types::phase::Phase;
@@ -47,16 +57,21 @@ use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use std::ops::ControlFlow;
 
-use crate::cast_facts::CastCostMode;
+use crate::cast_facts::{collect_definition_effects_with, CastCostMode, ModeWalk};
 use crate::combat_ai::is_lethal_attack_available;
 use crate::config::AiConfig;
 use crate::context::AiContext;
 use crate::planner::PreparedCandidate;
-use crate::policies::context::{collect_ability_effects, PolicyContext};
+use crate::policies::context::{
+    collect_ability_effects, collect_resolved_abilities, PolicyContext,
+};
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
 };
-use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
+use crate::policies::stack_awareness::{
+    can_be_destroyed, damage_kills, has_pending_removal, node_damage, nodes_acting_on,
+    will_target_die_from_stack,
+};
 use crate::policies::strategy_helpers::can_pay_ward_cost;
 use crate::search::ability_is_temporary_combat_modifier;
 
@@ -200,6 +215,9 @@ pub(crate) fn gate_prepared_candidates(
 fn assess_candidate(ctx: &PolicyContext<'_>) -> GateDecision {
     match &ctx.candidate.action {
         GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. } => assess_pre_cast(ctx),
+        GameAction::ChooseX { .. } | GameAction::SelectModes { .. } => {
+            assess_counter_announcement(ctx).unwrap_or(GateDecision::Allow)
+        }
         GameAction::ChooseTarget {
             target: Some(target),
         } => {
@@ -292,6 +310,7 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     if let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     {
         if let Some(object) = ctx.state.objects.get(source_id) {
@@ -339,22 +358,15 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
         return GateDecision::Reject;
     }
 
+    if counter_reaches_nothing_foreign(ctx)
+        || assess_counter_announcement(ctx) == Some(GateDecision::Reject)
+    {
+        return GateDecision::Reject;
+    }
+
     let effects = ctx.effects();
     if effects.is_empty() {
         return GateDecision::Allow;
-    }
-
-    if effects
-        .iter()
-        .any(|effect| matches!(effect, Effect::Counter { .. }))
-        && (ctx.state.stack.is_empty()
-            || ctx
-                .state
-                .stack
-                .iter()
-                .all(|entry| entry.controller == ctx.ai_player))
-    {
-        return GateDecision::Reject;
     }
 
     if is_redundant_creature_only_removal(ctx, &effects) {
@@ -1162,8 +1174,21 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     let TargetRef::Object(object_id) = target else {
         return None;
     };
-    let object = ctx.state.objects.get(object_id)?;
     let effects = ctx.effects();
+
+    // CR 701.6a: with several legal targets the choice reaches this gate
+    // (see `counter_reaches_nothing_foreign` for the single-target case).
+    // Choosing the AI's own SPELL with a plain counter only throws away two of
+    // its cards. Narrower than the cast-time check on purpose: here a foreign
+    // target exists, so only the choice is wrong — and countering its own
+    // ability (Stifle on an upkeep cost) or redirecting its own spell (Memory
+    // Lapse) stays a judgment call.
+    if is_pure_counter_payload(&effects) && is_own_stack_spell(ctx.state, ctx.ai_player, *object_id)
+    {
+        return Some(GateDecision::Reject);
+    }
+
+    let object = ctx.state.objects.get(object_id)?;
 
     // CR 701.8 + CR 702.12b: destroy-based removal can't destroy an
     // indestructible permanent.
@@ -1197,6 +1222,512 @@ fn reject_futile_target(ctx: &PolicyContext<'_>, target: &TargetRef) -> Option<G
     }
 
     None
+}
+
+/// A plain counter that can only hit the AI's own spells costs it both spells
+/// (CR 701.6a). Own abilities, redirects, and additional payloads can be useful.
+///
+/// The stack-wide check — empty, or every entry the AI's — was the whole test
+/// before. It misses the case where the opponent's entries are on the stack but
+/// OUTSIDE the counter's target filter. Field report: the AI countered the
+/// opponent's creature spell with Counterspell, then cast Spell Pierce
+/// ("Counter target noncreature spell unless its controller pays {2}"), whose
+/// ONLY legal target was that same Counterspell, and countered its own counter;
+/// the creature resolved. `counterspell_score` values the best foreign stack
+/// entry without applying the counter's filter (an accepted over-estimate,
+/// documented there), and with a single legal target the engine binds it at
+/// announcement, so no `ChooseTarget` candidate reaches
+/// [`reject_futile_target`]. The cast is the only decision there is.
+///
+/// So the check now asks what the counter can REACH (CR 115.1, CR 601.2c): the
+/// engine's own legal-target set for every plain counter effect, each target a
+/// spell the AI controls. Counter spells and activations alike — Glen Elendra
+/// Archmage's "{U}, Sacrifice: Counter target noncreature spell" walks into the
+/// same hole. This fixed-filter shortcut defers unresolved X and modal payloads
+/// to `assess_counter_announcement`. CR 601.2b + CR 700.2a: spell modes have not
+/// been selected at announcement; activation mode choices are separate roots.
+fn counter_reaches_nothing_foreign(ctx: &PolicyContext<'_>) -> bool {
+    let activated = ctx.effective_activated_ability();
+    let (source_id, definitions, modes) = match &ctx.candidate.action {
+        GameAction::CastSpell {
+            object_id, card_id, ..
+        } => {
+            let Some(object) = ctx.state.objects.get(object_id) else {
+                return false;
+            };
+            if object.card_id != *card_id {
+                return false;
+            }
+            (
+                *object_id,
+                modal_spell_mode_ability_refs(object).collect::<Vec<_>>(),
+                if object.modal.is_some() {
+                    ModeWalk::All
+                } else {
+                    ModeWalk::RootOnly
+                },
+            )
+        }
+        GameAction::ActivateAbility { source_id, .. } => {
+            let Some(definition) = activated.as_ref() else {
+                return false;
+            };
+            (*source_id, vec![definition], ModeWalk::RootOnly)
+        }
+        _ => return false,
+    };
+    let effects = definitions
+        .iter()
+        .flat_map(|definition| collect_definition_effects_with(definition, modes))
+        .collect::<Vec<_>>();
+    if !is_pure_counter_payload(&effects) {
+        return false;
+    }
+    let ai = ctx.ai_player;
+    if ctx.state.stack.iter().all(|entry| {
+        stack_object_controller(ctx.state, entry) == ai
+            && matches!(entry.kind, StackEntryKind::Spell { .. })
+    }) {
+        return true;
+    }
+    // CR 107.3a + CR 601.2b + CR 601.2c + CR 602.2b: X is announced before
+    // targets. An empty context-free target set with unbound X is not proof
+    // that no foreign target will be legal after that announcement.
+    if modes == ModeWalk::All
+        || definitions.iter().any(|definition| {
+            let resolved = build_resolved_from_def(definition, source_id, ai);
+            ability_target_legality_needs_chosen_x(&resolved, definition.distribute.as_ref())
+        })
+    {
+        return false;
+    }
+    effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::Counter { .. }))
+        .all(|effect| {
+            let Some(filter) = effect.target_filter() else {
+                return false;
+            };
+            find_legal_targets(ctx.state, filter, ai, source_id)
+                .iter()
+                .all(|target| {
+                    matches!(target, TargetRef::Object(id) if is_own_stack_spell(ctx.state, ai, *id))
+                })
+        })
+}
+
+// The card id authenticates spells; the effective activation index authenticates
+// activations. Triggered mode choices have neither voluntary root contract.
+type CounterAnnouncementRoot = (ObjectId, Option<CardId>, Option<usize>);
+
+fn counter_pending_matches(root: CounterAnnouncementRoot, pending: &PendingCast) -> bool {
+    pending.object_id == root.0
+        && pending.activation_ability_index == root.2
+        && root.1.is_none_or(|card_id| pending.card_id == card_id)
+        && pending.ability.source_id == root.0
+}
+
+fn counter_choice_root(state: &GameState) -> Option<CounterAnnouncementRoot> {
+    match &state.waiting_for {
+        WaitingFor::ChooseXValue { pending_cast, .. } => {
+            // CR 107.3a + CR 107.3k: the reducer consumes the canonical pending
+            // activation/spell X, independently of the source object's cast X.
+            // `PendingCast`'s derived `PartialEq` includes the crate-private
+            // activation-trigger carrier, which the engine keeps on only one
+            // live owner (#9758), so the canonical copy and this prompt's copy
+            // differ by design. Announcement identity is the "same
+            // announcement" test, the invariant `live_pending_cast_owners`
+            // asserts across owners.
+            let canonical = state.pending_cast.as_deref()?;
+            if canonical.object_id != pending_cast.object_id
+                || canonical.activation_ability_index != pending_cast.activation_ability_index
+                || pending_cast.ability.chosen_x.is_some()
+            {
+                return None;
+            }
+            Some((
+                pending_cast.object_id,
+                pending_cast
+                    .activation_ability_index
+                    .is_none()
+                    .then_some(pending_cast.card_id),
+                pending_cast.activation_ability_index,
+            ))
+        }
+        WaitingFor::ModeChoice { pending_cast, .. }
+            if pending_cast.activation_ability_index.is_none() =>
+        {
+            Some((pending_cast.object_id, Some(pending_cast.card_id), None))
+        }
+        WaitingFor::AbilityModeChoice {
+            source_id,
+            is_activated: true,
+            ability_index: Some(index),
+            ..
+        } => Some((*source_id, None, Some(*index))),
+        _ => None,
+    }
+}
+
+fn replay_counter_announcement(
+    state: &GameState,
+    candidate: &CandidateAction,
+    owner: PlayerId,
+) -> Option<GameState> {
+    if candidate.metadata.semantic_owner != Some(owner) {
+        return None;
+    }
+    let mut successor = state.clone();
+    let result = apply_interaction_for_simulation(
+        &mut successor,
+        candidate.metadata.actor?,
+        owner,
+        candidate.action.clone(),
+    )
+    .ok()?;
+    if !result.disposition.is_applied() {
+        return None;
+    }
+    Some(successor)
+}
+
+/// Strategic own-spell veto, not an additional targeting rule (CR 701.6a).
+/// Root commitment and concrete X/mode responses consume the same proof. A
+/// response is pruned only when another legal ordinary continuation remains;
+/// imported/indeterminate commitments must never empty the pool into fallback.
+fn assess_counter_announcement(ctx: &PolicyContext<'_>) -> Option<GateDecision> {
+    let root = match &ctx.candidate.action {
+        GameAction::CastSpell {
+            object_id, card_id, ..
+        } => {
+            let object = ctx.state.objects.get(object_id)?;
+            if object.card_id != *card_id
+                || !modal_spell_mode_ability_refs(object).any(|definition| {
+                    collect_definition_effects_with(definition, ModeWalk::All)
+                        .iter()
+                        .any(|effect| matches!(effect, Effect::Counter { .. }))
+                })
+            {
+                return None;
+            }
+            (*object_id, Some(*card_id), None)
+        }
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            ..
+        } => {
+            let definition = ctx.effective_activated_ability()?;
+            if !collect_definition_effects_with(&definition, ModeWalk::All)
+                .iter()
+                .any(|effect| matches!(effect, Effect::Counter { .. }))
+            {
+                return None;
+            }
+            (*source_id, None, Some(*ability_index))
+        }
+        GameAction::ChooseX { .. } | GameAction::SelectModes { .. } => {
+            let may_counter = match &ctx.state.waiting_for {
+                WaitingFor::ChooseXValue { pending_cast, .. } => {
+                    collect_ability_effects(&pending_cast.ability)
+                        .iter()
+                        .any(|effect| matches!(effect, Effect::Counter { .. }))
+                }
+                WaitingFor::ModeChoice { pending_cast, .. } => {
+                    modal_spell_mode_ability_refs(ctx.state.objects.get(&pending_cast.object_id)?)
+                        .any(|definition| {
+                            collect_definition_effects_with(definition, ModeWalk::All)
+                                .iter()
+                                .any(|effect| matches!(effect, Effect::Counter { .. }))
+                        })
+                }
+                WaitingFor::AbilityModeChoice {
+                    is_activated: true,
+                    mode_abilities,
+                    ..
+                } => mode_abilities.iter().any(|definition| {
+                    collect_definition_effects_with(definition, ModeWalk::All)
+                        .iter()
+                        .any(|effect| matches!(effect, Effect::Counter { .. }))
+                }),
+                _ => false,
+            };
+            if !may_counter {
+                return None;
+            }
+            counter_choice_root(ctx.state)?
+        }
+        _ => return None,
+    };
+    let owner = ctx.candidate.metadata.semantic_owner?;
+    let successor = replay_counter_announcement(ctx.state, ctx.candidate, owner)?;
+    let verdict = counter_announcement_domain(ctx.state, &successor, root, owner, ctx.ai_player);
+    if verdict != Some(GateDecision::Reject)
+        || matches!(
+            ctx.candidate.action,
+            GameAction::CastSpell { .. } | GameAction::ActivateAbility { .. }
+        )
+    {
+        return verdict;
+    }
+    // The entire actual issued sibling domain is eligible; no guessed X,
+    // sampled mode combinations, strategic CancelCast, or payment DFS.
+    for sibling in candidate_actions(ctx.state) {
+        if sibling.action == ctx.candidate.action
+            || !matches!(
+                sibling.action,
+                GameAction::ChooseX { .. } | GameAction::SelectModes { .. }
+            )
+        {
+            continue;
+        }
+        let Some(next) = replay_counter_announcement(ctx.state, &sibling, owner) else {
+            continue;
+        };
+        if counter_announcement_domain(ctx.state, &next, root, owner, ctx.ai_player)
+            != Some(GateDecision::Reject)
+        {
+            return Some(GateDecision::Reject);
+        }
+    }
+    None
+}
+
+fn counter_announcement_domain(
+    before: &GameState,
+    state: &GameState,
+    root: CounterAnnouncementRoot,
+    owner: PlayerId,
+    ai: PlayerId,
+) -> Option<GateDecision> {
+    if matches!(
+        state.waiting_for,
+        WaitingFor::ChooseXValue { .. }
+            | WaitingFor::ModeChoice { .. }
+            | WaitingFor::AbilityModeChoice { .. }
+    ) {
+        if counter_choice_root(state)? != root {
+            return None;
+        }
+        // CR 601.2b + CR 601.2c + CR 602.2b + CR 700.2a: consume the
+        // announcement edges before examining the selected target payload.
+        // Only a nonempty, complete reducer-valid domain can prove Reject.
+        let mut completed = false;
+        let mut indeterminate = false;
+        for candidate in candidate_actions(state) {
+            if !matches!(
+                candidate.action,
+                GameAction::ChooseX { .. } | GameAction::SelectModes { .. }
+            ) {
+                continue;
+            }
+            let Some(next) = replay_counter_announcement(state, &candidate, owner) else {
+                continue;
+            };
+            completed = true;
+            match counter_announcement_domain(before, &next, root, owner, ai) {
+                Some(GateDecision::Allow | GateDecision::AllowWithPenalty(_)) => {
+                    return Some(GateDecision::Allow)
+                }
+                Some(GateDecision::Reject) => {}
+                None => indeterminate = true,
+            }
+        }
+        return (completed && !indeterminate).then_some(GateDecision::Reject);
+    }
+
+    if let Some(pending) = state
+        .waiting_for
+        .pending_cast_ref()
+        .or(state.pending_cast.as_deref())
+    {
+        if !counter_pending_matches(root, pending) || pending.ability.controller != owner {
+            return None;
+        }
+        // Other cost/declaration choices may replace the payload; this proof
+        // deliberately consumes only X/modes, never those unresolved branches.
+        if !matches!(
+            state.waiting_for,
+            WaitingFor::TargetSelection { .. }
+                | WaitingFor::ManaPayment { .. }
+                | WaitingFor::ManaSourceSelection { .. }
+                | WaitingFor::PayCost { .. }
+        ) {
+            return None;
+        }
+        return concrete_counter_verdict(state, &pending.ability, Some(pending), ai);
+    }
+
+    let ability = committed_counter_ability(before, state, root, owner)?;
+    concrete_counter_verdict(state, ability, None, ai)
+}
+
+fn committed_counter_ability<'a>(
+    before: &GameState,
+    state: &'a GameState,
+    root: CounterAnnouncementRoot,
+    owner: PlayerId,
+) -> Option<&'a ResolvedAbility> {
+    // CR 601.2a + CR 601.2i: finalization retags the spell's existing
+    // announcement entry. Only an absent or exact unfinalized entry can bind.
+    // CR 602.2b: retain the authenticated activation index from reducer replay;
+    // newness excludes old instances, even with the same originating index.
+    let mut matching = state.stack.iter().filter(|entry| {
+        entry.source_id == root.0
+            && entry.controller == owner
+            && match (&entry.kind, root.1, root.2) {
+                (
+                    StackEntryKind::Spell {
+                        card_id,
+                        ability: Some(_),
+                        ..
+                    },
+                    Some(expected),
+                    None,
+                ) => {
+                    entry.id == root.0
+                        && *card_id == expected
+                        && before
+                            .stack
+                            .iter()
+                            .find(|old| old.id == entry.id)
+                            .is_none_or(|old| {
+                                old.source_id == root.0
+                                    && old.controller == owner
+                                    && matches!(&old.kind,
+                                    StackEntryKind::Spell { card_id, ability: None, .. }
+                                        if *card_id == expected)
+                            })
+                }
+                (StackEntryKind::ActivatedAbility { source_id, .. }, None, Some(_)) => {
+                    *source_id == root.0 && !before.stack.iter().any(|old| old.id == entry.id)
+                }
+                _ => false,
+            }
+    });
+    let entry = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    let ability = entry.ability()?;
+    if ability.source_id != root.0 || ability.controller != owner {
+        return None;
+    }
+    Some(ability)
+}
+
+fn concrete_counter_verdict(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    pending: Option<&PendingCast>,
+    ai: PlayerId,
+) -> Option<GateDecision> {
+    let effects = collect_ability_effects(ability);
+    if effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
+    {
+        return None;
+    }
+    if !is_pure_counter_payload(&effects) {
+        return Some(GateDecision::Allow);
+    }
+    let nodes = collect_resolved_abilities(ability);
+    if ability_target_legality_needs_chosen_x(
+        ability,
+        pending.and_then(|cast| cast.distribute.as_ref()),
+    ) || nodes.iter().any(|node| {
+        node.condition.is_some()
+            || node.optional
+            || node.optional_targeting
+            || node.optional_for.is_some()
+            || node.target_selection_mode != TargetSelectionMode::Chosen
+            || node.target_chooser.is_some()
+    }) {
+        return None;
+    }
+    // CR 601.2c + CR 115.5: targets come from the engine's chosen-X/source
+    // context and exclude the counter itself. Never reconstruct an X filter.
+    let bound = declared_targets_in_chain(ability);
+    if !bound.is_empty() && !matches!(state.waiting_for, WaitingFor::TargetSelection { .. }) {
+        return Some(
+            if bound.iter().all(|target| {
+                matches!(target,
+            TargetRef::Object(id) if is_own_stack_spell(state, ai, *id))
+            }) {
+                GateDecision::Reject
+            } else {
+                GateDecision::Allow
+            },
+        );
+    }
+    let pending = pending?;
+    let built;
+    let slots = if let WaitingFor::TargetSelection { target_slots, .. } = &state.waiting_for {
+        target_slots.as_slice()
+    } else {
+        built = build_target_slots(state, ability).ok()?;
+        built.as_slice()
+    };
+    if slots.is_empty()
+        || slots.iter().any(|slot| {
+            slot.legal_targets.is_empty()
+                || slot.optional
+                || slot.chooser.is_some_and(|chooser| chooser != ai)
+        })
+        || !has_legal_target_assignment_for_ability(
+            state,
+            ability,
+            slots,
+            &pending.target_constraints,
+        )
+    {
+        return None;
+    }
+    if slots.iter().all(|slot| {
+        slot.legal_targets.iter().all(|target| {
+            matches!(target,
+        TargetRef::Object(id) if is_own_stack_spell(state, ai, *id))
+        })
+    }) {
+        Some(GateDecision::Reject)
+    } else if pending.target_constraints.is_empty() {
+        Some(GateDecision::Allow)
+    } else {
+        // A foreign slot member may be unreachable under cross-slot constraints.
+        // The engine's assignment solver stays the sole authority.
+        None
+    }
+}
+
+/// Every effect is a plain `Counter` — no destination redirect and nothing
+/// else in the payload. `source_rider` needs no check: it acts only when an
+/// ABILITY is countered, and the target proof that uses this only ever matches
+/// spells.
+fn is_pure_counter_payload(effects: &[&Effect]) -> bool {
+    !effects.is_empty()
+        && effects.iter().all(|effect| {
+            matches!(
+                effect,
+                Effect::Counter {
+                    countered_spell_zone: None,
+                    ..
+                }
+            )
+        })
+}
+
+/// Whether `id` is a spell on the stack controlled by `ai_player`.
+///
+/// CR 112.2 + CR 613.1b: the caster controls a spell only by default; a
+/// control-changing effect (Commandeer) moves it while the `StackEntry` keeps
+/// the original caster, so ownership reads the live stack-object controller.
+fn is_own_stack_spell(state: &GameState, ai_player: PlayerId, id: ObjectId) -> bool {
+    state.stack.iter().any(|entry| {
+        entry.id == id
+            && stack_object_controller(state, entry) == ai_player
+            && matches!(entry.kind, StackEntryKind::Spell { .. })
+    })
 }
 
 /// Whether any effect deals damage (fixed or variable).
@@ -1265,6 +1796,12 @@ fn is_redundant_creature_only_removal(ctx: &PolicyContext<'_>, effects: &[&Effec
     let Some(source) = ctx.source_object() else {
         return false;
     };
+
+    // CR 700.2a + CR 601.2b: printed modes are alternatives until announced;
+    // an unavailable damage mode cannot prove the whole cast redundant.
+    if matches!(ctx.candidate.action, GameAction::CastSpell { .. }) && source.modal.is_some() {
+        return false;
+    }
 
     // A MIXED spell carrying a useful MASS wipe is never "redundant creature-only
     // removal": the wipe's NON-targeted population (CR 115.10a) is an independent
@@ -1358,6 +1895,7 @@ fn activated_ueot_pump_source(ctx: &PolicyContext<'_>) -> Option<ObjectId> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     else {
         return None;
@@ -1469,57 +2007,61 @@ fn should_reject_pump_window(
     !pump_changes_combat_outcome(ctx.state, ctx.ai_player, power_bonus, toughness_bonus)
 }
 
-/// Check if pumping can actually save a creature from hostile stack effects.
-/// Destroy/Exile/Counter/Bounce kill regardless of stats — pump doesn't help.
-/// Only damage-based removal can be survived with a toughness boost.
+/// Whether a pump of `toughness_bonus` toughness, which resolves before every
+/// stack entry (CR 405.5), keeps an AI creature a stack entry acts on from
+/// dying.
+///
+/// The nodes acting on the creature are read in the order they resolve
+/// ([`nodes_acting_on`]) up to the first `Destroy`, `Counter`, `Bounce` or
+/// `ChangeZone` node, where a `Destroy` counts only if it can destroy the
+/// creature ([`can_be_destroyed`]). A `Destroy` or `Counter` there answers
+/// false: a pump does not stop it. A `Bounce` or `ChangeZone` there ends the
+/// read: damage that resolves after it does not reach the creature (CR 400.7),
+/// so only the damage before it is judged.
 fn pump_can_save_from_hostile_stack(
     state: &GameState,
     ai_player: PlayerId,
     toughness_bonus: i32,
 ) -> bool {
-    use engine::types::ability::QuantityExpr;
-
-    state.stack.iter().any(|entry| {
-        let Some(ability) = entry.ability() else {
+    let mut acted_on: Vec<ObjectId> = Vec::new();
+    for target in state
+        .stack
+        .iter()
+        .flat_map(|entry| engine::game::effects::stack_reach::stack_entry_node_reach(state, entry))
+        .flat_map(|reach| reach.acted_on)
+    {
+        if let TargetRef::Object(id) = target {
+            if !acted_on.contains(&id) {
+                acted_on.push(id);
+            }
+        }
+    }
+    acted_on.iter().any(|object_id| {
+        let Some(object) = state.objects.get(object_id) else {
             return false;
         };
-        ability.targets.iter().any(|target| {
-            let TargetRef::Object(object_id) = target else {
-                return false;
-            };
-            let Some(object) = state.objects.get(object_id) else {
-                return false;
-            };
-            if object.controller != ai_player
-                || !object.card_types.core_types.contains(&CoreType::Creature)
-            {
-                return false;
-            }
+        if object.controller != ai_player
+            || !object.card_types.core_types.contains(&CoreType::Creature)
+        {
+            return false;
+        }
 
-            let effects = collect_ability_effects(ability);
-            for effect in &effects {
-                match effect {
-                    // Destroy/Exile/Counter/Bounce — pump doesn't save
-                    Effect::Destroy { .. } | Effect::Counter { .. } | Effect::Bounce { .. } => {
-                        return false
-                    }
-                    Effect::ChangeZone { .. } => return false,
-                    // Damage — pump saves if toughness + bonus > damage
-                    Effect::DealDamage {
-                        amount: QuantityExpr::Fixed { value },
-                        ..
-                    } => {
-                        let toughness = object.toughness.unwrap_or(0);
-                        let remaining = toughness - object.damage_marked as i32;
-                        if remaining + toughness_bonus > *value {
-                            return true;
-                        }
-                    }
-                    _ => {}
+        let mut dealt = Vec::new();
+        for reach in nodes_acting_on(state, *object_id) {
+            match &reach.node.effect {
+                Effect::Destroy { .. } if can_be_destroyed(object) => return false,
+                Effect::Counter { .. } => return false,
+                Effect::Bounce { .. } | Effect::ChangeZone { .. } => break,
+                // Damage whose amount is not fixed is not judged.
+                Effect::DealDamage { .. } => {
+                    dealt.extend(node_damage(state, reach.node, object));
                 }
+                _ => {}
             }
-            false
-        })
+        }
+        // The pump saves the creature only from damage that kills it without
+        // the pump and not with it.
+        damage_kills(object, &dealt, 0) && !damage_kills(object, &dealt, toughness_bonus)
     })
 }
 
@@ -1697,6 +2239,7 @@ mod tests {
     };
     use engine::types::card::{CardFace, CleaveVariant, LayoutKind};
     use engine::types::counter::{CounterMatch, CounterType};
+    use engine::types::events::GameEvent;
     use engine::types::game_state::{
         CastingVariant, DelayedTrigger, NextSpellModifier, PendingCast, PendingNextSpellModifier,
         PlayerDeckPool, StackEntry, StackEntryKind, TargetEffectDetail, TargetSelectionProgress,
@@ -1811,7 +2354,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id: candidate_source,
-                        ability_index: candidate_index,
+                        ability_index: candidate_index, ..
                     } if candidate_source == source_id && candidate_index == ability_index
                 )
             })
@@ -3063,7 +3606,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if source_id == source
                 )
             })
@@ -5451,7 +5994,7 @@ mod tests {
                     &candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if *source_id == untap_source
                 )
             })
@@ -7237,6 +7780,1991 @@ mod tests {
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
     }
 
+    // ---- CR 701.6a: a counter aimed only at the AI's own spells ----
+
+    const SPELL_PIERCE_ORACLE: &str =
+        "Counter target noncreature spell unless its controller pays {2}.";
+
+    /// Put a spell on the stack the way the engine does (entry id == object id).
+    fn push_stack_spell(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        core_type: CoreType,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Stack,
+        );
+        let card_id = state.objects[&id].card_id;
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(core_type);
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: id,
+            controller,
+            kind: StackEntryKind::Spell {
+                card_id,
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        id
+    }
+
+    /// Score the announcement of `spell` (in P0's hand) at priority.
+    fn gate_cast(state: &mut GameState, spell: ObjectId) -> GateDecision {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: P0 },
+            candidates: Vec::new(),
+        };
+        let card_id = state.objects[&spell].card_id;
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
+        };
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// Put a counterspell from `oracle` in P0's hand; returns its id.
+    fn counter_in_hand(scenario: &mut GameScenario, name: &str, oracle: &str) -> ObjectId {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, name, true, oracle)
+            .id()
+    }
+
+    /// The field report: P1's creature spell under the AI's Counterspell. Spell
+    /// Pierce can only reach noncreature spells, so its one legal target is the
+    /// AI's own Counterspell — casting it would counter the counter.
+    #[test]
+    fn rejects_counter_whose_only_legal_target_is_own_spell() {
+        let mut scenario = GameScenario::new();
+        let pierce = counter_in_hand(&mut scenario, "Spell Pierce", SPELL_PIERCE_ORACLE);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Makindi Sliderunner", CoreType::Creature);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_eq!(gate_cast(state, pierce), GateDecision::Reject);
+    }
+
+    /// Build the field-report board on the production path: Spell Pierce
+    /// castable from P0's hand with {U} floating, P1's creature spell under
+    /// P0's Counterspell (or `opponent_noncreature` in its place for the
+    /// positive control), priority to P0 on P1's turn.
+    fn pierce_board(opponent_noncreature: bool) -> (GameState, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let pierce = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Pierce", true, SPELL_PIERCE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        if opponent_noncreature {
+            push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        } else {
+            push_stack_spell(state, P1, "Makindi Sliderunner", CoreType::Creature);
+        }
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state.clone(), pierce)
+    }
+
+    fn casts(action: &GameAction, spell: ObjectId) -> bool {
+        matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == spell)
+    }
+
+    const COMMANDEER_ORACLE: &str = "You may exile two blue cards from your hand rather than pay this spell's mana cost.\nGain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent enters under your control.)";
+    const DIVINATION_ORACLE: &str = "Draw two cards.";
+    const OPT_ORACLE: &str =
+        "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.";
+
+    /// Resolve Commandeer on the stack's top spell through the reducer, keep
+    /// its targets, and assert the stolen spell's entry still records
+    /// `caster` while the live object is controlled by `new_controller`.
+    fn resolve_commandeer(
+        runner: &mut GameRunner,
+        stolen: ObjectId,
+        caster: PlayerId,
+        new_controller: PlayerId,
+    ) {
+        runner.resolve_top();
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .expect("keep the targets");
+        }
+        let state = runner.state();
+        let entry = state
+            .stack
+            .iter()
+            .find(|entry| entry.id == stolen)
+            .expect("reach guard: the stolen spell is still on the stack");
+        assert_eq!(
+            (entry.controller, state.objects[&stolen].controller),
+            (caster, new_controller),
+            "reach guard: the entry records the caster, the live object the new controller"
+        );
+        assert_eq!(state.stack.len(), 1, "reach guard: Commandeer has resolved");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+    }
+
+    /// CR 112.2 + CR 613.1b: P0 casts Divination and P1 Commandeers it. The
+    /// spell is now P1's, so P0's Spell Pierce has a useful opponent-controlled
+    /// victim: the root and the target choice both stay available.
+    #[test]
+    fn counter_keeps_a_spell_the_ai_cast_but_an_opponent_now_controls() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let divination = scenario
+            .add_spell_to_hand_from_oracle(P0, "Divination", false, DIVINATION_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        let pierce = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Pierce", true, SPELL_PIERCE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        let commandeer = scenario
+            .add_spell_to_hand_from_oracle(P1, "Commandeer", true, COMMANDEER_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 4));
+        scenario.with_mana_pool(P1, pooled_mana(ManaType::Blue, 7));
+        let mut runner = scenario.build();
+        runner.cast(divination).commit();
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.cast(commandeer).target_object(divination).commit();
+        resolve_commandeer(&mut runner, divination, P0, P1);
+        let state = runner.state();
+
+        assert!(!is_own_stack_spell(state, P0, divination));
+        assert_counter_in_pools(state, pierce, None, GateDecision::Allow);
+        assert_ne!(
+            counter_target_verdict(
+                state,
+                plain_counter(None),
+                vec![TargetRef::Object(divination)],
+                divination
+            ),
+            GateDecision::Reject,
+            "countering the spell an opponent now controls is a useful target"
+        );
+    }
+
+    /// CR 112.2 + CR 613.1b: P1 casts Opt and P0 Commandeers it. The spell is
+    /// now P0's own, so Spell Pierce's only legal target would counter the
+    /// AI's own spell: the gate, scoring, both chooser routes and the target
+    /// choice all exclude it.
+    #[test]
+    fn counter_rejects_a_spell_an_opponent_cast_but_the_ai_now_controls() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let opt = scenario
+            .add_spell_to_hand_from_oracle(P1, "Opt", true, OPT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        let commandeer = scenario
+            .add_spell_to_hand_from_oracle(P0, "Commandeer", true, COMMANDEER_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 5,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .id();
+        let pierce = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Pierce", true, SPELL_PIERCE_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 8));
+        scenario.with_mana_pool(P1, pooled_mana(ManaType::Blue, 1));
+        let mut runner = scenario.build();
+        runner.act(GameAction::PassPriority).expect("P0 passes");
+        runner.cast(opt).commit();
+        runner.act(GameAction::PassPriority).expect("P1 passes");
+        runner.cast(commandeer).target_object(opt).commit();
+        resolve_commandeer(&mut runner, opt, P1, P0);
+        let state = runner.state();
+
+        assert!(is_own_stack_spell(state, P0, opt));
+        let root = assert_counter_in_pools(state, pierce, None, GateDecision::Reject);
+        assert_counter_never_chosen(state, &root.action);
+        assert_eq!(
+            counter_target_verdict(
+                state,
+                plain_counter(None),
+                vec![TargetRef::Object(opt)],
+                opt
+            ),
+            GateDecision::Reject,
+            "the spell the AI now controls is its own counter target"
+        );
+    }
+
+    const SPELL_BLAST_ORACLE: &str = "Counter target spell with mana value X. (For example, if that spell's mana cost is {3}{U}{U}, X is 5.)";
+    const KOZILEK_COUNTER_ORACLE: &str =
+        "Discard a card with mana value X: Counter target spell with mana value X.";
+
+    /// Commit a real mana-value-two creature before giving P0 response priority.
+    /// The creature is a synthetic type/mana-value witness, not a printed card.
+    fn counter_response_board(
+        mut scenario: GameScenario,
+        controller: PlayerId,
+    ) -> (GameState, ObjectId) {
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario
+            .add_creature_to_hand(controller, "Mana Value Two Witness", 2, 2)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        scenario.with_mana_pool(controller, pooled_mana(ManaType::Colorless, 2));
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.active_player = controller;
+        state.priority_player = controller;
+        state.waiting_for = WaitingFor::Priority { player: controller };
+        assert_eq!(state.objects[&victim].zone, Zone::Hand);
+        assert!(state.objects[&victim]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        let mut committed = runner.cast(victim).commit();
+        if controller == P1 {
+            committed.act(GameAction::PassPriority).unwrap();
+        }
+        let state = committed.state();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
+        assert!(state.objects[&victim]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+        assert_eq!(state.objects[&victim].spell_mana_value(), 2);
+        assert!(state.stack.iter().any(|entry| entry.id == victim
+            && entry.controller == controller
+            && matches!(entry.kind, StackEntryKind::Spell { .. })));
+        (state.clone(), victim)
+    }
+
+    /// Assert availability using actual engine candidates, then both AI pools.
+    fn assert_counter_in_pools(
+        state: &GameState,
+        source: ObjectId,
+        index: Option<usize>,
+        expected: GateDecision,
+    ) -> CandidateAction {
+        let issued = engine::ai_support::candidate_actions(state);
+        let root = issued
+            .iter()
+            .find(|candidate| match (&candidate.action, index) {
+                (GameAction::CastSpell { object_id, .. }, None) => *object_id == source,
+                (
+                    GameAction::ActivateAbility {
+                        source_id,
+                        ability_index,
+                        ..
+                    },
+                    Some(index),
+                ) => *source_id == source && *ability_index == index,
+                _ => false,
+            })
+            .expect("reach-guard: the engine issues this exact counter root")
+            .clone();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let gated = gate_candidates(
+            state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        );
+        let retained = expected != GateDecision::Reject;
+        assert_eq!(
+            gated
+                .iter()
+                .any(|candidate| candidate.candidate.action == root.action),
+            retained,
+            "the issued root must have the expected announcement gate verdict"
+        );
+        assert_eq!(
+            crate::search::score_candidates(state, P0, &config)
+                .iter()
+                .any(|(action, _)| *action == root.action),
+            retained,
+            "ordinary scoring must preserve the announcement gate verdict"
+        );
+        root
+    }
+
+    fn assert_counter_response_in_pools(
+        state: &GameState,
+        action: GameAction,
+        retained: bool,
+    ) -> CandidateAction {
+        let issued = candidate_actions(state);
+        let candidate = issued
+            .iter()
+            .find(|candidate| candidate.action == action)
+            .expect("reach-guard: actual engine-issued announcement response")
+            .clone();
+        let successor = replay_counter_announcement(state, &candidate, P0)
+            .expect("reach-guard: this issued response is reducer-valid and affordable");
+        let root = counter_choice_root(state).unwrap();
+        let owner = candidate.metadata.semantic_owner.unwrap();
+        let ability = successor
+            .waiting_for
+            .pending_cast_ref()
+            .or(successor.pending_cast.as_deref())
+            .filter(|pending| {
+                counter_pending_matches(root, pending) && pending.ability.controller == owner
+            })
+            .map(|pending| pending.ability.as_ref())
+            .or_else(|| committed_counter_ability(state, &successor, root, owner))
+            .expect("reach-guard: the response has an actual selected engine carrier");
+        assert!(
+            collect_ability_effects(ability)
+                .iter()
+                .all(|effect| !matches!(effect, Effect::Unimplemented { .. })),
+            "reach-guard: no unsupported selected payload can certify these results"
+        );
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: issued.clone(),
+        };
+        let gated = gate_candidates(
+            state,
+            &decision,
+            issued,
+            P0,
+            &config,
+            &AiContext::empty(&config.weights),
+        );
+        assert_eq!(
+            gated.iter().any(|item| item.candidate.action == action),
+            retained
+        );
+        assert_eq!(
+            crate::search::score_candidates(state, P0, &config)
+                .iter()
+                .any(|(scored, _)| *scored == action),
+            retained
+        );
+        if !retained {
+            assert_counter_never_chosen(state, &action);
+        }
+        candidate
+    }
+
+    fn assert_counter_never_chosen(state: &GameState, rejected: &GameAction) {
+        for search_enabled in [false, true] {
+            let mut config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+            config.search.enabled = search_enabled;
+            for seed in 0..8 {
+                let mut rng = ChaCha20Rng::seed_from_u64(seed);
+                assert_ne!(
+                    crate::search::choose_action(state, P0, &config, &mut rng),
+                    Some(rejected.clone()),
+                    "the {search_enabled:?} chooser route must retain the counter veto"
+                );
+            }
+        }
+    }
+
+    /// Commit printed Bolt and Counterspell with real mana values and targets.
+    /// Setup mana is replaced ONLY after both victims have committed, leaving
+    /// exactly the response pool under test and no payable battlefield sources.
+    fn printed_counter_stack(
+        mut scenario: GameScenario,
+        bolt_controller: PlayerId,
+        response_mana: Vec<ManaUnit>,
+    ) -> (GameState, ObjectId, ObjectId) {
+        scenario.at_phase(Phase::PreCombatMain);
+        let counter_controller = if bolt_controller == P0 { P1 } else { P0 };
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(
+                bolt_controller,
+                "Lightning Bolt",
+                true,
+                "Lightning Bolt deals 3 damage to any target.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Red],
+            })
+            .id();
+        let counter = scenario
+            .add_spell_to_hand_from_oracle(
+                counter_controller,
+                "Counterspell",
+                true,
+                "Counter target spell.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(bolt_controller, pooled_mana(ManaType::Red, 1));
+        scenario.with_mana_pool(counter_controller, pooled_mana(ManaType::Blue, 2));
+        let mut runner = scenario.build();
+        set_priority_window(runner.state_mut(), Phase::PreCombatMain, bolt_controller);
+        runner.state_mut().priority_player = bolt_controller;
+        runner.state_mut().waiting_for = WaitingFor::Priority {
+            player: bolt_controller,
+        };
+        runner.cast(bolt).target_player(counter_controller).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == counter_controller)
+        );
+        runner.cast(counter).target_object(bolt).commit();
+        let state = runner.state_mut();
+        state.players[P0.0 as usize].mana_pool.clear();
+        for unit in response_mana {
+            state.players[P0.0 as usize].mana_pool.add(unit);
+        }
+        set_priority_window(state, Phase::PreCombatMain, P1);
+        assert_eq!(state.stack.len(), 2);
+        for (id, controller, mv) in [(bolt, bolt_controller, 1), (counter, counter_controller, 2)] {
+            assert_eq!(state.objects[&id].spell_mana_value(), mv);
+            assert!(state.stack.iter().any(|entry| entry.id == id
+                && entry.controller == controller
+                && matches!(entry.kind, StackEntryKind::Spell { .. })));
+        }
+        (state.clone(), bolt, counter)
+    }
+
+    fn spell_blast_in_hand(scenario: &mut GameScenario) -> ObjectId {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Blast", true, SPELL_BLAST_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            })
+            .id()
+    }
+
+    #[test]
+    fn concrete_x_counter_excludes_own_singleton_and_retains_foreign_sibling() {
+        for bolt_controller in [P1, P0] {
+            let mut scenario = GameScenario::new();
+            let blast = spell_blast_in_hand(&mut scenario);
+            let (mut state, bolt, counter) =
+                printed_counter_stack(scenario, bolt_controller, pooled_mana(ManaType::Blue, 3));
+            // Owner divergence is setup-only; the stack's live controller is
+            // the strategic authority for both the own and foreign victim.
+            state.objects.get_mut(&bolt).unwrap().owner =
+                if bolt_controller == P0 { P1 } else { P0 };
+            state.objects.get_mut(&counter).unwrap().owner = bolt_controller;
+            assert_unannounced_x_counter(&state.objects[&blast].abilities[0], blast);
+            let root = assert_counter_in_pools(&state, blast, None, GateDecision::Allow);
+            let mut announced = GameRunner::from_state(state.clone());
+            announced.act(root.action).unwrap();
+            assert!(matches!(
+                announced.state().waiting_for,
+                WaitingFor::ChooseXValue { min: 0, max: 2, .. }
+            ));
+            // CR 601.2a + CR 601.2i: the exact announcement is finalized in place.
+            let announcement = announced
+                .state()
+                .stack
+                .iter()
+                .find(|entry| entry.id == blast)
+                .unwrap();
+            assert_eq!(announcement.source_id, blast);
+            assert_eq!(announcement.controller, P0);
+            assert!(matches!(&announcement.kind,
+                StackEntryKind::Spell { card_id, ability: None, .. }
+                    if *card_id == state.objects[&blast].card_id));
+            let (bad_x, own, good_x, foreign) = if bolt_controller == P1 {
+                (2, counter, 1, bolt)
+            } else {
+                (1, bolt, 2, counter)
+            };
+            let rejected = assert_counter_response_in_pools(
+                announced.state(),
+                GameAction::ChooseX { value: bad_x },
+                false,
+            );
+            assert_counter_response_in_pools(
+                announced.state(),
+                GameAction::ChooseX { value: good_x },
+                true,
+            );
+            let hostile = replay_counter_announcement(announced.state(), &rejected, P0).unwrap();
+            assert!(!matches!(
+                hostile.waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ));
+            let entry = hostile
+                .stack
+                .iter()
+                .find(|entry| entry.id == blast)
+                .unwrap();
+            assert_eq!(entry.id, announcement.id);
+            assert_eq!(entry.source_id, announcement.source_id);
+            assert_eq!(entry.controller, announcement.controller);
+            assert!(matches!(&entry.kind,
+                StackEntryKind::Spell { card_id, ability: Some(_), .. }
+                    if *card_id == state.objects[&blast].card_id));
+            let bound = entry.ability().unwrap();
+            assert_eq!(bound.source_id, blast);
+            assert_eq!(bound.controller, P0);
+            assert!(is_pure_counter_payload(&collect_ability_effects(bound)));
+            assert_eq!(bound.chosen_x, Some(bad_x));
+            assert_eq!(
+                declared_targets_in_chain(bound),
+                vec![TargetRef::Object(own)]
+            );
+            let mut runner = GameRunner::from_state(state);
+            let outcome = runner
+                .cast(blast)
+                .x(good_x)
+                .target_object(foreign)
+                .resolve();
+            // CR 701.6a: the event distinguishes countering from an instant's
+            // later normal resolution into the same graveyard.
+            assert!(outcome.events().iter().any(|event| matches!(event,
+                GameEvent::SpellCountered { object_id, countered_by, .. } if *object_id == foreign && *countered_by == blast)));
+            assert!(!outcome.events().iter().any(|event| matches!(event,
+                GameEvent::SpellCountered { object_id, countered_by, .. } if *object_id == own && *countered_by == blast)));
+            outcome.assert_zone(&[foreign], Zone::Graveyard);
+        }
+    }
+
+    #[test]
+    fn all_futile_affordable_x_counter_domain_is_rejected_before_fallback() {
+        let mut scenario = GameScenario::new();
+        let blast = spell_blast_in_hand(&mut scenario);
+        let (state, bolt, counter) =
+            printed_counter_stack(scenario, P0, pooled_mana(ManaType::Blue, 2));
+        assert_unannounced_x_counter(&state.objects[&blast].abilities[0], blast);
+        let root = assert_counter_in_pools(&state, blast, None, GateDecision::Reject);
+        assert_counter_never_chosen(&state, &root.action);
+        let mut reference = GameRunner::from_state(state.clone());
+        reference.act(root.action.clone()).unwrap();
+        assert!(matches!(
+            reference.state().waiting_for,
+            WaitingFor::ChooseXValue { min: 0, max: 1, .. }
+        ));
+        let issued = candidate_actions(reference.state());
+        assert_eq!(
+            issued
+                .iter()
+                .filter(|candidate| matches!(candidate.action, GameAction::ChooseX { .. }))
+                .count(),
+            2
+        );
+        let zero = issued
+            .iter()
+            .find(|candidate| candidate.action == GameAction::ChooseX { value: 0 })
+            .unwrap();
+        assert!(replay_counter_announcement(reference.state(), zero, P0).is_none());
+        assert!(!issued
+            .iter()
+            .any(|candidate| candidate.action == GameAction::ChooseX { value: 2 }));
+        // Imported/stale commitments retain their only legal ordinary response;
+        // normal play must reject the root, so max-X fallback never enters it.
+        let one = assert_counter_response_in_pools(
+            reference.state(),
+            GameAction::ChooseX { value: 1 },
+            true,
+        );
+        let bound = replay_counter_announcement(reference.state(), &one, P0).unwrap();
+        assert_eq!(
+            declared_targets_in_chain(
+                bound
+                    .stack
+                    .iter()
+                    .find(|entry| entry.id == blast)
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+            ),
+            vec![TargetRef::Object(bolt)]
+        );
+        assert!(is_own_stack_spell(&bound, P0, bolt));
+        assert!(!is_own_stack_spell(&bound, P0, counter));
+        let mut no_assignment = state.clone();
+        no_assignment.players[P0.0 as usize].mana_pool.clear();
+        no_assignment.players[P0.0 as usize]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+        let impossible_root =
+            assert_counter_in_pools(&no_assignment, blast, None, GateDecision::Allow);
+        let impossible_prompt =
+            replay_counter_announcement(&no_assignment, &impossible_root, P0).unwrap();
+        assert!(matches!(
+            impossible_prompt.waiting_for,
+            WaitingFor::ChooseXValue { min: 0, max: 0, .. }
+        ));
+        let only = candidate_actions(&impossible_prompt)
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::ChooseX { value: 0 }))
+            .unwrap();
+        assert!(
+            replay_counter_announcement(&impossible_prompt, &only, P0).is_none(),
+            "zero legal completions must not become an empty-all strategic proof"
+        );
+        let mut affordable = state;
+        affordable.players[P0.0 as usize]
+            .mana_pool
+            .add(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+        let root = assert_counter_in_pools(&affordable, blast, None, GateDecision::Allow);
+        let next = replay_counter_announcement(&affordable, &root, P0).unwrap();
+        assert_counter_response_in_pools(&next, GameAction::ChooseX { value: 2 }, true);
+        assert_counter_response_in_pools(&next, GameAction::ChooseX { value: 1 }, false);
+    }
+
+    const IZZET_CHARM_ORACLE: &str = "Choose one —\n• Counter target noncreature spell unless its controller pays {2}.\n• Izzet Charm deals 2 damage to target creature.\n• Draw two cards, then discard two cards.";
+
+    #[test]
+    fn concrete_counter_mode_excludes_own_singleton_and_retains_draw_discard() {
+        let mut scenario = GameScenario::new();
+        let charm = scenario
+            .add_spell_to_hand_from_oracle(P0, "Izzet Charm", true, IZZET_CHARM_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Red],
+            })
+            .id();
+        let draw_one = scenario.add_card_to_library_top(P0, "First draw");
+        let draw_two = scenario.add_card_to_library_top(P0, "Second draw");
+        let spare = scenario.add_card_to_hand(P0, "Spare hand card");
+        let creature = scenario
+            .add_creature_to_hand(P1, "Grizzly Bears", 2, 2)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let counter = scenario
+            .add_spell_to_hand_from_oracle(P0, "Counterspell", true, "Counter target spell.")
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .id();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P1, pooled_mana(ManaType::Green, 2));
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 2));
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = P1;
+        runner.state_mut().priority_player = P1;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+        runner.cast(creature).commit();
+        runner.act(GameAction::PassPriority).unwrap();
+        assert_eq!(runner.state().objects[&creature].spell_mana_value(), 2);
+        assert!(runner.state().stack.iter().any(|entry| entry.id == creature
+            && entry.controller == P1
+            && matches!(entry.kind, StackEntryKind::Spell { .. })));
+        runner.cast(counter).target_object(creature).commit();
+        let state = runner.state_mut();
+        state.players[P0.0 as usize].mana_pool.clear();
+        for unit in [
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]),
+        ] {
+            state.players[P0.0 as usize].mana_pool.add(unit);
+        }
+        set_priority_window(state, Phase::PreCombatMain, P1);
+        let state = state.clone();
+        let root = assert_counter_in_pools(&state, charm, None, GateDecision::Allow);
+        let mut announced = GameRunner::from_state(state.clone());
+        announced.act(root.action).unwrap();
+        assert!(matches!(
+            announced.state().waiting_for,
+            WaitingFor::ModeChoice { .. }
+        ));
+        // CR 601.2a + CR 601.2i: the exact announcement is finalized in place.
+        let announcement = announced
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.id == charm)
+            .unwrap();
+        assert_eq!(announcement.source_id, charm);
+        assert_eq!(announcement.controller, P0);
+        assert!(matches!(&announcement.kind,
+            StackEntryKind::Spell { card_id, ability: None, .. }
+                if *card_id == state.objects[&charm].card_id));
+        let bad = assert_counter_response_in_pools(
+            announced.state(),
+            GameAction::SelectModes { indices: vec![0] },
+            false,
+        );
+        assert_counter_response_in_pools(
+            announced.state(),
+            GameAction::SelectModes { indices: vec![2] },
+            true,
+        );
+        let reference = replay_counter_announcement(announced.state(), &bad, P0).unwrap();
+        assert!(!matches!(
+            reference.waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ));
+        let entry = reference
+            .stack
+            .iter()
+            .find(|entry| entry.id == charm)
+            .unwrap();
+        assert_eq!(entry.id, announcement.id);
+        assert_eq!(entry.source_id, announcement.source_id);
+        assert_eq!(entry.controller, announcement.controller);
+        assert!(matches!(&entry.kind,
+            StackEntryKind::Spell { card_id, ability: Some(_), .. }
+                if *card_id == state.objects[&charm].card_id));
+        let ability = entry.ability().unwrap();
+        assert_eq!(ability.source_id, charm);
+        assert_eq!(ability.controller, P0);
+        assert_eq!(ability.context.chosen_modes, vec![0]);
+        assert!(is_pure_counter_payload(&collect_ability_effects(ability)));
+        assert!(ability.unless_pay.is_some());
+        assert_eq!(
+            declared_targets_in_chain(ability),
+            vec![TargetRef::Object(counter)]
+        );
+        assert_eq!(reference.players[P0.0 as usize].mana_pool.total(), 0);
+        let mut foreign_noncreature = state.clone();
+        foreign_noncreature
+            .stack
+            .iter_mut()
+            .find(|entry| entry.id == counter)
+            .unwrap()
+            .controller = P1;
+        foreign_noncreature
+            .objects
+            .get_mut(&counter)
+            .unwrap()
+            .controller = P1;
+        let root = assert_counter_in_pools(&foreign_noncreature, charm, None, GateDecision::Allow);
+        let next = replay_counter_announcement(&foreign_noncreature, &root, P0).unwrap();
+        assert_counter_response_in_pools(&next, GameAction::SelectModes { indices: vec![0] }, true);
+        let mut useful = GameRunner::from_state(state);
+        let outcome = useful.cast(charm).modes(&[2]).resolve();
+        outcome.assert_hand_drawn(P0, 2);
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::DiscardChoice { count: 2, .. }
+        ));
+        let discard = candidate_actions(useful.state()).into_iter().find(|candidate| matches!(&candidate.action,
+            GameAction::SelectCards { cards } if cards.len() == 2 && cards.contains(&draw_one) && cards.contains(&draw_two)))
+            .expect("engine offers the drawn cards for the real discard continuation");
+        useful.act(discard.action).unwrap();
+        assert_eq!(useful.state().objects[&draw_one].zone, Zone::Graveyard);
+        assert_eq!(useful.state().objects[&draw_two].zone, Zone::Graveyard);
+        // CR 701.9b: the chosen discard leaves the unselected card in hand.
+        assert_eq!(useful.state().objects[&spare].zone, Zone::Hand);
+        assert!(matches!(
+            useful.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    #[test]
+    fn concrete_x_activation_uses_selected_index_and_its_pay_cost_carrier() {
+        for payable_one in [true, false] {
+            let mut scenario = GameScenario::new();
+            let oracle =
+                format!("{{U}}: Counter target noncreature spell.\n{KOZILEK_COUNTER_ORACLE}");
+            let source = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Synthetic selected-X counter source",
+                    12,
+                    12,
+                    &oracle,
+                )
+                .id();
+            let discard_two = scenario
+                .add_spell_to_hand(P0, "MV2 discard witness", false)
+                .with_mana_cost(ManaCost::generic(2))
+                .id();
+            let discard_one = payable_one.then(|| {
+                scenario
+                    .add_spell_to_hand(P0, "MV1 discard witness", false)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id()
+            });
+            let (state, bolt, counter) =
+                printed_counter_stack(scenario, P1, pooled_mana(ManaType::Blue, 1));
+            let definitions = activated_ability_definitions(&state, source);
+            assert_eq!(
+                definitions
+                    .iter()
+                    .map(|(index, _)| *index)
+                    .collect::<Vec<_>>(),
+                vec![0, 1]
+            );
+            assert_unannounced_x_counter(&definitions[1].1, source);
+            // A real pre-existing activation on this very source must never be
+            // mistaken for index1's newly announced X payload.
+            let mut setup = GameRunner::from_state(state);
+            setup
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            let target = candidate_actions(setup.state())
+                .into_iter()
+                .find(|candidate| {
+                    matches!(&candidate.action,
+                GameAction::ChooseTarget { target: Some(TargetRef::Object(id)) } if *id == bolt)
+                })
+                .expect("the fixed counter's real target prompt offers the foreign Bolt");
+            setup.act(target.action).unwrap();
+            let old_entry = setup
+                .state()
+                .stack
+                .iter()
+                .find(|entry| {
+                    entry.source_id == source
+                        && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+                })
+                .unwrap()
+                .id;
+            let state = setup.state_mut();
+            state.players[P0.0 as usize].mana_pool.add(ManaUnit::new(
+                ManaType::Blue,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+            set_priority_window(state, Phase::PreCombatMain, P1);
+            let state = state.clone();
+            assert!(state.stack.iter().any(|entry| entry.id == old_entry));
+            let expected = if payable_one {
+                GateDecision::Allow
+            } else {
+                GateDecision::Reject
+            };
+            let root = assert_counter_in_pools(&state, source, Some(1), expected);
+            if !payable_one {
+                assert_counter_never_chosen(&state, &root.action);
+            }
+            let next = replay_counter_announcement(&state, &root, P0).unwrap();
+            let WaitingFor::ChooseXValue { pending_cast, .. } = &next.waiting_for else {
+                panic!("selected activation must announce its X");
+            };
+            assert_eq!(pending_cast.activation_ability_index, Some(1));
+            assert_eq!(pending_cast.object_id, source);
+            let two = assert_counter_response_in_pools(
+                &next,
+                GameAction::ChooseX { value: 2 },
+                !payable_one,
+            );
+            let hostile = replay_counter_announcement(&next, &two, P0).unwrap();
+            let pending = hostile
+                .waiting_for
+                .pending_cast_ref()
+                .expect("selected activation retained through actual PayCost");
+            assert!(matches!(hostile.waiting_for, WaitingFor::PayCost { .. }));
+            assert_eq!(pending.activation_ability_index, Some(1));
+            assert_eq!(pending.ability.chosen_x, Some(2));
+            assert_eq!(pending.ability.source_id, source);
+            assert_eq!(pending.ability.controller, P0);
+            assert_eq!(
+                declared_targets_in_chain(&pending.ability),
+                vec![TargetRef::Object(counter)]
+            );
+            assert!(hostile.stack.iter().any(|entry| entry.id == old_entry));
+            assert_eq!(
+                hostile.stack.iter().find(|entry| entry.id == old_entry),
+                next.stack.iter().find(|entry| entry.id == old_entry),
+            );
+            let one = candidate_actions(&next)
+                .into_iter()
+                .find(|candidate| candidate.action == GameAction::ChooseX { value: 1 })
+                .unwrap();
+            assert_eq!(
+                replay_counter_announcement(&next, &one, P0).is_some(),
+                payable_one,
+                "discard eligibility is validated by the reducer, not inferred from the max X"
+            );
+            if let Some(discard_one) = discard_one {
+                assert_counter_response_in_pools(&next, GameAction::ChooseX { value: 1 }, true);
+                let mut runner = GameRunner::from_state(state);
+                let outcome = runner
+                    .activate(source, 1)
+                    .x(1)
+                    .target_object(bolt)
+                    .pay_with(&[discard_one])
+                    .resolve();
+                // CR 701.6a + CR 701.9a: the chosen discard and foreign spell
+                // move to their respective owners' graveyards.
+                outcome.assert_zone(&[discard_one, bolt], Zone::Graveyard);
+                assert_eq!(outcome.state().objects[&discard_two].zone, Zone::Hand);
+                assert!(outcome.events().iter().any(|event| matches!(event,
+                    GameEvent::SpellCountered { object_id, countered_by, .. } if *object_id == bolt && *countered_by == source)));
+            }
+        }
+    }
+
+    #[test]
+    fn selected_modal_x_chain_preserves_repeated_modes_and_mixed_or_redirect_payloads() {
+        for rider in ["Draw a card.", "If that spell is countered this way, put it on top of its owner's library instead of into that player's graveyard."] {
+            let mut scenario = GameScenario::new();
+            let oracle = format!("Choose one or both —\n• Counter target spell with mana value X.\n• Counter target spell with mana value X. {rider}");
+            let counter = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic modal-X counter", true, &oracle)
+                .with_mana_cost(ManaCost::Cost { generic: 0, shards: vec![ManaCostShard::X, ManaCostShard::Blue] }).id();
+            scenario.with_library_top(P0, &["Draw witness one", "Draw witness two"]);
+            let (mut state, bolt, own) = printed_counter_stack(scenario, P1, pooled_mana(ManaType::Blue, 3));
+            // Synthetic repeat parameter; the engine generates every sequence.
+            state.objects.get_mut(&counter).unwrap().modal.as_mut().unwrap().allow_repeat_modes = true;
+            let root = assert_counter_in_pools(&state, counter, None, GateDecision::Allow);
+            let modes = replay_counter_announcement(&state, &root, P0).unwrap();
+            assert!(matches!(modes.waiting_for, WaitingFor::ModeChoice { .. }));
+            let issued = candidate_actions(&modes);
+            assert!(issued.iter().any(|candidate| matches!(&candidate.action, GameAction::SelectModes { indices } if indices.as_slice() == [0, 0])));
+            for indices in [vec![0], vec![0, 0], vec![1], vec![0, 1]] {
+                let choice = assert_counter_response_in_pools(&modes, GameAction::SelectModes { indices: indices.clone() }, true);
+                let x_prompt = replay_counter_announcement(&modes, &choice, P0).unwrap();
+                let WaitingFor::ChooseXValue { pending_cast, .. } = &x_prompt.waiting_for else { panic!("mode selection must retain its X announcement"); };
+                let mut sorted = indices.clone();
+                sorted.sort_unstable();
+                assert_eq!(pending_cast.chosen_modes, sorted);
+                let pure = indices.iter().all(|index| *index == 0);
+                assert_eq!(is_pure_counter_payload(&collect_ability_effects(&pending_cast.ability)), pure);
+                assert_counter_response_in_pools(&x_prompt, GameAction::ChooseX { value: 2 }, !pure);
+                let useful = assert_counter_response_in_pools(&x_prompt, GameAction::ChooseX { value: 1 }, true);
+                let next = replay_counter_announcement(&x_prompt, &useful, P0).unwrap();
+                let ability = next.waiting_for.pending_cast_ref().map(|pending| pending.ability.as_ref())
+                    .or_else(|| next.stack.iter().find(|entry| entry.id == counter).and_then(|entry| entry.ability())).unwrap();
+                assert!(collect_resolved_abilities(ability).iter().all(|node| node.chosen_x == Some(1)));
+                assert!(declared_targets_in_chain(ability).iter().all(|target| *target == TargetRef::Object(bolt)));
+                assert!(is_own_stack_spell(&next, P0, own));
+            }
+            // The generator uses canonical sequences; out-of-order input is
+            // a reducer contract control, not a claimed issued AI candidate.
+            let mut out_of_order = GameRunner::from_state(modes);
+            out_of_order.act(GameAction::SelectModes { indices: vec![1, 0] }).unwrap();
+            let pending = out_of_order.state().waiting_for.pending_cast_ref().unwrap();
+            assert_eq!(pending.chosen_modes, vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn activated_modal_x_counter_authenticates_only_the_new_same_source_entry() {
+        let mut scenario = GameScenario::new();
+        let oracle = format!("{{U}}: Counter target noncreature spell.\n{KOZILEK_COUNTER_ORACLE}");
+        let source = scenario
+            .add_creature_from_oracle(P0, "Synthetic activated modal-X source", 12, 12, &oracle)
+            .id();
+        scenario.with_library_top(P0, &["Draw witness"]);
+        let (mut state, bolt, own) =
+            printed_counter_stack(scenario, P1, pooled_mana(ManaType::Blue, 1));
+        let mut pure = state.objects[&source].abilities[1].clone();
+        pure.cost = None;
+        let mut mixed = pure.clone();
+        mixed.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )));
+        let modal = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+                },
+            })
+            .with_modal(
+                ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 2,
+                    mode_descriptions: vec![
+                        "Counter target spell with mana value X.".to_string(),
+                        "Counter target spell with mana value X. Draw a card.".to_string(),
+                    ],
+                    ..ModalChoice::default()
+                },
+                vec![pure, mixed],
+            );
+        let object = state.objects.get_mut(&source).unwrap();
+        Arc::make_mut(&mut object.abilities)[1] = modal.clone();
+        Arc::make_mut(&mut object.base_abilities)[1] = modal;
+        let mut setup = GameRunner::from_state(state);
+        setup
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let target = candidate_actions(setup.state())
+            .into_iter()
+            .find(|candidate| {
+                matches!(&candidate.action,
+            GameAction::ChooseTarget { target: Some(TargetRef::Object(id)) } if *id == bolt)
+            })
+            .unwrap();
+        setup.act(target.action).unwrap();
+        let old_entry = setup
+            .state()
+            .stack
+            .iter()
+            .find(|entry| {
+                entry.source_id == source
+                    && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+            })
+            .unwrap()
+            .id;
+        let state = setup.state_mut();
+        for unit in pooled_mana(ManaType::Blue, 3) {
+            state.players[P0.0 as usize].mana_pool.add(unit);
+        }
+        set_priority_window(state, Phase::PreCombatMain, P1);
+        let state = state.clone();
+        let root = assert_counter_in_pools(&state, source, Some(1), GateDecision::Allow);
+        let modes = replay_counter_announcement(&state, &root, P0).unwrap();
+        assert!(matches!(
+            modes.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: true,
+                ability_index: Some(1),
+                ..
+            }
+        ));
+        for index in [0, 1] {
+            let choice = assert_counter_response_in_pools(
+                &modes,
+                GameAction::SelectModes {
+                    indices: vec![index],
+                },
+                true,
+            );
+            let x_prompt = replay_counter_announcement(&modes, &choice, P0).unwrap();
+            assert!(matches!(
+                x_prompt.waiting_for,
+                WaitingFor::ChooseXValue { .. }
+            ));
+            assert_eq!(
+                x_prompt
+                    .waiting_for
+                    .pending_cast_ref()
+                    .unwrap()
+                    .chosen_modes,
+                vec![index],
+            );
+            let two = assert_counter_response_in_pools(
+                &x_prompt,
+                GameAction::ChooseX { value: 2 },
+                index == 1,
+            );
+            assert_counter_response_in_pools(&x_prompt, GameAction::ChooseX { value: 1 }, true);
+            let next = replay_counter_announcement(&x_prompt, &two, P0).unwrap();
+            assert!(matches!(next.waiting_for, WaitingFor::Priority { .. }));
+            let additions = next
+                .stack
+                .iter()
+                .filter(|entry| {
+                    entry.source_id == source
+                        && entry.id != old_entry
+                        && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(additions.len(), 1);
+            assert_eq!(additions[0].controller, P0);
+            let selected = additions[0].ability().unwrap();
+            assert_eq!(selected.source_id, source);
+            assert_eq!(selected.controller, P0);
+            assert_eq!(selected.ability_index, Some(1));
+            assert_eq!(selected.chosen_x, Some(2));
+            assert_eq!(
+                declared_targets_in_chain(additions[0].ability().unwrap()),
+                vec![TargetRef::Object(own)]
+            );
+            assert!(next.stack.iter().any(|entry| entry.id == old_entry));
+            assert_eq!(
+                next.stack.iter().find(|entry| entry.id == old_entry),
+                state.stack.iter().find(|entry| entry.id == old_entry),
+            );
+        }
+    }
+
+    #[test]
+    fn concrete_counter_optional_random_and_opponent_target_authority_stays_indeterminate() {
+        for authority in 0..3 {
+            let mut scenario = GameScenario::new();
+            let counter = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic qualified modal-X counter",
+                    true,
+                    "Choose one —\n• Counter target spell with mana value X.\n• Draw a card.",
+                )
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+                })
+                .id();
+            scenario.with_library_top(P0, &["Draw witness"]);
+            let (mut state, _, own) =
+                printed_counter_stack(scenario, P1, pooled_mana(ManaType::Blue, 3));
+            let object = state.objects.get_mut(&counter).unwrap();
+            for abilities in [&mut object.abilities, &mut object.base_abilities] {
+                let mode = &mut Arc::make_mut(abilities)[0];
+                match authority {
+                    0 => mode.optional_targeting = true,
+                    1 => mode.target_selection_mode = TargetSelectionMode::Random,
+                    2 => mode.target_chooser = Some(TargetFilter::Opponent),
+                    _ => unreachable!(),
+                }
+            }
+            let root = assert_counter_in_pools(&state, counter, None, GateDecision::Allow);
+            let modes = replay_counter_announcement(&state, &root, P0).unwrap();
+            let mode = assert_counter_response_in_pools(
+                &modes,
+                GameAction::SelectModes { indices: vec![0] },
+                true,
+            );
+            let x_prompt = replay_counter_announcement(&modes, &mode, P0).unwrap();
+            let two =
+                assert_counter_response_in_pools(&x_prompt, GameAction::ChooseX { value: 2 }, true);
+            let next = replay_counter_announcement(&x_prompt, &two, P0).unwrap();
+            let ability = next
+                .waiting_for
+                .pending_cast_ref()
+                .map(|cast| cast.ability.as_ref())
+                .or_else(|| {
+                    next.stack
+                        .iter()
+                        .find(|entry| entry.id == counter)
+                        .and_then(|entry| entry.ability())
+                })
+                .unwrap();
+            assert!(is_pure_counter_payload(&collect_ability_effects(ability)));
+            assert_eq!(ability.chosen_x, Some(2));
+            match authority {
+                0 => {
+                    let WaitingFor::TargetSelection { target_slots, .. } = &next.waiting_for else {
+                        panic!("optional target must retain its decline prompt");
+                    };
+                    assert!(target_slots.iter().all(|slot| slot.optional));
+                    let decline = candidate_actions(&next)
+                        .into_iter()
+                        .find(|candidate| {
+                            matches!(candidate.action, GameAction::ChooseTarget { target: None })
+                        })
+                        .expect("engine issues the all-decline target response");
+                    let mut runner = GameRunner::from_state(next);
+                    runner.act(decline.action).unwrap();
+                    let ability = runner
+                        .state()
+                        .stack
+                        .iter()
+                        .find(|entry| entry.id == counter)
+                        .unwrap()
+                        .ability()
+                        .unwrap();
+                    assert!(declared_targets_in_chain(ability).is_empty());
+                }
+                1 => {
+                    assert_eq!(ability.target_selection_mode, TargetSelectionMode::Random);
+                    assert_eq!(
+                        declared_targets_in_chain(ability),
+                        vec![TargetRef::Object(own)]
+                    );
+                }
+                2 => assert!(matches!(
+                    next.waiting_for,
+                    WaitingFor::TargetSelection { player: P1, .. }
+                )),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// SHAPE reach guards only; the tests below also drive the reducer/AI pools.
+    fn assert_unannounced_x_counter(definition: &AbilityDefinition, source: ObjectId) {
+        let effects = collect_definition_effects_with(definition, ModeWalk::RootOnly);
+        assert!(
+            is_pure_counter_payload(&effects),
+            "no mixed or Unimplemented payload"
+        );
+        let filter = definition.effect.target_filter().unwrap();
+        let typed = match filter {
+            TargetFilter::Typed(typed) => typed,
+            TargetFilter::And { filters } => filters
+                .iter()
+                .find_map(|filter| match filter {
+                    TargetFilter::Typed(typed) => Some(typed),
+                    _ => None,
+                })
+                .expect("typed mana-value restriction under stack constraint"),
+            other => panic!("expected typed mana-value counter filter, got {other:?}"),
+        };
+        assert!(typed.properties.iter().any(|property| matches!(property,
+            FilterProp::Cmc { comparator: Comparator::EQ, value: QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name }
+            }} if name == "X")));
+        let resolved = build_resolved_from_def(definition, source, P0);
+        assert!(resolved.chosen_x.is_none());
+        assert!(ability_target_legality_needs_chosen_x(
+            &resolved,
+            definition.distribute.as_ref()
+        ));
+    }
+
+    #[test]
+    fn affordable_x_counter_survives_before_x_and_counters_after_announcement() {
+        let mut scenario = GameScenario::new();
+        let blast = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Blast", true, SPELL_BLAST_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 3));
+        let (state, victim) = counter_response_board(scenario, P1);
+        assert_eq!(
+            state.objects[&blast].mana_cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            }
+        );
+        let pool = &state
+            .players
+            .iter()
+            .find(|player| player.id == P0)
+            .unwrap()
+            .mana_pool;
+        assert_eq!(pool.count_color(ManaType::Blue), 3);
+        assert_eq!(pool.total(), 3);
+        let definition = &state.objects[&blast].abilities[0];
+        assert_eq!(definition.kind, AbilityKind::Spell);
+        assert_unannounced_x_counter(definition, blast);
+        assert!(find_legal_targets(
+            &state,
+            definition.effect.target_filter().unwrap(),
+            P0,
+            blast
+        )
+        .is_empty());
+        assert!(!is_own_stack_spell(&state, P0, victim));
+        let root = assert_counter_in_pools(&state, blast, None, GateDecision::Allow);
+        let mut announced = GameRunner::from_state(state.clone());
+        announced.act(root.action).unwrap();
+        // CR 107.3a + CR 601.2b + CR 601.2c: X precedes target selection.
+        let WaitingFor::ChooseXValue {
+            player,
+            min,
+            max,
+            pending_cast,
+            ..
+        } = &announced.state().waiting_for
+        else {
+            panic!("real cast must announce X");
+        };
+        assert_eq!(*player, P0);
+        assert!(*min <= 2 && *max >= 2);
+        assert_eq!(pending_cast.object_id, blast);
+        assert!(pending_cast.ability.chosen_x.is_none());
+        assert!(pending_cast.deferred_target_selection);
+        let choose_x = engine::ai_support::candidate_actions(announced.state())
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::ChooseX { value: 2 }))
+            .expect("engine offers affordable X=2");
+        announced.act(choose_x.action).unwrap();
+        assert!(announced.state().stack.iter().any(|entry| entry.id == blast
+            && matches!(&entry.kind, StackEntryKind::Spell { ability: Some(ability), .. }
+                if ability.chosen_x == Some(2) && ability.targets == vec![TargetRef::Object(victim)])));
+        let mut resolved = GameRunner::from_state(state);
+        let outcome = resolved.cast(blast).x(2).target_object(victim).resolve();
+        // CR 701.6a: countering prevents the creature from resolving to the battlefield.
+        outcome.assert_zone(&[victim], Zone::Graveyard);
+    }
+
+    #[test]
+    fn x_counter_keeps_the_independent_all_own_spell_and_empty_stack_proof() {
+        let mut scenario = GameScenario::new();
+        let blast = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Blast", true, SPELL_BLAST_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 3));
+        let mut empty = scenario.build().state().clone();
+        assert_unannounced_x_counter(&empty.objects[&blast].abilities[0], blast);
+        assert!(empty.stack.is_empty());
+        assert_eq!(gate_cast(&mut empty, blast), GateDecision::Reject);
+
+        let mut scenario = GameScenario::new();
+        let blast = scenario
+            .add_spell_to_hand_from_oracle(P0, "Spell Blast", true, SPELL_BLAST_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 3));
+        let (state, victim) = counter_response_board(scenario, P0);
+        assert_unannounced_x_counter(&state.objects[&blast].abilities[0], blast);
+        assert!(is_own_stack_spell(&state, P0, victim));
+        assert_counter_in_pools(&state, blast, None, GateDecision::Reject);
+    }
+
+    #[test]
+    fn selected_nonzero_x_counter_activation_survives_and_pays_its_own_cost() {
+        let mut scenario = GameScenario::new();
+        // Synthetic two-ability source: fixed clause first, verbatim Kozilek clause second.
+        let oracle = format!("{{U}}: Counter target noncreature spell.\n{KOZILEK_COUNTER_ORACLE}");
+        let source = scenario
+            .add_creature_from_oracle(P0, "Counter Ability Witness", 12, 12, &oracle)
+            .id();
+        let discard = scenario
+            .add_spell_to_hand(P0, "Mana Value Two Discard", false)
+            .with_mana_cost(ManaCost::generic(2))
+            .id();
+        scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+        let (state, victim) = counter_response_board(scenario, P1);
+        assert_eq!(state.objects[&discard].zone, Zone::Hand);
+        assert_eq!(state.objects[&discard].effective_mana_value(), 2);
+        assert!(!is_own_stack_spell(&state, P0, victim));
+        let definitions = activated_ability_definitions(&state, source);
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(definitions[0].0, 0);
+        assert_eq!(definitions[1].0, 1);
+        assert!(is_pure_counter_payload(&collect_definition_effects_with(
+            &definitions[0].1,
+            ModeWalk::RootOnly
+        )));
+        assert!(!ability_target_legality_needs_chosen_x(
+            &build_resolved_from_def(&definitions[0].1, source, P0),
+            definitions[0].1.distribute.as_ref()
+        ));
+        assert_eq!(definitions[1].1.kind, AbilityKind::Activated);
+        assert_unannounced_x_counter(&definitions[1].1, source);
+        assert!(find_legal_targets(
+            &state,
+            definitions[1].1.effect.target_filter().unwrap(),
+            P0,
+            source
+        )
+        .is_empty());
+        let root = assert_counter_in_pools(&state, source, Some(1), GateDecision::Allow);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let decision = AiDecisionContext {
+            waiting_for: state.waiting_for.clone(),
+            candidates: vec![root.clone()],
+        };
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &root,
+            ai_player: P0,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assert_unannounced_x_counter(&ctx.effective_activated_ability().unwrap(), source);
+        let mut announced = GameRunner::from_state(state.clone());
+        announced.act(root.action).unwrap();
+        // CR 107.3a + CR 602.2b: this activation announces its own X before targets/costs.
+        let WaitingFor::ChooseXValue {
+            pending_cast,
+            min,
+            max,
+            ..
+        } = &announced.state().waiting_for
+        else {
+            panic!("real activation must announce X");
+        };
+        assert_eq!(pending_cast.object_id, source);
+        assert_eq!(pending_cast.activation_ability_index, Some(1));
+        assert!(pending_cast.deferred_target_selection);
+        assert!(pending_cast.ability.chosen_x.is_none());
+        assert!(*min <= 2 && *max >= 2);
+        let choose_x = engine::ai_support::candidate_actions(announced.state())
+            .into_iter()
+            .find(|candidate| matches!(candidate.action, GameAction::ChooseX { value: 2 }))
+            .unwrap();
+        announced.act(choose_x.action).unwrap();
+        let mut resolved = GameRunner::from_state(state);
+        let outcome = resolved
+            .activate(source, 1)
+            .x(2)
+            .target_object(victim)
+            .pay_with(&[discard])
+            .resolve();
+        // CR 701.6a + CR 701.9a: countering removes the spell without resolution;
+        // the selected discard cost moves the matching hand card to its owner's graveyard.
+        outcome.assert_zone(&[discard, victim], Zone::Graveyard);
+    }
+
+    #[test]
+    fn unselected_x_activation_does_not_disable_the_fixed_counter_proof() {
+        for foreign_noncreature in [false, true] {
+            let mut scenario = GameScenario::new();
+            let oracle =
+                format!("{{U}}: Counter target noncreature spell.\n{KOZILEK_COUNTER_ORACLE}");
+            let source = scenario
+                .add_creature_from_oracle(P0, "Counter Ability Witness", 12, 12, &oracle)
+                .id();
+            scenario
+                .add_spell_to_hand(P0, "Mana Value Two Discard", false)
+                .with_mana_cost(ManaCost::generic(2));
+            scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+            let (mut state, _) = counter_response_board(scenario, P1);
+            let own = push_stack_spell(&mut state, P0, "Own Instant Witness", CoreType::Instant);
+            if foreign_noncreature {
+                push_stack_spell(&mut state, P1, "Foreign Instant Witness", CoreType::Instant);
+            }
+            let definitions = activated_ability_definitions(&state, source);
+            assert_eq!(definitions[0].0, 0);
+            assert_eq!(definitions[1].0, 1);
+            assert_unannounced_x_counter(&definitions[1].1, source);
+            let fixed = &definitions[0].1;
+            assert!(is_pure_counter_payload(&collect_definition_effects_with(
+                fixed,
+                ModeWalk::RootOnly
+            )));
+            assert!(!ability_target_legality_needs_chosen_x(
+                &build_resolved_from_def(fixed, source, P0),
+                fixed.distribute.as_ref()
+            ));
+            let legal =
+                find_legal_targets(&state, fixed.effect.target_filter().unwrap(), P0, source);
+            assert!(legal.contains(&TargetRef::Object(own)));
+            assert_eq!(
+                legal
+                    .iter()
+                    .any(|target| matches!(target, TargetRef::Object(id)
+                if !is_own_stack_spell(&state, P0, *id))),
+                foreign_noncreature
+            );
+            assert_counter_in_pools(
+                &state,
+                source,
+                Some(0),
+                if foreign_noncreature {
+                    GateDecision::Allow
+                } else {
+                    GateDecision::Reject
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn later_spell_root_x_is_selected_but_an_activated_root_x_is_not() {
+        // Synthetic typed composition isolates root membership from printed card identity.
+        for x_kind in [AbilityKind::Spell, AbilityKind::Activated] {
+            for foreign_noncreature in [false, true] {
+                let mut scenario = GameScenario::new();
+                let mut x_definition = AbilityDefinition::new(
+                    x_kind,
+                    Effect::Counter {
+                        target: TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::StackSpell,
+                                TargetFilter::Typed(TypedFilter::new(TypeFilter::Any).properties(
+                                    vec![FilterProp::Cmc {
+                                        comparator: Comparator::EQ,
+                                        value: QuantityExpr::Ref {
+                                            qty: QuantityRef::Variable {
+                                                name: "X".to_string(),
+                                            },
+                                        },
+                                    }],
+                                )),
+                            ],
+                        },
+                        source_rider: None,
+                        countered_spell_zone: None,
+                    },
+                );
+                if x_kind == AbilityKind::Activated {
+                    x_definition.cost = Some(AbilityCost::Mana {
+                        cost: ManaCost::zero(),
+                    });
+                }
+                let counter = scenario
+                    .add_spell_to_hand_from_oracle(
+                        P0,
+                        "Root Membership Witness",
+                        true,
+                        SPELL_PIERCE_ORACLE,
+                    )
+                    .with_mana_cost(ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![ManaCostShard::X, ManaCostShard::Blue],
+                    })
+                    .with_ability_definition(x_definition)
+                    .id();
+                scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 3));
+                let (mut state, _) = counter_response_board(scenario, P1);
+                let own =
+                    push_stack_spell(&mut state, P0, "Own Instant Witness", CoreType::Instant);
+                if foreign_noncreature {
+                    push_stack_spell(&mut state, P1, "Foreign Instant Witness", CoreType::Instant);
+                }
+                let object = &state.objects[&counter];
+                assert_eq!(object.abilities.len(), 2);
+                assert_eq!(object.abilities[0].kind, AbilityKind::Spell);
+                assert_eq!(object.abilities[1].kind, x_kind);
+                assert_unannounced_x_counter(&object.abilities[1], counter);
+                let selected = modal_spell_mode_ability_refs(object).collect::<Vec<_>>();
+                assert_eq!(
+                    selected.len(),
+                    if x_kind == AbilityKind::Spell { 2 } else { 1 }
+                );
+                assert!(selected.iter().all(|definition| is_pure_counter_payload(
+                    &collect_definition_effects_with(definition, ModeWalk::RootOnly)
+                )));
+                assert!(!ability_target_legality_needs_chosen_x(
+                    &build_resolved_from_def(selected[0], counter, P0),
+                    selected[0].distribute.as_ref()
+                ));
+                let legal = find_legal_targets(
+                    &state,
+                    selected[0].effect.target_filter().unwrap(),
+                    P0,
+                    counter,
+                );
+                assert!(legal.contains(&TargetRef::Object(own)));
+                assert_counter_in_pools(
+                    &state,
+                    counter,
+                    None,
+                    if x_kind == AbilityKind::Spell || foreign_noncreature {
+                        GateDecision::Allow
+                    } else {
+                        GateDecision::Reject
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn all_plain_modal_counter_rejects_ineligible_foreign_spell_and_keeps_useful_sibling() {
+        for controller in [P1, P0] {
+            let mut scenario = GameScenario::new();
+            // Synthetic two-mode plain counter, both modes noncreature-only.
+            let counter = scenario.add_spell_to_hand_from_oracle(P0, "Modal Counter Witness", true,
+                "Choose one —\n• Counter target noncreature spell.\n• Counter target noncreature spell unless its controller pays {2}.")
+                .with_mana_cost(ManaCost::Cost { generic: 0, shards: vec![ManaCostShard::Blue] }).id();
+            scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+            let (mut state, _) = counter_response_board(scenario, controller);
+            push_stack_spell(&mut state, P0, "Own Instant Witness", CoreType::Instant);
+            let object = &state.objects[&counter];
+            assert!(object.modal.is_some());
+            let modes = modal_spell_mode_ability_refs(object).collect::<Vec<_>>();
+            assert_eq!(modes.len(), 2);
+            assert!(modes.iter().all(|mode| is_pure_counter_payload(
+                &collect_definition_effects_with(mode, ModeWalk::All)
+            )));
+            let root = assert_counter_in_pools(&state, counter, None, GateDecision::Reject);
+            assert_counter_never_chosen(&state, &root.action);
+            push_stack_spell(&mut state, P1, "Foreign Instant Witness", CoreType::Instant);
+            let root = assert_counter_in_pools(&state, counter, None, GateDecision::Allow);
+            let next = replay_counter_announcement(&state, &root, P0).unwrap();
+            assert!(matches!(next.waiting_for, WaitingFor::ModeChoice { .. }));
+            assert_counter_response_in_pools(
+                &next,
+                GameAction::SelectModes { indices: vec![0] },
+                true,
+            );
+        }
+    }
+
+    /// Production path for the field report: the engine issues the Spell
+    /// Pierce cast (its own Counterspell is a legal target), the gate removes
+    /// it, scoring does not bring it back, and neither chooser route samples
+    /// it. The positive control keeps the cast in the gated pool.
+    #[test]
+    fn counter_aimed_only_at_own_spell_never_reaches_the_chooser() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let gated_pool = |state: &GameState| {
+            let issued = engine::ai_support::candidate_actions(state);
+            let decision = AiDecisionContext {
+                waiting_for: state.waiting_for.clone(),
+                candidates: issued.clone(),
+            };
+            let gated = gate_candidates(
+                state,
+                &decision,
+                issued.clone(),
+                P0,
+                &config,
+                &AiContext::empty(&config.weights),
+            );
+            (issued, gated)
+        };
+
+        let (state, pierce) = pierce_board(false);
+        let (issued, gated) = gated_pool(&state);
+        assert!(
+            issued.iter().any(|c| casts(&c.action, pierce)),
+            "precondition: the engine issues the Spell Pierce cast"
+        );
+        assert!(
+            gated.iter().all(|c| !casts(&c.candidate.action, pierce)),
+            "a counter whose only legal target is the AI's own spell must be gated"
+        );
+        assert!(
+            crate::search::score_candidates(&state, P0, &config)
+                .iter()
+                .all(|(action, _)| !casts(action, pierce)),
+            "the scored path must not reintroduce the gated cast"
+        );
+        for search_enabled in [false, true] {
+            let mut chooser_config = config.clone();
+            chooser_config.search.enabled = search_enabled;
+            for seed in 0..8 {
+                let mut rng = ChaCha20Rng::seed_from_u64(seed);
+                assert!(
+                    !crate::search::choose_action(&state, P0, &chooser_config, &mut rng)
+                        .is_some_and(|action| casts(&action, pierce)),
+                    "the {search_enabled:?} chooser route must not sample the gated cast"
+                );
+            }
+        }
+
+        let (state, pierce) = pierce_board(true);
+        let (_, gated) = gated_pool(&state);
+        assert!(
+            gated.iter().any(|c| casts(&c.candidate.action, pierce)),
+            "with an opponent noncreature spell in reach the cast stays in the pool"
+        );
+    }
+
+    /// The announcement gate must retain useful counters before target selection.
+    #[test]
+    fn useful_self_counter_casts_remain_in_the_engine_issued_pool() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        for (name, oracle, targets_ability) in [
+            ("Stifle", "Counter target activated or triggered ability.", true),
+            (
+                "Mixed Counter Probe",
+                "Counter target noncreature spell. Draw a card.",
+                false,
+            ),
+            (
+                "Memory Lapse",
+                "Counter target spell. If that spell is countered this way, put it on top of its owner's library instead of into that player's graveyard.",
+                false,
+            ),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_mana_pool(P0, pooled_mana(ManaType::Blue, 1));
+            let counter = scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, oracle)
+                .with_mana_cost(ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Blue],
+                })
+                .id();
+            let drawback = scenario
+                .add_artifact_from_oracle(P0, "Drawback Probe", "{T}: You lose 3 life.")
+                .id();
+            let mut runner = scenario.build();
+            if targets_ability {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: drawback,
+                        ability_index: 0,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                    })
+                    .expect("the engine announces the harmful own ability");
+                assert!(runner.state().stack.iter().any(|entry| {
+                    entry.controller == P0
+                        && matches!(&entry.kind, StackEntryKind::ActivatedAbility { ability, .. }
+                            if matches!(ability.effect, Effect::LoseLife { .. }))
+                }), "reach-guard: the harmful own ability is on the stack");
+            } else {
+                push_stack_spell(runner.state_mut(), P0, "Counterspell", CoreType::Instant);
+            }
+            if name != "Memory Lapse" {
+                push_stack_spell(runner.state_mut(), P1, "Makindi Sliderunner", CoreType::Creature);
+            }
+            let state = runner.state_mut();
+            set_priority_window(state, Phase::PreCombatMain, P1);
+            let issued = engine::ai_support::candidate_actions(state);
+            assert!(
+                issued.iter().any(|candidate| casts(&candidate.action, counter)),
+                "reach-guard: the engine issues the {name} cast"
+            );
+            let decision = AiDecisionContext {
+                waiting_for: state.waiting_for.clone(),
+                candidates: issued.clone(),
+            };
+            let gated = gate_candidates(
+                state,
+                &decision,
+                issued,
+                P0,
+                &config,
+                &AiContext::empty(&config.weights),
+            );
+            assert!(
+                gated.iter().any(|candidate| casts(&candidate.candidate.action, counter)),
+                "the useful {name} self-counter must survive the announcement gate"
+            );
+        }
+    }
+
+    /// Non-vacuity: one opponent spell in the legal set makes it a real counter.
+    #[test]
+    fn allows_counter_when_an_opponent_spell_is_targetable() {
+        let mut scenario = GameScenario::new();
+        let pierce = counter_in_hand(&mut scenario, "Spell Pierce", SPELL_PIERCE_ORACLE);
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_ne!(gate_cast(state, pierce), GateDecision::Reject);
+    }
+
+    const GLEN_ELENDRA_ORACLE: &str =
+        "{U}, Sacrifice this creature: Counter target noncreature spell.";
+
+    /// The same hole through an activated ability: Glen Elendra Archmage can
+    /// only reach noncreature spells, and the only one is the AI's own.
+    #[test]
+    fn rejects_counter_activation_whose_only_legal_target_is_own_spell() {
+        let mut scenario = GameScenario::new();
+        let archmage = scenario
+            .add_creature_from_oracle(P0, "Glen Elendra Archmage", 2, 2, GLEN_ELENDRA_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Makindi Sliderunner", CoreType::Creature);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_eq!(gate_activation(state, archmage), GateDecision::Reject);
+    }
+
+    /// Non-vacuity for the activation: an opponent noncreature spell is a real
+    /// target.
+    #[test]
+    fn allows_counter_activation_when_an_opponent_spell_is_targetable() {
+        let mut scenario = GameScenario::new();
+        let archmage = scenario
+            .add_creature_from_oracle(P0, "Glen Elendra Archmage", 2, 2, GLEN_ELENDRA_ORACLE)
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        set_priority_window(state, Phase::PreCombatMain, P1);
+
+        assert_ne!(gate_activation(state, archmage), GateDecision::Reject);
+    }
+
+    /// Verdict on choosing `target` for a pending counter `effect` whose legal
+    /// targets are `legal` — the multi-target case, where the choice reaches
+    /// `reject_futile_target`.
+    fn counter_target_verdict(
+        state: &GameState,
+        effect: Effect,
+        legal: Vec<TargetRef>,
+        target: ObjectId,
+    ) -> GateDecision {
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P0,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(900),
+                    CardId(900),
+                    ResolvedAbility::new(effect, Vec::new(), ObjectId(900), P0),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal,
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let candidate = choose_target_candidate(target);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    fn plain_counter(
+        countered_spell_zone: Option<engine::types::ability::SpellStackToGraveyardReplacement>,
+    ) -> Effect {
+        Effect::Counter {
+            target: TargetFilter::Any,
+            source_rider: None,
+            countered_spell_zone,
+        }
+    }
+
+    /// With an opponent spell and the AI's own both legal, choosing its own
+    /// spell is rejected; choosing the opponent's is not.
+    #[test]
+    fn rejects_choosing_own_spell_as_counter_target() {
+        let mut runner = GameScenario::new().build();
+        let state = runner.state_mut();
+        let theirs = push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        let mine = push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        let legal = vec![TargetRef::Object(theirs), TargetRef::Object(mine)];
+
+        assert_eq!(
+            counter_target_verdict(state, plain_counter(None), legal.clone(), mine),
+            GateDecision::Reject
+        );
+        assert_ne!(
+            counter_target_verdict(state, plain_counter(None), legal, theirs),
+            GateDecision::Reject
+        );
+    }
+
+    /// Boundary: a redirecting counter (Memory Lapse: top of the library) on
+    /// the AI's own spell is outside the proof.
+    #[test]
+    fn allows_choosing_own_spell_for_redirecting_counter() {
+        let mut runner = GameScenario::new().build();
+        let state = runner.state_mut();
+        let theirs = push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        let mine = push_stack_spell(state, P0, "Counterspell", CoreType::Instant);
+        let lapse = plain_counter(Some(
+            engine::types::ability::SpellStackToGraveyardReplacement::Library {
+                position: engine::types::ability::LibraryPosition::Top,
+            },
+        ));
+
+        assert_ne!(
+            counter_target_verdict(
+                state,
+                lapse,
+                vec![TargetRef::Object(theirs), TargetRef::Object(mine)],
+                mine,
+            ),
+            GateDecision::Reject
+        );
+    }
+
+    /// Boundary: the proof is about SPELLS. Countering the AI's own ability
+    /// (Stifle on an upkeep cost) is a real play.
+    #[test]
+    fn allows_choosing_own_ability_as_counter_target() {
+        let mut runner = GameScenario::new().build();
+        let state = runner.state_mut();
+        let theirs = push_stack_spell(state, P1, "Lightning Bolt", CoreType::Instant);
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            P0,
+            "Engine".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: ability,
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), source, P0)),
+            },
+        });
+
+        assert_ne!(
+            counter_target_verdict(
+                state,
+                plain_counter(None),
+                vec![TargetRef::Object(theirs), TargetRef::Object(ability)],
+                ability,
+            ),
+            GateDecision::Reject
+        );
+    }
+
     /// CR 702.21a: never target a warded creature whose ward cost the AI can't
     /// pay — the spell would just be countered.
     #[test]
@@ -7290,6 +9818,122 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// Gate verdict for P0 targeting a P1 creature warded with `ward`, with P0's
+    /// hand staged by `stage_hand`. When `stage_hand` returns the id of a hand
+    /// card, that card is the spell being cast (the decision's pending cast), as
+    /// for a real `TargetSelection`.
+    fn ward_discard_gate(
+        ward: WardCost,
+        stage_hand: impl FnOnce(&mut GameScenario) -> Option<ObjectId>,
+    ) -> GateDecision {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(ward))
+            .id();
+        let spell_being_cast = stage_hand(&mut scenario);
+        let runner = scenario.build();
+        let state = runner.state();
+        let mut decision = damage_target_decision(creature, 3);
+        if let (Some(spell), WaitingFor::TargetSelection { pending_cast, .. }) =
+            (spell_being_cast, &mut decision.waiting_for)
+        {
+            pending_cast.object_id = spell;
+            pending_cast.card_id = state.objects[&spell].card_id;
+        }
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// Saruman of Many Colors: "Ward—Discard an enchantment, instant, or
+    /// sorcery card."
+    fn saruman_ward() -> WardCost {
+        use engine::types::ability::{TypeFilter, TypedFilter};
+        WardCost::Discard {
+            count: 1,
+            filter: Some(TargetFilter::Or {
+                filters: [
+                    TypeFilter::Enchantment,
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ]
+                .into_iter()
+                .map(|card_type| TargetFilter::Typed(TypedFilter::new(card_type)))
+                .collect(),
+            }),
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+        }
+    }
+
+    /// CR 702.21a + CR 701.9a + CR 205.2a + CR 118.3: a card-type-filtered ward
+    /// discard is payable only from a hand card of a listed type.
+    #[test]
+    fn ward_discard_filter_requires_a_matching_hand_card() {
+        let creature_only = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            None
+        });
+        assert_eq!(creature_only, GateDecision::Reject);
+
+        let with_instant = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            scenario.add_spell_to_hand(P0, "Shock", true);
+            None
+        });
+        assert_ne!(with_instant, GateDecision::Reject);
+    }
+
+    /// CR 702.21a + CR 701.9a + CR 118.3: a counted ward discard needs that many
+    /// cards in hand.
+    #[test]
+    fn ward_discard_count_requires_enough_hand_cards() {
+        let ward = WardCost::Discard {
+            count: 2,
+            filter: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+        };
+        let one_card = ward_discard_gate(ward.clone(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            None
+        });
+        assert_eq!(one_card, GateDecision::Reject);
+
+        let two_cards = ward_discard_gate(ward, |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            scenario.add_creature_to_hand(P0, "Cub", 1, 1);
+            None
+        });
+        assert_ne!(two_cards, GateDecision::Reject);
+    }
+
+    /// CR 601.2a + CR 702.21a: the spell being cast is on the stack, not in
+    /// hand, when the ward trigger resolves, so it cannot pay its own target's
+    /// ward discard.
+    #[test]
+    fn ward_discard_excludes_the_spell_being_cast() {
+        let only_the_spell = ward_discard_gate(saruman_ward(), |scenario| {
+            Some(scenario.add_spell_to_hand(P0, "Shock", true).id())
+        });
+        assert_eq!(only_the_spell, GateDecision::Reject);
+
+        let with_a_second_instant = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_spell_to_hand(P0, "Opt", true);
+            Some(scenario.add_spell_to_hand(P0, "Shock", true).id())
+        });
+        assert_ne!(with_a_second_instant, GateDecision::Reject);
     }
 
     /// CR 702.21a + CR 119.4: Phyrexian Fleshgorger's Ward uses its current
@@ -8093,6 +10737,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
         };
@@ -8336,5 +10981,590 @@ mod tests {
 
         assert_parses_as_temporary_pump(state, dragon);
         assert_eq!(gate_activation(state, dragon), GateDecision::Reject);
+    }
+
+    const ARC_TRAIL: &str =
+        "Arc Trail deals 2 damage to any target and 1 damage to any other target.";
+
+    /// Arc Trail cast by P0 at `first` (2 damage) and `second` (1 damage).
+    fn arc_trail_on_stack(
+        first: (PlayerId, i32),
+        second: (PlayerId, i32),
+    ) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario
+            .add_creature(first.0, "First", first.1, first.1)
+            .id();
+        let b = scenario
+            .add_creature(second.0, "Second", second.1, second.1)
+            .id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Arc Trail", true, ARC_TRAIL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        runner.cast(card).target_objects(&[a, b]).commit();
+        (runner, a, b)
+    }
+
+    /// `assess_candidate` for P1 choosing `target` for a destroy spell.
+    fn destroy_target_gate(state: &GameState, target: ObjectId) -> GateDecision {
+        let destroy = Effect::Destroy {
+            target: TargetFilter::Any,
+            cant_regenerate: false,
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P1,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(902),
+                    CardId(902),
+                    ResolvedAbility::new(destroy, Vec::new(), ObjectId(902), P1),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(target)],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+            metadata: ActionMetadata::for_actor(Some(P1), TacticalClass::Target),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P1,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    #[test]
+    fn arc_trail_penalizes_the_creature_it_kills_not_the_one_it_grazes() {
+        let (runner, grazed, killed) = arc_trail_on_stack((P1, 3), (P1, 1));
+        let state = runner.state();
+        let root = state
+            .stack
+            .back()
+            .and_then(|e| e.ability())
+            .expect("Arc Trail");
+        assert!(
+            root.sub_ability
+                .as_ref()
+                .is_some_and(|node| node.targets == vec![TargetRef::Object(killed)]),
+            "reach guard: the 1-damage node declares the creature it kills"
+        );
+        assert_eq!(
+            destroy_target_gate(state, killed),
+            GateDecision::AllowWithPenalty(-10.0)
+        );
+        assert_eq!(destroy_target_gate(state, grazed), GateDecision::Allow);
+    }
+
+    #[test]
+    fn pump_cannot_save_a_creature_from_damage_aimed_at_another() {
+        let (runner, ai_creature, _) = arc_trail_on_stack((P1, 1), (P0, 1));
+        let state = runner.state();
+        let root = state
+            .stack
+            .back()
+            .and_then(|e| e.ability())
+            .expect("Arc Trail");
+        assert_eq!(
+            root.targets,
+            vec![TargetRef::Object(ai_creature)],
+            "reach guard: the 2-damage root aims at the AI's creature"
+        );
+        assert!(
+            pump_can_save_from_hostile_stack(state, P1, 2),
+            "control: +2 toughness survives the 2 damage aimed at it"
+        );
+        assert!(!pump_can_save_from_hostile_stack(state, P1, 1));
+    }
+
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+
+    /// P0's Shock at P1's creature with toughness `toughness` and `keywords`,
+    /// on the stack.
+    fn shock_on_stack(toughness: i32, keywords: &[Keyword]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = {
+            let mut builder = scenario.add_creature(P1, "Victim", 2, toughness);
+            for keyword in keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        let mut runner = scenario.build();
+        runner.cast(shock).target_object(victim).commit();
+        (runner, victim)
+    }
+
+    #[test]
+    fn a_pump_saves_a_creature_only_from_damage_that_kills_it_without_the_pump() {
+        let (runner, _) = shock_on_stack(2, &[]);
+        assert!(
+            pump_can_save_from_hostile_stack(runner.state(), P1, 1),
+            "control: 2 damage kills a 2-toughness creature, and +1 toughness survives it"
+        );
+        let (runner, _) = shock_on_stack(3, &[]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 1));
+        let (runner, _) = shock_on_stack(2, &[Keyword::Indestructible]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 1));
+
+        // A 1/1 of P0's pings P1's 1/1: +1 toughness survives the ping unless
+        // the 1/1 has deathtouch.
+        for deathtouch in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let victim = scenario.add_creature(P1, "Victim", 1, 1).id();
+            let pinger = {
+                let mut builder = scenario.add_creature_from_oracle(
+                    P0,
+                    "Prodigal Pyromancer",
+                    1,
+                    1,
+                    PRODIGAL_PYROMANCER,
+                );
+                if deathtouch {
+                    builder.with_keyword(Keyword::Deathtouch);
+                }
+                builder.id()
+            };
+            let mut state = scenario.build().state().clone();
+            let ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+                &state.objects[&pinger].abilities[0],
+                pinger,
+                P0,
+                vec![TargetRef::Object(victim)],
+            );
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: pinger,
+                controller: P0,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: pinger,
+                    ability: Box::new(ability),
+                },
+            });
+            assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 1), !deathtouch);
+        }
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_of_every_node_that_acts_on_the_creature() {
+        let (runner, victim) = shock_on_stack(3, &[]);
+        let mut state = runner.state().clone();
+        let root = state
+            .stack
+            .back_mut()
+            .and_then(StackEntry::ability_mut)
+            .expect("Shock");
+        let mut again = root.clone();
+        again.targets = Vec::new();
+        let Effect::DealDamage { target, .. } = &mut again.effect else {
+            panic!("Shock deals damage");
+        };
+        *target = TargetFilter::ParentTarget;
+        root.sub_ability = Some(Box::new(again));
+        let entry = state.stack.back().expect("Shock");
+        assert_eq!(
+            engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
+                .iter()
+                .filter(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                .count(),
+            2,
+            "reach guard: both damage nodes act on the creature"
+        );
+        assert!(!pump_can_save_from_hostile_stack(&state, P1, 1));
+        assert!(
+            pump_can_save_from_hostile_stack(&state, P1, 2),
+            "control: 4 damage does not kill it with +2 toughness"
+        );
+    }
+
+    #[test]
+    fn a_three_player_arc_trail_threatens_each_creature_it_damages() {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let third = PlayerId(2);
+        let first = scenario.add_creature(third, "First", 2, 2).id();
+        let second = scenario.add_creature(P1, "Second", 1, 1).id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Arc Trail", true, ARC_TRAIL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        runner.cast(card).target_objects(&[first, second]).commit();
+        let state = runner.state();
+        assert_eq!(state.players.len(), 3, "reach guard: three players");
+        assert_eq!(
+            state
+                .stack
+                .back()
+                .and_then(|e| e.ability())
+                .map(|root| root.targets.clone()),
+            Some(vec![TargetRef::Object(first)]),
+            "reach guard: the root aims only at the third player's creature"
+        );
+        assert!(will_target_die_from_stack(state, second));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 1));
+        assert!(pump_can_save_from_hostile_stack(state, third, 1));
+    }
+
+    const MURDER: &str = "Destroy target creature.";
+    const RECKLESS_EMBERMAGE: &str =
+        "{1}{R}: This creature deals 1 damage to any target and 1 damage to itself.";
+    const PSIONIC_ENTITY: &str =
+        "{T}: This creature deals 2 damage to any target and 3 damage to itself.";
+
+    /// P0 casts each of `spells` (name, Oracle text) at P1's creature with
+    /// toughness `toughness`, each spell its own stack entry.
+    fn spells_at_one_creature(toughness: i32, spells: &[(&str, &str)]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P1, "Victim", 2, toughness).id();
+        let ids: Vec<ObjectId> = spells
+            .iter()
+            .map(|(name, text)| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, name, true, text)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id()
+            })
+            .collect();
+        for _ in spells {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        for id in ids {
+            runner.cast(id).target_object(victim).commit();
+        }
+        (runner, victim)
+    }
+
+    /// Puts `source`'s first ability on the stack under `controller`, aimed at
+    /// `targets`.
+    fn activate_first_ability(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+        targets: Vec<TargetRef>,
+    ) {
+        let ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+            &state.objects[&source].abilities[0],
+            source,
+            controller,
+            targets,
+        );
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: source,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_of_every_stack_entry_that_acts_on_the_creature() {
+        let (runner, victim) = spells_at_one_creature(3, &[("Shock", SHOCK), ("Shock", SHOCK)]);
+        let state = runner.state();
+        assert!(
+            state.stack.len() == 2
+                && state.stack.iter().all(|entry| {
+                    engine::game::effects::stack_reach::stack_entry_node_reach(state, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                }),
+            "reach guard: each Shock is its own stack entry acting on the creature"
+        );
+        assert!(will_target_die_from_stack(state, victim));
+        assert!(!pump_can_save_from_hostile_stack(state, P1, 1));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 2));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 3));
+
+        let (runner, _) = spells_at_one_creature(2, &[("Murder", MURDER), ("Shock", SHOCK)]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 3));
+    }
+
+    #[test]
+    fn damage_from_an_entry_of_the_creatures_controller_counts_toward_the_pump() {
+        // P1's Reckless Embermage pings P0 and itself; P0's Prodigal Pyromancer
+        // pings the Embermage.
+        for embermage_activated in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let embermage = scenario
+                .add_creature_from_oracle(P1, "Reckless Embermage", 2, 2, RECKLESS_EMBERMAGE)
+                .id();
+            let pyromancer = scenario
+                .add_creature_from_oracle(P0, "Prodigal Pyromancer", 1, 1, PRODIGAL_PYROMANCER)
+                .id();
+            let mut state = scenario.build().state().clone();
+            if embermage_activated {
+                activate_first_ability(&mut state, embermage, P1, vec![TargetRef::Player(P0)]);
+            }
+            activate_first_ability(
+                &mut state,
+                pyromancer,
+                P0,
+                vec![TargetRef::Object(embermage)],
+            );
+            assert_eq!(
+                pump_can_save_from_hostile_stack(&state, P1, 1),
+                embermage_activated
+            );
+        }
+    }
+
+    #[test]
+    fn damage_the_creatures_protection_prevents_is_not_lethal() {
+        // P1's Psionic Entity (blue) deals 2 damage to P0 and 3 damage to itself.
+        for protected in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let entity = {
+                let mut builder =
+                    scenario.add_creature_from_oracle(P1, "Psionic Entity", 2, 2, PSIONIC_ENTITY);
+                builder.with_color(vec![engine::types::mana::ManaColor::Blue]);
+                if protected {
+                    builder.with_keyword(Keyword::Protection(
+                        engine::types::keywords::ProtectionTarget::Color(
+                            engine::types::mana::ManaColor::Blue,
+                        ),
+                    ));
+                }
+                builder.id()
+            };
+            let mut state = scenario.build().state().clone();
+            activate_first_ability(&mut state, entity, P1, vec![TargetRef::Player(P0)]);
+            let entry = state.stack.back().expect("Psionic Entity's ability");
+            assert!(
+                engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
+                    .iter()
+                    .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
+                "reach guard: the 3-damage node acts on the Entity"
+            );
+            assert_eq!(will_target_die_from_stack(&state, entity), !protected);
+            assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 2), !protected);
+        }
+    }
+
+    const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+    const OTHERWORLDLY_JOURNEY: &str = "Exile target creature. At the beginning of the next end step, return that card to the battlefield under its owner's control with a +1/+1 counter on it.";
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    const NO_KEYWORDS: &[&str] = &[];
+    const UNSUMMON: &str = "Return target creature to its owner's hand.";
+
+    /// Each of `spells` (caster, name, MTGJSON keyword names, Oracle text) cast
+    /// in order at P1's 2/2 with `victim_keywords`, each its own stack entry,
+    /// then, when `pumped`, P1's Giant Growth at the 2/2 on top of them.
+    /// Returns the board before the Giant Growth and the zone the 2/2 is in
+    /// once the stack has resolved.
+    fn spells_then_giant_growth(
+        spells: &[(PlayerId, &str, &[&str], &str)],
+        victim_keywords: &[Keyword],
+        pumped: bool,
+    ) -> (GameState, Zone) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = {
+            let mut builder = scenario.add_creature(P1, "Victim", 2, 2);
+            for keyword in victim_keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let ids: Vec<(PlayerId, ObjectId)> = spells
+            .iter()
+            .map(|(caster, name, keyword_names, text)| {
+                let id = scenario
+                    .add_spell_to_hand(*caster, name, true)
+                    .from_oracle_text_with_keywords(keyword_names, text)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                (*caster, id)
+            })
+            .collect();
+        let growth = scenario
+            .add_spell_to_hand_from_oracle(P1, "Giant Growth", true, GIANT_GROWTH)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        let cast_as = |runner: &mut GameRunner, caster: PlayerId, id: ObjectId| {
+            let state = runner.state_mut();
+            state.priority_player = caster;
+            state.waiting_for = WaitingFor::Priority { player: caster };
+            runner.cast(id).target_object(victim).commit();
+        };
+        for (caster, id) in ids {
+            cast_as(&mut runner, caster, id);
+        }
+        let board = runner.state().clone();
+        assert!(
+            board.stack.len() == spells.len()
+                && board.stack.iter().all(|entry| {
+                    engine::game::effects::stack_reach::stack_entry_node_reach(&board, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                }),
+            "reach guard: each spell is its own stack entry acting on the 2/2"
+        );
+        if pumped {
+            cast_as(&mut runner, P1, growth);
+        }
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(state.stack.is_empty(), "the stack resolved");
+        let zones: Vec<Zone> = state
+            .objects
+            .values()
+            .filter(|object| object.name == "Victim")
+            .map(|object| object.zone)
+            .collect();
+        let [zone] = zones[..] else {
+            panic!("one Victim, found in {zones:?}");
+        };
+        (board, zone)
+    }
+
+    /// Whether, once the stack has resolved, P1's 2/2 with `victim_keywords`
+    /// is in the graveyard without the Giant Growth and elsewhere with it,
+    /// paired with the board before the Giant Growth.
+    fn giant_growth_saves_the_two_two(
+        spells: &[(PlayerId, &str, &[&str], &str)],
+        victim_keywords: &[Keyword],
+    ) -> (bool, GameState) {
+        let (board, unpumped) = spells_then_giant_growth(spells, victim_keywords, false);
+        let (_, pumped) = spells_then_giant_growth(spells, victim_keywords, true);
+        (
+            unpumped == Zone::Graveyard && pumped != Zone::Graveyard,
+            board,
+        )
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_that_resolves_before_a_zone_change() {
+        for zone_change in [
+            (P1, "Cloudshift", NO_KEYWORDS, CLOUDSHIFT),
+            (
+                P0,
+                "Otherworldly Journey",
+                NO_KEYWORDS,
+                OTHERWORLDLY_JOURNEY,
+            ),
+            (P0, "Unsummon", NO_KEYWORDS, UNSUMMON),
+        ] {
+            let (saves, board) = giant_growth_saves_the_two_two(
+                &[zone_change, (P0, "Shock", NO_KEYWORDS, SHOCK)],
+                &[],
+            );
+            assert!(saves, "engine: {}, then Shock", zone_change.1);
+            assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+        }
+    }
+
+    #[test]
+    fn damage_below_a_zone_change_leaves_the_pump_nothing_to_save() {
+        let (saves, board) = giant_growth_saves_the_two_two(
+            &[
+                (P0, "Shock", NO_KEYWORDS, SHOCK),
+                (P1, "Cloudshift", NO_KEYWORDS, CLOUDSHIFT),
+            ],
+            &[],
+        );
+        assert!(!saves, "engine: Shock, then Cloudshift");
+        assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+    }
+
+    #[test]
+    fn a_pump_saves_nothing_from_a_destroy_above_or_below_the_damage() {
+        for spells in [
+            [
+                (P0, "Murder", NO_KEYWORDS, MURDER),
+                (P0, "Shock", NO_KEYWORDS, SHOCK),
+            ],
+            [
+                (P0, "Shock", NO_KEYWORDS, SHOCK),
+                (P0, "Murder", NO_KEYWORDS, MURDER),
+            ],
+        ] {
+            let (saves, board) = giant_growth_saves_the_two_two(&spells, &[]);
+            assert!(!saves, "engine: {}, then {}", spells[0].1, spells[1].1);
+            assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+        }
+    }
+
+    const PUNCTURE_BLAST: &str = "Wither (This deals damage to creatures in the form of -1/-1 counters.)\nPuncture Blast deals 3 damage to any target.";
+
+    #[test]
+    fn a_pump_is_judged_past_a_destroy_that_cannot_destroy_the_creature() {
+        for (victim_keywords, indestructible) in
+            [(&[Keyword::Indestructible][..], true), (&[][..], false)]
+        {
+            for spells in [
+                [
+                    (P0, "Murder", NO_KEYWORDS, MURDER),
+                    (P0, "Puncture Blast", &["Wither"][..], PUNCTURE_BLAST),
+                ],
+                [
+                    (P0, "Puncture Blast", &["Wither"][..], PUNCTURE_BLAST),
+                    (P0, "Murder", NO_KEYWORDS, MURDER),
+                ],
+            ] {
+                let (saves, board) = giant_growth_saves_the_two_two(&spells, victim_keywords);
+                assert_eq!(
+                    saves, indestructible,
+                    "engine: {}, then {}, indestructible {indestructible}",
+                    spells[0].1, spells[1].1
+                );
+                assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+            }
+        }
     }
 }

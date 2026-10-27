@@ -1,3 +1,4 @@
+import { WIRE_PROTOCOL_VERSION as GENERATED_VERSION } from "../../generated/protocol-versions";
 import { describe, it, expect } from "vitest";
 
 import {
@@ -6,7 +7,12 @@ import {
   MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
   lobbyProtocolRequiredForFormat,
 } from "../../adapter/ws-adapter";
-import type { EndContinuousEffectOffer } from "../../adapter/types";
+import type {
+  ActivationPhyrexianIntent,
+  EndContinuousEffectOffer,
+  GameAction,
+  PendingCast,
+} from "../../adapter/types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
   WIRE_PROTOCOL_VERSION,
@@ -90,8 +96,8 @@ describe("lobby capability floor for the Dandan format", () => {
 });
 
 describe("encodeWireMessage / decodeWireMessage", () => {
-  it("pins the P2P wire protocol to v129", () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(129);
+  it("uses the generated P2P wire protocol", () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(GENERATED_VERSION);
   });
 
   it("defaults shortcut actions for a legacy payload created before the additive field", () => {
@@ -387,6 +393,16 @@ describe("encodeWireMessage / decodeWireMessage", () => {
               type: "GraveyardPaidCast",
               hit_card: 17,
               cast_transformed: false,
+              // CR 608.2c + CR 601.2a: a populated gains-modifications rider —
+              // the typed modifications AND the printed spell-quality predicate
+              // must survive the wire round trip.
+              enters_with_modifications: {
+                modifications: [{ type: "AddKeyword", keyword: "Haste" }],
+                cast_filter: {
+                  type: "Typed",
+                  type_filters: [{ type: "Creature" }],
+                },
+              },
               graveyard_replacement: {
                 type: "Library",
                 position: { type: "BeneathTop", depth: { type: "Fixed", value: 2 } },
@@ -446,7 +462,41 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       }),
     };
 
-    for (const message of [nonempty, legacyEmpty]) {
+    // FreeCastWindow — a populated rider on the window carrier, with the
+    // optional offer fields (remaining_casts / remaining_mv_budget /
+    // member_pool) omitted; the round trip must keep the populated values and
+    // keep the omitted values omitted.
+    const windowMessage: P2PMessage = {
+      ...nonempty,
+      state: buildGameState({
+        waiting_for: {
+          type: "CastOffer",
+          data: {
+            player: 0,
+            kind: {
+              type: "FreeCastWindow",
+              candidates: [17, 18],
+              face_policy: {
+                filter: { type: "Any" },
+                source_id: 11,
+                controller: 0,
+                constraint: null,
+              },
+              zones: ["Exile"],
+              enters_with_modifications: {
+                modifications: [{ type: "AddKeyword", keyword: "Haste" }],
+                cast_filter: {
+                  type: "Typed",
+                  type_filters: [{ type: "Creature" }],
+                },
+              },
+            },
+          },
+        },
+      }),
+    };
+
+    for (const message of [nonempty, legacyEmpty, windowMessage]) {
       const bytes = await encodeWireMessage(message);
       await expect(decodeWireMessage(bytes)).resolves.toEqual(message);
     }
@@ -518,6 +568,22 @@ describe("encodeWireMessage / decodeWireMessage", () => {
       .toThrow(/Invalid message type/);
   });
 
+  it("accepts the durable terminal receipt tag and rejects a near miss", () => {
+    const result = {
+      key: "session-key",
+      lease: { sessionKey: "session-key", hostIncarnation: "host-1" },
+      recipient: 1,
+      revision: 7,
+      terminalId: "terminal-1:recipient:1",
+      finalStateCommitment: `sha256:${"0".repeat(64)}`,
+      display: { winner: 0, reason: "Game complete" },
+    };
+    expect(validateMessage({ type: "terminal_result_receipt", result, authority: result.lease }))
+      .toMatchObject({ type: "terminal_result_receipt", result });
+    expect(() => validateMessage({ type: "terminal_result_receipts" }))
+      .toThrow(/Invalid message type/);
+  });
+
   /**
    * Row 7, P2P half, at the real wire format: a decoder that does not know the
    * tag throws rather than passing it through. The KNOWN tag on the identical
@@ -534,6 +600,119 @@ describe("encodeWireMessage / decodeWireMessage", () => {
     bytes[0] = 0x00;
     bytes.set(json, 1);
     await expect(decodeWireMessage(bytes)).rejects.toThrow(/Invalid message type/);
+  });
+});
+
+// CR 602.2b + CR 601.2g-h: an activation's payment mode and a manually paid
+// activation's Phyrexian announcement/payment records are engine-authored
+// payload the P2P wire carries untouched. These are transport contracts; the
+// engine's reducer tests own the rules outcomes.
+describe("manual activation payment payload on the P2P wire", () => {
+  const autoActivation: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 21, ability_index: 1 },
+  };
+  const manualActivation: GameAction = {
+    type: "ActivateAbility",
+    data: { source_id: 21, ability_index: 1, payment_mode: { type: "Manual" } },
+  };
+
+  it("keeps the Auto and Manual siblings of one activation distinct in legal actions", () => {
+    const wire = legalActionsToWire({
+      actions: [autoActivation, manualActivation],
+      autoPassRecommended: false,
+    });
+    expect(wire.legalActions).toEqual([autoActivation, manualActivation]);
+    expect(legalActionsFromWire(wire).actions).toEqual([autoActivation, manualActivation]);
+  });
+
+  const pendingActivation = (intent?: ActivationPhyrexianIntent): PendingCast =>
+    ({
+      object_id: 21,
+      card_id: 21,
+      ability: { targets: [] },
+      cost: { type: "Cost", shards: ["PhyrexianBlack"], generic: 1 },
+      activation_ability_index: 0,
+      ...(intent ? { activation_phyrexian_intent: intent } : {}),
+    }) as unknown as PendingCast;
+
+  const intents: Array<[string, ActivationPhyrexianIntent | undefined]> = [
+    ["no announcement", undefined],
+    [
+      "a native announcement only",
+      { native_choices: [{ shard_index: 0, shard: "PhyrexianBlack", choice: { type: "PayLife" } }] },
+    ],
+    [
+      "a native announcement and a distinct indexed payment selection",
+      {
+        native_choices: [{ shard_index: 0, shard: "PhyrexianBlack", choice: { type: "PayMana" } }],
+        payment_choices: [{ shard_index: 0, shard: "PhyrexianBlack", choice: { type: "PayLife" } }],
+      },
+    ],
+    [
+      "a grant-only payment selection with no native symbol",
+      {
+        native_choices: [],
+        payment_choices: [{ shard_index: 1, shard: "Black", choice: { type: "PayLife" } }],
+      },
+    ],
+  ];
+
+  it.each(intents)("round-trips a paused manual activation with %s", async (_label, intent) => {
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "OrderCostReductions",
+          data: {
+            player: 0,
+            reductions: [],
+            outcomes: [],
+            pending_cast: pendingActivation(intent),
+          },
+        },
+      }),
+      events: [],
+      legalActions: [],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "OrderCostReductions") throw new Error("prompt lost");
+    expect(waiting.data.pending_cast.activation_phyrexian_intent).toEqual(intent);
+  });
+
+  it("round-trips a modal activation's Manual mode across the mode prompt", async () => {
+    const msg: P2PMessage = {
+      type: "state_update",
+      state: buildGameState({
+        waiting_for: {
+          type: "AbilityModeChoice",
+          data: {
+            player: 0,
+            modal: { min_choices: 1, max_choices: 1, mode_count: 2, mode_descriptions: ["a", "b"] },
+            source_id: 21,
+            mode_abilities: [],
+            is_activated: true,
+            ability_index: 0,
+            activation_payment_mode: { type: "Manual" },
+          },
+        } as never,
+      }),
+      events: [],
+      legalActions: [manualActivation],
+      manaPaymentShortcutActions: [],
+      viewerInteraction: viewerInteractionWithProducedMana,
+    };
+    const out = await decodeWireMessage(await encodeWireMessage(msg));
+    expect(out).toEqual(msg);
+    const decoded = out as Extract<P2PMessage, { type: "state_update" }>;
+    const waiting = decoded.state.waiting_for;
+    if (waiting.type !== "AbilityModeChoice") throw new Error("prompt lost");
+    expect(waiting.data.activation_payment_mode).toEqual({ type: "Manual" });
   });
 });
 

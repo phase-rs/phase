@@ -119,7 +119,7 @@ fn a_face_up_permanent_records_no_cause() {
 #[test]
 fn a_morph_cast_records_the_morph_cause() {
     assert_eq!(
-        cause_after_face_down_cast(engine::types::keywords::Keyword::Morph(
+        cause_after_face_down_cast(engine::types::keywords::Keyword::morph(
             engine::types::mana::ManaCost::generic(5)
         )),
         Some(FaceDownCause::Morph)

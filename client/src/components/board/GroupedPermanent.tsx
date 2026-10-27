@@ -70,6 +70,7 @@ function waitingForPlayer(waitingFor: WaitingFor | null | undefined): number | n
     case "ChooseTokenHost":
     case "TriggerTargetSelection":
     case "RetargetChoice":
+    case "ChooseObjectsSelection":
     case "PayCost":
     case "EffectZoneChoice":
     case "WardSacrificeChoice":

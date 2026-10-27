@@ -84,7 +84,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, CopiableValues,
     CounterSourceRider, Effect, ReplacementDefinition, ReplacementMode, StaticDefinition,
-    TriggerDefinition, VoteSubject,
+    TargetFilter, TriggerDefinition, VoteSubject,
 };
 use std::ops::ControlFlow;
 
@@ -181,8 +181,9 @@ fn debug_assert_own_resolution_unreachable(scope: ResolutionScope, fn_name: &str
 /// **KNOWN GAP — inline branch carriers are NOT descended on the cost axis.**
 /// `visit_effect_scoped` descends nested `AbilityDefinition`s under
 /// `Vote.per_choice_effect` / `VoteSubject.outcome_template`,
-/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoin` / `FlipCoins`,
-/// `FlipCoinUntilLose`, `RollDie.results`, and `ChooseOneOf.branches` (all via
+/// `SeparateIntoPiles`, `RevealFromHand.on_decline`, `FlipCoins` (win and lose),
+/// `ExileTopCardContest.winner_effect`, `RollDie.results`, and
+/// `ChooseOneOf.branches` (all via
 /// `visit_nested_ability_def_scoped`); this walk does not. A cost sitting on one
 /// of those nested defs — e.g. `ChooseOneOf { branches: [AbilityDefinition {
 /// cost: AbilityCost::Mill { .. }, .. }] }` — is therefore invisible here, which
@@ -428,9 +429,10 @@ where
             visit_copiable_values_scoped(values, scope, visit)?
         }
         // Remaining modifications carry no nested ability/effect carriers.
-        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only hold a
-        // source `TargetFilter`; the granted abilities/triggers are pulled live
-        // from the provider objects at layer collection time, not nested here.
+        // GrantAllActivatedAbilitiesOf / GrantAllTriggeredAbilitiesOf only
+        // hold a source `TargetFilter`; the granted abilities/triggers are
+        // pulled live from the provider objects at layer collection time,
+        // not nested here.
         ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         // CR 707.2c (Metamorphic Alteration): inert parse-time copy marker — no
@@ -681,6 +683,9 @@ where
                 visit_nested_ability_def_scoped(outcome_template, scope, visit)?;
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => {
+            visit_nested_ability_def_scoped(winner_effect, scope, visit)?;
+        }
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -720,12 +725,7 @@ where
                 visit_trigger_scoped(trigger, scope, visit)?
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -736,9 +736,6 @@ where
             if let Some(sub) = lose_effect {
                 visit_nested_ability_def_scoped(sub, scope, visit)?;
             }
-        }
-        Effect::FlipCoinUntilLose { win_effect } => {
-            visit_nested_ability_def_scoped(win_effect, scope, visit)?
         }
         Effect::RollDie { results, .. } => {
             for branch in results {
@@ -1031,6 +1028,7 @@ where
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -1232,6 +1230,9 @@ pub(crate) fn node_fields(node: $Node<'_>, v: &mut impl FnMut(Symbol<'_>)) {
             if let Some(condition) = &$($mut_)? trigger.condition {
                 trigger_condition(condition, v);
             }
+            if let Some(condition) = &$($mut_)? trigger.attack_cost_condition {
+                static_condition(condition, v);
+            }
         }
         $Node::Static(def) => {
             if let Some(affected) = &$($mut_)? def.affected {
@@ -1319,6 +1320,10 @@ fn ability_condition(condition: &$($mut_)? AbilityCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        AbilityCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         AbilityCondition::PreviousEffectAmount { rhs, .. } => quantity(rhs, v),
         AbilityCondition::ConditionInstead { inner: c } | AbilityCondition::Not { condition: c } => {
             ability_condition(c, v)
@@ -1341,6 +1346,10 @@ fn trigger_condition(condition: &$($mut_)? TriggerCondition, v: &mut impl FnMut(
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        TriggerCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         // CR 201.5a: an `EventTime` condition (a state trigger's head, CR 603.8,
         // or an event trigger's "while" gate, CR 508.1m) is the wrapped
         // condition read only when the trigger fires, so its granter symbols
@@ -1363,6 +1372,10 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
             quantity(lhs, v);
             quantity(rhs, v);
         }
+        StaticCondition::QuantityQuality {
+            quantity: q,
+            quality: _,
+        } => quantity(q, v),
         StaticCondition::IsTapped { scope } => object_scope(scope, v),
         StaticCondition::Not { condition: c } => static_condition(c, v),
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
@@ -1527,4 +1540,51 @@ pub(crate) fn each_granter_symbol(
     v: &mut impl FnMut(granter_symbols::Symbol<'_>),
 ) {
     granter_symbols::each_node(root, &mut |node| granter_symbols::node_fields(node, v));
+}
+
+/// CR 201.5a: whether a granter symbol still names an unbound granter.
+pub(crate) fn names_unbound_granter(symbol: &granter_symbols::Symbol<'_>) -> bool {
+    match symbol {
+        granter_symbols::Symbol::Filter(bound) => bound.is_none(),
+        granter_symbols::Symbol::Scope(scope) => {
+            matches!(scope, crate::types::ability::ObjectScope::GrantingObject)
+        }
+        granter_symbols::Symbol::Caster(_) => false,
+    }
+}
+
+/// CR 201.5a: whether a static's own fields name an unbound granter. Nested definition nodes
+/// are not entered; [`nested_definitions_name_granter`] covers them.
+pub(crate) fn own_fields_name_granter(def: &StaticDefinition) -> bool {
+    let mut names = false;
+    granter_symbols::node_fields(DefinitionNode::Static(def), &mut |symbol| {
+        names |= names_unbound_granter(&symbol);
+    });
+    names
+}
+
+/// CR 201.5a: whether a definition nested in `def`'s modifications names an unbound
+/// granter — together with [`own_fields_name_granter`], the whole of
+/// [`each_granter_symbol`]'s walk over a static.
+pub(crate) fn nested_definitions_name_granter(def: &StaticDefinition) -> bool {
+    let mut names = false;
+    for m in &def.modifications {
+        granter_symbols::each_node_in(m, &mut |node| {
+            granter_symbols::node_fields(node, &mut |symbol| {
+                names |= names_unbound_granter(&symbol);
+            })
+        });
+    }
+    names
+}
+
+/// CR 111.3 + CR 201.5a: whether a created token's static grants its nested definitions
+/// to the token itself. Those definitions are the token's own quoted abilities — its
+/// text, written by the creating effect — so a by-name reference in them names the
+/// creator and is bound at creation, as one in the static's own fields is. Any other
+/// static grants its nested definitions to other objects; the token is that grant's
+/// source, so a by-name reference in them names the token and binds at layer 6
+/// (CR 613.1f).
+pub(crate) fn token_static_grants_to_itself(def: &StaticDefinition) -> bool {
+    matches!(def.affected.as_ref(), Some(TargetFilter::SelfRef))
 }

@@ -1,17 +1,19 @@
 use serde::Serialize;
 
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
+use crate::parser::oracle_nom::target::PlayerAnaphor;
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
-    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousModification,
-    ControlWindow, ControllerRef, CopyRetargetPermission, CounterAdjustment, CounterKindChooser,
-    CounterKindDomain, CounterSourceRider, DigRestOrder, DoorLockOp, Duration, Effect, EffectScope,
-    FaceDownProfile, ForceBlockAttackerRef, GuardReading, LibraryInstructionActor, LibraryPosition,
-    ManaProduction, ManaSpendRestriction, ManaTargetRole, ModalSelectionConstraint,
-    OutsideGameSourcePool, PlayerFilter, PtStat, PtValue, QuantityExpr, SearchDestinationSplit,
-    SearchSelectionConstraint, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    SubAbilityLink, TargetFilter, ThisWayCause, UnloweredGuard,
+    BounceSelection, CastingPermission, ChosenCounterCountCondition, ContinuousEffectOnset,
+    ContinuousModification, ControlWindow, ControllerRef, CopyRetargetPermission,
+    CounterAdjustment, CounterKindChooser, CounterKindDomain, CounterSourceRider, DigRestOrder,
+    DoorLockOp, Duration, Effect, EffectScope, FaceDownProfile, ForceBlockAttackerRef,
+    GuardReading, LibraryInstructionActor, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ManaTargetRole, ModalSelectionConstraint, OutsideGameSourcePool, PlayerFilter, PtStat, PtValue,
+    QuantityExpr, SearchDestinationSplit, SearchSelectionConstraint,
+    SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TargetFilter, ThisWayCause, UnloweredGuard,
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
@@ -46,6 +48,13 @@ pub(crate) struct ParsedEffectClause {
     pub(crate) distribute: Option<DistributionUnit>,
     /// CR 115.1d: Multi-target spec for "any number of" / "up to N" / fixed-count targeting.
     pub(crate) multi_target: Option<MultiTargetSpec>,
+    /// CR 115.6: the Attach HOST operand's printed "up to N target …" — the
+    /// clause-level zero-target authority for the host frame. Stamped ONLY by
+    /// the typed host capture in `imperative.rs`; the generalized clause-count
+    /// detector (`lower::apply_optional_target_fixup`) writes `multi_target`
+    /// and never this flag. Consumed by the assembly OR-stamp.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) optional_targeting: bool,
     /// CR 608.2c: Leading conditional guard from "if X, Y" clause structure.
     /// Set when `parse_clause_ast` detects a leading conditional and the condition
     /// text is parseable by the nom condition combinator pipeline.
@@ -65,6 +74,13 @@ pub(crate) struct ParsedEffectClause {
     /// resolved after line routing; see [`crate::types::ability::UnloweredGuard`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) unlowered_guard: Option<UnloweredGuard>,
+    /// CR 611.2e + CR 608.2c: when this clause's continuous effect begins to apply to a
+    /// permanent an earlier instruction of the same resolution put onto the battlefield.
+    /// Stamped by the clause parser that recognized the verb form ("is/has" ⇒ `WithEntry`);
+    /// every other construction states `WhenFollowed`. Copied onto the assembled
+    /// `AbilityDefinition::entry_onset`.
+    #[serde(skip_serializing_if = "ContinuousEffectOnset::is_when_followed")]
+    pub(crate) entry_onset: ContinuousEffectOnset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -78,6 +94,11 @@ pub(crate) struct SubjectApplication {
     /// `AbilityDefinition.optional` so the resolver treats the sub-ability
     /// as a player choice.
     pub(crate) is_optional: bool,
+    /// CR 608.2c: the player anaphor the subject phrase printed, which names its
+    /// antecedent where `affected` alone cannot ("that player" and "its controller"
+    /// both lower to `ParentTargetController`).
+    #[serde(skip)]
+    pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -252,6 +273,9 @@ pub(crate) struct SubjectPhraseAst {
     pub(crate) inherits_parent: bool,
     /// CR 608.2c: Propagated from `SubjectApplication.is_optional`.
     pub(crate) is_optional: bool,
+    /// Propagated from `SubjectApplication.player_anaphor`.
+    #[serde(skip)]
+    pub(crate) player_anaphor: Option<PlayerAnaphor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -260,11 +284,19 @@ pub(crate) enum PredicateAst {
         effect: Effect,
         duration: Option<Duration>,
         sub_ability: Option<Box<AbilityDefinition>>,
+        /// CR 611.2e: the onset the predicate's verb form states (see
+        /// `ParsedEffectClause::entry_onset`).
+        onset: ContinuousEffectOnset,
     },
     Become {
         effect: Effect,
         duration: Option<Duration>,
         sub_ability: Option<Box<AbilityDefinition>>,
+        /// CR 611.2e: the onset the clause states. A "becomes" predicate is `WhenFollowed`;
+        /// the copula arms that lower through this variant ("it's a 3/3 …", "it's a Treasure
+        /// artifact …, and it loses all other card types", "is no longer <supertype>") state
+        /// `WithEntry`.
+        onset: ContinuousEffectOnset,
     },
     Restriction {
         effect: Effect,
@@ -582,9 +614,24 @@ pub(crate) enum ContinuationAst {
     /// (Stangg / Shark Shredder). Only ChangeZone honors the gate;
     /// CopyTokenOf / Token always enter unconditionally.
     EntersTappedAttacking { moved_filter: Option<TargetFilter> },
-    /// CR 122.6a: "The token enters with X +1/+1 counters on it, where X is ..."
-    /// Absorbs into the preceding Token effect by populating `enter_with_counters`.
+    /// CR 122.6 + CR 614.12: an entry-counter rider — "The token enters with X
+    /// +1/+1 counters on it, where X is …", or an unconditional "<it | that creature
+    /// | each of them> enters with N additional <counter> counter(s) on it" after
+    /// a battlefield mover. Absorbs into the preceding `Token`'s or battlefield
+    /// `ChangeZone`'s `enter_with_counters`. (The name predates the `ChangeZone`
+    /// producer.) The imperative "put … counters on it" form is
+    /// [`Self::PutCountersOnLastCreated`].
     TokenEntersWithCounters {
+        counter_type: CounterType,
+        count: QuantityExpr,
+    },
+    /// CR 608.2c + CR 122.1: imperative "put N <type> counter(s) on it" after a
+    /// create-token clause — a separate, later instruction on the token(s) that
+    /// clause just created, not counters the token enters with. Lowers to a
+    /// `ContinuationStep` `Effect::PutCounter { target: LastCreated }` sub
+    /// directly under the `Effect::Token`: the token enters first, then
+    /// receives the counters (Zaxara, the Exemplary rulings).
+    PutCountersOnLastCreated {
         counter_type: CounterType,
         count: QuantityExpr,
     },
@@ -791,12 +838,16 @@ pub(crate) enum ImperativeFamilyAst {
     /// CR 611.2e: because the definition uses the "is [characteristic]" form
     /// ("It's a Borg artifact creature"), the rule requires the type change to
     /// apply SIMULTANEOUSLY with the permanent entering the battlefield. The
-    /// engine installs it after entry via the shared `ChangeZone` +
-    /// `GenericEffect` continuation, so an ETB trigger keying on the new
-    /// characteristics does not see them. This is a PRE-EXISTING, CLASS-WIDE
-    /// deviation shared with Rise from the Grave and Grave Betrayal (both also
-    /// the "is" form); Puppeteer Clique's "It gains haste" is the "gains" form
-    /// and is correct. Not introduced here, and out of scope to fix.
+    /// engine still installs it after entry via the shared `ChangeZone` +
+    /// `GenericEffect` continuation, but that continuation is stamped
+    /// `ContinuousEffectOnset::WithEntry`, so the resolution defers its enter
+    /// observation until the continuation has applied and enter observers read
+    /// the entrant with the new characteristics (shared with Rise from the
+    /// Grave and Grave Betrayal, also the "is" form; Puppeteer Clique's "It
+    /// gains haste" is the "gains" form and is not deferred). Residual: the
+    /// deferral is one observation point at the end of the resolution, so
+    /// observers also see any later instruction's change (the same class as
+    /// Call a Surprise Witness's later flying counter).
     ///
     /// `assimilate` has NO CR 701.x keyword-action number: the set is
     /// unreleased and `docs/MagicCompRules.txt` has zero matches for it. Do not
@@ -1009,17 +1060,14 @@ pub(crate) enum ImperativeFamilyAst {
         sides: u8,
         modifier: Option<crate::types::ability::DieRollModifier>,
     },
-    /// CR 705: Flip a coin.
-    FlipCoin,
-    /// CR 705: Flip N coins. `count` is the number of flips; consolidation
-    /// passes may attach `win_effect`/`lose_effect` from a following sentence
-    /// (e.g., "for each heads …"). Emitted for "flip N coins" / "flip X coins"
-    /// where N > 1.
+    /// CR 705.1 + CR 705.2: Flip coins. `flips` carries the run: "flip a coin" is
+    /// `Exactly { Fixed 1 }`, "flip N coins" / "flip X coins" (N > 1) is `Exactly { count }`,
+    /// and "flip a coin until you lose a flip" is `UntilLoss`. Consolidation passes may
+    /// attach `win_effect`/`lose_effect` from a following sentence (e.g., "for each
+    /// heads …").
     FlipCoins {
-        count: crate::types::ability::QuantityExpr,
+        flips: crate::types::ability::CoinFlipRun,
     },
-    /// CR 705: Flip a coin until you lose a flip.
-    FlipCoinUntilLose,
     /// CR 506.4: Remove a creature from combat.
     RemoveFromCombat(TargetFilter),
     Shuffle(ShuffleImperativeAst),
@@ -1300,6 +1348,11 @@ pub(crate) enum TargetedImperativeAst {
     ReturnToBattlefield {
         target: TargetFilter,
         origin: Option<Zone>,
+        /// CR 608.2d + CR 202.3: a fixed aggregate restriction on an
+        /// untargeted resolution-time subset, separate from per-card filters.
+        choice_constraint: Option<crate::types::ability::ChooseFromZoneConstraint>,
+        /// CR 608.2d: the printed subset cardinality, independent of its budget.
+        choice_cardinality: Option<MultiTargetSpec>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
         /// CR 110.2a: the battlefield-entry controller. `Override(r)` routes
@@ -1550,6 +1603,9 @@ pub(crate) enum UtilityImperativeAst {
         /// `ctx.parent_target_available` at the one construction site where
         /// `ParseContext` is live (issue #1094).
         parent_target_available: bool,
+        /// CR 608.2k + CR 120.1: object named by the trigger condition (for
+        /// example, the damaged recipient). Parent targets remain nearer.
+        object_pronoun_ref: Option<TargetFilter>,
     },
     Regenerate {
         text: String,
@@ -1593,6 +1649,14 @@ pub(crate) enum UtilityImperativeAst {
         /// `Effect::Attach.selection`; the HOST operand's timing stays the
         /// ability-level `TargetChoiceTiming`.
         selection: AttachSelection,
+        /// CR 115.6: the HOST operand's printed target-count spec ("attach this
+        /// Equipment to up to one target creature you control"). `None` means
+        /// the host is mandatory; `Some(spec)` keeps the count, not just a
+        /// boolean, and is mirrored onto `ParsedEffectClause.optional_targeting`.
+        /// Captured independently of whether the ATTACHMENT operand claims an
+        /// announced slot; the trigger-body `has_up_to` stamp is gated separately
+        /// for Attach.
+        host_target: Option<MultiTargetSpec>,
     },
     /// CR 608.2c (rules of English — number agreement) + CR 400.7: an Attach
     /// instruction whose ATTACHMENT operand is a plural anaphor ("attach
@@ -1760,6 +1824,15 @@ pub(crate) enum ChooseImperativeAst {
         min: u32,
         max: Option<u32>,
     },
+    /// CR 115.10a + CR 608.2d: "choose an object and a player" makes two
+    /// untargeted choices during resolution, in the printed order.
+    ObjectAndPlayer {
+        object: TargetFilter,
+        player: crate::types::ability::ChoiceType,
+        /// The printed object-and-player clause, kept so the bare-effect
+        /// fail-closed marker carries Oracle text like its siblings.
+        clause: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1926,6 +1999,12 @@ pub(crate) enum ShuffleImperativeAst {
     },
     ChangeZoneAllToLibrary {
         origins: Vec<Zone>,
+    },
+    /// "shuffle ~ and {possessive} {zone} into {owner}'s library" — the source
+    /// object plus every card in the named zone(s) (Elixir of Immortality).
+    SelfAndZonesToLibrary {
+        origins: Vec<Zone>,
+        owner: TargetFilter,
     },
     /// "shuffle target card from {origin} into {owner}'s library" —
     /// targeted zone change + shuffle composition.
@@ -2174,6 +2253,7 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
 
 pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
     ParsedEffectClause {
+        optional_targeting: false,
         effect,
         duration: None,
         sub_ability: None,
@@ -2183,6 +2263,7 @@ pub(crate) fn parsed_clause(effect: Effect) -> ParsedEffectClause {
         optional: false,
         unless_pay: None,
         unlowered_guard: None,
+        entry_onset: ContinuousEffectOnset::WhenFollowed,
     }
 }
 
@@ -3039,6 +3120,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CopySpell { .. }
         | Effect::EpicCopy { .. }
@@ -3116,9 +3198,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -3182,6 +3262,7 @@ pub(crate) fn duration_governs(effect: &Effect) -> bool {
         | Effect::SkipNextStep { .. }
         | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }

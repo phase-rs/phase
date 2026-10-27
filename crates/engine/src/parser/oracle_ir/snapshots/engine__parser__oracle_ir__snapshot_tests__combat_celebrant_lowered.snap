@@ -90,6 +90,12 @@ expression: "&lowered"
       "description": "If ~ hasn't been exerted this turn, you may exert it as it attacks. When you do, untap all other creatures you control and after this phase, there is an additional combat phase.",
       "constraint": null,
       "condition": null,
+      "attack_cost_condition": {
+        "type": "Not",
+        "condition": {
+          "type": "SourceExertedThisTurn"
+        }
+      },
       "batched": false
     }
   ],

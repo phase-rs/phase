@@ -367,6 +367,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::Discover { .. }
         | Effect::PhysicalContest { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::DraftFromSpellbook { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachPlayerCopyChosen { .. }
@@ -385,9 +386,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::ExileFaceDownPile { .. }
         | Effect::Exploit { .. }
         | Effect::ExploreAll { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::Forage
         | Effect::CompletePlayerAction { .. }
         | Effect::ForceAttack { .. }
@@ -467,6 +466,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::SearchOutsideGame { .. }
         | Effect::Seek { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SetClassLevel { .. }
         | Effect::SetDayNight { .. }
         | Effect::SetLifeTotal { .. }
@@ -905,6 +905,10 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
 
         // CR 115.10a: a compound "you and permanents you control" recipient.
         TargetFilter::ControllerAndControlledPermanents { .. } => FilterDomain::ANYTHING,
+
+        // CR 506.3: the player or planeswalker an attacker is attacking. A planeswalker
+        // may itself be a creature, so this fails open rather than claiming a player.
+        TargetFilter::AttackedPlayerOrPlaneswalker => FilterDomain::ANYTHING,
 
         TargetFilter::Player
         | TargetFilter::Controller
@@ -4960,5 +4964,19 @@ mod filter_domain_tests {
         );
         assert!(!filter_admits_creature(&filter));
         assert!(!filter_is_creature_only(&filter));
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_domain_tests {
+    use super::*;
+
+    /// CR 506.3: a planeswalker may itself be a creature, so the referent fails open.
+    #[test]
+    fn attacked_referent_domain_is_anything() {
+        assert_eq!(
+            filter_domain(&TargetFilter::AttackedPlayerOrPlaneswalker),
+            FilterDomain::ANYTHING
+        );
     }
 }

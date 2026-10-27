@@ -27,6 +27,7 @@ fn tree_of_perdition_exchanges_opponent_life_with_its_toughness() {
         .act(GameAction::ActivateAbility {
             source_id: tree,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("begin Tree of Perdition activation");
 

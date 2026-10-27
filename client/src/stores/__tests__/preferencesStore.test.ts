@@ -1,7 +1,8 @@
 import { act } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { usePreferencesStore } from "../preferencesStore";
+import { emptyPoolSelection } from "../../services/randomPoolSelection";
 
 describe("preferencesStore", () => {
   it.each([
@@ -20,6 +21,102 @@ describe("preferencesStore", () => {
     }));
     usePreferencesStore.persist.rehydrate();
     expect(usePreferencesStore.getState().boardBackground).toBe(expected);
+  });
+
+  it("normalizes malformed v37 pool selections on migrate", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {
+        humanPoolSelection: {
+          excludedGroups: "unfiled",
+          excludedDecks: ["saved:a", 7],
+          includedDecks: [],
+        },
+        aiPoolSelection: "nope",
+      },
+      version: 37,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().humanPoolSelection).toEqual({
+      excludedGroups: [],
+      excludedDecks: ["saved:a"],
+      includedDecks: [],
+    });
+    expect(usePreferencesStore.getState().aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  it("defaults absent pool selections to include-all", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {},
+      version: 37,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(usePreferencesStore.getState().aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  it("preserves v38 priority-alert choices while adding pool selections", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {
+        priorityAlertVisual: false,
+        priorityAlertSound: true,
+        priorityAlertTitle: false,
+      },
+      version: 38,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    const state = usePreferencesStore.getState();
+    expect(state.priorityAlertVisual).toBe(false);
+    expect(state.priorityAlertSound).toBe(true);
+    expect(state.priorityAlertTitle).toBe(false);
+    expect(state.humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(state.aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  describe("card animation style on memory-constrained devices", () => {
+    const IPHONE_UA =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
+    const DESKTOP_UA =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+    const realUserAgent = navigator.userAgent;
+
+    function useUserAgent(userAgent: string): void {
+      Object.defineProperty(navigator, "userAgent", { value: userAgent, configurable: true });
+    }
+
+    afterEach(() => useUserAgent(realUserAgent));
+
+    it.each([
+      [IPHONE_UA, "classic"],
+      [DESKTOP_UA, "webgl"],
+    ] as const)("moves a v39 webgl store to the device default (%s)", (userAgent, expected) => {
+      useUserAgent(userAgent);
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardAnimationStyle: "webgl" },
+        version: 39,
+      }));
+      usePreferencesStore.persist.rehydrate();
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe(expected);
+    });
+
+    it("keeps a phone's webgl choice made after the migration", () => {
+      useUserAgent(IPHONE_UA);
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardAnimationStyle: "webgl" },
+        version: 40,
+      }));
+      usePreferencesStore.persist.rehydrate();
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+    });
+
+    it.each([
+      [IPHONE_UA, "classic"],
+      [DESKTOP_UA, "webgl"],
+    ] as const)("resets to the device default (%s)", (userAgent, expected) => {
+      useUserAgent(userAgent);
+      usePreferencesStore.setState({ cardAnimationStyle: expected === "classic" ? "webgl" : "classic" });
+      act(() => usePreferencesStore.getState().resetAllPreferences());
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe(expected);
+    });
   });
 
   beforeEach(() => {
@@ -50,6 +147,8 @@ describe("preferencesStore", () => {
         multiplayerSplitLayoutNudgeDismissed: true,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
+        humanPoolSelection: emptyPoolSelection(),
+        aiPoolSelection: emptyPoolSelection(),
       });
     });
     localStorage.clear();
@@ -74,6 +173,8 @@ describe("preferencesStore", () => {
     expect(state.experimentalTournamentsEnabled).toBe(false);
     expect(state.draftDoubleClickConfirmPick).toBe(true);
     expect(usePreferencesStore.getInitialState().cardAnimationStyle).toBe("webgl");
+    expect(usePreferencesStore.getInitialState().humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(usePreferencesStore.getInitialState().aiPoolSelection).toEqual(emptyPoolSelection());
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {

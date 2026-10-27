@@ -219,7 +219,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
     }
 
     // CR 705.2: Redundant "for each flip you won, " coin-flip quantifier — the
-    // flip loop (`finish_until_lose` / the `FlipCoins` win branch) already runs
+    // flip loop (`complete_run` / the `FlipCoins` win branch) already runs
     // the win effect once per win, so drop the prefix (no `repeat_for`) and keep
     // peeling the bare imperative. Must precede the generic for-each peel, which
     // cannot strip "flip(s) you won" (not a countable clause) and would leave
@@ -318,6 +318,22 @@ fn try_peel_opponent_may_prefix(
     text: &str,
 ) -> Option<(Option<OpponentMayScope>, Option<PlayerFilter>, String)> {
     let lower = text.to_lowercase();
+    // CR 608.2d + CR 115.1: "target opponent may draw …" names the ANNOUNCED
+    // target opponent as the actor, not a controller-held optional that fans out
+    // to every opponent. Declining the peel lets the whole clause parse through
+    // the subject-predicate path, where `subject.rs` marks the clause optional and
+    // `assembly.rs` stamps `optional_player = TargetFilter::DeclaredPlayer { group }`
+    // from this same clause provenance — deliberately NOT a `player_scope`, which
+    // would rebind the whole chain's controller to the opponent's seat.
+    // Mirrors `is_specialized_you_may_phrase`: a dedicated body path needs the
+    // full surface form. The discriminator is evaluated on the WHOLE clause
+    // (the shared `targeted_opponent_may_player_action`), matching the subject
+    // witness and the assembly stamp so the three cannot drift; every other
+    // `target opponent may <verb>` shape (`may have you …`, `may sacrifice …`,
+    // …) fails it and peels exactly as before (M2, `draw`-only axis).
+    if super::oracle_effect::subject::targeted_opponent_may_player_action(&lower) {
+        return None;
+    }
     if let Some((_, rest)) = nom_on_lower(text, &lower, |i| {
         value((), tag("each player may ")).parse(i)
     }) {

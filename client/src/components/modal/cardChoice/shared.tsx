@@ -76,10 +76,21 @@ export function searchChoiceSubtitle(data: SearchChoice["data"], t: TFunction<"g
       ? t("cardChoice.search.subtitleMatchUpTo", opts)
       : t("cardChoice.search.subtitleMatchExact", opts);
   }
-  if (constraint?.type === "DistinctQualities") {
-    return allowsPartialFind
-      ? t("cardChoice.search.subtitleDistinctUpTo", opts)
-      : t("cardChoice.search.subtitleDistinctExact", opts);
+  if (constraint?.type === "SharesQualities") {
+    switch (constraint.relation) {
+      case "DoesNotShare":
+        return allowsPartialFind
+          ? t("cardChoice.search.subtitleDistinctUpTo", opts)
+          : t("cardChoice.search.subtitleDistinctExact", opts);
+      case "Shares":
+        return allowsPartialFind
+          ? t("cardChoice.search.subtitleUpTo", opts)
+          : t("cardChoice.search.subtitleExact", opts);
+      default: {
+        const _exhaustive: never = constraint.relation;
+        return _exhaustive;
+      }
+    }
   }
   if (constraint?.type === "TotalManaValue") {
     return allowsPartialFind
@@ -108,7 +119,8 @@ export type EffectZoneMode =
   | "Battlefield"
   | "Untap"
   | "Tap"
-  | "Attach";
+  | "Attach"
+  | "Cast";
 
 export const EFFECT_ZONE_VISUAL_CLASSES: Record<
   EffectZoneMode,
@@ -154,6 +166,11 @@ export const EFFECT_ZONE_VISUAL_CLASSES: Record<
     overlay: "bg-violet-500/20",
     badge: "bg-violet-500/90",
   },
+  Cast: {
+    ring: "ring-sky-300/80",
+    overlay: "bg-sky-500/20",
+    badge: "bg-sky-500/90",
+  },
 };
 
 export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
@@ -165,6 +182,7 @@ export const EFFECT_ZONE_ACTION_LABEL_KEYS: Record<EffectZoneMode, string> = {
   Untap: "cardChoice.effectZone.labelConfirm",
   Tap: "cardChoice.effectZone.labelConfirm",
   Attach: "cardChoice.effectZone.labelAttach",
+  Cast: "cardChoice.effectZone.labelCast",
 };
 
 export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
@@ -176,4 +194,5 @@ export const EFFECT_ZONE_BADGE_KEYS: Record<EffectZoneMode, string> = {
   Untap: "cardChoice.badges.untap",
   Tap: "cardChoice.badges.tap",
   Attach: "cardChoice.badges.attach",
+  Cast: "cardChoice.badges.cast",
 };

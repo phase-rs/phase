@@ -61,7 +61,7 @@ fn card_db() -> &'static CardDatabase {
 /// fails loudly: the row total, the card-gated rows, and their testable complement.
 #[test]
 fn corpus_table_shape_is_locked() {
-    assert_eq!(corpus::corpus_len(), 61, "corpus must hold all 61 rows");
+    assert_eq!(corpus::corpus_len(), 62, "corpus must hold all 62 rows");
     let gated = (0..corpus::corpus_len())
         .filter(|&i| corpus::row(i).gated_on.is_some())
         .count();
@@ -85,7 +85,7 @@ fn corpus_table_shape_is_locked() {
     }
     // The testable rows are the complement of the gated rows.
     let testable = corpus::corpus_len() - gated;
-    assert_eq!(testable, 56, "56 corpus combos are testable once driven");
+    assert_eq!(testable, 57, "57 corpus combos are testable once driven");
 }
 
 /// META-TEST: the corpus is a clean partition — every row is exactly one of
@@ -104,7 +104,7 @@ fn corpus_partition_is_locked() {
         .filter(|&i| corpus::row(i).deferral.is_some())
         .collect();
 
-    assert_eq!(driven.len(), 22, "22 driven rows");
+    assert_eq!(driven.len(), 23, "23 driven rows");
     assert_eq!(gated.len(), 5, "5 gated rows");
     assert_eq!(deferred.len(), 34, "34 deferred rows");
 
@@ -127,7 +127,7 @@ fn corpus_partition_is_locked() {
         n,
         "driven ∪ gated ∪ deferred must cover every one of the {n} rows"
     );
-    assert_eq!(n, 61);
+    assert_eq!(n, 62);
 
     // Exclusivity: a driven or gated row must not also declare a deferral bucket.
     for &i in driven.iter().chain(gated.iter()) {
@@ -553,6 +553,20 @@ fn drive_combo_d2_kilo_freed_relic() {
     assert_combo(1, &cert);
 }
 
+/// DISPLACER KITTEN + BLAZING FIRESINGER — the prepared Seething Song copy nets {R}{R} a cycle
+/// while Kitten re-prepares Firesinger (CR 722.3c), offered through `apply()`.
+#[test]
+fn drive_combo_61_kitten_firesinger() {
+    let cert = corpus::drive_kitten_firesinger_offer(card_db())
+        .expect("Kitten + Firesinger must be offered as an unbounded red-mana loop");
+    assert_combo(61, &cert);
+    assert!(
+        cert.unbounded.contains(&ResourceAxis::Mana(ManaType::Red)),
+        "the certificate must name red mana (got {:?})",
+        cert.unbounded
+    );
+}
+
 /// PR-7 #8 (offline acceptance): a REAL Pentad Prism seeded with ≥1 charge counter,
 /// under the Kilo/Freed/Relic proliferate engine, is certified as an infinite
 /// preserved-`Generic` charge-counter growth loop — `WinKind::Advantage` (CR 104.4b:
@@ -847,6 +861,7 @@ fn drive_one_ping(probe: &mut LoopProbe, pinger: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: pinger,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate pinger");
     assert!(
@@ -1817,6 +1832,7 @@ fn drive_finite_stack_keeps_ring_empty() {
             .act(GameAction::ActivateAbility {
                 source_id: artifact,
                 ability_index: gain_idx,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activate costless gain-life");
     }
@@ -1931,6 +1947,7 @@ fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
                         .iter()
                         .position(|a| !crate::game::mana_abilities::is_mana_ability(a))
                         .expect("the Sieve's ability"),
+                    payment_mode: CastPaymentMode::Auto,
                 }
             }
             WaitingFor::PayCost { choices, count, .. } => GameAction::SelectCards {

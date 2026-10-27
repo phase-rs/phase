@@ -10,12 +10,11 @@ use crate::game::functioning_abilities::active_replacements;
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
-    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, ObjectScope, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -328,20 +327,6 @@ impl Walk<'_> {
                 return Runs::No;
             }
         }
-        // The chain resolver treats an unless cost of {0} as paid, so a counter
-        // with one counters nothing and the rest of the entry does not run.
-        // Where no player would be asked, it counters; that answer is nothing
-        // here too.
-        if let Some(unless_pay) = &ability.unless_pay {
-            if matches!(ability.effect, Effect::Counter { .. })
-                && matches!(
-                    super::resolved_unless_cost(board, ability, &unless_pay.cost),
-                    AbilityCost::Mana { cost } if cost == ManaCost::zero()
-                )
-            {
-                return Runs::No;
-            }
-        }
         if super::fails_shared_quality(board, ability) {
             return Runs::NotItself;
         }
@@ -439,15 +424,9 @@ fn resolves_once_as_bound(bound: &ResolvedAbility) -> bool {
 /// CR 608.2c: a node that replaces its parent's effect when its condition
 /// holds.
 fn is_instead_override(node: &ResolvedAbility) -> bool {
-    matches!(
-        node.condition,
-        Some(
-            AbilityCondition::AdditionalCostPaidInstead
-                | AbilityCondition::CastVariantPaidInstead { .. }
-                | AbilityCondition::TargetHasKeywordInstead { .. }
-                | AbilityCondition::ConditionInstead { .. }
-        )
-    )
+    node.condition
+        .as_ref()
+        .is_some_and(AbilityCondition::is_instead_override)
 }
 
 /// A condition that reads only what the entry's context recorded when it was

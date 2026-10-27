@@ -17,9 +17,10 @@ use crate::types::casting_costs::{
     CostReductionAnalysis, CostReductionCoverage, CostReductionElection, CostReductionEntry,
     CostReductionOutcome, ManaCarrier, ReductionProvenance, SettledTail,
 };
-use crate::types::events::{ActivatedAbilityKind, GameEvent};
+use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent};
 use crate::types::game_state::{
-    AbilityActivationRecord, ActivationTargetFact, LKISnapshot, TransientContinuousEffect,
+    AbilityActivationRecord, ActivationPhyrexianIntent, ActivationShardChoice,
+    ActivationTargetFact, LKISnapshot, ShardChoice, TransientContinuousEffect,
 };
 use crate::types::game_state::{
     ActivationResidual, ActivationTargetSelection, AlternativeAdditionalCostDescription,
@@ -63,6 +64,7 @@ use super::casting_costs::{self, check_additional_cost_or_pay};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
+use super::layers::remove_core_type;
 use super::mana_payment;
 use super::priority;
 use super::quantity::resolve_quantity;
@@ -200,6 +202,7 @@ pub(in crate::game) struct PriorityCastFreeAnnouncement {
 pub(in crate::game) struct PriorityActivateAbilityAnnouncement {
     source_id: ObjectId,
     ability_index: usize,
+    payment_mode: CastPaymentMode,
 }
 
 /// An engine-authored Sneak cast announcement for Priority preflight. The hand
@@ -304,11 +307,19 @@ impl PrioritySneakAnnouncement {
 }
 
 impl PriorityActivateAbilityAnnouncement {
-    fn new(source_id: ObjectId, ability_index: usize) -> Self {
+    fn new(source_id: ObjectId, ability_index: usize, payment_mode: CastPaymentMode) -> Self {
         Self {
             source_id,
             ability_index,
+            payment_mode,
         }
+    }
+
+    pub(in crate::game) fn payment_mode(
+        &self,
+        _access: &PriorityAnnouncementFacadeAccess,
+    ) -> CastPaymentMode {
+        self.payment_mode
     }
 
     pub(in crate::game) fn source_id(
@@ -691,6 +702,7 @@ pub(crate) fn begin_variable_speed_payment(
     target_selection: ActivationTargetSelection,
     activation_cost_snapshot: Option<Box<ActivationCostSnapshot>>,
     activation_trigger_collection: Option<Box<super::triggers::PendingActivationTriggerCollection>>,
+    payment_mode: CastPaymentMode,
 ) -> WaitingFor {
     let max_speed = effective_speed(state, player);
     let (min, max) = variable_speed_payment_range(&cost, max_speed).unwrap_or((0, max_speed));
@@ -700,6 +712,7 @@ pub(crate) fn begin_variable_speed_payment(
         ManaCost::NoCost,
         ability_index,
         activation_cost_snapshot,
+        payment_mode,
     );
     pending.activation_cost = Some(cost);
     pending.activation_target_selection = target_selection;
@@ -2189,6 +2202,8 @@ pub(in crate::game) fn priority_activate_ability_announcements(
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityActivateAbilityAnnouncement> {
     let player = principal.semantic_holder();
+    let gates = restrictions::ActivationRestrictionStaticGates::compute(state);
+    let gates = &gates;
     state
         .objects
         .iter()
@@ -2196,9 +2211,19 @@ pub(in crate::game) fn priority_activate_ability_announcements(
             activated_ability_definitions(state, source_id)
                 .into_iter()
                 .filter_map(move |(ability_index, ability)| {
-                    (ability.kind == AbilityKind::Activated
-                        && can_activate_ability_now(state, player, source_id, ability_index))
-                    .then(|| PriorityActivateAbilityAnnouncement::new(source_id, ability_index))
+                    if ability.kind != AbilityKind::Activated {
+                        return None;
+                    }
+                    // CR 602.2b + CR 601.2g: announced in the payment mode the
+                    // priority offer carries, so preflight and the offer agree.
+                    activation_offer_payment_mode(state, player, source_id, ability_index, gates)
+                        .map(|payment_mode| {
+                            PriorityActivateAbilityAnnouncement::new(
+                                source_id,
+                                ability_index,
+                                payment_mode,
+                            )
+                        })
                 })
         })
         .collect()
@@ -2646,6 +2671,52 @@ pub(super) fn spell_cast_origin_zone(
         .unwrap_or(spell_obj.zone)
 }
 
+/// CR 118.9a + CR 601.2b: a spell may elect its printed alternative cost only
+/// when the exact exile authority elected for this cast leaves its mana cost
+/// available. A plain impulse grant supplies zone permission (CR 601.3) without
+/// replacing that cost; sibling grants cannot change the elected authority.
+pub(super) fn exile_cast_pays_printed_mana_cost(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> bool {
+    let Some(index) = casting_permission_index else {
+        return false;
+    };
+    if play_from_exile_permission_source_at_index(
+        state,
+        obj,
+        player,
+        index,
+        Some(CardPlayMode::Cast),
+    )
+    .is_none()
+    {
+        return false;
+    }
+    match &obj.casting_permissions[index.0] {
+        // CR 118.9a: only a paid, rider-free impulse grant leaves the mana cost
+        // in place (`is_normal_cost_authority_for_rider`); a "without paying its
+        // mana cost" grant (Fire Lord Ozai) or an alt-ability rider is already
+        // the cast's one alternative cost. CR 601.2f: a cost-rider grant stays
+        // unoffered, since its composition with a non-mana alternative cost is
+        // not modelled.
+        permission @ CastingPermission::PlayFromExile {
+            cast_cost_modifier: None,
+            ..
+        } => permission.is_normal_cost_authority_for_rider(),
+        CastingPermission::PlayFromExile { .. }
+        | CastingPermission::AdventureCreature
+        | CastingPermission::ExileWithAltCost { .. }
+        | CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => false,
+    }
+}
+
 /// Collect the keywords granted to `object_id` by `CastWithKeyword` statics
 /// (CR 604.1). `fused` projects a pre-payment fused split spell with its COMBINED
 /// characteristics (CR 702.102b) so `CastWithKeyword` `affected` filters keyed on
@@ -2749,26 +2820,8 @@ fn granted_spell_keyword_instances_for(
     let origin_zone = spell_cast_origin_zone(state, spell_obj);
 
     let mut keywords = Vec::new();
-    for (source_obj, def) in super::functioning_abilities::game_active_statics(state) {
-        let StaticMode::CastWithKeyword { keyword } = &def.mode else {
-            continue;
-        };
-
-        let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from_state_for(
-                state,
-                spell_obj,
-                origin_zone,
-                caster,
-                filter,
-                source_obj.id,
-                &state.all_creature_types,
-                fused,
-            )
-        });
-        if matches {
-            merge_spell_keyword(&mut keywords, keyword.clone(), true);
-        }
+    for (_, keyword) in static_spell_keyword_grants(state, caster, spell_obj, origin_zone, fused) {
+        merge_spell_keyword(&mut keywords, keyword.clone(), true);
     }
 
     transient_granted_spell_keywords_for(
@@ -2794,6 +2847,104 @@ fn granted_spell_keyword_instances_for(
     }
 
     keywords
+}
+
+/// CR 611.3b: each functioning `CastWithKeyword` static that grants its keyword
+/// to this spell, with the permanent generating it, in scan order.
+fn static_spell_keyword_grants<'a>(
+    state: &'a GameState,
+    caster: PlayerId,
+    spell_obj: &crate::game::game_object::GameObject,
+    origin_zone: Zone,
+    fused: bool,
+) -> Vec<(ObjectId, &'a Keyword)> {
+    super::functioning_abilities::game_active_statics(state)
+        .filter_map(|(source_obj, def)| {
+            let StaticMode::CastWithKeyword { keyword } = &def.mode else {
+                return None;
+            };
+            def.affected
+                .as_ref()
+                .is_none_or(|filter| {
+                    super::filter::spell_object_matches_filter_from_state_for(
+                        state,
+                        spell_obj,
+                        origin_zone,
+                        caster,
+                        filter,
+                        source_obj.id,
+                        &state.all_creature_types,
+                        fused,
+                    )
+                })
+                .then_some((source_obj.id, keyword))
+        })
+        .collect()
+}
+
+/// CR 601.2i + CR 611.3b: stamp the cast-time snapshot read by the SpellCast
+/// trigger seams: the spell's effective keyword instances, and which
+/// permanents' casualty grants still apply. Taken before the spell is recorded
+/// in the turn's history, so "first spell each turn" grants still attach.
+pub(crate) fn snapshot_cast_spell_keywords(
+    state: &mut GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+) {
+    let cast_spell_keywords = effective_spell_keyword_instances(state, caster, object_id);
+    let cast_casualty_grant_sources =
+        effective_casualty_grant_sources(state, caster, object_id, &cast_spell_keywords)
+            .into_iter()
+            .flatten()
+            .collect();
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.cast_spell_keywords = cast_spell_keywords;
+        obj.cast_casualty_grant_sources = cast_casualty_grant_sources;
+    }
+}
+
+/// CR 611.3b + CR 702.153b: the permanent whose static grants each casualty
+/// instance of this spell, aligned with the casualty ordinals of
+/// [`effective_spell_keyword_instances`], passed in as `keywords`. A printed
+/// instance, and a grant no permanent generates (a resolved effect, a
+/// next-spell modifier), is `None`.
+pub(crate) fn effective_casualty_grant_sources(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    keywords: &[Keyword],
+) -> Vec<Option<ObjectId>> {
+    let Some(obj) = state.objects.get(&object_id) else {
+        return Vec::new();
+    };
+    let is_casualty = |keyword: &Keyword| matches!(keyword, Keyword::Casualty(_));
+    // allow-raw-authority: counts the instances at the head of `effective_spell_keyword_instances` (its `obj.keywords` base); the helpers only answer has/has-not.
+    let printed = obj.keywords.iter().filter(|k| is_casualty(k)).count();
+    let total = keywords.iter().filter(|k| is_casualty(k)).count();
+    // No granted instance: skip the static traversal (the common spell).
+    if total <= printed {
+        return vec![None; total];
+    }
+    let mut sources = vec![None; printed];
+    sources.extend(
+        static_spell_keyword_grants(
+            state,
+            caster,
+            obj,
+            spell_cast_origin_zone(state, obj),
+            false,
+        )
+        .into_iter()
+        .filter(|(_, keyword)| is_casualty(keyword))
+        .map(|(source, _)| Some(source)),
+    );
+    // Player-scoped and next-spell grants follow the statics.
+    debug_assert!(
+        sources.len() <= total,
+        "a static casualty grant is a keyword instance"
+    );
+    sources.resize(total, None);
+    sources
 }
 
 /// CR 611.2c + CR 601.3b: Player-scoped spell-casting keyword grants (e.g. Teferi,
@@ -3132,6 +3283,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
@@ -3369,6 +3521,22 @@ pub fn pending_phyrexian_route_is_payable(
     let Some(pending) = state.pending_cast.as_deref() else {
         return false;
     };
+    pending_phyrexian_route_is_payable_for(state, player, spell_object, &pending.cost, choices)
+}
+
+/// CR 107.4f + CR 601.2h: [`pending_phyrexian_route_is_payable`] for the cost a
+/// pending activation actually pays — for a manually paid activation, its
+/// announced payment view (`mana_payment::native_phyrexian_payment_view`).
+pub(crate) fn pending_phyrexian_route_is_payable_for(
+    state: &GameState,
+    player: PlayerId,
+    spell_object: ObjectId,
+    cost: &ManaCost,
+    choices: &[crate::types::game_state::ShardChoice],
+) -> bool {
+    let Some(pending) = state.pending_cast.as_deref() else {
+        return false;
+    };
     if pending.object_id != spell_object {
         return false;
     }
@@ -3403,7 +3571,7 @@ pub fn pending_phyrexian_route_is_payable(
         player,
         mana_spend_permission,
     );
-    let phyrexian_count = match &pending.cost {
+    let phyrexian_count = match cost {
         ManaCost::Cost { shards, .. } => shards
             .iter()
             .filter(|shard| {
@@ -3433,11 +3601,8 @@ pub fn pending_phyrexian_route_is_payable(
     // CR 601.2h: Preview only the mana actually required by this route.
     // PayLife shards must not consume an untapped producer, while PayMana
     // routes remain available when their source has not yet been tapped.
-    let tap_cost = mana_payment::mana_cost_for_phyrexian_choices(
-        &pending.cost,
-        choices,
-        permissions.life_colors,
-    );
+    let tap_cost =
+        mana_payment::mana_cost_for_phyrexian_choices(cost, choices, permissions.life_colors);
     let excluded_sources = pending
         .activation_cost
         .as_ref()
@@ -3470,7 +3635,7 @@ pub fn pending_phyrexian_route_is_payable(
         .unwrap_or_else(|| player_data.mana_pool.clone());
     mana_payment::pay_cost_with_demand_and_choices(
         &mut pool,
-        &pending.cost,
+        cost,
         Some(&hand_demand),
         payment_context.as_ref(),
         mana_spend_permission,
@@ -4020,6 +4185,110 @@ fn exile_alt_cost_permission_uses_casting_cards_mana_cost(
     }
 }
 
+/// CR 601.2f + CR 118.9a: whether a pending "the next spell … without paying
+/// its mana cost" applies to this cast.
+fn next_spell_without_paying_applies(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+) -> bool {
+    !casting_variant.uses_alternative_cost()
+        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
+            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
+        })
+        .is_some()
+}
+
+/// CR 118.9a + CR 601.2b: a named permission or a prepared next-spell
+/// free cast has already elected its alternative. Do not scan sibling grants
+/// or offer another alternative over that exact choice.
+pub(super) fn cast_has_elected_alternative_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    permission_index: Option<CastingPermissionIndex>,
+    variant: CastingVariant,
+) -> Result<bool, EngineError> {
+    if variant.uses_alternative_cost()
+        || next_spell_without_paying_applies(state, player, object_id, variant)
+    {
+        return Ok(true);
+    }
+    let Some(CastingPermissionIndex(index)) = permission_index else {
+        return Ok(false);
+    };
+    let permission = state
+        .objects
+        .get(&object_id)
+        .and_then(|object| object.casting_permissions.get(index))
+        .ok_or_else(|| {
+            EngineError::InvalidAction("Selected casting permission is missing".into())
+        })?;
+    Ok(match permission {
+        CastingPermission::ExileWithAltCost {
+            cost,
+            cost_provenance,
+            ..
+        } => {
+            *cost_provenance == crate::types::ability::ExileGrantCostProvenance::Alternative
+                && !matches!(cost, ManaCost::SelfManaCost)
+        }
+        CastingPermission::ExileWithAltAbilityCost { .. }
+        | CastingPermission::ExileWithEnergyCost
+        | CastingPermission::WarpExile { .. }
+        | CastingPermission::Plotted { .. }
+        | CastingPermission::Foretold { .. } => true,
+        CastingPermission::AdventureCreature | CastingPermission::PlayFromExile { .. } => false,
+    })
+}
+
+/// CR 118.6 + CR 601.2h: whether this cast would pay a mana cost the card
+/// doesn't have. A normal-cost grant (`NormalCost` provenance, or a stored
+/// `SelfManaCost`) restates the card's printed cost, which for a card with no
+/// mana cost is an unpayable cost. A printed {0} is payable. A free
+/// alternative cost may be paid instead (CR 118.6a): a "without paying its
+/// mana cost" grant never has this provenance, and a pending next-spell one is
+/// excluded here. Methods with their own alternative cost never elect this
+/// slot (`selected_object_cast_permission_index`).
+pub(super) fn cast_pays_nonexistent_printed_cost(
+    state: &GameState,
+    player: PlayerId,
+    obj: &crate::game::game_object::GameObject,
+    casting_permission_index: Option<CastingPermissionIndex>,
+    casting_variant: CastingVariant,
+) -> bool {
+    casting_permission_index
+        .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index))
+        .is_some_and(|permission| match permission {
+            crate::types::ability::CastingPermission::ExileWithAltCost {
+                cost,
+                cost_provenance,
+                ..
+            } => {
+                (matches!(
+                    cost_provenance,
+                    crate::types::ability::ExileGrantCostProvenance::NormalCost
+                ) || matches!(cost, ManaCost::SelfManaCost))
+                    && matches!(
+                        resolve_exile_with_alt_cost_permission_mana_cost(cost, obj),
+                        ManaCost::NoCost
+                    )
+            }
+            // A face-based cast, an impulse permission, a non-mana alternative
+            // cost, or an exile mechanic with its own cost: none stores the
+            // normal-cost grant this predicate reads.
+            crate::types::ability::CastingPermission::AdventureCreature
+            | crate::types::ability::CastingPermission::PlayFromExile { .. }
+            | crate::types::ability::CastingPermission::ExileWithEnergyCost
+            | crate::types::ability::CastingPermission::ExileWithAltAbilityCost { .. }
+            | crate::types::ability::CastingPermission::WarpExile { .. }
+            | crate::types::ability::CastingPermission::Plotted { .. }
+            | crate::types::ability::CastingPermission::Foretold { .. } => false,
+        })
+        && !next_spell_without_paying_applies(state, player, obj.id, casting_variant)
+}
+
 /// CR 709.3 + CR 712.11b + CR 601.2a: `CastFromZone` and similar grants stamp
 /// `ExileWithAltCost { cost: obj.mana_cost }` when the card is permitted to be
 /// cast for its normal mana cost. Split cards and spell//spell MDFCs choose a
@@ -4287,9 +4556,9 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
     object_id: ObjectId,
     player: PlayerId,
     casting_permission_index: Option<CastingPermissionIndex>,
-) -> Vec<crate::types::ability::ContinuousModification> {
+) -> crate::types::ability::PendingEntersModifications {
     let Some(obj) = state.objects.get(&object_id) else {
-        return Vec::new();
+        return Default::default();
     };
     selected_exile_alt_cost_permission(state, obj, player, casting_permission_index)
         .map(|permission| match permission {
@@ -4297,7 +4566,7 @@ pub(super) fn selected_exile_alt_cost_permission_enters_with_modifications(
                 enters_with_modifications,
                 ..
             } => enters_with_modifications.clone(),
-            _ => Vec::new(),
+            _ => Default::default(),
         })
         .unwrap_or_default()
 }
@@ -4519,7 +4788,7 @@ pub(super) fn selected_play_from_exile_permission_source(
 /// cast. Alternative-cost permissions take precedence because cost preparation
 /// already elects the first matching alternative-cost grant; otherwise the
 /// first functioning `PlayFromExile` grant is the authority.
-fn selected_object_cast_permission_index(
+pub(super) fn selected_object_cast_permission_index(
     state: &GameState,
     obj: &crate::game::game_object::GameObject,
     player: PlayerId,
@@ -5925,6 +6194,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
     match condition {
         StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::IsPresent { .. } => true,
         StaticCondition::And { conditions } | StaticCondition::Or { conditions } => {
             conditions.iter().all(holder_bound_condition_is_modeled)
@@ -5934,6 +6204,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
         | StaticCondition::HasMaxSpeed
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
@@ -5962,6 +6233,7 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -9297,7 +9569,6 @@ fn prepare_spell_cast_announced(
     } else {
         None
     };
-
     // CR 107.14: ExileWithEnergyCost — zero mana cost, energy paid as additional cost.
     //
     // CR 118.9a: this scan reads every attached permission, not the elected
@@ -9780,11 +10051,27 @@ fn prepare_spell_cast_announced(
         .then(|| crate::types::mana::ManaCost::generic(3));
     let awaken_cost = awaken_payload.as_ref().map(|(_, cost)| cost.clone());
     // CR 601.2f + CR 118.9a: One-shot "the next spell … without paying its mana cost".
-    let next_spell_without_paying = !casting_variant.uses_alternative_cost()
-        && pending_next_spell_modifier_index(state, player, object_id, |modifier| {
-            matches!(modifier, NextSpellModifier::WithoutPayingManaCost)
-        })
-        .is_some();
+    let next_spell_without_paying =
+        next_spell_without_paying_applies(state, player, object_id, casting_variant);
+    // CR 118.6 + CR 118.6a + CR 601.2h: a cast that would pay a nonexistent
+    // printed mana cost is refused, unless a payable alternative cost will be
+    // applied for it. `check_additional_cost_or_pay` (a `Normal` cast) and the
+    // skipped-election branch of `finish_pending_cast_cost_or_pay` apply it
+    // without a choice.
+    if cast_pays_nonexistent_printed_cost(
+        state,
+        player,
+        obj,
+        casting_permission_index,
+        casting_variant,
+    ) && !(casting_variant == CastingVariant::Normal
+        && casting_costs::payable_spell_alternative_cost_details(state, player, object_id)
+            .is_some())
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "A card with no mana cost can't be cast by paying its mana cost".to_string(),
+        ));
+    }
 
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
     // casting from the origin scope carried by the static. Auto-application is
@@ -15014,20 +15301,34 @@ pub fn handle_prototype_cost_choice_with_payment_mode(
 /// touched by layers, but battlefield re-entry resets are anchored on base
 /// values too).
 ///
-/// `bestow_form` is set to `Some(BestowFormState)` to mark the object as in
-/// bestow form; `revert_bestow_aura_form` is the inverse operation.
+/// `bestow_form` is set to `Some(BestowFormState { .. })` (carrying the removed
+/// creature subtypes, CR 205.1a) to mark the object as in bestow form; `revert_bestow_aura_form` is the inverse operation.
 ///
 /// Idempotent: safe to re-run after printed-face rehydration or layer resets
 /// re-anchor `card_types` from a refreshed `base_card_types`.
 pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
     use crate::types::card_type::CoreType;
-    // CR 702.103b: Remove the Creature core type while bestowed.
-    obj.card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Creature));
-    obj.base_card_types
-        .core_types
-        .retain(|t| !matches!(t, CoreType::Creature));
+    // CR 702.103b + CR 205.1a: Remove the Creature core type while bestowed;
+    // the creature types of the printed face go with it, because a bestowed
+    // Aura is an Aura enchantment and not a creature.
+    let base_subtypes_before = obj.base_card_types.subtypes.clone();
+    remove_core_type(&mut obj.card_types, CoreType::Creature);
+    remove_core_type(&mut obj.base_card_types, CoreType::Creature);
+    // Record what the base lost so `revert_bestow_aura_form` can restore it.
+    // Union with any existing payload, never overwrite: a re-run on an
+    // already-bestowed object finds nothing left to remove and must keep it.
+    let mut removed_creature_subtypes = obj
+        .bestow_form
+        .take()
+        .map(|form| form.removed_creature_subtypes)
+        .unwrap_or_default();
+    for subtype in base_subtypes_before {
+        if !obj.base_card_types.subtypes.contains(&subtype)
+            && !removed_creature_subtypes.contains(&subtype)
+        {
+            removed_creature_subtypes.push(subtype);
+        }
+    }
     // CR 702.103b: Gain the Aura subtype while bestowed. Idempotent push.
     if !obj.card_types.subtypes.iter().any(|s| s == "Aura") {
         obj.card_types.subtypes.push("Aura".to_string());
@@ -15056,14 +15357,17 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
     {
         obj.base_keywords.push(enchant_creature);
     }
-    obj.bestow_form = Some(crate::game::game_object::BestowFormState);
+    obj.bestow_form = Some(crate::game::game_object::BestowFormState {
+        removed_creature_subtypes,
+    });
     // Bestow form rewrites the printed base: restore the derived art baseline.
     obj.restore_token_art_baseline();
 }
 
 /// CR 702.103e + CR 702.103f: Inverse of `apply_bestow_aura_form`. Restores the
-/// Creature core type, removes the synthesized Aura subtype, and removes the
-/// granted `enchant creature` keyword. Called when:
+/// Creature core type and the creature types the form removed (CR 205.1a),
+/// removes the synthesized Aura subtype, and removes the granted
+/// `enchant creature` keyword. Called when:
 ///   * Resolution-time illegal target (CR 702.103e) — revert before the spell
 ///     finishes resolving so it ETBs as a normal creature.
 ///   * Bestow Aura on the battlefield becomes unattached (CR 702.103f) —
@@ -15072,9 +15376,9 @@ pub(crate) fn apply_bestow_aura_form(obj: &mut crate::game::game_object::GameObj
 ///
 /// Idempotent: a no-op if the object is not in bestow form.
 pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameObject) {
-    if obj.bestow_form.is_none() {
+    let Some(form) = obj.bestow_form.take() else {
         return;
-    }
+    };
     use crate::types::card_type::CoreType;
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
         obj.card_types.core_types.push(CoreType::Creature);
@@ -15084,10 +15388,21 @@ pub(crate) fn revert_bestow_aura_form(obj: &mut crate::game::game_object::GameOb
     }
     obj.card_types.subtypes.retain(|s| s != "Aura");
     obj.base_card_types.subtypes.retain(|s| s != "Aura");
+    // CR 205.1a: the object is a creature again, so it regains the creature
+    // types the bestow form removed. Pushed after the Aura is dropped so the
+    // printed order is the final order. A battlefield object is re-derived by
+    // the layer pass; a stack object (not layered) needs the live fields too.
+    for subtype in form.removed_creature_subtypes {
+        if !obj.card_types.subtypes.contains(&subtype) {
+            obj.card_types.subtypes.push(subtype.clone());
+        }
+        if !obj.base_card_types.subtypes.contains(&subtype) {
+            obj.base_card_types.subtypes.push(subtype);
+        }
+    }
     obj.keywords.retain(|k| !matches!(k, Keyword::Enchant(_)));
     obj.base_keywords
         .retain(|k| !matches!(k, Keyword::Enchant(_)));
-    obj.bestow_form = None;
     obj.restore_token_art_baseline();
 }
 
@@ -16684,6 +16999,13 @@ pub(super) struct ResolutionCastRequest {
     pub(super) cleanup: crate::types::ability::ResolutionCastCleanup,
     pub(super) graveyard_replacement:
         Option<crate::types::ability::SpellStackToGraveyardReplacement>,
+    /// CR 608.2c + CR 611.2a + CR 611.2c: the cast-permission
+    /// gains-modifications rider ("If you cast a [quality] spell this way, it
+    /// gains …", Strago and Relm) rides the elected resolution permission into
+    /// the cast finalization, which applies it as a `Duration::Permanent`
+    /// continuous effect scoped to the cast object. Empty for every other
+    /// during-resolution route.
+    pub(super) enters_with_modifications: crate::types::ability::PendingEntersModifications,
     /// CR 608.2g + CR 609.4b + CR 118.9: whether the during-resolution cast
     /// is free (Cascade/Discover/Suspend, `Auto`), pays the card's real
     /// printed cost (Quistis Trepe / Tinybones the Pickpocket, `Manual` with
@@ -16806,7 +17128,11 @@ fn install_resolution_cast_permission(
             source_id: None,
             graveyard_replacement: request.graveyard_replacement.clone(),
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            // CR 608.2c: the request is the transaction authority for the
+            // rider; `selected_exile_alt_cost_permission_enters_with_modifications`
+            // is the single reader, so a non-elected sibling permission cannot
+            // leak its own modifications onto this cast.
+            enters_with_modifications: request.enters_with_modifications.clone(),
             mana_spend_permission,
             cast_cost_modifier: None,
         });
@@ -18566,7 +18892,43 @@ fn announce_spell_on_stack(
     player: PlayerId,
     prepared: &PreparedSpellCast,
     events: &mut Vec<GameEvent>,
-) {
+) -> Result<(), EngineError> {
+    // CR 601.2 + CR 733.1: the action boundary records sparse inverse edits
+    // for this cast; the declaration retains only its identity and journal mark.
+    if state.spell_cast_reversal.is_none() {
+        // CR 608.2g + CR 733.1: only the elected resolution-owned permission
+        // can have consumed a parent choice inside this input. Other casts use
+        // the existing action boundary directly, without serializing a prefix.
+        let resolution_owned = prepared
+            .casting_permission_index
+            .and_then(|index| {
+                state.objects.get(&prepared.object_id).and_then(|object| {
+                    selected_exile_alt_cost_permission(state, object, player, Some(index))
+                })
+            })
+            .is_some_and(|permission| {
+                matches!(
+                    permission,
+                    CastingPermission::ExileWithAltCost {
+                        resolution_cleanup: Some(_),
+                        ..
+                    }
+                )
+            });
+        if resolution_owned {
+            super::engine_casting::remember_cast_start(state, prepared.object_id)?;
+        }
+        state.spell_cast_reversal = Some(std::sync::Arc::new(
+            crate::types::game_state::SpellCastReversal {
+                object_id: prepared.object_id,
+                player,
+                journal_start: state.resolved_rules_journal.entries().len(),
+                undo: Vec::new(),
+                cost_mutations: false,
+                library_undo_forbidden: false,
+            },
+        ));
+    }
     // CR 400.7: A new cast announcement is a new casting event — discard any
     // stale behold creature-type choice left on the spell object from a prior
     // resolution (#5051; cancel rewind uses the same clear in handle_cancel_cast).
@@ -18598,6 +18960,30 @@ fn announce_spell_on_stack(
         },
         events,
     );
+    Ok(())
+}
+
+fn pending_cast_from_prepared(
+    prepared: &PreparedSpellCast,
+    resolved: ResolvedAbility,
+) -> PendingCast {
+    let mut pending = PendingCast::new(
+        prepared.object_id,
+        prepared.card_id,
+        resolved,
+        prepared.mana_cost.clone(),
+    );
+    pending.base_cost = Some(prepared.base_mana_cost.clone());
+    pending.casting_variant = prepared.casting_variant;
+    pending.casting_permission_index = prepared.casting_permission_index;
+    pending.cast_timing_permission = prepared.cast_timing_permission;
+    pending.distribute = prepared
+        .ability_def
+        .as_ref()
+        .and_then(|a| a.distribute.clone());
+    pending.origin_zone = prepared.origin_zone;
+    pending.payment_mode = prepared.payment_mode;
+    pending
 }
 
 /// Continue the casting pipeline from a PreparedSpellCast.
@@ -18633,7 +19019,7 @@ fn continue_with_prepared(
     // CR 601.2a: The spell goes on the stack at announcement, before any
     // mode/target/cost steps. All subsequent branches construct a `PendingCast`
     // that references an object already on the stack.
-    announce_spell_on_stack(state, player, &prepared, events);
+    announce_spell_on_stack(state, player, &prepared, events)?;
 
     // Build the resolved ability from the ability_def, or a placeholder for auras
     // with no spell-level ability (aura targeting is via the Enchant keyword).
@@ -18785,6 +19171,7 @@ fn continue_with_prepared(
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
                 assign_targets_in_chain(state, &mut resolved, &targets)?;
+                let event_start = events.len();
                 emit_targeting_events(
                     state,
                     &declared_targets_in_chain(&resolved),
@@ -18792,6 +19179,16 @@ fn continue_with_prepared(
                     player,
                     spell_targeter(state, prepared.object_id),
                     events,
+                );
+                // CR 601.2c + CR 603.2: stage announcement triggers for the Aura before
+                // payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
+                // move the target before triggers match.
+                let pending = pending_cast_from_prepared(&prepared, resolved.clone());
+                super::announcement_triggers::stage_with_pending_owner(
+                    state,
+                    &pending,
+                    events,
+                    event_start,
                 );
                 return check_additional_cost_or_pay(
                     state,
@@ -18810,22 +19207,7 @@ fn continue_with_prepared(
                 );
             } else {
                 let selection = begin_target_selection(&target_slots, &[])?;
-                let mut pending_aura = PendingCast::new(
-                    prepared.object_id,
-                    prepared.card_id,
-                    resolved,
-                    prepared.mana_cost.clone(),
-                );
-                pending_aura.base_cost = Some(prepared.base_mana_cost.clone());
-                pending_aura.casting_variant = prepared.casting_variant;
-                pending_aura.casting_permission_index = prepared.casting_permission_index;
-                pending_aura.cast_timing_permission = prepared.cast_timing_permission;
-                pending_aura.distribute = prepared
-                    .ability_def
-                    .as_ref()
-                    .and_then(|a| a.distribute.clone());
-                pending_aura.origin_zone = prepared.origin_zone;
-                pending_aura.payment_mode = prepared.payment_mode;
+                let pending_aura = pending_cast_from_prepared(&prepared, resolved);
                 return Ok(WaitingFor::TargetSelection {
                     player,
                     pending_cast: Box::new(pending_aura),
@@ -18872,6 +19254,7 @@ fn continue_with_prepared(
         if let Some(targets) = auto_select_targets(&target_slots, &[])? {
             let mut resolved = resolved;
             assign_targets_in_chain(state, &mut resolved, &targets)?;
+            let event_start = events.len();
             emit_targeting_events(
                 state,
                 &declared_targets_in_chain(&resolved),
@@ -18879,6 +19262,16 @@ fn continue_with_prepared(
                 player,
                 spell_targeter(state, prepared.object_id),
                 events,
+            );
+            // CR 601.2c + CR 603.2: stage announcement triggers for the mutating creature spell
+            // before payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
+            // move the target before triggers match.
+            let pending = pending_cast_from_prepared(&prepared, resolved.clone());
+            super::announcement_triggers::stage_with_pending_owner(
+                state,
+                &pending,
+                events,
+                event_start,
             );
             return check_additional_cost_or_pay(
                 state,
@@ -18897,22 +19290,7 @@ fn continue_with_prepared(
             );
         } else {
             let selection = begin_target_selection(&target_slots, &[])?;
-            let mut pending_mutate = PendingCast::new(
-                prepared.object_id,
-                prepared.card_id,
-                resolved,
-                prepared.mana_cost.clone(),
-            );
-            pending_mutate.base_cost = Some(prepared.base_mana_cost.clone());
-            pending_mutate.casting_variant = prepared.casting_variant;
-            pending_mutate.casting_permission_index = prepared.casting_permission_index;
-            pending_mutate.cast_timing_permission = prepared.cast_timing_permission;
-            pending_mutate.distribute = prepared
-                .ability_def
-                .as_ref()
-                .and_then(|a| a.distribute.clone());
-            pending_mutate.origin_zone = prepared.origin_zone;
-            pending_mutate.payment_mode = prepared.payment_mode;
+            let pending_mutate = pending_cast_from_prepared(&prepared, resolved);
             return Ok(WaitingFor::TargetSelection {
                 player,
                 pending_cast: Box::new(pending_mutate),
@@ -19149,10 +19527,10 @@ fn continue_with_prepared(
         // CR 601.2b: Casualty (optional sacrifice) must be declared before targets are
         // chosen. Detect an effective Casualty cost and route through the deferred target
         // selection path so the sacrifice prompt appears first.
-        if let Some(casualty_cost) =
-            casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+        if casting_costs::effective_casualty_additional_cost(state, player, prepared.object_id)
+            .is_some()
         {
-            return casting_costs::begin_optional_cost_before_targets(
+            return casting_costs::begin_keyword_queue_before_targets(
                 state,
                 player,
                 prepared.object_id,
@@ -19160,8 +19538,6 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
-                casualty_cost,
-                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.casting_permission_index,
                 prepared.cast_timing_permission,
@@ -19270,6 +19646,7 @@ fn continue_with_prepared(
         {
             let mut resolved = resolved;
             assign_selected_slots_in_chain(state, &mut resolved, &targets)?;
+            let event_start = events.len();
             emit_targeting_events(
                 state,
                 &declared_targets_in_chain(&resolved),
@@ -19277,6 +19654,16 @@ fn continue_with_prepared(
                 player,
                 spell_targeter(state, prepared.object_id),
                 events,
+            );
+            // CR 601.2c + CR 603.2: stage announcement triggers for the spell before
+            // payment, so automatic mana payment (e.g. sacrificing Blood Pet) does not
+            // move the target before triggers match.
+            let pending = pending_cast_from_prepared(&prepared, resolved.clone());
+            super::announcement_triggers::stage_with_pending_owner(
+                state,
+                &pending,
+                events,
+                event_start,
             );
             return check_additional_cost_or_pay(
                 state,
@@ -19301,23 +19688,8 @@ fn continue_with_prepared(
             &target_slots,
             &target_constraints,
         )?;
-        let mut pending_targets = PendingCast::new(
-            prepared.object_id,
-            prepared.card_id,
-            resolved,
-            prepared.mana_cost.clone(),
-        );
-        pending_targets.base_cost = Some(prepared.base_mana_cost.clone());
-        pending_targets.casting_variant = prepared.casting_variant;
-        pending_targets.casting_permission_index = prepared.casting_permission_index;
-        pending_targets.cast_timing_permission = prepared.cast_timing_permission;
-        pending_targets.distribute = prepared
-            .ability_def
-            .as_ref()
-            .and_then(|a| a.distribute.clone());
+        let mut pending_targets = pending_cast_from_prepared(&prepared, resolved);
         pending_targets.target_constraints = target_constraints;
-        pending_targets.origin_zone = prepared.origin_zone;
-        pending_targets.payment_mode = prepared.payment_mode;
         return Ok(WaitingFor::TargetSelection {
             player,
             pending_cast: Box::new(pending_targets),
@@ -19434,7 +19806,7 @@ fn continue_with_no_ability(
     // so this path is only for non-Aura permanents.
 
     // CR 601.2a: Announce the spell onto the stack before any cost payment.
-    announce_spell_on_stack(state, player, &prepared, events);
+    announce_spell_on_stack(state, player, &prepared, events)?;
 
     // Build a placeholder resolved ability for cost-payment plumbing.
     // The PendingCast infrastructure requires a ResolvedAbility; it carries no
@@ -20748,9 +21120,17 @@ fn can_cast_prepared_now_with_probe(
         return true;
     }
 
-    if targets_ok
-        && super::casting_costs::payable_spell_alternative_cost(state, player, prepared.object_id)
-            .is_some()
+    // CR 118.9a + CR 601.2b: a face-down or other non-Normal method already
+    // elected its own alternative cost and cannot use the printed self-option.
+    if prepared.casting_variant == CastingVariant::Normal
+        && targets_ok
+        && super::casting_costs::payable_spell_alternative_cost_details_at_index(
+            state,
+            player,
+            prepared.object_id,
+            prepared.casting_permission_index,
+        )
+        .is_some()
     {
         return true;
     }
@@ -20817,6 +21197,21 @@ fn can_pay_mana_cost_after_auto_tap_with_context(
 struct AutoTapProbeOptions<'a> {
     source_cache: Option<&'a casting_costs::AutoTapSourceCache>,
     explicit_tap_payment_mode: Option<ConvokeMode>,
+    phyrexian_life_budget: ProbeLifeBudget,
+}
+
+/// CR 107.4f + CR 119.4: the life total an auto-tap probe's Phyrexian life
+/// budget (`CostPermissionContext::max_life`) is read from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ProbeLifeBudget {
+    /// The life after the probe's auto-tap, including any life a tapped mana
+    /// ability gained.
+    #[default]
+    AfterAutoTap,
+    /// The life before the probe taps anything: the budget an automatic
+    /// activation's payer validates its Phyrexian life choices against
+    /// ([`pending_phyrexian_route_is_payable_for`]), before it taps a source.
+    BeforeAutoTap,
 }
 
 fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
@@ -20828,6 +21223,12 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     excluded_sources: &HashSet<ObjectId>,
     options: AutoTapProbeOptions<'_>,
 ) -> bool {
+    let life_budget_before_tap = match options.phyrexian_life_budget {
+        ProbeLifeBudget::AfterAutoTap => None,
+        ProbeLifeBudget::BeforeAutoTap => Some(super::life_costs::max_phyrexian_life_payments(
+            simulated, player,
+        )),
+    };
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources_with_context_excluding_cached(
         simulated,
@@ -20863,11 +21264,14 @@ fn can_pay_mana_cost_after_auto_tap_with_context_and_cache(
     // CR 107.4f + CR 118.1 + CR 118.3 + CR 119.8: Bundle the payer's
     // payment-time permissions (`mana_spend_permission`, `max_life`, `life_colors`) so
     // K'rrik-style life-for-{B} grants are visible to the affordability check.
-    let permissions = super::static_abilities::build_cost_permission_context(
+    let mut permissions = super::static_abilities::build_cost_permission_context(
         simulated,
         player,
         mana_spend_permission,
     );
+    if let Some(max_life) = life_budget_before_tap {
+        permissions.max_life = max_life;
+    }
     simulated
         .players
         .iter()
@@ -21386,6 +21790,7 @@ pub fn can_pay_cost_after_auto_tap_with_probe(
         AutoTapProbeOptions {
             source_cache,
             explicit_tap_payment_mode: None,
+            phyrexian_life_budget: ProbeLifeBudget::AfterAutoTap,
         },
     )
 }
@@ -21417,6 +21822,7 @@ pub(crate) fn can_pay_pending_cast_after_auto_tap_in_scratch(
         AutoTapProbeOptions {
             source_cache: None,
             explicit_tap_payment_mode: None,
+            phyrexian_life_budget: ProbeLifeBudget::AfterAutoTap,
         },
     )
 }
@@ -21535,6 +21941,7 @@ fn feasibly_payable_with_tap_payment_mode_in_context(
         AutoTapProbeOptions {
             source_cache: None,
             explicit_tap_payment_mode: Some(tap_payment_mode),
+            phyrexian_life_budget: ProbeLifeBudget::AfterAutoTap,
         },
     ) {
         return true;
@@ -23677,6 +24084,7 @@ fn pending_activation_after_cost_pause(
     ability_index: usize,
     remaining_cost: Option<AbilityCost>,
     activation_cost_snapshot: Option<Box<ActivationCostSnapshot>>,
+    payment_mode: CastPaymentMode,
 ) -> PendingCast {
     let mut pending = PendingCast::for_activation(
         source_id,
@@ -23684,6 +24092,7 @@ fn pending_activation_after_cost_pause(
         ManaCost::NoCost,
         ability_index,
         activation_cost_snapshot,
+        payment_mode,
     );
     pending.activation_cost = remaining_cost;
     pending
@@ -24307,7 +24716,9 @@ fn find_eligible_hand_cost_targets(
 ) -> Vec<ObjectId> {
     let effective_filter = super::cost_payability::cost_filter_before_x_announcement(filter);
     let filter_ref = effective_filter.as_ref();
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .players
@@ -24403,7 +24814,9 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
             find_eligible_hand_cost_targets(state, player, source, granting_object, filter_ref)
         }
         ExileCostSourceZone::Graveyard => {
-            let ctx = super::filter::FilterContext::from_source(state, source)
+            // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+            // activated ability).
+            let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
                 .with_granting_object(granting_object);
             state
                 .players
@@ -24441,7 +24854,9 @@ pub(crate) fn find_eligible_unattach_for_cost_targets(
     filter: &TargetFilter,
     n: u32,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .battlefield
@@ -24470,7 +24885,8 @@ pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> 
 
 /// CR 601.2h + CR 602.2b: Filter disjunctive activation-cost branches through the
 /// same affordability authority used by `can_activate_ability_now` and
-/// `handle_activate_ability`, each judged inside its `enclosing` total cost.
+/// `handle_activate_ability`, each judged inside its `enclosing` total cost and
+/// in the activation's `payment_mode` (one life window shared by every branch).
 pub(crate) fn payable_one_of_activation_branches(
     state: &GameState,
     player: PlayerId,
@@ -24478,7 +24894,9 @@ pub(crate) fn payable_one_of_activation_branches(
     enclosing: &AbilityCost,
     costs: &[AbilityCost],
     ability_index: usize,
+    payment_mode: CastPaymentMode,
 ) -> Vec<AbilityCost> {
+    let life = ActivationLifeWindow::for_payment_mode(player, source_id, payment_mode);
     costs
         .iter()
         .filter(|branch| {
@@ -24489,6 +24907,7 @@ pub(crate) fn payable_one_of_activation_branches(
                 enclosing,
                 branch,
                 Some(ability_index),
+                &life,
             )
         })
         .cloned()
@@ -24505,16 +24924,17 @@ pub(crate) fn one_of_branch_payable_in(
     enclosing: &AbilityCost,
     branch: &AbilityCost,
     ability_index: Option<usize>,
+    life: &ActivationLifeWindow,
 ) -> bool {
     enclosing
         .resolve_first_one_of(branch)
         .is_some_and(|resolved| {
-            can_pay_ability_cost_now(state, player, source_id, &resolved, ability_index)
+            can_pay_ability_cost_now(state, player, source_id, &resolved, ability_index, life)
         })
 }
 
 /// CR 601.2h: branch payability for a pending activation, judged against its
-/// current total cost.
+/// current total cost in its payment mode.
 pub(crate) fn activation_one_of_branch_payable(
     state: &GameState,
     player: PlayerId,
@@ -24529,6 +24949,11 @@ pub(crate) fn activation_one_of_branch_payable(
             cost,
             branch,
             pending.activation_ability_index,
+            &ActivationLifeWindow::for_payment_mode(
+                player,
+                pending.object_id,
+                pending.payment_mode,
+            ),
         )
     })
 }
@@ -24543,22 +24968,42 @@ fn activation_cost_passes_early_affordability_gate(
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_index: usize,
+    payment_mode: CastPaymentMode,
 ) -> bool {
+    let life = ActivationLifeWindow::for_payment_mode(player, source_id, payment_mode);
     if let Some(locked) =
         super::costs::lock_half_life_activation_cost(state, player, source_id, cost)
     {
         // CR 601.2f + CR 602.2b: Refuse an unaffordable locked cost before
         // target prompts or mana abilities can mutate the activation state.
-        can_pay_ability_cost_now(state, player, source_id, &locked, Some(ability_index))
+        can_pay_ability_cost_now(
+            state,
+            player,
+            source_id,
+            &locked,
+            Some(ability_index),
+            &life,
+        )
     } else if find_one_of_cost(cost).is_some() {
-        can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
+        can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index), &life)
     } else {
         // CR 106.6: the tag reaches the payability gate for the same reason it
         // reaches `can_pay_ability_cost_now` above — tag-scoped mana
         // (`OnlyForTaggedActivation`) is spendable at the real payment step,
         // so a gate that judged the cost without the tag would refuse
         // activations the payment step would have allowed.
-        cost.is_payable_for_activation(state, player, source_id, Some(ability_index))
+        // CR 601.2g + CR 119.4: a printed "Pay N life" is judged by the life the
+        // player can have when it is paid, as `can_pay_ability_cost_now` is.
+        payable_with_mana_ability_window_life(
+            state,
+            player,
+            source_id,
+            cost,
+            &life,
+            |state, cost| {
+                cost.is_payable_for_activation(state, player, source_id, Some(ability_index))
+            },
+        )
     }
 }
 
@@ -24708,7 +25153,9 @@ pub(crate) fn find_eligible_return_to_hand_targets(
     granting_object: Option<ObjectIncarnationRef>,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .battlefield
@@ -24766,7 +25213,9 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
     counter_type: &crate::types::counter::CounterMatch,
     count: u32,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     state
         .battlefield
@@ -24793,7 +25242,9 @@ pub(super) fn find_eligible_tap_creatures_for_cost(
     cost: &AbilityCost,
     filter: &TargetFilter,
 ) -> Vec<ObjectId> {
-    let ctx = super::filter::FilterContext::from_source(state, source)
+    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
+    // activated ability).
+    let ctx = super::filter::FilterContext::from_source_with_controller(source, player)
         .with_granting_object(granting_object);
     let exclude_source = requires_untapped(cost);
     state
@@ -25418,13 +25869,19 @@ pub(crate) fn activated_ability_granting_object(
 /// eligible fodder under a "players can't sacrifice" effect. `pub` so `phase-ai`'s
 /// cast-time cost gates share it with the payment path in `cost_payability.rs` and
 /// `casting_costs.rs`.
-pub fn find_eligible_sacrifice_targets(
+/// CR 601.2h / CR 602.2b / CR 702.37e: The single authority for sacrifice-cost
+/// eligibility, parameterized by payment scope. Cast and activation scopes enforce
+/// static "players can't sacrifice permanents to cast spells or activate abilities"
+/// prohibitions (Yasharn, Angel of Jubilation); turn-face-up special actions do not.
+pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     state: &GameState,
     player: PlayerId,
     source_id: ObjectId,
     granting_object: Option<ObjectIncarnationRef>,
     filter: &TargetFilter,
+    scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
+    let skip_cant_sacrifice = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
@@ -25436,7 +25893,14 @@ pub fn find_eligible_sacrifice_targets(
             if obj.controller != player {
                 return false;
             }
-            if super::static_abilities::player_cant_sacrifice_as_cost(state, player, id) {
+            // CR 701.21a: A permanent with "can't be sacrificed" cannot be sacrificed
+            // for any cost regardless of payment scope (e.g. Assault Suit).
+            if super::static_abilities::object_has_static_other(state, id, "CantBeSacrificed") {
+                return false;
+            }
+            if !skip_cant_sacrifice
+                && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
+            {
                 return false;
             }
             // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
@@ -25453,13 +25917,32 @@ pub fn find_eligible_sacrifice_targets(
         .collect()
 }
 
+pub fn find_eligible_sacrifice_targets(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    find_eligible_sacrifice_targets_for_scope(
+        state,
+        player,
+        source_id,
+        granting_object,
+        filter,
+        None,
+    )
+}
+
 /// CR 118.3 + CR 601.2h: Activation-time affordability pre-gate. Delegates to
 /// the single affordability authority [`super::costs::can_pay`], which composes
 /// `AbilityCost::is_payable` (the CR 118.3 resource/choice-eligibility gate,
 /// including the Waterbend auto-tap mana check) with a clone-and-dry-run of the
 /// payment authority. This keeps legal-action generation in sync with
 /// `handle_activate_ability`, so the AI never proposes an activation the submit
-/// path would reject.
+/// path would reject. `life` says how the life the cost pays is judged: on the
+/// current total for an automatic payment, after the CR 601.2g opportunity for
+/// a manual one ([`payable_with_mana_ability_window_life`]).
 ///
 /// The bespoke non-self-Sacrifice / PayLife / TapCreatures pre-checks that used
 /// to live here were deleted in Phase 5 — each duplicated logic already in
@@ -25472,18 +25955,400 @@ pub(crate) fn can_pay_ability_cost_now(
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_index: Option<usize>,
+    life: &ActivationLifeWindow,
 ) -> bool {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
-    super::costs::can_pay(
-        state,
+    payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
+        super::costs::can_pay(
+            state,
+            player,
+            source_id,
+            cost,
+            &super::costs::PaymentScope::Activation {
+                excluded_sources: &excluded_sources,
+                ability_index,
+            },
+        )
+    })
+}
+
+/// CR 107.4f + CR 119.4 + CR 601.2h: whether an automatic payment of `cost`'s
+/// mana can pay its Phyrexian life on the life the player has now. The
+/// automatic payer asks for those symbols' payment and validates every symbol
+/// paid with 2 life against the current total
+/// ([`pending_phyrexian_route_is_payable_for`]) before it taps a source, so the
+/// life a tapped mana ability would then gain (Pristine Talisman: "{T}: Add
+/// {C}. You gain 1 life.") pays none of them. [`can_pay_ability_cost_now`]'s
+/// dry run taps first and reads the life after, so an automatic verdict also
+/// judges the mana on the life budget before the auto-tap. Trivially true when
+/// the mana has no symbol payable with life, or when no mana ability of the
+/// player gains them life: the auto-tap cannot then raise the budget.
+fn automatic_activation_phyrexian_life_payable_now(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    ability_index: usize,
+) -> bool {
+    let mana = activation_mana_component(cost);
+    let life_colors = super::static_abilities::player_life_payment_colors(state, player);
+    if !mana_payment::cost_has_life_payable_shard(&mana, life_colors) {
+        return true;
+    }
+    let gains_life_for_mana = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .flat_map(|obj| obj.abilities.iter())
+        .any(|def| {
+            super::mana_abilities::is_mana_ability(def)
+                && super::mana_sources::mana_ability_gains_controller_life(def)
+        });
+    if !gains_life_for_mana {
+        return true;
+    }
+    let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
+    crate::game::perf_counters::record_state_clone_for_legality();
+    let mut simulated = state.clone();
+    super::layers::flush_layers(&mut simulated);
+    let activation_context = activation_payment_context(&simulated, source_id, Some(ability_index));
+    let activation_ctx = activation_context.as_payment_context();
+    can_pay_mana_cost_after_auto_tap_with_context_and_cache(
+        &mut simulated,
         player,
-        source_id,
-        cost,
-        &super::costs::PaymentScope::Activation {
-            excluded_sources: &excluded_sources,
-            ability_index,
+        Some(source_id),
+        &mana,
+        Some(&activation_ctx),
+        &excluded_sources,
+        AutoTapProbeOptions {
+            source_cache: None,
+            explicit_tap_payment_mode: None,
+            phyrexian_life_budget: ProbeLifeBudget::BeforeAutoTap,
         },
     )
+}
+
+/// CR 601.2g + CR 119.3 + CR 119.4: how one legality pass judges the life an
+/// activation's cost pays, which is paid only in CR 601.2h.
+pub(crate) enum ActivationLifeWindow {
+    /// The life the player has now. The automatic payer activates mana
+    /// abilities only for the mana a cost needs, never for the life one also
+    /// gains, so an automatic activation is judged on the current total and is
+    /// never offered at a life its payer then refuses.
+    Current,
+    /// A manual payment: the life the player can have once they have activated,
+    /// during the CR 601.2g opportunity, the mana abilities that gain them life.
+    /// `witness` memoizes that board for the pass — it depends only on the
+    /// activator and the activation's source
+    /// ([`mana_ability_window_life_witness`]), so every gate, probe and target
+    /// completion of one verdict shares one build.
+    ManaAbilityWindow {
+        player: PlayerId,
+        source_id: ObjectId,
+        witness: OnceCell<Option<Box<GameState>>>,
+    },
+}
+
+impl ActivationLifeWindow {
+    /// CR 602.2b + CR 601.2g: the life judgement of an activation by `player`
+    /// of an ability of `source_id`, paid in `payment_mode`.
+    pub(crate) fn for_payment_mode(
+        player: PlayerId,
+        source_id: ObjectId,
+        payment_mode: CastPaymentMode,
+    ) -> Self {
+        if payment_mode_pays_mana_manually(payment_mode) {
+            ActivationLifeWindow::ManaAbilityWindow {
+                player,
+                source_id,
+                witness: OnceCell::new(),
+            }
+        } else {
+            ActivationLifeWindow::Current
+        }
+    }
+}
+
+/// CR 601.2g + CR 601.2h + CR 119.3 + CR 119.4: a manually paid activation's
+/// life follows the same structural rule as its mana. Its mana is judged by
+/// what the player's mana abilities can produce during the CR 601.2g
+/// opportunity, not by the current pool; its life — a printed "Pay N life", a
+/// Phyrexian symbol paid with 2 life, or a {B} paid with life under a payment
+/// permission (K'rrik, Son of Yawgmoth) — is paid only in CR 601.2h, so it is
+/// judged by the life total the player can have by then. A mana ability that
+/// also gains its controller life (Pristine Talisman: "{T}: Add {C}. You gain 1
+/// life.") changes that total during the opportunity (CR 119.3), so a cost
+/// `payable` refuses on the current board is retried once on the pass's witness
+/// board (see [`mana_ability_window_life_witness`]), only when all of these
+/// hold:
+///
+/// * `life` is a manual payment's window. An automatic payment keeps the
+///   current-total verdict.
+/// * each route judged has a CR 601.2g opportunity: its total includes a mana
+///   payment. When paying every printed Phyrexian symbol with 2 life would leave
+///   no mana and no X (Spellskite's lone {U/P}), that all-life announcement has
+///   no opportunity (CR 118.13a), so the routes judged are the announcements
+///   that pay at least one of those symbols as the colored mana it stands for,
+///   each symbol announced as life kept as a 2-life payment (CR 601.2b: the
+///   choice is made for each symbol). For two or more such symbols (Drivnod,
+///   Carnage Dominus; Zopandrel, Hunger Dominus) an announcement mixing mana and
+///   life is one of them. A total that is only life is paid at once, with the
+///   life the player has now.
+/// * that route pays life, and the retry passes when any such route is
+///   payable on the witness. A mana-only total cannot change its verdict: the
+///   current-board check already counts the mana a life-gaining ability adds.
+///
+/// The retry only ever adds an offer; the payment itself still checks the life
+/// the player has when paying (CR 119.4 + CR 118.3).
+pub(crate) fn payable_with_mana_ability_window_life(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    life: &ActivationLifeWindow,
+    payable: impl Fn(&GameState, &AbilityCost) -> bool,
+) -> bool {
+    if payable(state, cost) {
+        return true;
+    }
+    let ActivationLifeWindow::ManaAbilityWindow {
+        player: window_player,
+        source_id: window_source,
+        witness,
+    } = life
+    else {
+        return false;
+    };
+    // The memo belongs to one activator and source; any other activation is
+    // refused the retry rather than judged on a board built for another.
+    debug_assert_eq!(
+        (*window_player, *window_source),
+        (player, source_id),
+        "an activation life window is scoped to one activator and source"
+    );
+    if (*window_player, *window_source) != (player, source_id) {
+        return false;
+    }
+    let life_colors = super::static_abilities::player_life_payment_colors(state, player);
+    let routes: Vec<_> = mana_ability_window_routes(cost)
+        .into_iter()
+        .filter(|route| activation_cost_pays_life(route, life_colors))
+        .collect();
+    if routes.is_empty() {
+        return false;
+    }
+    witness
+        .get_or_init(|| mana_ability_window_life_witness(state, player, source_id).map(Box::new))
+        .as_deref()
+        .is_some_and(|witness| routes.iter().any(|route| payable(witness, route)))
+}
+
+/// CR 601.2g + CR 601.2b + CR 118.13a: the routes of `cost` this check judges
+/// for a mana-ability opportunity — each a total that includes a mana payment,
+/// and so has the opportunity before its life is paid:
+///
+/// * `cost` itself, alone, when paying every printed Phyrexian symbol with
+///   2 life still leaves mana or an X to pay: every announcement then has the
+///   opportunity, and the payability check already judges each one;
+/// * otherwise one route per distinct announcement that pays at least one
+///   printed Phyrexian symbol as the colored mana it stands for (CR 107.4f),
+///   in [`announced_activation_route`]'s shape. The all-life announcement is
+///   left out: its total is only life.
+///
+/// Empty when no route has a mana payment at all. The announcements are
+/// enumerated per symbol (CR 601.2b); the most printed Phyrexian symbols any
+/// activation cost holds is four (Spike, Tournament Grinder), so at most
+/// sixteen announcements are enumerated and fifteen routes built, and
+/// same-colored symbols collapse to fewer distinct routes.
+fn mana_ability_window_routes(cost: &AbilityCost) -> Vec<std::borrow::Cow<'_, AbilityCost>> {
+    let has_mana_payment =
+        |mana: &ManaCost| mana.mana_value() > 0 || casting_costs::cost_has_x(mana);
+    let mana = activation_mana_component(cost);
+    if !has_mana_payment(&mana) {
+        return Vec::new();
+    }
+    let printed_phyrexian = mana_payment::native_phyrexian_shards(&mana);
+    let all_life = mana_payment::all_life_announcement(&mana);
+    if has_mana_payment(&mana_payment::native_selected_mana(&mana, &all_life)) {
+        return vec![std::borrow::Cow::Borrowed(cost)];
+    }
+    let announcements = printed_phyrexian.iter().fold(
+        vec![Vec::<ActivationShardChoice>::new()],
+        |announcements, &(shard_index, shard)| {
+            announcements
+                .into_iter()
+                .flat_map(|announced| {
+                    [ShardChoice::PayMana, ShardChoice::PayLife].map(|choice| {
+                        let mut next = announced.clone();
+                        next.push(ActivationShardChoice {
+                            shard_index,
+                            shard,
+                            choice,
+                        });
+                        next
+                    })
+                })
+                .collect()
+        },
+    );
+    let mut routes: Vec<std::borrow::Cow<'_, AbilityCost>> = Vec::new();
+    for announcement in announcements
+        .iter()
+        .filter(|announced| **announced != all_life)
+    {
+        let route = announced_activation_route(cost, announcement);
+        if !routes.iter().any(|known| **known == route) {
+            routes.push(std::borrow::Cow::Owned(route));
+        }
+    }
+    routes
+}
+
+/// CR 601.2b + CR 107.4f + CR 119.4: `cost` as `announcement` proposes it: each
+/// printed Phyrexian symbol announced as mana is the colored mana it stands for
+/// ([`selected_activation_cost_for_payability`]), and the symbols announced as
+/// life are one "Pay N life" leg of 2 life each, appended last so the first leg
+/// stays the cost's first mana leg.
+fn announced_activation_route(
+    cost: &AbilityCost,
+    announcement: &[ActivationShardChoice],
+) -> AbilityCost {
+    let selected = selected_activation_cost_for_payability(cost, Some(announcement));
+    let life_symbols = announcement
+        .iter()
+        .filter(|record| record.choice == ShardChoice::PayLife)
+        .count();
+    if life_symbols == 0 {
+        return selected;
+    }
+    let life = AbilityCost::PayLife {
+        amount: QuantityExpr::Fixed {
+            value: 2 * life_symbols as i32,
+        },
+    };
+    match selected {
+        AbilityCost::Composite { mut costs } => {
+            costs.push(life);
+            AbilityCost::Composite { costs }
+        }
+        other => AbilityCost::Composite {
+            costs: vec![other, life],
+        },
+    }
+}
+
+/// CR 119.4 + CR 107.4f: whether paying `cost` can pay life — a "Pay N life"
+/// leg, or a mana symbol that can be paid with 2 life under `life_colors`.
+fn activation_cost_pays_life(
+    cost: &AbilityCost,
+    life_colors: crate::types::mana::LifePaymentColors,
+) -> bool {
+    let mut pays_life = false;
+    cost.for_each_cost_node(&mut |node| {
+        pays_life |= match node {
+            AbilityCost::PayLife { .. } => true,
+            AbilityCost::Mana { cost } => {
+                mana_payment::cost_has_life_payable_shard(cost, life_colors)
+            }
+            _ => false,
+        };
+    });
+    pays_life
+}
+
+/// CR 601.2g + CR 119.3: the mana abilities [`mana_ability_window_life_witness`]
+/// activates: each mana ability of a permanent `player` controls, other than
+/// `source_id`, that gains its controller life and costs no more than tapping
+/// or untapping its source. The activation's own source is the only object an
+/// activation cost can need untapped (`ability_mana_payment_excluded_sources`),
+/// so it is always left alone.
+fn mana_ability_window_life_sources(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> impl Iterator<Item = (ObjectId, usize)> + '_ {
+    state
+        .battlefield
+        .iter()
+        .filter(move |id| **id != source_id)
+        .filter_map(move |id| state.objects.get(id))
+        .filter(move |obj| obj.controller == player)
+        .flat_map(|obj| {
+            obj.abilities
+                .iter()
+                .enumerate()
+                .filter(|(_, def)| {
+                    super::mana_sources::mana_ability_gains_controller_life(def)
+                        && super::mana_sources::cost_conclusively_payable_by_cheap_gate(&def.cost)
+                        && super::mana_abilities::is_mana_ability(def)
+                })
+                .map(move |(index, _)| (obj.id, index))
+        })
+}
+
+/// CR 601.2g + CR 605.3b + CR 119.3: a witness board for
+/// [`payable_with_mana_ability_window_life`]: a clone on which `player` has
+/// activated, through the real mana-ability authority, every mana ability
+/// [`mana_ability_window_life_sources`] names. Each resolves at once
+/// (CR 605.3b), adding its mana to the pool — still available to the payment,
+/// so activating it first never takes mana away — and its life to the total.
+/// An ability that would stop for a choice (a mana color) is skipped. `None`
+/// when no activated ability gained any life, i.e. when the witness could not
+/// change any life-based verdict. Every clone it makes is counted.
+fn mana_ability_window_life_witness(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+) -> Option<GameState> {
+    let candidates: Vec<(ObjectId, usize)> =
+        mana_ability_window_life_sources(state, player, source_id).collect();
+    if candidates.is_empty() {
+        return None;
+    }
+    let life = |state: &GameState| state.players.get(player.0 as usize).map(|p| p.life);
+    crate::game::perf_counters::record_state_clone_for_legality();
+    let mut witness = state.clone();
+    let mut gained_life = false;
+    for (mana_source, index) in candidates {
+        let Some(def) = witness
+            .objects
+            .get(&mana_source)
+            .and_then(|obj| obj.abilities.get(index))
+            .cloned()
+        else {
+            continue;
+        };
+        if !super::mana_abilities::can_activate_mana_ability_now(
+            &witness,
+            player,
+            mana_source,
+            index,
+            &def,
+        ) {
+            continue;
+        }
+        crate::game::perf_counters::record_state_clone_for_legality();
+        let mut next = witness.clone();
+        let resolved = super::mana_abilities::activate_mana_ability(
+            &mut next,
+            mana_source,
+            player,
+            index,
+            &def,
+            &mut Vec::new(),
+            ManaAbilityResume::Priority,
+            None,
+        );
+        // CR 605.3b: only an activation that resolved at once (no choice left
+        // open) is part of the witness.
+        if matches!(resolved, Ok(WaitingFor::Priority { .. })) {
+            gained_life |= life(&next) > life(&witness);
+            next.waiting_for = witness.waiting_for.clone();
+            witness = next;
+        }
+    }
+    gained_life.then_some(witness)
 }
 
 /// CR 602.2: True when `obj` has an activated ability that `player` may begin to
@@ -25724,7 +26589,8 @@ pub fn can_activate_ability_now(
 
 /// CR 602.5: enforcement shim over [`activation_verdict`]. The verdict core is
 /// the single activation-legality authority; this preserves the shipped `bool`
-/// signature for its six call sites so display and enforcement can never drift.
+/// signature for its call sites so display and enforcement can never drift.
+/// It answers for an automatic payment (`CastPaymentMode::Auto`).
 pub fn can_activate_ability_now_with_restriction_gates(
     state: &GameState,
     player: PlayerId,
@@ -25740,15 +26606,122 @@ pub fn can_activate_ability_now_with_restriction_gates(
             ability_index,
             restriction_gates,
             ActivationQuery::Legality,
+            CastPaymentMode::Auto,
         ),
         ActivationVerdict::Legal
     )
+}
+
+/// CR 602.2b + CR 601.2g: whether `player` may activate the ability now, paid
+/// in `payment_mode` — the verdict a submitted `GameAction::ActivateAbility`
+/// carrying that mode is judged by.
+pub fn can_activate_ability_now_with_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    payment_mode: CastPaymentMode,
+) -> bool {
+    let gates = restrictions::ActivationRestrictionStaticGates::compute(state);
+    matches!(
+        activation_verdict(
+            state,
+            player,
+            source_id,
+            ability_index,
+            &gates,
+            ActivationQuery::Legality,
+            payment_mode,
+        ),
+        ActivationVerdict::Legal
+    )
+}
+
+/// CR 602.2b + CR 601.2g: the payment mode a priority offer of the ability
+/// carries — the mode the reducer honours, as
+/// [`castable_spell_payment_mode_with_probe`] picks one for a spell. `Auto` when
+/// the automatic payer can complete the activation. Otherwise `Manual` when
+/// only a manual payment can: its life is judged after the CR 601.2g
+/// opportunity, in which the player may first activate mana abilities that gain
+/// them life ([`payable_with_mana_ability_window_life`]). `None` when neither
+/// can. The manual verdict runs only for a cost whose window route pays life
+/// while the player controls such a mana ability.
+pub(crate) fn activation_offer_payment_mode(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    restriction_gates: &restrictions::ActivationRestrictionStaticGates,
+) -> Option<CastPaymentMode> {
+    if can_activate_ability_now_with_restriction_gates(
+        state,
+        player,
+        source_id,
+        ability_index,
+        restriction_gates,
+    ) {
+        return Some(CastPaymentMode::Auto);
+    }
+    (manual_activation_life_retry_possible(state, player, source_id, ability_index)
+        && matches!(
+            activation_verdict(
+                state,
+                player,
+                source_id,
+                ability_index,
+                restriction_gates,
+                ActivationQuery::Legality,
+                CastPaymentMode::Manual,
+            ),
+            ActivationVerdict::Legal
+        ))
+    .then_some(CastPaymentMode::Manual)
+}
+
+/// CR 601.2g + CR 119.4: a manual activation's verdict can differ from the
+/// automatic one only through [`payable_with_mana_ability_window_life`]'s
+/// retry: the ability's cost has a window route that pays life, and the player
+/// controls a mana ability that would gain them life in that window.
+fn manual_activation_life_retry_possible(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+) -> bool {
+    // Cheapest first: with no mana ability that gains the player life, the
+    // window cannot change any life the activation pays.
+    if mana_ability_window_life_sources(state, player, source_id)
+        .next()
+        .is_none()
+    {
+        return false;
+    }
+    let Some(def) = activation_ability_definition(state, source_id, ability_index) else {
+        return false;
+    };
+    // CR 605.3a: a mana ability is activated during a payment, not paid for by
+    // hand, so it has no manual payment to relax.
+    if super::mana_abilities::is_mana_ability(&def) {
+        return false;
+    }
+    let Some(cost) = def
+        .cost
+        .map(|cost| activation_cost_for_affordability(cost, def.ability_tag))
+    else {
+        return false;
+    };
+    let life_colors = super::static_abilities::player_life_payment_colors(state, player);
+    mana_ability_window_routes(&cost)
+        .iter()
+        .any(|route| activation_cost_pays_life(route, life_colors))
 }
 
 /// CR 602.5 + CR 118.3: the one activation-legality evaluation, shared by
 /// enforcement (`ActivationQuery::Legality`) and the display read-out
 /// (`ActivationQuery::BlockReason`). See [`ActivationQuery`] for what the two
 /// modes do differently and why `Legal` is meaningless under `BlockReason`.
+/// `payment_mode` decides how the cost's life is judged (one
+/// [`ActivationLifeWindow`] for the whole evaluation).
 pub(crate) fn activation_verdict(
     state: &GameState,
     player: PlayerId,
@@ -25756,6 +26729,7 @@ pub(crate) fn activation_verdict(
     ability_index: usize,
     restriction_gates: &restrictions::ActivationRestrictionStaticGates,
     query: ActivationQuery,
+    payment_mode: CastPaymentMode,
 ) -> ActivationVerdict {
     crate::game::perf_counters::record_activation_verdict_pass();
     let Some(obj) = state.objects.get(&source_id) else {
@@ -25862,12 +26836,14 @@ pub(crate) fn activation_verdict(
     // CR 601.2f: Apply self-referential cost reduction before affordability check.
     // CR 601.2c + CR 602.2b: a cost that may depend on the targets is judged
     // over the legal assignments; `proved_unpayable` means none is affordable.
+    let life = ActivationLifeWindow::for_payment_mode(player, source_id, payment_mode);
     let proved_unpayable = fold_activation_cost_for_feasibility(
         state,
         &mut ability_def,
         player,
         source_id,
         ability_index,
+        &life,
     );
     let affordability_cost = ability_def
         .cost
@@ -25896,9 +26872,19 @@ pub(crate) fn activation_verdict(
         return ActivationVerdict::Illegal;
     }
     // CR 118.3: the resource-availability gate — the ONE evaluation.
+    // CR 107.4f + CR 119.4: an automatic payment's Phyrexian life is also
+    // judged in its payer's order, before any mana source is tapped.
     let cost_not_payable = proved_unpayable
         || affordability_cost.as_ref().is_some_and(|cost| {
-            !can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index))
+            !can_pay_ability_cost_now(state, player, source_id, cost, Some(ability_index), &life)
+                || (matches!(life, ActivationLifeWindow::Current)
+                    && !automatic_activation_phyrexian_life_payable_now(
+                        state,
+                        player,
+                        source_id,
+                        cost,
+                        ability_index,
+                    ))
         });
     if cost_not_payable && query == ActivationQuery::Legality {
         return ActivationVerdict::Illegal;
@@ -26024,6 +27010,10 @@ fn ability_condition_is_board_state_evaluable(condition: &AbilityCondition) -> b
         AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
             quantity_expr_is_board_state_relative(lhs) && quantity_expr_is_board_state_relative(rhs)
         }
+        AbilityCondition::QuantityQuality {
+            quantity,
+            quality: _,
+        } => quantity_expr_is_board_state_relative(quantity),
         _ => false,
     }
 }
@@ -26134,7 +27124,9 @@ mod starting_life_board_state_tests {
             PlayerScope::Target,
             PlayerScope::ScopedPlayer,
             PlayerScope::RecipientController,
-            PlayerScope::ParentObjectTargetController,
+            PlayerScope::ParentObjectTarget {
+                possession: crate::types::ability::PossessionAxis::Controller,
+            },
         ] {
             assert!(!ability_condition_is_board_state_evaluable(&condition(
                 scope
@@ -26168,6 +27160,7 @@ pub(super) fn try_finalize_activation_mana_payment(
     cost: &AbilityCost,
     target_selection: ActivationTargetSelection,
     activation_cost_snapshot: Option<Box<ActivationCostSnapshot>>,
+    payment_mode: CastPaymentMode,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     let mut pending = PendingCast::for_activation(
@@ -26176,6 +27169,7 @@ pub(super) fn try_finalize_activation_mana_payment(
         ManaCost::NoCost,
         ability_index,
         activation_cost_snapshot,
+        payment_mode,
     );
     pending.activation_target_selection = target_selection;
     try_finalize_activation_mana_payment_from_root(
@@ -26223,12 +27217,16 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     pending.activation_cost = remaining;
     pending.activation_ability_index = Some(ability_index);
     pending.activation_residual = ActivationResidual::ManaLeg;
-    let target_first_interactive_suffix = matches!(
-        pending.activation_target_selection,
-        ActivationTargetSelection::Settled
-    ) && pending.activation_cost.is_some();
+    let waits_for_player = activation_mana_leg_waits_for_player(&pending);
+    let pays_manually = activation_pays_mana_manually(&pending);
     let pending_source_id = pending.object_id;
     state.pending_cast = Some(Box::new(pending));
+    if pays_manually {
+        // CR 601.2g + CR 118.13a: the manual route never decides a Phyrexian
+        // symbol here: it was announced before the lock, and its payment is
+        // selected after the opportunity.
+        return enter_manual_activation_mana_payment(state, player, events).map(Some);
+    }
     let waiting = casting_costs::maybe_pause_for_phyrexian_choice(
         state,
         player,
@@ -26242,14 +27240,235 @@ pub(super) fn try_finalize_pending_activation_mana_leg(
     if let Some(waiting) = waiting {
         return Ok(Some(waiting));
     }
-    if target_first_interactive_suffix {
-        // CR 601.2g-h + CR 602.2b: A target-first activation has already
-        // declared its targets but still has an unpaid interactive suffix. Its
-        // mana leg therefore exposes ManaPayment rather than invalidating that
-        // target declaration before the suffix can be paid.
+    if waits_for_player {
         casting_costs::enter_payment_step(state, player, None, events).map(Some)
     } else {
         casting_costs::finalize_automatic_mana_payment(state, player, events).map(Some)
+    }
+}
+
+/// CR 601.2g + CR 602.2b: how a manually paid activation's locked mana leg, now
+/// on `state.pending_cast`, reaches payment. CR 601.2g gives the player the
+/// chance to activate mana abilities only when the SELECTED total includes a
+/// mana payment: a leg whose every symbol was announced as 2 life (Hex Parasite
+/// with X = 0, paid with life) has none, and is paid at once through the payment
+/// finalizer, which pays the announced life (CR 601.2h). Otherwise `ManaPayment`
+/// opens — even when a payment-only permission (K'rrik, Son of Yawgmoth) could
+/// later pay every colored symbol with life, because that permission does not
+/// change the cost (CR 601.2f).
+fn enter_manual_activation_mana_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let pending = state.pending_cast.as_deref().ok_or_else(|| {
+        EngineError::InvalidAction("a manual activation payment needs its root".to_string())
+    })?;
+    // CR 118.13a + CR 601.2b: a printed Phyrexian symbol of a manual activation
+    // is announced while the activation is proposed. A locked root without that
+    // announcement was not proposed through it, so it is refused rather than
+    // decided now against the current board.
+    if pending.activation_phyrexian_intent.is_none()
+        && !mana_payment::native_phyrexian_shards(&pending.cost).is_empty()
+    {
+        return Err(EngineError::InvalidAction(
+            "a manual activation's Phyrexian symbols were never announced".to_string(),
+        ));
+    }
+    if selected_mana_obligation(pending, &pending.cost).is_without_paying_mana() {
+        casting_costs::finalize_automatic_mana_payment(state, player, events)
+    } else {
+        casting_costs::enter_payment_step(state, player, None, events)
+    }
+}
+
+/// CR 602.2b + CR 601.2g-h: whether an activation's unpaid mana leg opens the
+/// `ManaPayment` window rather than being paid automatically. Two roots wait:
+///
+/// * a manual-payment activation — the player activates the mana abilities
+///   they choose while paying (CR 601.2g), exactly as a manual cast does;
+/// * a target-first activation with an unpaid interactive suffix, which has
+///   already declared its targets, so its mana leg must not invalidate that
+///   declaration before the suffix can be paid. Otherwise an unaffordable
+///   activation is illegal immediately.
+///
+/// `enter_payment_step` still pays a choice-free Auto obligation itself.
+fn activation_mana_leg_waits_for_player(pending: &PendingCast) -> bool {
+    let target_first_interactive_suffix = matches!(
+        pending.activation_target_selection,
+        ActivationTargetSelection::Settled
+    ) && pending.activation_cost.is_some();
+    activation_pays_mana_manually(pending) || target_first_interactive_suffix
+}
+
+/// CR 605.3a + CR 605.3b: whether `action` activates a mana ability, wherever its
+/// source sits (battlefield, hand, graveyard). A mana ability is itself what pays
+/// a mana payment, resolves at once without the stack, and has no payment window
+/// of its own, so there is no manual way to pay for it.
+pub(crate) fn activates_mana_ability(state: &GameState, action: &GameAction) -> bool {
+    let GameAction::ActivateAbility {
+        source_id,
+        ability_index,
+        ..
+    } = action
+    else {
+        return false;
+    };
+    state
+        .objects
+        .get(source_id)
+        .and_then(|obj| obj.abilities.get(*ability_index))
+        .is_some_and(super::mana_abilities::is_mana_ability)
+}
+
+/// CR 602.2b + CR 601.2g: whether the player chose to activate the mana
+/// abilities that pay this activation themself.
+pub(super) fn activation_pays_mana_manually(pending: &PendingCast) -> bool {
+    payment_mode_pays_mana_manually(pending.payment_mode)
+}
+
+/// CR 602.2b + CR 601.2g: the payment mode in which the player activates the mana
+/// abilities that pay an activation themself. `AutoExceptSacrificialMana` is an
+/// automatic mode for an activation.
+pub(super) fn payment_mode_pays_mana_manually(payment_mode: CastPaymentMode) -> bool {
+    match payment_mode {
+        CastPaymentMode::Manual => true,
+        CastPaymentMode::Auto | CastPaymentMode::AutoExceptSacrificialMana => false,
+    }
+}
+
+/// CR 118.13a + CR 601.2b: the Phyrexian announcement bound on `pending`, as the
+/// borrow the cost-fold authority reads. `None` before the announcement and for
+/// every activation that makes none.
+pub(super) fn pending_native_phyrexian(pending: &PendingCast) -> Option<&[ActivationShardChoice]> {
+    pending
+        .activation_phyrexian_intent
+        .as_ref()
+        .map(|intent| intent.native_choices.as_slice())
+}
+
+/// CR 118.13a + CR 601.2b: the printed Phyrexian symbols a manually paid
+/// activation of `cost` announces while it is proposed — before its targets
+/// (CR 601.2c) and before its total cost is determined and locked (CR 601.2f).
+/// Read from the raw mana component, so a payment-only permission never adds a
+/// symbol. Empty for an automatic activation, which keeps its payment-time
+/// choice, and for a cost with no Phyrexian symbol.
+pub(super) fn manual_native_phyrexian_domain(
+    payment_mode: CastPaymentMode,
+    cost: &AbilityCost,
+) -> Vec<(usize, ManaCostShard)> {
+    if !payment_mode_pays_mana_manually(payment_mode) {
+        return Vec::new();
+    }
+    mana_payment::native_phyrexian_shards(&activation_mana_component(cost))
+}
+
+/// CR 601.2b: whether a OneOf alternative of `cost` holds a printed Phyrexian
+/// symbol, so the alternative must be announced before the symbols of the
+/// selected one can be.
+fn one_of_branch_has_native_phyrexian(cost: &AbilityCost) -> bool {
+    find_one_of_cost(cost).is_some_and(|branches| {
+        branches.iter().any(|branch| {
+            !mana_payment::native_phyrexian_shards(&activation_mana_component(branch)).is_empty()
+        })
+    })
+}
+
+/// CR 118.13a + CR 601.2b: whether `pending` is a manually paid activation still
+/// in its proposal — its cost not yet locked — that has a printed Phyrexian
+/// symbol to announce and no announcement bound yet. `whole_cost` is the
+/// activation's selected whole cost on this root.
+pub(super) fn manual_activation_awaits_native_announcement(
+    pending: &PendingCast,
+    whole_cost: &AbilityCost,
+) -> bool {
+    pending.activation_ability_index.is_some()
+        && pending.activation_phyrexian_intent.is_none()
+        && pending
+            .activation_cost_snapshot
+            .as_deref()
+            .is_some_and(|snapshot| matches!(snapshot.lock, ActivationCostLock::Open { .. }))
+        && !manual_native_phyrexian_domain(pending.payment_mode, whole_cost).is_empty()
+}
+
+/// CR 118.13a + CR 601.2b: the announcement prompt for `pending`'s printed
+/// Phyrexian symbols, with the root installed so the answer resumes it.
+/// Structural: see [`mana_payment::native_phyrexian_announcement_options`].
+pub(super) fn native_phyrexian_announcement_prompt(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    whole_cost: &AbilityCost,
+) -> WaitingFor {
+    let shards =
+        mana_payment::native_phyrexian_announcement_options(&activation_mana_component(whole_cost));
+    let spell_object = pending.object_id;
+    state.pending_cast = Some(Box::new(pending));
+    WaitingFor::PhyrexianPayment {
+        player,
+        spell_object,
+        shards,
+    }
+}
+
+/// CR 601.2f + CR 601.2g + CR 118.13a: the mana a manually paid activation's
+/// locked obligation `cost` actually demands: the symbols announced as life are
+/// not mana, and a symbol announced as mana is the colored mana it stands for.
+/// Identical to `cost` for an activation with no announcement.
+pub(super) fn selected_mana_obligation(pending: &PendingCast, cost: &ManaCost) -> ManaCost {
+    match pending_native_phyrexian(pending) {
+        Some(native) => mana_payment::native_selected_mana(cost, native),
+        None => cost.clone(),
+    }
+}
+
+/// CR 601.2f + CR 118.13a + CR 601.2h: `cost` as the selected route's
+/// pre-payment checks must judge it: each mana leg becomes the mana its selected
+/// total demands ([`mana_payment::native_selected_mana`], keyed by the leg's
+/// offset in the activation's mana component), so a symbol announced as life is
+/// not judged against the current life total. That life is checked when the
+/// total is paid (CR 601.2h; CR 118.3 + CR 119.4), after the CR 601.2g
+/// mana-ability opportunity can have changed it.
+fn selected_activation_cost_for_payability(
+    cost: &AbilityCost,
+    native: Option<&[ActivationShardChoice]>,
+) -> AbilityCost {
+    fn rewrite(
+        cost: &AbilityCost,
+        native: &[ActivationShardChoice],
+        offset: &mut usize,
+    ) -> AbilityCost {
+        match cost {
+            AbilityCost::Mana {
+                cost: mana @ ManaCost::Cost { shards, .. },
+            } => {
+                let leg_native: Vec<ActivationShardChoice> = native
+                    .iter()
+                    .filter(|record| {
+                        (*offset..*offset + shards.len()).contains(&record.shard_index)
+                    })
+                    .map(|record| ActivationShardChoice {
+                        shard_index: record.shard_index - *offset,
+                        ..*record
+                    })
+                    .collect();
+                *offset += shards.len();
+                AbilityCost::Mana {
+                    cost: mana_payment::native_selected_mana(mana, &leg_native),
+                }
+            }
+            AbilityCost::Composite { costs } => AbilityCost::Composite {
+                costs: costs
+                    .iter()
+                    .map(|cost| rewrite(cost, native, offset))
+                    .collect(),
+            },
+            other => other.clone(),
+        }
+    }
+    match native {
+        Some(native) if !native.is_empty() => rewrite(cost, native, &mut 0),
+        Some(_) | None => cost.clone(),
     }
 }
 
@@ -26278,11 +27497,13 @@ pub(super) fn finalize_pending_activation_mana_payment(
         activation_payment_context(state, pending.object_id, Some(ability_index));
     let activation_ctx = activation_context.as_payment_context();
     let source_id = pending.object_id;
-    let target_first_interactive_suffix = matches!(
-        pending.activation_target_selection,
-        ActivationTargetSelection::Settled
-    ) && pending.activation_cost.is_some();
+    let waits_for_player = activation_mana_leg_waits_for_player(&pending);
+    let pays_manually = activation_pays_mana_manually(&pending);
     state.pending_cast = Some(Box::new(pending));
+    if pays_manually {
+        // CR 601.2g + CR 118.13a: see `try_finalize_pending_activation_mana_leg`.
+        return enter_manual_activation_mana_payment(state, player, events);
+    }
     if let Some(waiting) = casting_costs::maybe_pause_for_phyrexian_choice(
         state,
         player,
@@ -26295,10 +27516,7 @@ pub(super) fn finalize_pending_activation_mana_payment(
     ) {
         return Ok(waiting);
     }
-    if target_first_interactive_suffix {
-        // CR 601.2g-h + CR 602.2b: Preserve the manual-payment boundary only
-        // while target declaration still precedes an unpaid interactive suffix;
-        // otherwise an unaffordable activation is illegal immediately.
+    if waits_for_player {
         casting_costs::enter_payment_step(state, player, None, events)
     } else {
         casting_costs::finalize_automatic_mana_payment(state, player, events)
@@ -26317,8 +27535,13 @@ fn try_finalize_activation_mana_payment_from_root(
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Preserve the established left-to-right self-discard path: the source-card
     // discard can pause before the later mana leg, whose continuation then
-    // establishes this same serialized root.
-    if find_non_self_battlefield_removal_cost(cost).is_some() || has_self_ref_discard_cost(cost) {
+    // establishes this same serialized root. That path pays its mana leg
+    // automatically, so a manual-payment activation (a cycling card's {2}) takes
+    // this root instead: CR 601.2g-h lets the mana be paid in its window first
+    // and the discard after it, with the rest of the cost.
+    if find_non_self_battlefield_removal_cost(cost).is_some()
+        || (has_self_ref_discard_cost(cost) && !activation_pays_mana_manually(&pending))
+    {
         return Ok(None);
     }
     pending.ability = Box::new(resolved.clone());
@@ -26335,7 +27558,178 @@ pub fn handle_activate_ability(
     ability_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    activate_with_cost_carrier(state, player, source_id, ability_index, None, events)
+    handle_activate_ability_with_payment_mode(
+        state,
+        player,
+        source_id,
+        ability_index,
+        CastPaymentMode::Auto,
+        events,
+    )
+}
+
+/// CR 602.2b + CR 601.2g-h: activate with an explicit mana-payment mode.
+/// `Manual` keeps every mana leg of the activation in `ManaPayment`, after
+/// modes, X and targets are announced, so the player activates the mana
+/// abilities they choose instead of the engine auto-tapping.
+pub fn handle_activate_ability_with_payment_mode(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    ability_index: usize,
+    payment_mode: CastPaymentMode,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    activate_with_cost_carrier(
+        state,
+        player,
+        source_id,
+        ability_index,
+        None,
+        payment_mode,
+        None,
+        events,
+    )
+}
+
+/// CR 118.13a + CR 601.2b + CR 601.2h: which of a manually paid activation's two
+/// Phyrexian choices its `PhyrexianPayment` prompt asks for. The lock tells them
+/// apart: the announcement is made while the activation is proposed, before its
+/// cost locks; the actual payment after the lock and the CR 601.2g opportunity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManualPhyrexianPrompt {
+    /// CR 118.13a + CR 601.2b: how each printed Phyrexian symbol will be paid.
+    Announcement,
+    /// CR 601.2h: how the locked total's Phyrexian-shaped symbols are paid.
+    Payment,
+}
+
+/// CR 118.13a + CR 601.2h: the kind of Phyrexian prompt the pending activation
+/// is answering, or `None` when it is not a manually paid activation (a spell or
+/// an automatic activation keeps its existing payment-time choice).
+pub(crate) fn manual_activation_phyrexian_prompt_kind(
+    state: &GameState,
+) -> Option<ManualPhyrexianPrompt> {
+    let pending = state.pending_cast.as_deref()?;
+    if pending.activation_ability_index.is_none() || !activation_pays_mana_manually(pending) {
+        return None;
+    }
+    let open = pending
+        .activation_cost_snapshot
+        .as_deref()
+        .is_some_and(|snapshot| matches!(snapshot.lock, ActivationCostLock::Open { .. }));
+    Some(if open {
+        ManualPhyrexianPrompt::Announcement
+    } else {
+        ManualPhyrexianPrompt::Payment
+    })
+}
+
+/// CR 118.13a + CR 601.2b: the announcement records for the pending proposal
+/// root, answered on the published prompt `shards`. Each answer is keyed by the
+/// published symbol's raw index and printed symbol, which must be exactly the
+/// root's printed Phyrexian symbols; a second announcement is refused, never
+/// replacing the first. The answer is STRUCTURAL: either payment may be
+/// announced for any symbol, so no resource is checked here — not the pool, not
+/// the life total. Those are checked when the locked total is paid (CR 601.2h;
+/// CR 118.3 + CR 119.4), after the CR 601.2g opportunity can have changed them.
+pub(crate) fn native_announcement_records(
+    state: &GameState,
+    shards: &[crate::types::game_state::PhyrexianShard],
+    choices: &[ShardChoice],
+) -> Result<Vec<ActivationShardChoice>, EngineError> {
+    let pending = state.pending_cast.as_deref().ok_or_else(|| {
+        EngineError::InvalidAction("a Phyrexian announcement needs its activation".to_string())
+    })?;
+    if pending.activation_phyrexian_intent.is_some() {
+        return Err(EngineError::InvalidAction(
+            "this activation's Phyrexian payment is already announced".to_string(),
+        ));
+    }
+    if choices.len() != shards.len() {
+        return Err(EngineError::InvalidAction(format!(
+            "Phyrexian choice count mismatch: expected {}, got {}",
+            shards.len(),
+            choices.len()
+        )));
+    }
+    let domain = mana_payment::native_phyrexian_shards(&activation_mana_component(
+        &activation_x_whole_cost(pending),
+    ));
+    if domain.len() != shards.len()
+        || domain
+            .iter()
+            .zip(shards)
+            .any(|(&(index, _), published)| index != published.shard_index)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Phyrexian shard count changed during the announcement".to_string(),
+        ));
+    }
+    Ok(domain
+        .into_iter()
+        .zip(choices)
+        .map(|((shard_index, shard), &choice)| ActivationShardChoice {
+            shard_index,
+            shard,
+            choice,
+        })
+        .collect())
+}
+
+/// CR 118.13a + CR 601.2b + CR 602.2b: resume a manually paid activation whose
+/// printed Phyrexian symbols were just announced on its open proposal root
+/// (`state.pending_cast`), without paying anything. The announcement is bound on
+/// the root first, then the activation continues from the point that asked:
+///
+/// * after `ChooseX` — the `XAnnounced` lock (or the later target settlement);
+/// * after the modes — the modal continuation, locking first;
+/// * otherwise — the announcement re-enters with its open carrier and the
+///   announcement, and locks there (or at target settlement).
+pub(crate) fn resume_activation_after_native_announcement(
+    state: &mut GameState,
+    player: PlayerId,
+    native_choices: Vec<ActivationShardChoice>,
+    convoke_mode: Option<ConvokeMode>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let mut root = *state.pending_cast.take().ok_or_else(|| {
+        EngineError::InvalidAction("a Phyrexian announcement needs its activation".to_string())
+    })?;
+    let ability_index = root.activation_ability_index.ok_or_else(|| {
+        EngineError::InvalidAction("a Phyrexian announcement needs its ability index".to_string())
+    })?;
+    root.activation_phyrexian_intent = Some(ActivationPhyrexianIntent::announced(native_choices));
+    if root.ability.chosen_x.is_some()
+        && matches!(root.activation_residual, ActivationResidual::XMana)
+    {
+        // CR 601.2b + CR 601.2f: X was announced before the symbols; the lock
+        // that waited for X runs now, with the announcement.
+        let object_id = root.object_id;
+        state.pending_cast = Some(Box::new(root));
+        if let Some(prompt) = lock_activation_cost_at_x(state, player, convoke_mode)? {
+            return Ok(prompt);
+        }
+        apply_post_x_cost_modifiers(state, player, object_id);
+        return casting_costs::enter_payment_step(state, player, convoke_mode, events);
+    }
+    let modal = activation_ability_definition(state, root.object_id, ability_index)
+        .is_some_and(|definition| definition.modal.is_some());
+    if modal {
+        return super::engine_modes::continue_modal_activation_after_announcement(
+            state, player, root, events,
+        );
+    }
+    activate_with_cost_carrier(
+        state,
+        player,
+        root.object_id,
+        ability_index,
+        root.activation_cost_snapshot.take(),
+        root.payment_mode,
+        root.activation_phyrexian_intent.take(),
+        events,
+    )
 }
 
 /// The resolution of a `WaitingFor::OrderCostReductions` answer for an
@@ -26396,14 +27790,35 @@ pub(crate) fn resume_activation_after_cost_election(
                 point,
                 order: Some(order),
             };
-            activate_with_cost_carrier(
-                state,
-                player,
-                pending.object_id,
-                ability_index,
-                Some(snapshot),
-                events,
-            )
+            // CR 601.2b + CR 700.2a: a modal activation with a bound Phyrexian
+            // announcement elected after its modes; it continues past them on
+            // its own root rather than announcing its modes again.
+            if pending.activation_phyrexian_intent.is_some()
+                && activation_ability_definition(state, pending.object_id, ability_index)
+                    .is_some_and(|definition| definition.modal.is_some())
+            {
+                let mut root = pending.clone();
+                root.activation_cost_snapshot = Some(snapshot);
+                write_back_announcement_lock(state, player, &mut root).and_then(|()| {
+                    super::engine_modes::continue_modal_activation_after_lock(
+                        state, player, root, events,
+                    )
+                })
+            } else {
+                // Re-enter the announcement with the prompt's snapshot. Nothing
+                // was chosen before this lock but the Phyrexian announcement,
+                // which the root carries and every rebuilt root keeps.
+                activate_with_cost_carrier(
+                    state,
+                    player,
+                    pending.object_id,
+                    ability_index,
+                    Some(snapshot),
+                    pending.payment_mode,
+                    pending.activation_phyrexian_intent.clone(),
+                    events,
+                )
+            }
         }
         ActivationCostLockPoint::XAnnounced => {
             snapshot.lock = ActivationCostLock::Locked {
@@ -26425,6 +27840,70 @@ pub(crate) fn resume_activation_after_cost_election(
     })
 }
 
+/// CR 601.2f + CR 118.13a: write an `Announcement`-locked carrier's fold — under
+/// its elected order, if any, and the bound Phyrexian announcement — back onto
+/// the root's whole cost. Used by a modal manual activation, whose lock waited
+/// for its modes and the announcement after them (CR 601.2b + CR 700.2a).
+pub(super) fn write_back_announcement_lock(
+    state: &GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) -> Result<(), EngineError> {
+    let ability_index = pending.activation_ability_index.ok_or_else(|| {
+        EngineError::InvalidAction("an activation lock needs its ability index".to_string())
+    })?;
+    let definition = activation_ability_definition(state, pending.object_id, ability_index)
+        .ok_or_else(|| EngineError::InvalidAction("the activated ability is gone".to_string()))?;
+    let snapshot = pending.activation_cost_snapshot.as_deref().ok_or_else(|| {
+        EngineError::InvalidAction("an activation lock needs its cost carrier".to_string())
+    })?;
+    let folded = fold_activation_cost(
+        &snapshot.base_cost,
+        snapshot.raise_total,
+        &snapshot.reductions,
+        locked_activation_order(snapshot),
+        pending_native_phyrexian(pending),
+    );
+    let folded = finish_activation_fold(state, player, &definition, folded);
+    pending.activation_cost = Some(activation_cost_for_affordability(
+        folded,
+        definition.ability_tag,
+    ));
+    Ok(())
+}
+
+/// CR 601.2f + CR 602.2b + CR 118.13a: the `Announcement` lock of a modal manual
+/// activation, run once its modes and its Phyrexian announcement are bound: the
+/// distinct totals its reduction orders lock (`Some`), for the caster's
+/// election, or `None` once the default order is locked and written back.
+pub(super) fn lock_proposed_activation_at_announcement(
+    state: &GameState,
+    player: PlayerId,
+    pending: &mut PendingCast,
+) -> Result<Option<Vec<CostReductionOutcome>>, EngineError> {
+    let outcomes = pending
+        .activation_cost_snapshot
+        .as_deref()
+        .and_then(|snapshot| {
+            analyze_activation_cost_election(snapshot, pending_native_phyrexian(pending))
+        });
+    if outcomes.is_some() {
+        return Ok(outcomes);
+    }
+    let snapshot = pending
+        .activation_cost_snapshot
+        .as_deref_mut()
+        .ok_or_else(|| {
+            EngineError::InvalidAction("an activation lock needs its cost carrier".to_string())
+        })?;
+    snapshot.lock = ActivationCostLock::Locked {
+        point: ActivationCostLockPoint::Announcement,
+        order: None,
+    };
+    write_back_announcement_lock(state, player, pending)?;
+    Ok(None)
+}
+
 /// CR 601.2f: the elected order a locked snapshot carries, if any.
 fn locked_activation_order(snapshot: &ActivationCostSnapshot) -> Option<&[ReductionProvenance]> {
     match &snapshot.lock {
@@ -26439,7 +27918,7 @@ fn locked_activation_order(snapshot: &ActivationCostSnapshot) -> Option<&[Reduct
 /// mana leg in `pending.cost` followed by the residual in
 /// `pending.activation_cost`, whose other mana legs, if any, count toward the
 /// same floors ("the mana in that cost").
-fn activation_x_whole_cost(pending: &PendingCast) -> AbilityCost {
+pub(super) fn activation_x_whole_cost(pending: &PendingCast) -> AbilityCost {
     let mut legs = vec![AbilityCost::Mana {
         cost: pending.cost.clone(),
     }];
@@ -26480,11 +27959,14 @@ fn split_activation_x_whole_cost(pending: &mut PendingCast, folded: AbilityCost)
 /// now-concrete cost under `snapshot.lock`'s order (the default when none was
 /// elected), write the result back, and carry the locked snapshot on.
 fn apply_activation_x_fold(pending: &mut PendingCast, snapshot: Box<ActivationCostSnapshot>) {
+    // CR 118.13a + CR 601.2b: the announcement (bound after X, before this
+    // lock) decides which symbols are mana in the total the floors read.
     let folded = fold_activation_cost(
         &snapshot.base_cost,
         snapshot.raise_total,
         &snapshot.reductions,
         locked_activation_order(&snapshot),
+        pending_native_phyrexian(pending),
     );
     split_activation_x_whole_cost(pending, folded);
     pending.activation_cost_snapshot = Some(snapshot);
@@ -26496,6 +27978,12 @@ fn apply_activation_x_fold(pending: &mut PendingCast, snapshot: Box<ActivationCo
 /// judged by the feasibility authority the spell route uses before it opens a
 /// manual payment (`can_feasibly_pay_mana_cost`), the other legs by the
 /// announcement gate (`is_payable_for_activation`).
+///
+/// CR 118.13a + CR 601.2h: for a bound Phyrexian announcement the mana leg is
+/// judged by the mana its selected total demands; a symbol announced as life is
+/// not judged against the current life total here — that life is checked when
+/// the total is paid, after the CR 601.2g opportunity can have changed it
+/// (CR 118.3 + CR 119.4).
 fn ensure_x_locked_activation_payable(
     state: &GameState,
     player: PlayerId,
@@ -26503,16 +27991,44 @@ fn ensure_x_locked_activation_payable(
     let pending = state.pending_cast.as_deref().ok_or_else(|| {
         EngineError::InvalidAction("an X-locked activation must be pending".to_string())
     })?;
-    let mana_payable = pending.cost.mana_value() == 0
-        || can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), &pending.cost);
-    if mana_payable
-        && activation_x_whole_cost(pending).is_payable_for_activation(
-            state,
-            player,
-            pending.object_id,
-            pending.activation_ability_index,
-        )
-    {
+    let mana_obligation = selected_mana_obligation(pending, &pending.cost);
+    let whole_cost = activation_x_whole_cost(pending);
+    // CR 601.2g + CR 119.4: life in the locked total is judged by the life the
+    // player can have when it is paid, exactly as the offer judged it. The mana
+    // leg judged is the X leg of the route being judged: the selected total's,
+    // or — when X is locked before the Phyrexian announcement and every printed
+    // symbol announced as life would leave no mana — each route that announces
+    // at least one of them as mana (CR 118.13a), the ones with a CR 601.2g
+    // opportunity. `activation_x_whole_cost` puts that leg first, and every
+    // route keeps it there.
+    let payable = |state: &GameState, route: &AbilityCost| {
+        let route_x_leg = match route {
+            AbilityCost::Composite { costs } => costs.first(),
+            other => Some(other),
+        };
+        let obligation = match route_x_leg {
+            Some(AbilityCost::Mana { cost }) => cost,
+            _ => &mana_obligation,
+        };
+        (obligation.mana_value() == 0
+            || can_feasibly_pay_mana_cost(state, player, Some(pending.object_id), obligation))
+            && whole_cost.is_payable_for_activation(
+                state,
+                player,
+                pending.object_id,
+                pending.activation_ability_index,
+            )
+    };
+    let selected_cost =
+        selected_activation_cost_for_payability(&whole_cost, pending_native_phyrexian(pending));
+    if payable_with_mana_ability_window_life(
+        state,
+        player,
+        pending.object_id,
+        &selected_cost,
+        &ActivationLifeWindow::for_payment_mode(player, pending.object_id, pending.payment_mode),
+        payable,
+    ) {
         Ok(())
     } else {
         Err(EngineError::ActionNotAllowed(
@@ -26525,6 +28041,66 @@ fn ensure_x_locked_activation_payable(
 /// activation locks for a candidate X — the per-X authority behind the X cap and
 /// the X previews. `None` unless `pending` is such an activation.
 pub(super) fn deferred_activation_mana_for_x(pending: &PendingCast, x: u32) -> Option<ManaCost> {
+    // An X preview precedes any Phyrexian announcement (CR 601.2b announces X
+    // first), so it is the unselected preview unless one is already bound.
+    deferred_activation_mana_for_x_announcing(pending, x, pending_native_phyrexian(pending))
+}
+
+/// CR 601.2b + CR 118.13a + CR 119.4: the printed Phyrexian symbols of `cost`
+/// the X cap of `pending` takes as announced with 2 life. X is announced before
+/// them — a manual payment announces them next, an automatic one while paying —
+/// so the cap, an upper bound and never a price, admits every symbol the player
+/// may still pay with life: all of them for a manual payment, whose life is
+/// judged after the CR 601.2g opportunity; for an automatic one, as many as the
+/// player's current life can pay. None for a spell, or once an announcement is
+/// bound (it is the selected total then).
+pub(super) fn activation_x_cap_life_announcement(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    cost: &ManaCost,
+) -> Vec<ActivationShardChoice> {
+    if pending.activation_ability_index.is_none() || pending.activation_phyrexian_intent.is_some() {
+        return Vec::new();
+    }
+    let all_life = mana_payment::all_life_announcement(cost);
+    if activation_pays_mana_manually(pending) {
+        return all_life;
+    }
+    let payable = super::life_costs::max_phyrexian_life_payments(state, player);
+    all_life
+        .into_iter()
+        .take(usize::try_from(payable).unwrap_or(usize::MAX))
+        .collect()
+}
+
+/// CR 601.2b + CR 601.2f + CR 118.13a: the mana the X cap judges for candidate
+/// `x` of a deferred mana-`{X}` activation: [`deferred_activation_mana_for_x`]
+/// with the symbols [`activation_x_cap_life_announcement`] admits announced as
+/// 2 life — folded under that announcement, so a floor counts only the mana left
+/// (CR 601.2f), and without those symbols.
+pub(super) fn deferred_activation_x_cap_mana(
+    state: &GameState,
+    player: PlayerId,
+    pending: &PendingCast,
+    x: u32,
+) -> Option<ManaCost> {
+    let printed = deferred_activation_mana_for_x(pending, x)?;
+    let life = activation_x_cap_life_announcement(state, player, pending, &printed);
+    if life.is_empty() {
+        return Some(printed);
+    }
+    let total = deferred_activation_mana_for_x_announcing(pending, x, Some(&life))?;
+    Some(mana_payment::native_selected_mana(&total, &life))
+}
+
+/// [`deferred_activation_mana_for_x`] under the Phyrexian announcement `native`
+/// (`None`: unselected), keyed by index in the activation's mana component.
+fn deferred_activation_mana_for_x_announcing(
+    pending: &PendingCast,
+    x: u32,
+    native: Option<&[ActivationShardChoice]>,
+) -> Option<ManaCost> {
     let snapshot = pending.activation_cost_snapshot.as_deref()?;
     if !matches!(
         snapshot.lock,
@@ -26541,6 +28117,7 @@ pub(super) fn deferred_activation_mana_for_x(pending: &PendingCast, x: u32) -> O
         snapshot.raise_total,
         &snapshot.reductions,
         None,
+        native,
     );
     Some(activation_mana_component(&folded))
 }
@@ -26575,7 +28152,9 @@ pub(crate) fn lock_activation_cost_at_x(
     let mut snapshot = Box::new(snapshot.clone());
     snapshot.base_cost = activation_x_whole_cost(pending);
 
-    if let Some(outcomes) = analyze_activation_cost_election(&snapshot) {
+    if let Some(outcomes) =
+        analyze_activation_cost_election(&snapshot, pending_native_phyrexian(pending))
+    {
         let mut dry_run = state.clone();
         let object_id = pending.object_id;
         {
@@ -26624,12 +28203,23 @@ pub(crate) fn lock_activation_cost_at_x(
 /// CR 602.2: the one activation path. `carrier` is `None` for a fresh
 /// activation (the modifiers are collected here) and a `Locked` snapshot when
 /// the caster's CR 601.2f election resumes it, or for the lock's own dry run.
+///
+/// CR 118.13a + CR 601.2b: `phyrexian_intent` is a manual activation's bound
+/// Phyrexian announcement. A manual activation with a printed Phyrexian symbol
+/// stops BEFORE its cost locks to announce it, with nothing yet mutated, and is
+/// resumed here with its still-`Open` carrier and that announcement: exactly as
+/// an Announcement election resumes, it rebuilds nothing that was chosen — no
+/// choice precedes the announcement — and every root it builds from then on
+/// carries the announcement.
+#[allow(clippy::too_many_arguments)]
 fn activate_with_cost_carrier(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
     carrier: Option<Box<ActivationCostSnapshot>>,
+    payment_mode: CastPaymentMode,
+    phyrexian_intent: Option<ActivationPhyrexianIntent>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if !state.objects.contains_key(&source_id) {
@@ -26710,7 +28300,13 @@ fn activate_with_cost_carrier(
     // itself is written only by the lock, further down.
     let mut carrier = match carrier {
         Some(snapshot) => {
-            if matches!(snapshot.lock, ActivationCostLock::Open { .. }) {
+            // CR 118.13a + CR 601.2b: only a manual activation resumed from its
+            // Phyrexian announcement re-enters with its lock still open — its
+            // lock follows that announcement, which an election resume has
+            // already passed.
+            if matches!(snapshot.lock, ActivationCostLock::Open { .. })
+                && phyrexian_intent.is_none()
+            {
                 debug_assert!(false, "an activation re-entered with an unlocked cost");
                 return Err(EngineError::InvalidAction(
                     "an activation re-entered with its cost still unlocked".to_string(),
@@ -26763,6 +28359,24 @@ fn activate_with_cost_carrier(
             }
         )
     });
+    // CR 118.13a + CR 601.2b: the bound Phyrexian announcement the fold reads
+    // (`None` before it, which previews every printed symbol as mana).
+    let native = phyrexian_intent
+        .as_ref()
+        .map(|intent| intent.native_choices.as_slice());
+    // CR 601.2b + CR 700.2a: a modal manual activation with a printed Phyrexian
+    // symbol announces its modes first and the symbols' payment after them, so
+    // its Announcement lock waits for the announcement the mode choice leads to.
+    let lock_deferred_to_modes = phyrexian_intent.is_none()
+        && ability_def.modal.is_some()
+        && carrier.as_deref().is_some_and(|snapshot| {
+            matches!(
+                snapshot.lock,
+                ActivationCostLock::Open {
+                    point: ActivationCostLockPoint::Announcement
+                }
+            ) && !manual_native_phyrexian_domain(payment_mode, &snapshot.base_cost).is_empty()
+        });
     // The gates below read a PREVIEW. A deferred activation previews its best
     // case (every target-gated reduction, no target-gated raise): settlement
     // decides the real price exactly, before any payment, so an optimistic
@@ -26790,6 +28404,7 @@ fn activate_with_cost_carrier(
                 snapshot.raise_total,
                 &reductions,
                 locked_activation_order(snapshot),
+                native,
             ),
         )
     });
@@ -26810,6 +28425,7 @@ fn activate_with_cost_carrier(
             source_id,
             cost,
             ability_index,
+            payment_mode,
         ) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay activation cost".to_string(),
@@ -26840,6 +28456,76 @@ fn activate_with_cost_carrier(
         }
     }
 
+    // CR 118.13a + CR 601.2b + CR 602.2b: a manually paid activation announces
+    // how it will pay each printed Phyrexian symbol while it is proposed — before
+    // its targets (CR 601.2c) and before its total cost is determined and locked
+    // (CR 601.2f), because a symbol announced as life is not mana in that total.
+    // Nothing is mutated before this point, so the announcement's answer resumes
+    // the activation here. A mana `{X}` is announced first (its root asks after
+    // `ChooseX`); a modal one after its modes (`engine_modes`); a cost
+    // alternative before the symbols of the alternative it selects.
+    if phyrexian_intent.is_none()
+        && ability_def.modal.is_none()
+        && payment_mode_pays_mana_manually(payment_mode)
+    {
+        if let Some(snapshot) = carrier.as_deref().filter(|snapshot| {
+            matches!(
+                snapshot.lock,
+                ActivationCostLock::Open {
+                    point: ActivationCostLockPoint::Announcement
+                        | ActivationCostLockPoint::TargetSettlement
+                }
+            )
+        }) {
+            let base_cost = snapshot.base_cost.clone();
+            let announces_alternative = one_of_branch_has_native_phyrexian(&base_cost);
+            // A mana `{X}` is announced before the symbols, on the X root.
+            let announces_after_x = casting_costs::extract_x_mana_cost(&base_cost).is_some();
+            if !announces_after_x
+                && (announces_alternative
+                    || !manual_native_phyrexian_domain(payment_mode, &base_cost).is_empty())
+            {
+                let mut root = PendingCast::for_activation(
+                    source_id,
+                    build_resolved_from_def(&ability_def, source_id, player),
+                    ManaCost::NoCost,
+                    ability_index,
+                    carrier.clone(),
+                    payment_mode,
+                );
+                root.activation_cost = Some(base_cost.clone());
+                if announces_alternative {
+                    // CR 601.2b: the alternative is announced before the
+                    // symbols of the alternative it selects; nothing is paid.
+                    let costs = find_one_of_cost(&base_cost)
+                        .expect("an announced alternative is a OneOf cost");
+                    let payable = payable_one_of_activation_branches(
+                        state,
+                        player,
+                        source_id,
+                        &base_cost,
+                        costs,
+                        ability_index,
+                        payment_mode,
+                    );
+                    if payable.is_empty() {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay activation cost".to_string(),
+                        ));
+                    }
+                    return Ok(WaitingFor::ActivationCostOneOfChoice {
+                        player,
+                        costs: payable,
+                        pending_cast: Box::new(root),
+                    });
+                }
+                return Ok(native_phyrexian_announcement_prompt(
+                    state, player, root, &base_cost,
+                ));
+            }
+        }
+    }
+
     // CR 601.2f + CR 602.2b: the cost lock. It runs exactly once per activation,
     // after the final fold (on this engine the announcement fold above, which is
     // where every modelled activation cost modifier is determined) and before the
@@ -26847,14 +28533,15 @@ fn activate_with_cost_carrier(
     // interactive costs and the `{0}` direct push — sees the locked total.
     let election = match carrier.as_deref() {
         Some(snapshot)
-            if matches!(
-                snapshot.lock,
-                ActivationCostLock::Open {
-                    point: ActivationCostLockPoint::Announcement
-                }
-            ) =>
+            if !lock_deferred_to_modes
+                && matches!(
+                    snapshot.lock,
+                    ActivationCostLock::Open {
+                        point: ActivationCostLockPoint::Announcement
+                    }
+                ) =>
         {
-            analyze_activation_cost_election(snapshot)
+            analyze_activation_cost_election(snapshot, native)
         }
         _ => None,
     };
@@ -26876,22 +28563,40 @@ fn activate_with_cost_carrier(
             order: None,
         };
         let mut probe = state.clone();
+        // The dry run proves the default order payable; automatic payment is
+        // that proof, whatever mode the player chose — except for a bound
+        // Phyrexian announcement (CR 118.13a), which an automatic dry run would
+        // drop and re-decide against the current life total. That route proves
+        // its legality the way it is played: it runs manually, with the
+        // announcement, to its first prompt. So does any manual activation: its
+        // life is judged after the CR 601.2g opportunity (CR 119.3 + CR 119.4),
+        // which an automatic dry run would judge against the current total and
+        // refuse an activation the manual offer made.
+        let (dry_run_mode, dry_run_intent) = match phyrexian_intent.as_ref() {
+            Some(intent) => (payment_mode, Some(intent.clone())),
+            None if payment_mode_pays_mana_manually(payment_mode) => (payment_mode, None),
+            None => (CastPaymentMode::Auto, None),
+        };
         activate_with_cost_carrier(
             &mut probe,
             player,
             source_id,
             ability_index,
             Some(Box::new(dry_run)),
+            dry_run_mode,
+            dry_run_intent,
             &mut Vec::new(),
         )?;
         let reductions = snapshot.reductions.clone();
-        let pending = PendingCast::for_activation(
+        let mut pending = PendingCast::for_activation(
             source_id,
             build_resolved_from_def(&ability_def, source_id, player),
             ManaCost::NoCost,
             ability_index,
             Some(snapshot),
+            payment_mode,
         );
+        pending.activation_phyrexian_intent = phyrexian_intent.clone();
         return Ok(WaitingFor::OrderCostReductions {
             player,
             reductions,
@@ -26903,6 +28608,11 @@ fn activate_with_cost_carrier(
     let mut deferred_to_x = false;
     if let Some(snapshot) = carrier.as_mut() {
         match snapshot.lock {
+            // CR 601.2b + CR 700.2a: deferred until the modes and the Phyrexian
+            // announcement after them (see `lock_deferred_to_modes`).
+            ActivationCostLock::Open {
+                point: ActivationCostLockPoint::Announcement,
+            } if lock_deferred_to_modes => {}
             ActivationCostLock::Open {
                 point: ActivationCostLockPoint::Announcement,
             } => {
@@ -26922,9 +28632,10 @@ fn activate_with_cost_carrier(
         }
     }
     // The lock is the only writer of the ability's cost. A lock deferred to the
-    // X announcement or to target settlement leaves the printed cost unfolded:
-    // the later lock folds every modifier once, against the concrete cost.
-    ability_def.cost = if deferred_to_x || lock_deferred_to_targets {
+    // X announcement, to target settlement, or past the modes leaves the printed
+    // cost unfolded: the later lock folds every modifier once, against the
+    // concrete cost and the bound announcement.
+    ability_def.cost = if deferred_to_x || lock_deferred_to_targets || lock_deferred_to_modes {
         carrier.as_ref().map(|snapshot| snapshot.base_cost.clone())
     } else {
         preview_cost
@@ -27029,6 +28740,7 @@ fn activate_with_cost_carrier(
             ability_index: Some(ability_index),
             ability_cost: ability_def.cost.clone(),
             activation_cost_snapshot: carrier.clone(),
+            activation_payment_mode: payment_mode,
             unavailable_modes,
         });
     }
@@ -27052,6 +28764,8 @@ fn activate_with_cost_carrier(
     // captured now, before any cost is paid. Target settlement adds the
     // committed targets on every target-first route. CR 602.2a: provenance too.
     record_activation_announcement(state, player, source_id, ability_index, &mut resolved);
+    // The record retains the definition's original cost. A resumed proposal's
+    // fold base may already be a selected OneOf branch, a different domain.
     // CR 602.2b + CR 601.2b/c: an X announcement can determine how many
     // targets an ability has. Before X is chosen, target-slot construction may
     // reject that specific class of otherwise legal activation; defer only that
@@ -27075,6 +28789,14 @@ fn activate_with_cost_carrier(
         }
         Err(error) => return Err(error),
     };
+
+    // CR 601.2c + CR 602.2b: the ability's cross-target constraints ("from a
+    // single graveyard") bind the whole target set it declares, whether its
+    // targets are chosen now, before any cost, or after an X announcement that
+    // sets how many it has (`deferred_target_selection`). Stated once and
+    // carried onto every target-bearing pending activation built below, as the
+    // modal sibling (`engine_modes::route_activated_modes`) carries its modes'.
+    let target_constraints = ability_def.target_constraints.clone();
 
     // CR 602.2b + CR 601.2b-i: announcement-only choices are resolved before
     // entering the shared target-before-cost boundary below.
@@ -27109,8 +28831,11 @@ fn activate_with_cost_carrier(
                 mana_cost.unwrap_or(ManaCost::NoCost),
                 ability_index,
                 carrier.clone(),
+                payment_mode,
             );
+            pending_x.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_x.activation_cost = remaining;
+            pending_x.target_constraints = target_constraints;
             pending_x.deferred_target_selection = has_effect_targets;
             // CR 601.2g + CR 601.2h: if a non-self battlefield-removal sub-cost
             // (Sacrifice / battlefield Exile / ReturnToHand) is still
@@ -27151,8 +28876,11 @@ fn activate_with_cost_carrier(
                 mana_cost,
                 ability_index,
                 carrier.clone(),
+                payment_mode,
             );
+            pending_x.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_x.activation_cost = remaining;
+            pending_x.target_constraints = target_constraints;
             pending_x.deferred_target_selection = has_effect_targets;
             // CR 601.2f + CR 601.2h: POSITIVE signal — the residual non-mana tail
             // in `activation_cost` is still OUTSTANDING after mana payment, so
@@ -27207,7 +28935,11 @@ fn activate_with_cost_carrier(
 
         let loyalty_no_targets =
             crate::types::ability::is_loyalty_ability_cost(cost) && !has_effect_targets;
+        // CR 601.2g + CR 602.2b: a manually paid activation hoists its mana leg
+        // through the shared residual dispatcher below, whatever its non-mana
+        // suffix, so its opportunity follows its selected total.
         if !has_effect_targets
+            && !payment_mode_pays_mana_manually(payment_mode)
             && (find_non_self_battlefield_removal_cost(cost).is_some() || loyalty_no_targets)
         {
             if let Some((mana_cost, remaining)) = casting_costs::extract_mana_leg(cost) {
@@ -27217,7 +28949,9 @@ fn activate_with_cost_carrier(
                     mana_cost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_leg.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_leg.activation_cost = remaining;
                 pending_leg.activation_residual = ActivationResidual::ManaLeg;
                 state.pending_cast = Some(Box::new(pending_leg));
@@ -27237,7 +28971,9 @@ fn activate_with_cost_carrier(
                 ManaCost::NoCost,
                 ability_index,
                 carrier.clone(),
+                payment_mode,
             );
+            pending_interactive.activation_phyrexian_intent = phyrexian_intent.clone();
             pending_interactive.activation_cost = Some(cost.clone());
             let initial_activation_cost = pending_interactive.activation_cost.clone();
             if let Some(waiting_for) =
@@ -27276,7 +29012,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_discard.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_discard.activation_cost = Some(cost.clone());
                 return Ok(WaitingFor::PayCost {
                     player,
@@ -27312,7 +29050,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending.activation_cost = Some(cost.clone());
                 return super::effects::collect_evidence::begin_cost_payment(
                     state,
@@ -27353,7 +29093,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_agg.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_agg.activation_cost = Some(cost.clone());
                 let max_count = eligible.len();
                 return Ok(WaitingFor::PayCost {
@@ -27406,7 +29148,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_exile.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_exile.activation_cost = Some(cost.clone());
                 return Ok(WaitingFor::PayCost {
                     player,
@@ -27445,7 +29189,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_craft.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_craft.activation_cost = Some(cost.clone());
                 return Ok(WaitingFor::PayCost {
                     player,
@@ -27472,6 +29218,7 @@ fn activate_with_cost_carrier(
                     cost,
                     costs,
                     ability_index,
+                    payment_mode,
                 );
                 if payable.is_empty() {
                     return Err(EngineError::ActionNotAllowed(
@@ -27484,7 +29231,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_one_of.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_one_of.activation_cost = Some(cost.clone());
                 return Ok(WaitingFor::ActivationCostOneOfChoice {
                     player,
@@ -27515,14 +29264,16 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_return.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_return.activation_cost = Some(cost.clone());
                 return Ok(WaitingFor::PayCost {
                     player,
                     kind: PayCostKind::ReturnToHand,
                     choices: eligible,
                     count: count as usize,
-                    min_count: 0,
+                    min_count: count as usize,
                     resume: CostResume::Spell {
                         spell: Box::new(pending_return),
                     },
@@ -27574,7 +29325,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_counter.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_counter.activation_cost = Some(cost.clone());
                 let max_count = match selection {
                     CounterCostSelection::SingleObject => 1,
@@ -27644,7 +29397,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_tap.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_tap.activation_cost = Some(cost.clone());
                 return Ok(WaitingFor::PayCost {
                     player,
@@ -27670,7 +29425,9 @@ fn activate_with_cost_carrier(
                     ManaCost::NoCost,
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_interactive.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_interactive.activation_cost = Some(cost.clone());
                 if let Some(waiting_for) =
                     casting_costs::surface_next_unpaid_interactive_activation_cost(
@@ -27700,7 +29457,9 @@ fn activate_with_cost_carrier(
                     wb_cost.clone(),
                     ability_index,
                     carrier.clone(),
+                    payment_mode,
                 );
+                pending_wb.activation_phyrexian_intent = phyrexian_intent.clone();
                 pending_wb.activation_cost = Some(cost.clone());
                 state.pending_cast = Some(Box::new(pending_wb));
                 return casting_costs::enter_payment_step(
@@ -27715,7 +29474,6 @@ fn activate_with_cost_carrier(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        let target_constraints = ability_def.target_constraints.clone();
         if let Some(targets) =
             auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
@@ -27739,7 +29497,9 @@ fn activate_with_cost_carrier(
                 ManaCost::NoCost,
                 ability_index,
                 carrier.clone(),
+                payment_mode,
             );
+            pending.activation_phyrexian_intent = phyrexian_intent.clone();
             pending.activation_cost = ability_def.cost.clone();
             pending.target_constraints = target_constraints;
             pending.distribute = ability_def.distribute.clone();
@@ -27755,7 +29515,9 @@ fn activate_with_cost_carrier(
             crate::types::mana::ManaCost::NoCost,
             ability_index,
             carrier.clone(),
+            payment_mode,
         );
+        pending_target.activation_phyrexian_intent = phyrexian_intent.clone();
         pending_target.activation_cost = ability_def.cost.clone();
         pending_target.target_constraints = target_constraints;
         // CR 601.2d: propagate the divided-effect flag so a targeted activated
@@ -27785,6 +29547,7 @@ fn activate_with_cost_carrier(
                 ActivationTargetSelection::Pending,
                 carrier.clone(),
                 None,
+                payment_mode,
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
@@ -27797,16 +29560,20 @@ fn activate_with_cost_carrier(
             cost,
             ActivationTargetSelection::Pending,
             carrier.clone(),
+            payment_mode,
             events,
         )? {
             return Ok(waiting);
         }
+        // CR 602.2b: this activation's own payment writes its removed-counter
+        // count onto `resolved`, which the pause clones and the push consumes.
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
             state,
             player,
             source_id,
             cost,
             Some(ability_index),
+            &mut resolved.context.cost_removed_counter_amount,
             events,
         )? {
             let pending = pending_activation_after_cost_pause(
@@ -27815,6 +29582,7 @@ fn activate_with_cost_carrier(
                 ability_index,
                 remaining_cost,
                 carrier.clone(),
+                payment_mode,
             );
             if let Some(pending) =
                 casting_costs::attach_pending_cast_to_cost_move(state, Box::new(pending))
@@ -27850,6 +29618,9 @@ fn activate_with_cost_carrier(
     // reversed (never recorded from post-payment facts).
     let mut resolved = resolved;
     let record = take_activation_record(&mut resolved, player)?;
+    // CR 602.2b + CR 601.2h + CR 608.2h: `resolved.context.cost_removed_counter_amount`
+    // already holds this activation's cost-removed counter count: the count was
+    // written by this activation's own payment.
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     let announced_targets = declared_targets_in_chain(&resolved);
@@ -27957,15 +29728,17 @@ pub(crate) fn record_activated_ability_placed(
                 )),
         "record_activated_ability_placed must name the entry its caller just pushed"
     );
-    // CR 606.1 + CR 602.2: the kind and announcement zone are the facts bound
-    // when the ability was announced — never re-read from the source after its
-    // costs were paid (a cost may have moved it, resetting its abilities).
+    // CR 606.1 + CR 602.2 + CR 602.1a: the kind, announcement zone and
+    // activation cost are the facts bound when the ability was announced —
+    // never re-read from the source after its costs were paid (a cost may have
+    // moved it, resetting its abilities; CR 400.7).
     let kind = if record.is_loyalty_ability {
         ActivatedAbilityKind::Loyalty
     } else {
         ActivatedAbilityKind::Normal
     };
     let announced_zone = record.source_zone;
+    let activation_cost = record.activation_cost.clone();
     restrictions::record_ability_activation(state, source_id, ability_index, Some(record));
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
@@ -27975,6 +29748,7 @@ pub(crate) fn record_activated_ability_placed(
         player,
         source_id,
         kind,
+        activation_cost,
         Some(placed_entry),
         announced_zone,
         events,
@@ -28033,6 +29807,26 @@ pub(crate) fn record_activation_announcement(
         .get(&source_id)
         .map(|source| source.activated_ability_provenance(ability_index));
     ability.set_source_ability_provenance_recursive(provenance);
+    // CR 400.7 + CR 602.2a: capture the source incarnation at this announcement
+    // — the authoritative pre-payment moment (CR 602.2a creates the ability
+    // here; CR 602.2b routes the remainder through the spell-casting steps, so
+    // this precedes every cost, CR 601.2h). A cost that moves the source
+    // (self-sacrifice, self-exile) advances the storage object's incarnation
+    // before stack placement; the source-subject condition gate must read the
+    // announced source's exit last-known information (CR 113.7a, CR 608.2h)
+    // rather than the moved object's cleared state. The capture goes to its own
+    // field: `source_incarnation` keeps the as-placed epoch for the consumers
+    // that reconstruct the source as it was put on the stack (Embalm-family
+    // copy sources, host references, craft returns). An existing capture is
+    // never overwritten: the earliest announcement wins.
+    if ability.announced_source_incarnation.is_none() {
+        ability.set_announced_source_incarnation_recursive(
+            state
+                .objects
+                .get(&source_id)
+                .map(|source| source.incarnation),
+        );
+    }
 }
 
 /// [`capture_activation_record`] from an ability definition and its committed
@@ -28073,6 +29867,9 @@ pub(crate) fn capture_activation_record_from(
         // CR 606.1: classified once, from the announcement-bound definition.
         is_loyalty_ability: def.map(ActivatedAbilityKind::of_definition)
             == Some(ActivatedAbilityKind::Loyalty),
+        // CR 602.1a: from the announcement-bound definition, like the CR 606.1
+        // kind above.
+        activation_cost: BoundActivationCost::of_definition(def),
         targets,
     })
 }
@@ -28165,6 +29962,15 @@ pub fn handle_cancel_cast(
     pending: &PendingCast,
     _events: &mut Vec<GameEvent>,
 ) {
+    // The owning action restored paid resources before entering this cleanup.
+    // Direct declaration-denial callers also retire the matching receipt.
+    if state
+        .spell_cast_reversal
+        .as_ref()
+        .is_some_and(|root| root.object_id == pending.object_id)
+    {
+        state.spell_cast_reversal = None;
+    }
     state.cancelled_casts.push(pending.object_id);
 
     // CR 601.2 + CR 733.1: Backing out of a cast reverses every choice and
@@ -28344,25 +30150,60 @@ fn reduce_generic_in_cost_by(cost: &mut AbilityCost, remaining: &mut u32) {
 }
 
 /// CR 601.2f: Reduce generic mana in an ability cost without taking the total
-/// mana in that cost below `minimum_mana`.
+/// mana in that cost below `minimum_mana` — the unselected preview of
+/// [`reduce_generic_in_selected_cost`], kept for the building-block tests.
+#[cfg(test)]
 fn reduce_generic_in_cost_with_minimum_mana(
     cost: &mut AbilityCost,
     amount: u32,
     minimum_mana: u32,
 ) {
+    reduce_generic_in_selected_cost(cost, amount, minimum_mana, None);
+}
+
+/// CR 601.2f + CR 118.13a: Reduce generic mana in an ability cost without taking
+/// the mana in its SELECTED total below `minimum_mana`: a Phyrexian symbol the
+/// player announced paying with 2 life (CR 601.2b) is not mana in that cost, so
+/// it does not count toward the floor
+/// ("can't reduce the mana in that cost to less than one mana"). `None` is an
+/// unselected preview, which counts every printed symbol.
+fn reduce_generic_in_selected_cost(
+    cost: &mut AbilityCost,
+    amount: u32,
+    minimum_mana: u32,
+    native: Option<&[ActivationShardChoice]>,
+) {
     let mut remaining = floored_generic_reduction(
         generic_mana_in_cost(cost),
-        total_mana_in_cost(cost),
+        selected_mana_in_cost(cost, native),
         amount,
         minimum_mana,
     );
     reduce_generic_in_cost_by(cost, &mut remaining);
 }
 
+/// CR 601.2f + CR 118.13a + CR 107.4f: the number of printed Phyrexian symbols
+/// the activation's announcement (CR 601.2b) pays with 2 life — the symbols that
+/// are not mana in its selected total. Zero for an unselected preview.
+fn native_life_symbols(native: Option<&[ActivationShardChoice]>) -> u32 {
+    native.map_or(0, |choices| {
+        choices
+            .iter()
+            .filter(|record| record.choice == ShardChoice::PayLife)
+            .count() as u32
+    })
+}
+
+/// CR 601.2f + CR 118.13a: the mana in the selected total — every mana symbol
+/// and generic mana, less the Phyrexian symbols announced as life.
+fn selected_mana_in_cost(cost: &AbilityCost, native: Option<&[ActivationShardChoice]>) -> u32 {
+    total_mana_in_cost(cost).saturating_sub(native_life_symbols(native))
+}
+
 /// CR 601.2f + CR 118.7a: how much generic mana a reduction of `amount` removes
 /// from a cost holding `generic` generic mana out of `total` mana, when it
 /// "can't reduce the mana in that cost to less than `minimum_mana`". The single
-/// scalar authority: [`reduce_generic_in_cost_with_minimum_mana`] applies it to a
+/// scalar authority: [`reduce_generic_in_selected_cost`] applies it to a
 /// cost, and the activation election searches reachable totals with it.
 fn floored_generic_reduction(generic: u32, total: u32, amount: u32, minimum_mana: u32) -> u32 {
     amount.min(total.saturating_sub(minimum_mana).min(generic))
@@ -28490,7 +30331,13 @@ pub(crate) fn loyalty_ability_gains_mana_tax(
         return true;
     }
     modifiers.raise_total = modifiers.raise_total.saturating_add(any.raise_total);
-    let probe = fold_activation_cost(base, modifiers.raise_total, &modifiers.reductions, None);
+    let probe = fold_activation_cost(
+        base,
+        modifiers.raise_total,
+        &modifiers.reductions,
+        None,
+        None,
+    );
     !matches!(probe, AbilityCost::Loyalty { .. })
 }
 
@@ -28512,8 +30359,13 @@ fn apply_cost_reduction(
         TargetGating::Independent,
     );
     if let Some(cost) = ability_def.cost.take() {
-        let folded =
-            fold_activation_cost(&cost, modifiers.raise_total, &modifiers.reductions, None);
+        let folded = fold_activation_cost(
+            &cost,
+            modifiers.raise_total,
+            &modifiers.reductions,
+            None,
+            None,
+        );
         ability_def.cost = Some(finish_activation_fold(state, player, ability_def, folded));
     }
 }
@@ -28861,7 +30713,7 @@ fn parsed_condition_reads_targets(condition: &ParsedCondition, read: TargetRead)
         | ParsedCondition::HasMaxSpeed
         | ParsedCondition::IsYourTurn
         | ParsedCondition::IsOpponentsTurn
-        | ParsedCondition::IsDuringUpkeep
+        | ParsedCondition::CurrentPhaseIs { .. }
         | ParsedCondition::ControlsCommander { .. } => false,
     }
 }
@@ -29044,7 +30896,7 @@ fn object_scope_reads_chosen_target(scope: &ObjectScope, read: TargetRead) -> bo
 
 fn player_scope_reads_chosen_target(player: &PlayerScope, read: TargetRead) -> bool {
     match player {
-        PlayerScope::Target | PlayerScope::ParentObjectTargetController => read.includes_bindable(),
+        PlayerScope::Target | PlayerScope::ParentObjectTarget { .. } => read.includes_bindable(),
         PlayerScope::AllPlayers { exclude, .. } => exclude
             .as_deref()
             .is_some_and(|x| player_scope_reads_chosen_target(x, read)),
@@ -29225,6 +31077,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::PostReplacementDamageTargetOwner
         | TargetFilter::DefendingPlayer
+        | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::HasChosenName
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
@@ -29274,6 +31127,11 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::DistinctFrom { reference: filter }
         | FilterProp::TargetsOnly { filter }
         | FilterProp::Targets { filter } => target_filter_reads_chosen_target(filter, read),
+        // CR 701.3a: the filter-matched host axis nests its own `TargetFilter`, so
+        // whether it reads a chosen target is exactly whether that filter does.
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { filter },
+        } => target_filter_reads_chosen_target(filter, read),
         FilterProp::SharesQuality { reference, .. } => reference
             .as_deref()
             .is_some_and(|x| target_filter_reads_chosen_target(x, read)),
@@ -29338,6 +31196,7 @@ fn filter_prop_reads_chosen_target(prop: &FilterProp, read: TargetRead) -> bool 
         | FilterProp::NotColor { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::Suspected
+        | FilterProp::Prepared
         | FilterProp::Renowned
         | FilterProp::Goaded
         | FilterProp::ToughnessGTPower
@@ -29597,6 +31456,7 @@ fn fold_activation_cost_for_feasibility(
     player: PlayerId,
     source_id: ObjectId,
     ability_index: usize,
+    life: &ActivationLifeWindow,
 ) -> bool {
     if !may_gain_target_gated_modifiers(state, ability_def, player, source_id) {
         apply_cost_reduction(state, ability_def, player, source_id);
@@ -29627,11 +31487,12 @@ fn fold_activation_cost_for_feasibility(
             independent.raise_total.saturating_add(any.raise_total),
             &independent.reductions,
             None,
+            None,
         )
     });
     let mut best_reductions = independent.reductions.clone();
     best_reductions.extend(any.reductions);
-    let best = fold_activation_cost(&base, independent.raise_total, &best_reductions, None);
+    let best = fold_activation_cost(&base, independent.raise_total, &best_reductions, None, None);
     let payable = |cost: &AbilityCost| {
         can_pay_ability_cost_now(
             state,
@@ -29639,6 +31500,7 @@ fn fold_activation_cost_for_feasibility(
             source_id,
             &activation_cost_for_affordability(cost.clone(), ability_def.ability_tag),
             Some(ability_index),
+            life,
         )
     };
     if let Some(worst) = worst.filter(|worst| payable(worst)) {
@@ -29661,6 +31523,7 @@ fn fold_activation_cost_for_feasibility(
         &base,
         &independent,
         &mut budget,
+        life,
     );
     ability_def.cost = Some(best);
     verdict == ActivationCostFeasibility::Unpayable
@@ -29681,6 +31544,7 @@ pub(crate) fn activation_cost_feasibility_search(
     base: &AbilityCost,
     independent: &ActivationCostModifiers,
     budget: &mut super::ability_utils::WorkBudget,
+    life: &ActivationLifeWindow,
 ) -> ActivationCostFeasibility {
     activation_cost_feasibility_search_with_witness(
         state,
@@ -29691,6 +31555,7 @@ pub(crate) fn activation_cost_feasibility_search(
         base,
         independent,
         budget,
+        life,
     )
     .0
 }
@@ -29707,6 +31572,7 @@ pub(crate) fn activation_cost_feasibility_search_with_witness(
     base: &AbilityCost,
     independent: &ActivationCostModifiers,
     budget: &mut super::ability_utils::WorkBudget,
+    life: &ActivationLifeWindow,
 ) -> (ActivationCostFeasibility, Option<Vec<Option<TargetRef>>>) {
     if ability_def.modal.is_some() {
         return (ActivationCostFeasibility::Undecided, None);
@@ -29728,6 +31594,7 @@ pub(crate) fn activation_cost_feasibility_search_with_witness(
         ability: &ability,
         priced: Vec::new(),
         witness: None,
+        life,
     };
     let verdict = match super::ability_utils::walk_target_completions(
         state,
@@ -29759,6 +31626,8 @@ struct ActivationCostVisitor<'a> {
     ability: &'a ResolvedAbility,
     priced: Vec<(AbilityCost, bool)>,
     witness: Option<Vec<Option<TargetRef>>>,
+    /// The pass's life judgement, shared with the verdict that started the walk.
+    life: &'a ActivationLifeWindow,
 }
 
 impl super::ability_utils::CompletionVisitor for ActivationCostVisitor<'_> {
@@ -29786,6 +31655,7 @@ impl super::ability_utils::CompletionVisitor for ActivationCostVisitor<'_> {
                 .saturating_add(committed.raise_total),
             &reductions,
             None,
+            None,
         );
         let payable = match self.priced.iter().find(|(priced, _)| *priced == cost) {
             Some(&(_, payable)) => payable,
@@ -29796,6 +31666,7 @@ impl super::ability_utils::CompletionVisitor for ActivationCostVisitor<'_> {
                     self.source_id,
                     &activation_cost_for_affordability(cost.clone(), self.ability_def.ability_tag),
                     Some(self.ability_index),
+                    self.life,
                 );
                 self.priced.push((cost, payable));
                 payable
@@ -29835,10 +31706,13 @@ pub enum ActivationCostGuardSite {
     ManaResume = 6,
     /// `finalize_mana_payment_with_phyrexian_choices`'s activation branch.
     PhyrexianResume = 7,
+    /// `finish_counter_cost_payment`, the counter-cost tail shared by the
+    /// selected handlers and the deferred-removal resume.
+    CounterCostTail = 8,
 }
 
 impl ActivationCostGuardSite {
-    pub const COUNT: usize = 8;
+    pub const COUNT: usize = 9;
 }
 
 /// CR 601.2f + CR 601.2h: an activation's cost is paid only after its total is
@@ -30060,19 +31934,36 @@ fn lock_activation_cost_at_settlement(
     // CR 601.2h: the default order is the minimum over every order, so the
     // cheapest reachable total is payable iff some elected order is.
     let cheapest = settled_activation_total_cost(pending, None);
+    // CR 118.13a + CR 601.2h: a bound Phyrexian announcement is judged by the
+    // mana its selected total demands; the life it announced is checked when
+    // the total is paid, after the CR 601.2g opportunity (CR 118.3 + CR 119.4).
+    let cheapest =
+        selected_activation_cost_for_payability(&cheapest, pending_native_phyrexian(pending));
     // CR 601.2h + CR 733.1: an activation that can't be completed legally is
     // reversed ENTIRELY, not left at its target prompt for another target
     // (CR 733.2 allows a fresh, legal activation instead). Nothing was accepted
     // before this lock, so the action boundary's typed reversal restores the
     // state before the action and returns priority.
-    if !can_pay_ability_cost_now(state, player, source_id, &cheapest, Some(ability_index)) {
+    let life = ActivationLifeWindow::for_payment_mode(player, source_id, pending.payment_mode);
+    if !can_pay_ability_cost_now(
+        state,
+        player,
+        source_id,
+        &cheapest,
+        Some(ability_index),
+        &life,
+    ) {
         return Err(EngineError::ActivationReversed { player });
     }
+    let native = pending
+        .activation_phyrexian_intent
+        .as_ref()
+        .map(|intent| intent.native_choices.clone());
     let snapshot = pending
         .activation_cost_snapshot
         .as_deref_mut()
         .expect("settlement locks an open carrier");
-    if let Some(outcomes) = analyze_activation_cost_election(snapshot) {
+    if let Some(outcomes) = analyze_activation_cost_election(snapshot, native.as_deref()) {
         return Ok(SettlementLock::Election(outcomes));
     }
     snapshot.lock = ActivationCostLock::Locked {
@@ -30098,6 +31989,7 @@ fn settled_activation_total_cost(
         snapshot.raise_total,
         &snapshot.reductions,
         order,
+        pending_native_phyrexian(pending),
     );
     match (snapshot.mana_carrier, pending.activation_cost.clone()) {
         (ManaCarrier::Split, Some(residual)) => AbilityCost::Composite {
@@ -30125,6 +32017,7 @@ fn write_back_settled_activation_cost(
         snapshot.raise_total,
         &snapshot.reductions,
         order,
+        pending_native_phyrexian(pending),
     );
     match snapshot.mana_carrier {
         ManaCarrier::Whole => pending.activation_cost = Some(folded),
@@ -30290,8 +32183,18 @@ fn activation_reduction_amount(entry: &CostReductionEntry) -> u32 {
 /// floor, less the non-generic mana symbols that already count toward it.
 /// Reductions whose effective floors are equal commute; that is the whole basis
 /// for the default order and for the election's observability test.
-pub(crate) fn activation_effective_floor(cost: &AbilityCost, entry: &CostReductionEntry) -> u32 {
-    let non_generic = total_mana_in_cost(cost).saturating_sub(generic_mana_in_cost(cost));
+///
+/// CR 118.13a + CR 601.2b: `native` is the activation's Phyrexian announcement
+/// when one is bound; a symbol announced as life is not mana in the selected
+/// total, so it does not count toward the floor. `None` previews the printed
+/// cost unselected.
+pub(crate) fn activation_effective_floor(
+    cost: &AbilityCost,
+    entry: &CostReductionEntry,
+    native: Option<&[ActivationShardChoice]>,
+) -> u32 {
+    let non_generic =
+        selected_mana_in_cost(cost, native).saturating_sub(generic_mana_in_cost(cost));
     entry.minimum_mana.saturating_sub(non_generic)
 }
 
@@ -30313,11 +32216,19 @@ pub(crate) fn activation_effective_floor(cost: &AbilityCost, entry: &CostReducti
 /// payable under some electable order and vice versa.
 ///
 /// Pure: no board reads, so a caller may fold once per candidate order.
+///
+/// CR 118.13a + CR 601.2b + CR 601.2f: `native` is the activation's bound
+/// Phyrexian announcement, or `None` for an unselected preview. The announcement
+/// only changes which symbols are mana in the total the floors read: the raw
+/// symbols and their order are never changed, so each still names its printed
+/// symbol when the locked total is paid. A payment-only permission is never an
+/// input here; it changes how a locked cost is paid, not the cost.
 pub(crate) fn fold_activation_cost(
     base: &AbilityCost,
     raise_total: u32,
     reductions: &[CostReductionEntry],
     order: Option<&[ReductionProvenance]>,
+    native: Option<&[ActivationShardChoice]>,
 ) -> AbilityCost {
     let mut cost = base.clone();
     increase_generic_in_cost(&mut cost, raise_total);
@@ -30331,15 +32242,16 @@ pub(crate) fn fold_activation_cost(
                 .position(|p| *p == entry.provenance)
                 .unwrap_or(usize::MAX)
         }),
-        None => {
-            ordered.sort_by_key(|entry| std::cmp::Reverse(activation_effective_floor(&cost, entry)))
-        }
+        None => ordered.sort_by_key(|entry| {
+            std::cmp::Reverse(activation_effective_floor(&cost, entry, native))
+        }),
     }
     for entry in ordered {
-        reduce_generic_in_cost_with_minimum_mana(
+        reduce_generic_in_selected_cost(
             &mut cost,
             activation_reduction_amount(entry),
             entry.minimum_mana,
+            native,
         );
     }
     cost
@@ -30393,8 +32305,13 @@ fn activation_mana_component(cost: &AbilityCost) -> ManaCost {
 /// Neither method samples, so every consumer (the AI, Manabrew, the modal) sees
 /// the complete list, and the prompt is suppressed only on an exact proof that
 /// every order locks the same total (CR 601.2f "in any order").
+///
+/// CR 118.13a + CR 601.2b: `native` is the activation's bound Phyrexian
+/// announcement (`None` unselected); the floor search and the outcomes read the
+/// same selected footprint the lock folds with.
 pub(crate) fn analyze_activation_cost_election(
     snapshot: &ActivationCostSnapshot,
+    native: Option<&[ActivationShardChoice]>,
 ) -> Option<Vec<CostReductionOutcome>> {
     let reductions = &snapshot.reductions;
     let mut raised = snapshot.base_cost.clone();
@@ -30405,7 +32322,7 @@ pub(crate) fn analyze_activation_cost_election(
         .count();
     let mut floors = reductions
         .iter()
-        .map(|entry| activation_effective_floor(&raised, entry));
+        .map(|entry| activation_effective_floor(&raised, entry, native));
     let first = floors.next()?;
     if positive < 2 || floors.all(|floor| floor == first) {
         return None;
@@ -30421,6 +32338,7 @@ pub(crate) fn analyze_activation_cost_election(
             snapshot.raise_total,
             reductions,
             Some(&provenances),
+            native,
         ));
         CostReductionOutcome {
             order,
@@ -30438,7 +32356,7 @@ pub(crate) fn analyze_activation_cost_election(
         .map(|entry| {
             (
                 activation_reduction_amount(entry),
-                activation_effective_floor(&raised, entry),
+                activation_effective_floor(&raised, entry, native),
             )
         })
         .collect();
@@ -31837,6 +33755,8 @@ pub(crate) fn activation_cost_block_reason(
 ) -> Option<AbilityBlockReason> {
     // Exhaustive, no wildcard: a future `ActivationVerdict` arm must be
     // classified deliberately rather than silently falling into "no read-out".
+    // CR 601.2g: judged for a manual payment, the most permissive mode — an
+    // ability offered for a manual payment is not withheld for its cost.
     match activation_verdict(
         state,
         player,
@@ -31844,6 +33764,7 @@ pub(crate) fn activation_cost_block_reason(
         ability_index,
         restriction_gates,
         ActivationQuery::BlockReason,
+        CastPaymentMode::Manual,
     ) {
         ActivationVerdict::CostNotPayableNow => Some(AbilityBlockReason {
             sources: Vec::new(),
@@ -31956,7 +33877,8 @@ fn cant_cast_filter_matches_for(
                 ChosenAttribute::CardName(n) => Some(n.as_str()),
                 _ => None,
             });
-            chosen_name.is_some_and(|name| name.eq_ignore_ascii_case(&spell_obj.name))
+            chosen_name
+                .is_some_and(|name| crate::game::filter::card_names_match(name, &spell_obj.name))
         }
         // Everything else — including IsChosenColor / IsChosenCardType properties —
         // flows through the shared source-aware typed-filter conjunction.
@@ -32087,6 +34009,7 @@ mod tests;
 mod half_life_activation_verdict_tests {
     use super::{activation_verdict, restrictions, ActivationQuery, ActivationVerdict};
     use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::game_state::CastPaymentMode;
     use crate::types::phase::Phase;
 
     #[test]
@@ -32121,6 +34044,8 @@ mod half_life_activation_verdict_tests {
                     0,
                     &gates,
                     ActivationQuery::BlockReason,
+                    // As `activation_cost_block_reason` judges it.
+                    CastPaymentMode::Manual,
                 ),
                 if has_target {
                     ActivationVerdict::CostNotPayableNow
@@ -32215,7 +34140,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32252,7 +34177,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }];
@@ -32439,7 +34364,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32666,7 +34591,7 @@ mod castable_zone_authority_tests {
             duration: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         };
@@ -32801,7 +34726,7 @@ mod castable_zone_authority_tests {
                         duration: None,
                         graveyard_replacement: None,
                         enters_with_counter: None,
-                        enters_with_modifications: Vec::new(),
+                        enters_with_modifications: Default::default(),
                         mana_spend_permission: None,
                         cast_cost_modifier: None,
                     }];
@@ -32837,6 +34762,230 @@ mod castable_zone_authority_tests {
             admitted_lands.is_empty(),
             "CR 305.9: these routes admitted a CoreType::Land object: {admitted_lands:?}"
         );
+    }
+}
+
+/// CR 601.2g + CR 119.3 + CR 119.4: the manual life window's gate on the
+/// payability authority — which payments it serves, which costs it is built
+/// for, and that one window builds its witness once and counts every clone.
+#[cfg(test)]
+mod mana_ability_window_life_tests {
+    use super::{
+        activation_ability_definition, can_pay_ability_cost_now, mana_ability_window_routes,
+        ActivationLifeWindow,
+    };
+    use crate::game::perf_counters;
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
+    use crate::types::ability::{AbilityCost, QuantityExpr};
+    use crate::types::game_state::CastPaymentMode;
+    use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+    use crate::types::phase::Phase;
+
+    const GREED: &str = "{B}, Pay 2 life: Draw a card.";
+    const IMMOLATING_SOULEATER: &str = "{R/P}: This creature gets +1/+0 until end of turn. ({R/P} can be paid with either {R} or 2 life.)";
+    const ARCANE_ENCYCLOPEDIA: &str = "{3}, {T}: Draw a card.";
+
+    #[derive(Clone, Copy)]
+    enum Source {
+        Greed,
+        ImmolatingSouleater,
+        ArcaneEncyclopedia,
+    }
+
+    /// `source` at `life`, with two Pristine Talismans ("{T}: Add {C}. You gain
+    /// 1 life.") and the listed basic lands.
+    fn board(life: i32, source: Source, lands: &[ManaColor]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain).with_life(P0, life);
+        let source = match source {
+            Source::Greed => scenario
+                .add_enchantment_from_oracle(P0, "Greed", GREED)
+                .id(),
+            Source::ImmolatingSouleater => scenario
+                .add_creature_from_oracle(P0, "Immolating Souleater", 1, 1, IMMOLATING_SOULEATER)
+                .id(),
+            Source::ArcaneEncyclopedia => scenario
+                .add_artifact_from_oracle(P0, "Arcane Encyclopedia", ARCANE_ENCYCLOPEDIA)
+                .id(),
+        };
+        for _ in 0..2 {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Pristine Talisman",
+                "{T}: Add {C}. You gain 1 life.",
+            );
+        }
+        for &color in lands {
+            scenario.add_basic_land(P0, color);
+        }
+        (scenario.build(), source)
+    }
+
+    fn printed_cost(runner: &GameRunner, source: ObjectId) -> AbilityCost {
+        activation_ability_definition(runner.state(), source, 0)
+            .and_then(|def| def.cost)
+            .expect("the ability has a cost")
+    }
+
+    fn payable(runner: &GameRunner, source: ObjectId, life: &ActivationLifeWindow) -> bool {
+        let cost = printed_cost(runner, source);
+        can_pay_ability_cost_now(runner.state(), P0, source, &cost, Some(0), life)
+    }
+
+    fn manual(source: ObjectId) -> ActivationLifeWindow {
+        ActivationLifeWindow::for_payment_mode(P0, source, CastPaymentMode::Manual)
+    }
+
+    /// Greed at one life with a Swamp and two Talismans is payable in the
+    /// manual window only; the automatic modes keep the current-total verdict.
+    /// At three life every judgement pays it now.
+    #[test]
+    fn only_a_manual_payment_judges_life_after_the_window() {
+        let (runner, greed) = board(1, Source::Greed, &[ManaColor::Black]);
+        assert!(payable(&runner, greed, &manual(greed)));
+        for mode in [
+            CastPaymentMode::Auto,
+            CastPaymentMode::AutoExceptSacrificialMana,
+        ] {
+            assert!(
+                !payable(
+                    &runner,
+                    greed,
+                    &ActivationLifeWindow::for_payment_mode(P0, greed, mode),
+                ),
+                "{mode:?} judges the life the player has now"
+            );
+        }
+
+        let (runner, greed) = board(3, Source::Greed, &[ManaColor::Black]);
+        assert!(payable(&runner, greed, &ActivationLifeWindow::Current));
+    }
+
+    /// One window builds its witness once: a second check on the same window
+    /// makes only the payment dry run's clones, and the first made exactly
+    /// three more — the witness board and one per Talisman activation.
+    #[test]
+    fn one_window_builds_its_witness_once_and_counts_every_clone() {
+        let (runner, greed) = board(1, Source::Greed, &[ManaColor::Black]);
+        let window = manual(greed);
+
+        perf_counters::reset();
+        assert!(payable(&runner, greed, &window));
+        let first = perf_counters::snapshot().state_clone_for_legality;
+        perf_counters::reset();
+        assert!(payable(&runner, greed, &window));
+        let second = perf_counters::snapshot().state_clone_for_legality;
+
+        assert_eq!(
+            first - second,
+            3,
+            "the witness board plus one clone per Talisman activation, built once"
+        );
+    }
+
+    /// No witness is built for a cost the window cannot change: an unaffordable
+    /// mana-only cost (Arcane Encyclopedia's {3}, two Talismans and no land),
+    /// and a Phyrexian-only cost whose only route with a window pays mana the
+    /// board cannot make (Immolating Souleater's {R/P}, no red source, one
+    /// life). Both are refused with no clone beyond the current-total check's.
+    /// Reach guards: the {R/P} is paid with 2 life at three life, and the {3}
+    /// once a Swamp is added.
+    #[test]
+    fn no_witness_is_built_for_a_cost_the_window_cannot_change() {
+        for source in [Source::ArcaneEncyclopedia, Source::ImmolatingSouleater] {
+            let (runner, id) = board(1, source, &[]);
+            perf_counters::reset();
+            assert!(!payable(&runner, id, &ActivationLifeWindow::Current));
+            let current = perf_counters::snapshot().state_clone_for_legality;
+            perf_counters::reset();
+            assert!(!payable(&runner, id, &manual(id)));
+            assert_eq!(
+                perf_counters::snapshot().state_clone_for_legality,
+                current,
+                "refused with no clone beyond the current-total check's: no witness"
+            );
+        }
+
+        let (runner, souleater) = board(3, Source::ImmolatingSouleater, &[]);
+        assert!(payable(&runner, souleater, &ActivationLifeWindow::Current));
+        let (runner, encyclopedia) = board(1, Source::ArcaneEncyclopedia, &[ManaColor::Black]);
+        assert!(payable(&runner, encyclopedia, &manual(encyclopedia)));
+    }
+
+    fn mana(shards: &[ManaCostShard], generic: u32) -> AbilityCost {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: shards.to_vec(),
+                generic,
+            },
+        }
+    }
+
+    fn pay_life(value: i32) -> AbilityCost {
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value },
+        }
+    }
+
+    fn routes(cost: &AbilityCost) -> Vec<AbilityCost> {
+        mana_ability_window_routes(cost)
+            .into_iter()
+            .map(|route| route.into_owned())
+            .collect()
+    }
+
+    /// CR 601.2b + CR 118.13a + CR 601.2g: the window routes are the
+    /// announcements that leave a mana payment, one per distinct total.
+    /// * A cost whose all-life announcement still leaves mana is its own only
+    ///   route ({2}{B/P}).
+    /// * A lone Phyrexian symbol has only its all-mana route ({U/P} as {U}).
+    /// * Two same-colored symbols ({G/P}{G/P}, Zopandrel's) have the all-mana
+    ///   route and one mixed route — {G} and 2 life, appended after the
+    ///   activation's other legs — whichever symbol is announced as life.
+    /// * Two differently colored symbols have three routes.
+    /// * A cost with no mana payment has none.
+    #[test]
+    fn window_routes_are_the_announcements_that_leave_a_mana_payment() {
+        use ManaCostShard::{
+            Black, Blue, Green, PhyrexianBlack, PhyrexianGreen, PhyrexianRed, Red,
+        };
+
+        let generic_and_phyrexian = mana(&[PhyrexianBlack], 2);
+        assert_eq!(
+            routes(&generic_and_phyrexian),
+            vec![generic_and_phyrexian.clone()]
+        );
+        assert_eq!(
+            routes(&mana(&[ManaCostShard::PhyrexianBlue], 0)),
+            vec![mana(&[Blue], 0)]
+        );
+        assert_eq!(
+            routes(&AbilityCost::Composite {
+                costs: vec![mana(&[PhyrexianGreen, PhyrexianGreen], 0), AbilityCost::Tap],
+            }),
+            vec![
+                AbilityCost::Composite {
+                    costs: vec![mana(&[Green, Green], 0), AbilityCost::Tap],
+                },
+                AbilityCost::Composite {
+                    costs: vec![mana(&[Green], 0), AbilityCost::Tap, pay_life(2)],
+                },
+            ]
+        );
+        assert_eq!(
+            routes(&mana(&[PhyrexianBlack, PhyrexianRed], 0)),
+            vec![
+                mana(&[Black, Red], 0),
+                AbilityCost::Composite {
+                    costs: vec![mana(&[Black], 0), pay_life(2)],
+                },
+                AbilityCost::Composite {
+                    costs: vec![mana(&[Red], 0), pay_life(2)],
+                },
+            ]
+        );
+        assert!(routes(&AbilityCost::Tap).is_empty());
     }
 }
 
@@ -33175,6 +35324,8 @@ mod sacrifice_cost_context_identity_tests {
                 None,
                 false,
                 None,
+                false,
+                crate::types::game_state::CastPaymentMode::Auto,
                 &mut vec![],
             )
             .unwrap();
@@ -33973,5 +36124,132 @@ mod dandan_read_sweep_tests {
                 "{cards:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_impulse_authority_tests {
+    use super::exile_cast_pays_printed_mana_cost;
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{
+        CardPlayMode, CastingPermission, Duration, ExileGrantCostProvenance,
+        PlayFromExileProvenance, TargetFilter,
+    };
+    use crate::types::game_state::CastingPermissionIndex;
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+    use crate::types::statics::CastFrequency;
+    use crate::types::zones::EtbTapState;
+
+    #[test]
+    fn indexed_impulse_offer_rejects_used_and_filter_failing_slots() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let card = scenario.add_spell_to_exile(P0, "Offer", true).id();
+        let other = scenario.add_spell_to_exile(P0, "Other", true).id();
+        let mut runner = scenario.build();
+        let live = CastingPermission::PlayFromExile {
+            provenance: PlayFromExileProvenance::Impulse,
+            mode: CardPlayMode::Play,
+            duration: Duration::Permanent,
+            granted_to: P0,
+            frequency: CastFrequency::Unlimited,
+            source_id: None,
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: EtbTapState::Unspecified,
+        };
+        let mut used = live.clone();
+        if let CastingPermission::PlayFromExile {
+            frequency,
+            source_id,
+            ..
+        } = &mut used
+        {
+            *frequency = CastFrequency::OncePerTurn;
+            *source_id = Some(card);
+        }
+        let mut filtered = live.clone();
+        if let CastingPermission::PlayFromExile { card_filter, .. } = &mut filtered {
+            *card_filter = Some(TargetFilter::SpecificObject { id: other });
+        }
+        // CR 118.9a: a "without paying its mana cost" grant (Fire Lord Ozai) is
+        // already the cast's one alternative cost.
+        let mut free = live.clone();
+        if let CastingPermission::PlayFromExile {
+            without_paying_mana_cost,
+            ..
+        } = &mut free
+        {
+            *without_paying_mana_cost = true;
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&card)
+            .unwrap()
+            .casting_permissions
+            .extend([
+                used,
+                filtered,
+                live,
+                CastingPermission::ExileWithAltCost {
+                    source_id: None,
+                    cost_provenance: ExileGrantCostProvenance::Alternative,
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(P0),
+                    resolution_cleanup: None,
+                    duration: None,
+                    graveyard_replacement: None,
+                    mana_spend_permission: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: Default::default(),
+                    cast_cost_modifier: None,
+                },
+                free,
+            ]);
+        runner.state_mut().exile_play_permissions_used.insert(card);
+        let state = runner.state();
+        let obj = &state.objects[&card];
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(0)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(1)),
+        ));
+        assert!(exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(2)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(3)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(
+            state,
+            obj,
+            P0,
+            Some(CastingPermissionIndex(4)),
+        ));
+        assert!(!exile_cast_pays_printed_mana_cost(state, obj, P0, None));
     }
 }

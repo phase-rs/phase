@@ -357,6 +357,7 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         },
     ) = (&state.waiting_for, action)
     else {
@@ -366,8 +367,16 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     // CR 602.2 + CR 602.5: `can_activate_ability_now` is the engine's
     // structural authority for beginning an activation. Avoid re-simulating the
     // same priority activation just to enter target selection and discard the
-    // clone.
-    crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
+    // clone. CR 602.2b + CR 601.2g: judged in the action's own payment mode, so
+    // an automatic activation is accepted only when the automatic payer can
+    // complete it.
+    crate::game::casting::can_activate_ability_now_with_payment_mode(
+        state,
+        *player,
+        *source_id,
+        *ability_index,
+        *payment_mode,
+    )
 }
 
 // CR 117.1a + CR 601.2: a player may cast a spell when they have priority;
@@ -586,6 +595,15 @@ struct ObjectFingerprint {
     is_commander: bool,
     loyalty: Option<u32>,
     loyalty_activations_this_turn: u32,
+    /// CR 606.3 + CR 101.1: the per-permanent extra-activation grant raises the
+    /// loyalty-ability cap `planeswalker::loyalty_activation_cap` reads, so the
+    /// legality verdict depends on it.
+    extra_loyalty_activations_this_turn: u32,
+    /// CR 613.1f: the cap read above applies only to a characteristic loyalty
+    /// ability, decided by where the ability index sits against this boundary
+    /// (`GameObject::activated_ability_provenance`). `Eq`-only: the `Hash` impl
+    /// stays a subset of `PartialEq`.
+    granted_abilities_from: Option<usize>,
     abilities: Arc<Vec<AbilityDefinition>>,
     trigger_definitions: Definitions<TriggerDefinition>,
     replacement_definitions: Definitions<ReplacementDefinition>,
@@ -718,6 +736,8 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         is_commander: obj.is_commander,
         loyalty: obj.loyalty,
         loyalty_activations_this_turn: obj.loyalty_activations_this_turn,
+        extra_loyalty_activations_this_turn: obj.extra_loyalty_activations_this_turn,
+        granted_abilities_from: obj.granted_abilities_from,
         abilities: obj.abilities.clone(),
         trigger_definitions: obj
             .trigger_definitions
@@ -818,6 +838,10 @@ struct LegalityKey {
     /// DeclareBlocker only: the blocked attacker's interned fingerprint id plus
     /// its ring-bearer designation (CR 701.54c/e). `None` for other classes.
     counterpart: Option<(u32, bool)>,
+    /// ActivateAbility only: the payment mode the activation is judged in
+    /// (CR 602.2b + CR 601.2g — a manual payment's life is judged after the
+    /// mana-ability window). `None` for other classes.
+    payment_mode: Option<CastPaymentMode>,
 }
 
 impl LegalityKey {
@@ -836,6 +860,7 @@ impl LegalityKey {
             is_blocked: false,
             attack_target: None,
             counterpart: None,
+            payment_mode: None,
         }
     }
 }
@@ -971,6 +996,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // CR 701.15b: A live designation may come from a TCE or printed source
         // outside the candidate fingerprint.
         | FilterProp::Goaded
+        // CR 722.3a: prepared reads `obj.prepared`, which the candidate
+        // fingerprint does not capture at all (unlike `is_suspected` /
+        // `is_renowned`); memoizing it is unsound — POISON for memoization.
+        | FilterProp::Prepared
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
@@ -979,6 +1008,12 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
         // CR 601.2c: reads the declared target slot's object — another object by id.
         | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        // CR 701.3a + CR 603.7c: the filter-matched host axis resolves a live
+        // host SET (the resolving chain's targets, the creation snapshot, or the
+        // trigger event) — not the candidate fingerprint.
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::HasKeywordKind { .. }
@@ -1124,8 +1159,8 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.
         | ParsedCondition::ControlsCommander { .. }
-        // CR 503.1: reads only `state.phase`, apply()-constant global state.
-        | ParsedCondition::IsDuringUpkeep
+        // CR 500.1: reads only `state.phase`, apply()-constant global state.
+        | ParsedCondition::CurrentPhaseIs { .. }
         // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,
         // both apply()-constant like `IsYourTurn`.
         | ParsedCondition::IsOpponentsTurn
@@ -1422,6 +1457,7 @@ fn legality_equivalence_key(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         } => {
             if poison.has_activation {
                 return None;
@@ -1429,6 +1465,7 @@ fn legality_equivalence_key(
             let fp = interner.intern(state, *source_id)?;
             let mut key = LegalityKey::new(LegalityClass::ActivateAbility, fp);
             key.ability_index = Some(*ability_index);
+            key.payment_mode = Some(*payment_mode);
             key.activations_this_turn = state
                 .activated_abilities_this_turn
                 .get(&(*source_id, *ability_index))
@@ -2290,10 +2327,12 @@ mod tests {
             cand(GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
             cand(GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
         ];
         crate::game::perf_counters::reset();
@@ -2339,10 +2378,12 @@ mod tests {
             cand(GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
             cand(GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
         ];
         crate::game::perf_counters::reset();
@@ -2407,6 +2448,52 @@ mod tests {
         );
     }
 
+    /// CR 606.3 + CR 613.1f: every input the loyalty-activation cap reads is part of
+    /// the fingerprint, so two otherwise-equal planeswalkers that differ in any of
+    /// them never share a memoized legality verdict. The control (two fresh equal
+    /// planeswalkers) compares equal, which is the reach-guard that each pair
+    /// below differs only in the named field.
+    #[test]
+    fn fingerprint_membership_guards_loyalty_cap_inputs() {
+        let mut s = GameState::new_two_player(4);
+        let a = make_object(&mut s, 100, 0, "Probe Walker");
+        let b = make_object(&mut s, 100, 0, "Probe Walker");
+        assert_eq!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "control: two fresh equal planeswalkers share a fingerprint"
+        );
+
+        s.objects.get_mut(&b).unwrap().loyalty_activations_this_turn = 1;
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the loyalty-activation count must be in the fingerprint"
+        );
+        s.objects.get_mut(&b).unwrap().loyalty_activations_this_turn = 0;
+
+        s.objects
+            .get_mut(&b)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the per-permanent extra grant must be in the fingerprint"
+        );
+        s.objects
+            .get_mut(&b)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 0;
+
+        s.objects.get_mut(&b).unwrap().granted_abilities_from = Some(1);
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the gained-ability boundary must be in the fingerprint"
+        );
+    }
+
     /// #9: per-(source, ability) activation count is folded into the key.
     #[test]
     fn activation_count_is_folded_into_key() {
@@ -2427,6 +2514,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2436,6 +2524,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2468,6 +2557,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2477,6 +2567,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -3149,6 +3240,7 @@ mod tests {
             ActivationTargetSelection::Pending,
             None,
             None,
+            CastPaymentMode::Auto,
         );
         assert!(paying.withholds_priority(), "premise: activation pending");
         let speed_options = match &paying.waiting_for {

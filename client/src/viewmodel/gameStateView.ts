@@ -250,14 +250,21 @@ export function isObjectReportableToViewer(
  *                            no amount (DistributeAmongModal).
  *   - `ProliferateChoice` -> `SelectTargets`; CR 701.34a chooses any-size subset
  *     `TimeTravelChoice`     of permanents and/or players (ProliferateModal).
- *     `ChooseObjectsSelection`
+ *   - multi-pick `ChooseObjectsSelection` -> `SelectTargets` (ProliferateModal).
  *   - `EachPlayerCopyChosenSelection` -> `SelectTargets`, ORDERED (first pick is
  *                            copied, second scales); a click carries no order.
  *   - `ChooseOneOfBranch` -> `ChooseBranch { index }`; `parent_targets` is
  *                            continuation context the modal never reads.
- * All of the above are host-wrapped (absent from
- * `DialogHost.CLICK_THROUGH_WAITING_FOR_TYPES`), so a HUD glow beneath their
- * `fixed inset-0` host could not be clicked even if it were offered.
+ * All of the above are host-wrapped (`isClickThroughWaitingFor` is false for
+ * them: absent from `DialogHost.CLICK_THROUGH_WAITING_FOR_TYPES`, or, for
+ * multi-pick `ChooseObjectsSelection`, excluded by its `max !== 1` guard), so a
+ * HUD glow beneath their `fixed inset-0` host could not be clicked even if it
+ * were offered.
+ *
+ * A single-pick `ChooseObjectsSelection` (`max === 1`) meets both criteria: the
+ * engine also accepts one `ChooseTarget` for it, and `eligible` is `TargetRef[]`.
+ * It is click-through (`ChooseObjectsSelection(max 1)` in `isClickThroughWaitingFor`);
+ * multi-pick shapes stay dialog-only.
  *
  * NOTE: `getWaitingForObjectChoiceIds` below keeps its own switch over a
  * superset of these arms. The two must agree on every shared arm, and neither
@@ -298,6 +305,13 @@ export function getWaitingForClickTargetRefs(
       // pick. Same cluster shape as ReturnAsAuraTarget — the engine owns which
       // stamped entrants are still legal; the client only routes each ref.
       return waitingFor.data.legal_targets;
+    case "ChooseObjectsSelection":
+      // CR 608.2d + CR 115.10a: a single-pick resolution choice is answered by one
+      // board/HUD click (the engine's `ChooseTarget` arm admits only `max == Some(1)`);
+      // its `eligible` mixes objects and players and is not a target list — hexproof
+      // creatures stay in it. Multi-pick selections keep ProliferateModal's
+      // `SelectTargets` subset.
+      return waitingFor.data.max === 1 ? waitingFor.data.eligible : null;
     default:
       return null;
   }
@@ -364,6 +378,11 @@ export function getWaitingForObjectChoiceIds(
       return waitingFor.data.legal_targets.flatMap((target) =>
         "Object" in target ? [target.Object] : [],
       );
+    case "ChooseObjectsSelection":
+      // CR 608.2d: only a single-pick selection is a board pick; multi-pick
+      // selections keep the dialog. Same mixed-axis projection as above.
+      if (waitingFor.data.max !== 1) return [];
+      return waitingFor.data.eligible.flatMap((t) => "Object" in t ? [t.Object] : []);
     default:
       return [];
   }
@@ -453,6 +472,12 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "Resolution") {
     return undefined;
   }
+  if (data.resume.type === "TurnFaceUp") {
+    return (data.resume.source?.object_id ?? data.resume.object_id) as ObjectId;
+  }
+  if (data.resume.type === "SpellCost") {
+    return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
+  }
   return (data.resume.Spell as { object_id?: ObjectId } | undefined)?.object_id;
 }
 
@@ -507,9 +532,24 @@ function tapCreaturesAggregateSelection(aggregate: TapCreaturesAggregate): Board
   }
 }
 
+function isCancellablePayCost(
+  resume: Extract<WaitingFor, { type: "PayCost" }>["data"]["resume"],
+  allowsCancelCast?: boolean,
+): boolean {
+  if (allowsCancelCast !== undefined) {
+    return allowsCancelCast;
+  }
+  return (
+    resume.type === "Spell" ||
+    resume.type === "SpellCost" ||
+    resume.type === "TurnFaceUp"
+  );
+}
+
 export function getBoardChoiceView(
   waitingFor: WaitingFor | null | undefined,
   objects?: Record<ObjectId, GameObject | undefined>,
+  allowsCancelCast?: boolean,
 ): BoardChoiceView | null {
   switch (waitingFor?.type) {
     case "EffectZoneChoice": {
@@ -585,6 +625,8 @@ export function getBoardChoiceView(
     }
     case "PayCost": {
       if (!isBattlefieldCostChoice(waitingFor, objects)) return null;
+      const canCancel = isCancellablePayCost(waitingFor.data.resume, allowsCancelCast);
+      const cancelAction = canCancel ? { type: "CancelCast" as const } : undefined;
       switch (waitingFor.data.kind.type) {
         case "Sacrifice":
           return {
@@ -594,7 +636,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "ReturnToHand":
           return {
@@ -604,7 +646,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "ExilePermanent":
           return {
@@ -614,7 +656,7 @@ export function getBoardChoiceView(
             selection: confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         case "TapCreatures": {
           const { mode } = waitingFor.data.kind;
@@ -628,7 +670,7 @@ export function getBoardChoiceView(
                 : confirmedCountSelection(waitingFor.data.count, waitingFor.data.min_count),
             response: { type: "SelectCards" },
             sourceId: payCostSourceId(waitingFor.data),
-            cancelAction: waitingFor.data.resume.type === "Spell" ? { type: "CancelCast" } : undefined,
+            cancelAction,
           };
         }
         default:

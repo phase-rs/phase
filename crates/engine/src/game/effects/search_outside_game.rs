@@ -184,23 +184,25 @@ pub(crate) fn put_face_up_exile_into(
         origin: Some(Zone::Exile),
         destination,
         enter_transformed: false,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_under_player: None,
-        enters_attacking: false,
-        enter_with_counters: Vec::new(),
-        conditional_enter_with_counters: vec![],
         duration: None,
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
-        // CR 614.12: search-from-outside carries no moved-object type gate.
-        enters_modified_if: None,
         enter_attached_to: None,
     };
+    // Search-from-outside carries no entry modifications: no counters, no
+    // tapped/attacking rider, and no moved-object type gate.
+    let member = crate::types::game_state::ChangeZoneMemberEntry {
+        object_id,
+        enter_with_counters: Vec::new(),
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+    };
     Ok(change_zone::process_one_zone_move(
-        state, &ctx, object_id, events,
+        state, &ctx, &member, events,
     ))
 }
 

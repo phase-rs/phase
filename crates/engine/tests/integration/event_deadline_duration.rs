@@ -175,6 +175,7 @@ fn activate_sculptor_onto_stack(board: &mut SculptorBoard) {
         .act(GameAction::ActivateAbility {
             source_id: board.sculptor,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the activation is legal");
     while matches!(

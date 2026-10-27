@@ -1001,6 +1001,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::EndCombatPhase
         | Effect::Vote { .. }
         | Effect::SeparateIntoPiles { .. }
+        | Effect::ExileTopCardContest { .. }
         | Effect::SwitchPT { .. }
         | Effect::CombineHost { .. }
         | Effect::ChooseAugmentAndCombineWithHost { .. }
@@ -1077,9 +1078,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::LoseTheGame { .. }
         | Effect::WinTheGame { .. }
         | Effect::RollDie { .. }
-        | Effect::FlipCoin { .. }
         | Effect::FlipCoins { .. }
-        | Effect::FlipCoinUntilLose { .. }
         | Effect::RingTemptsYou
         | Effect::VentureIntoDungeon
         | Effect::VentureInto { .. }
@@ -1136,6 +1135,7 @@ fn effect_projection(effect: &Effect) -> Projection {
         | Effect::SkipNextTurn { .. }
         | Effect::SkipNextStep { .. }
         | Effect::Double { .. }
+        | Effect::ModifyAnnouncedX { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
         | Effect::Amass { .. }
@@ -1264,7 +1264,7 @@ fn trigger_axis(trig: &TriggerDefinition) -> Option<AxisKey> {
         // CR 500.7: a turn-begin trigger fires once per turn.
         TriggerMode::TurnBegin => Some(AxisKey::ExtraTurn),
         // ----- remaining modes with no modeled producer ⇒ inert (None) -----
-        TriggerMode::ChangesController
+        TriggerMode::ChangesController { .. }
         | TriggerMode::DamageReceived
         | TriggerMode::DamagePreventedOnce
         | TriggerMode::ExcessDamage
@@ -1474,6 +1474,7 @@ fn collect_effects_in_effect<'a>(
                 collect_effects(outcome_template, out);
             }
         }
+        Effect::ExileTopCardContest { winner_effect } => collect_effects(winner_effect, out),
         Effect::SeparateIntoPiles {
             chosen_pile_effect,
             unchosen_pile_effect,
@@ -1499,12 +1500,7 @@ fn collect_effects_in_effect<'a>(
                 collect_effects(&branch.effect, out);
             }
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -1516,7 +1512,6 @@ fn collect_effects_in_effect<'a>(
                 collect_effects(d, out);
             }
         }
-        Effect::FlipCoinUntilLose { win_effect } => collect_effects(win_effect, out),
         Effect::ChooseOneOf { branches, .. } => {
             for d in branches {
                 collect_effects(d, out);

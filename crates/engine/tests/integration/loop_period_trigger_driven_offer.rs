@@ -1006,6 +1006,110 @@ fn a_declared_optional_may_outside_the_recurrence_must_be_the_confirmed_periods_
     );
 }
 
+/// CR 732.2a/c: a live recorded-period declaration must take the Replay route through the public
+/// Declare/Respond actions. The representable control commits all three attendant gains; with the
+/// per-turn gain counter one short of its limit, the first replayed cycle fits and the next one
+/// rejects the final Accept action and restores that action's entire entry state.
+#[test]
+fn public_recorded_period_replay_rejects_later_life_counter_overflow_atomically() {
+    use engine::game::perf_counters::take_cost_snapshot;
+
+    const COUNT: u32 = 3;
+    let (mut control, _) = offered(Board::BAttendant)
+        .expect("the real Board B fixture must produce its recorded-period offer");
+    let control_offer = control.state().clone();
+    assert!(
+        matches!(
+            &control_offer.waiting_for,
+            WaitingFor::LoopShortcut {
+                proposer,
+                road: OfferRoad::RecordedPeriod,
+                period,
+                ..
+            } if *proposer == P0 && !period.is_empty()
+        ),
+        "reach guard: the offer is a nonempty recorded period owned by P0"
+    );
+    let recorded = recorded_declaration(&control_offer, |_| false);
+    let control_life = control.state().players[0].life;
+    let before_control = take_cost_snapshot();
+    control.take_declared(IterationCount::Fixed(COUNT), Some(recorded));
+    let control_drive = take_cost_snapshot().since(before_control);
+    assert!(
+        control_drive.drive_snapshots > 0,
+        "reach guard: public DeclareShortcut/RespondToShortcut took a real Replay drive"
+    );
+    assert_eq!(
+        control.state().players[0].life - control_life,
+        COUNT as i32,
+        "the representable Replay committed the attendant's gain once in each cycle"
+    );
+    assert!(matches!(
+        control.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    let (mut hostile, _) = offered(Board::BAttendant)
+        .expect("the real Board B fixture must produce its recorded-period offer");
+    let hostile_offer = hostile.state().clone();
+    assert!(
+        matches!(
+            &hostile_offer.waiting_for,
+            WaitingFor::LoopShortcut {
+                road: OfferRoad::RecordedPeriod,
+                period,
+                ..
+            } if !period.is_empty()
+        ),
+        "reach guard: hostile case also begins from the real Replay offer"
+    );
+    hostile.runner.state_mut().players[0].life_gained_this_turn = u32::MAX - 1;
+    let hostile_recorded = recorded_declaration(hostile.state(), |_| false);
+    let before_hostile = take_cost_snapshot();
+    hostile
+        .runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(COUNT),
+            template: Some(hostile_recorded),
+        })
+        .expect("a valid recorded declaration opens the response window");
+    let mut rejected_after_progress = false;
+    for _ in 0..4 {
+        if !matches!(
+            hostile.state().waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ) {
+            break;
+        }
+        let entry = hostile.state().clone();
+        match hostile.runner.act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        }) {
+            Ok(_) => {}
+            Err(engine::game::engine::EngineError::LifeChangeUnrepresentable { player }) => {
+                assert_eq!(player, P0, "the attendant's overflowing gain is rejected");
+                assert_eq!(
+                    hostile.state(),
+                    &entry,
+                    "the failing public Accept restores its complete entry state, including the response window"
+                );
+                let hostile_drive = take_cost_snapshot().since(before_hostile);
+                assert!(
+                    hostile_drive.drive_snapshots > 0,
+                    "reach guard: the public response entered the real Replay drive"
+                );
+                rejected_after_progress = true;
+                break;
+            }
+            Err(error) => panic!("expected typed life-counter rejection, got {error:?}"),
+        }
+    }
+    assert!(
+        rejected_after_progress,
+        "the later-cycle counter overflow must reject after an earlier cycle fit"
+    );
+}
+
 /// CR 732.2a + CR 603.5: the recorded offer `drive` stands on states each "may" as fixed. A
 /// response pinning one is refused and the offer stands; a response pinning none declares the
 /// confirmed period's own answers, and its take replays the period.

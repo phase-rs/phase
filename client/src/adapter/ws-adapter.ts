@@ -1,3 +1,4 @@
+import { PROTOCOL_VERSION, LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL as MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL } from "../generated/protocol-versions";
 import { initializeLanCapabilities, isLanEndpoint } from "../services/lan";
 import { observeSocketDiagnostics, type SocketDiagnosticObserver } from "../services/socketDiagnostics";
 import { completeSocketDiagnostics, DIAGNOSTIC_HISTORY_LIMIT, type SocketReconnectOutcome } from "../services/troubleshooting";
@@ -179,6 +180,8 @@ export interface NativeSocketAdapterOptions {
   socketFactory: PhaseSocketFactory;
   /** Present on release only; preview parity is verified by the shell. */
   expectedServerVersion?: string;
+  /** Native P2P owns terminal fan-out and ACK ordering across local seat sockets. */
+  callerManagedTerminalDelivery?: boolean;
 }
 
 /** Native server setup for one local P2P seat. The PeerJS connection remains
@@ -212,9 +215,80 @@ export class NativeEngineVersionMismatchError extends Error {
 
 /**
  * Wire-protocol version the client speaks. Must match `PROTOCOL_VERSION` in
- * `crates/server-core/src/protocol.rs`. Bump in lockstep when either side
- * adds, removes, renames, or changes the type of a protocol variant field.
+ * `crates/server-core/src/protocol.rs`. Record incompatible changes with
+ * `node scripts/protocol-versions.mjs bump game --reason "description"`.
+ * The entries below are historical introduction versions.
  *
+ * 159 — Coin-flip effects are one Effect::FlipCoins { flips, .. } (the FlipCoin and
+ *       FlipCoinUntilLose tags are no longer written, count moves into flips) and
+ *       the coin-flip resolution frame's kind becomes Exactly or UntilLoss — see
+ *       PROTOCOL_VERSION's own `/// 159` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v158 or older peer reads a multi-flip or
+ *       until-loss run as one flip; the exact-match version check at connect
+ *       refuses the pairing. Wire 141 moves with it.
+ * 157 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *      choices and ability state. Old native readers cannot decode the new tag.
+ *      Wire 139 moves with it.
+ * 156 — StaticCondition, TriggerCondition and AbilityCondition gain
+ *      QuantityQuality { quantity, quality } with the new NumberQuality
+ *      ({"type":"Prime"} / {"type":"Parity","value":"Odd"|"Even"}), carried
+ *      in GameState ability definitions (CR 107.1, CR 603.4) — see
+ *      PROTOCOL_VERSION's own `/// 156` entry in
+ *      crates/lobby-broker/src/protocol.rs. A pre-v156 peer cannot parse the
+ *      tag; the exact-match version check at connect refuses the pairing.
+ *      The same bump adds the optional per-seat `created_tokens` channel (each
+ *      seat's pinned creation result) to the private
+ *      player-scope tail sidecar that `PendingContinuation` carries under its
+ *      existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+ *      tokens every seat created, for a paused "each player creates … The
+ *      tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+ *      as the linked-exile-only sidecar. Wire 138 moves with it.
+ * 155 — PendingChangeZoneIteration members carry their pre-event entry modifications
+ *      (ChangeZoneMemberEntry, CR 603.6a + CR 614.12), and the persisted resolution
+ *      state moves from version 6 to 7 — see PROTOCOL_VERSION's own `/// 155` entry
+ *      in crates/lobby-broker/src/protocol.rs. A v154 peer cannot parse a parked
+ *      ChangeZone frame and refuses the version-7 resolution state. Wire 137 moves
+ *      with it.
+ * 154 — PendingCostMoveResume gains CounterCostRemovalPayment (a counter-removal
+ *       cost paused on a CR 616.1 replacement choice; the activation reads the
+ *       settled count, CR 118.11) and ManaAbilityCostCursor gains
+ *       counter_removal, carried in GameState.pending_cost_move_resume — see
+ *       PROTOCOL_VERSION's own `/// 154` entry in
+ *       crates/lobby-broker/src/protocol.rs. A v153 peer cannot parse the tag;
+ *       the exact-match version check at connect refuses the pairing. Wire 136
+ *       moves with it. PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
+ * 153 — GrantAllActivatedAbilitiesOf gains the optional kind selector
+ *       (Nicol Bolas, Dragon-God's loyalty grant is kind Loyalty on the
+ *       activated authority; the loyalty-grant sibling variant is
+ *       removed). A v152 peer drops the defaulted field silently and
+ *       over-grants every activated ability of every other planeswalker,
+ *       so the exact-match handshake refuses the pairing. P2P moves in
+ *       lockstep (wire 135).
+ * 152 — ShortcutDecisionSchema gains suggested_declaration and leading_aims, and
+ *      ShortcutProposal gains leading_aims; a v151 peer drops them. Wire 134 moves
+ *      with it.
+ * 151: Populated GameObject.bestow_form carries the removed creature subtypes
+ *      as an object instead of a boolean. Old native readers cannot decode it.
+ *      Wire 133 moves with it.
+ * 150 — The cast-this-way gains rider's serialized payload is reshaped: the
+ *      ExileWithAltCost permission's enters_with_modifications becomes a
+ *      PendingEntersModifications object (was a ContinuousModification array) and
+ *      Effect.AddPendingEntersModifications carries its rider object in place of
+ *      the required modifications array — a v149 server or client cannot parse
+ *      either new shape. Full-game peers and P2P move in lockstep (wire 132); see
+ *      PROTOCOL_VERSION's own `/// 150` entry in
+ *      crates/lobby-broker/src/protocol.rs.
+ * 149 — The CR 608.2n final part of a spell's resolution is owed on the
+ *      resolution carrier: `GameState::deferred_spell_delivery` (v110) is removed
+ *      and `GameState::resolving_spell_final_part` (`{ spell }`) marks an instant
+ *      or sorcery whose paused instructions have not finished. A v148 peer drops
+ *      the key and would move the spell too early (or leave it on the stack after
+ *      a free-cast window). Wire 131 moves with it; no lobby frame names it.
+ * 148 — Timesifter's top-card exile contest: Effect::ExileTopCardContest and
+ *      BatchCompletion::TopCardContestRoundComplete in GameState — see
+ *      PROTOCOL_VERSION's own `/// 148` entry in crates/lobby-broker/src/protocol.rs.
+ *      A v147 peer cannot parse them. Wire 130 moves with it.
  * 147 — Online physical contests: WaitingFor::PhysicalContest, Effect::PhysicalContest,
  *      the two PhysicalContest* GameEvents, ClientMessage::ContestClick and
  *      ServerMessage::ContestProgress — see PROTOCOL_VERSION's own `/// 147` entry
@@ -898,7 +972,7 @@ export class NativeEngineVersionMismatchError extends Error {
  *      every spell frame is byte-identical to v78.
  *
  */
-export const PROTOCOL_VERSION = 147;
+export { PROTOCOL_VERSION };
 
 /**
  * Lowest server protocol version this client will accept in the handshake.
@@ -1069,7 +1143,7 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * 1 — Initial lobby-owned version, covering the lobby variant set unchanged
  *     since #1880.
  */
-export const LOBBY_PROTOCOL_VERSION = 16;
+export { LOBBY_PROTOCOL_VERSION };
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION this client accepts.
@@ -1081,7 +1155,7 @@ export const LOBBY_PROTOCOL_VERSION = 16;
  * new variant it may never need — which is precisely how a protocol-bumping
  * release used to strand every older desktop build.
  */
-export const MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL = 2;
+export { MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL };
 
 /**
  * Lowest broker LOBBY_PROTOCOL_VERSION that can answer a gated tournament
@@ -1519,6 +1593,7 @@ export class WebSocketAdapter implements EngineAdapter {
   /** Set by AiDriverFault: the server permanently rejects every later submission for this game code. */
   private aiDriverFault: { gameCode: string | null; message: string } | null = null;
   private gameEnded = false;
+  private terminalCleanupPending = false;
   /**
    * Populated once the server's `ServerHello` arrives. `null` between the
    * WebSocket opening and the hello being delivered. Consumers see it via
@@ -2248,7 +2323,7 @@ export class WebSocketAdapter implements EngineAdapter {
     this.receivedGameStarted = false;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.emit({ type: "latencyChanged", latencyMs: null });
-    if (this.gameEnded) {
+    if (this.gameEnded && !this.terminalCleanupPending) {
       this.emit({ type: "sessionChanged", session: null });
     }
     this.listeners = [];
@@ -3059,6 +3134,13 @@ export class WebSocketAdapter implements EngineAdapter {
       case "TerminalResult": {
         const delivery = (msg.data as { delivery?: FullTerminalDelivery }).delivery;
         if (!delivery) break;
+        if (this.options.nativePregame?.callerManagedTerminalDelivery) {
+          this.gameEnded = true;
+          this.emit({ type: "actionPendingChanged", pending: false });
+          this.emit({ type: "sessionChanged", session: null });
+          this.emit({ type: "terminalDelivery", delivery });
+          break;
+        }
         void (async () => {
           if (!(await commitFullTerminalDelivery(delivery))) {
             this.emit({
@@ -3069,13 +3151,20 @@ export class WebSocketAdapter implements EngineAdapter {
           }
           this.gameEnded = true;
           this.emit({ type: "actionPendingChanged", pending: false });
-          this.emit({ type: "sessionChanged", session: null });
+          const terminalSession = this.currentSession();
+          this.terminalCleanupPending = true;
+          if (terminalSession) {
+            this.emit({ type: "sessionChanged", session: { ...terminalSession, terminalOnly: true } });
+          }
           this.emit({ type: "terminalDelivery", delivery });
-          await acknowledgeFullTerminalDelivery(
+          if (await acknowledgeFullTerminalDelivery(
             this.serverUrl,
-            delivery.delivery_id,
+            delivery.deliveryId,
             delivery.credential,
-          );
+          )) {
+            this.terminalCleanupPending = false;
+            this.emit({ type: "sessionChanged", session: null });
+          }
         })().catch((error: unknown) => {
           this.emit({
             type: "terminalUnavailable",

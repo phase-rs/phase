@@ -111,6 +111,8 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             turn_zone_change_index: 0,
             recorded_turn_number: 0,
             is_suspected: false,
+            was_prepared: false,
+            departure: engine::types::game_state::ZoneDeparture::Moved,
         });
 
     let mut events = Vec::new();

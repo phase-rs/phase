@@ -265,6 +265,7 @@ class PrReviewTests(unittest.TestCase):
             with (
                 mock.patch.object(pr_review, "load_review_context", return_value=context),
                 mock.patch.object(pr_review, "build_scan_output", return_value=scan_output),
+                mock.patch.object(pr_review, "complete_open_nodes", return_value=[{"number": 7, "state": "OPEN", "headRefOid": "head"}]),
                 mock.patch.object(pr_review, "fetch_terminal_prs", return_value=[{"number": 8}]),
                 mock.patch.object(pr_review, "dashboard_terminal_row", return_value=terminal_row),
             ):
@@ -998,6 +999,9 @@ class PrReviewTests(unittest.TestCase):
             },
         }
 
+        packet["freshness"] = pr_review.review_freshness(
+            packet["pr"], packet["acting_login"], None, None
+        )
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
@@ -1050,6 +1054,9 @@ class PrReviewTests(unittest.TestCase):
             },
         }
 
+        packet["freshness"] = pr_review.review_freshness(
+            packet["pr"], packet["acting_login"], None, None
+        )
         recommendation = pr_review.recommend_from_packet(packet)
 
         self.assertEqual(recommendation["advisory_action"], "review")
@@ -2369,7 +2376,7 @@ class PrReviewTests(unittest.TestCase):
                 "event_type": "blocked",
                 "outcome": "changes_requested",
                 "head_sha": "head",
-                "timestamp": "2026-07-05T20:26:49Z",
+                "timestamp": self._days_ago(1),
             },
             "policy_trace": [],
         }
@@ -2944,6 +2951,74 @@ class PrReviewTests(unittest.TestCase):
         self.assertIsNone(packet["contributor"])
         self.assertNotIn("matched:standing_skip", packet["policy_trace"])
         self.assertNotEqual(packet["recommendation"]["reason"], "contributor_standing_skip")
+
+    def test_repository_writer_bypasses_contributor_gates(self) -> None:
+        enforced_admission = {"mode": "enforce", "enforced_after": "2026-07-10T00:00:00Z"}
+        cases = {
+            "hard_stop": (
+                {"hard_stops": {"patterns": [".github/workflows/**"]}},
+                ".github/workflows/ci.yml",
+                ("request_changes", "hard_stop"),
+            ),
+            "architecture_scope": (
+                {"architecture_scope": {"mode": "enforce", "patterns": ["crates/server-core/**"]}},
+                "crates/server-core/src/lib.rs",
+                ("decline", "architecture_scope_not_authorized"),
+            ),
+            "frontend_policy": (
+                {"path_classes": {"frontend": {"patterns": ["client/**"]}}},
+                "client/src/App.tsx",
+                ("defer", "frontend_policy"),
+            ),
+            "artifacts": (
+                {"admission": enforced_admission},
+                "crates/engine/src/lib.rs",
+                ("decline", "required_artifacts_current_head"),
+            ),
+        }
+        for gate, (raw_policy, path, contributor_route) in cases.items():
+            policy = pr_review.Policy(raw_policy)
+            pr = {
+                "number": 1,
+                "state": "OPEN",
+                "createdAt": "2026-08-01T00:00:00Z",
+                "headRefOid": "a" * 40,
+                "author": {"login": "writer"},
+                "closingIssuesReferencesComplete": True,
+                "files": [{"path": path}],
+                "changedFiles": 1,
+            }
+            with self.subTest(gate=gate):
+                contributor = pr_review.make_packet(pr, policy, "maintainer", "full", {})
+                recommendation = contributor["recommendation"]
+                self.assertEqual(
+                    (recommendation["advisory_action"], recommendation["reason"]),
+                    contributor_route,
+                )
+                writer = pr_review.make_packet(
+                    pr, policy, "maintainer", "full", {}, author_is_repository_writer=True
+                )
+                self.assertTrue(writer["author_policy"]["repository_writer"])
+                self.assertEqual(writer["recommendation"]["advisory_action"], "review")
+                self.assertNotIn("audit_would_decline", writer["recommendation"])
+
+    def test_repository_writer_logins_folds_pages_and_fails_closed(self) -> None:
+        pages = [[{"login": "LGray"}], [{"login": "ntindle"}]]
+        with mock.patch.object(pr_review, "run_json", return_value=pages) as run_json:
+            self.assertEqual(
+                pr_review.repository_writer_logins("phase-rs/phase"),
+                frozenset({"lgray", "ntindle"}),
+            )
+        command = run_json.call_args.args[0]
+        self.assertIn("repos/phase-rs/phase/collaborators", command)
+        self.assertIn("permission=push", command)
+
+        failure = subprocess.CalledProcessError(1, ["gh"])
+        with (
+            mock.patch.object(pr_review, "run_json", side_effect=failure),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(pr_review.repository_writer_logins("phase-rs/phase"), frozenset())
 
     @staticmethod
     def _artifact_body(
@@ -3783,6 +3858,783 @@ class PrReviewTests(unittest.TestCase):
             }
         )
         self.assertFalse(incomplete_labels["closingIssuesReferencesComplete"])
+
+
+class IncrementalDashboardTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state_dir = Path(self.temp.name)
+        self.args = pr_review.build_parser().parse_args([
+            "dashboard-data", "--repo", "phase-rs/phase", "--acting-login", "maintainer",
+            "--state-dir", str(self.state_dir), "--gittensor-api-url", "",
+        ])
+        self.nodes = {1: self.node(1)}
+        self.issues = []
+        self.comments = []
+        self.calls = []
+        self.clock = "2026-10-06T12:00:00Z"
+
+        class FixedDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromisoformat(self.clock).astimezone(tz)
+
+        for patch in (
+            mock.patch.object(pr_review, "run_json", side_effect=self.github),
+            mock.patch.object(pr_review, "required_checks_by_base", return_value={"main": None}),
+            mock.patch.object(pr_review, "now_iso", side_effect=lambda: self.clock),
+            mock.patch.object(pr_review, "datetime", FixedDateTime),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    @staticmethod
+    def connection(nodes: list[dict], total: int | None = None) -> dict:
+        return {"nodes": nodes, "totalCount": len(nodes) if total is None else total,
+                "pageInfo": {"hasNextPage": False, "endCursor": None}}
+
+    @classmethod
+    def node(cls, number: int) -> dict:
+        return {
+            "number": number, "state": "OPEN", "title": f"Change {number}",
+            "url": f"https://github.com/phase-rs/phase/pull/{number}",
+            "author": {"login": "contributor"}, "body": "A focused tooling change.",
+            "createdAt": "2026-07-01T00:00:00Z", "updatedAt": "2026-07-02T00:00:00Z",
+            "headRefOid": f"head-{number}", "headRefName": "branch", "baseRefName": "main",
+            "closedAt": None, "mergedAt": None, "mergeStateStatus": "CLEAN",
+            "isDraft": False, "reviewDecision": "REVIEW_REQUIRED", "changedFiles": 1,
+            "isInMergeQueue": False, "mergeQueueEntry": None, "autoMergeRequest": None,
+            "labels": cls.connection([]), "assignees": cls.connection([]),
+            "closingIssuesReferences": cls.connection([]),
+            "files": cls.connection([{"path": "scripts/tool.py"}]),
+            "comments": cls.connection([]), "reviews": cls.connection([]),
+            "latestReviews": cls.connection([]),
+            "commits": {"nodes": [{"commit": {
+                "oid": f"head-{number}", "messageHeadline": "Focused change", "authors": cls.connection([]),
+                "statusCheckRollup": {"state": "SUCCESS", "contexts": cls.connection([
+                    {"__typename": "CheckRun", "name": "check", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ])},
+            }}]},
+        }
+
+    def github(self, command: list[str]) -> object:
+        self.calls.append(command)
+        endpoint = command[2]
+        if endpoint.endswith("/collaborators"):
+            return [[]]
+        if endpoint != "graphql":
+            rows = self.comments if endpoint.endswith("issues/comments") else self.issues
+            page = int(next(item.split("=", 1)[1] for item in command if item.startswith("page=")))
+            count = int(next(item.split("=", 1)[1] for item in command if item.startswith("per_page=")))
+            return copy.deepcopy(rows[(page - 1) * count:page * count])
+        query = next(item[6:] for item in command if item.startswith("query="))
+        if "pullRequests(" in query:
+            states = {"OPEN"} if "states:[OPEN]" in query else {"CLOSED", "MERGED"}
+            nodes = sorted((node for node in self.nodes.values() if node["state"] in states),
+                           key=lambda node: node["number"], reverse="direction:DESC" in query)
+            first = int(next(item.split("=", 1)[1] for item in command if item.startswith("first=")))
+            cursor = next((int(item.split("=", 1)[1]) for item in command if item.startswith("after=")), 0)
+            chunk = nodes[cursor:cursor + first]
+            return {"data": {"repository": {"pullRequests": {
+                "nodes": copy.deepcopy(chunk), "pageInfo": {
+                    "hasNextPage": cursor + first < len(nodes), "endCursor": str(cursor + first),
+                },
+            }}}}
+        numbers = re.findall(r"q(\d+):pullRequest\(number:(\d+)\)", query)
+        return {"data": {"repository": {
+            f"q{alias}": copy.deepcopy(self.nodes.get(int(number))) for alias, number in numbers
+        }}}
+
+    def run_dashboard(self) -> dict:
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pr_review.command_dashboard_data(self.args), 0)
+        return json.loads((self.state_dir / "review-dashboard.json").read_text())
+
+    def cache_bytes(self) -> bytes:
+        return (self.state_dir / "github-discovery.json").read_bytes()
+
+    def detail_calls(self) -> list:
+        return [call for call in self.calls if any("q0:pullRequest(" in item for item in call)]
+
+    @staticmethod
+    def row(snapshot: dict, number: int = 1) -> dict:
+        return next(row for rows in snapshot["candidates_by_action"].values() for row in rows if row["pr"] == number)
+
+    def review(self, author: str, date: str, state: str = "COMMENTED") -> dict:
+        return {"author": {"login": author}, "authorAssociation": "MEMBER" if author == "maintainer" else "CONTRIBUTOR",
+                "state": state, "submittedAt": date, "updatedAt": date,
+                "lastEditedAt": None, "commit": {"oid": self.nodes[1]["headRefOid"]}}
+
+    def record(self, event_type: str, timestamp: str = "2026-10-06T10:00:00Z") -> None:
+        pr_review.append_event(self.state_dir, {"event_type": event_type, "pr": 1,
+            "head_sha": self.nodes[1]["headRefOid"], "author": "contributor", "timestamp": timestamp})
+
+    def test_unchanged_sweep_retains_inventory_and_unfinished_review_without_full_fetch(self) -> None:
+        first = self.run_dashboard()
+        self.calls.clear()
+        self.clock = "2026-10-06T12:02:00Z"
+        second = self.run_dashboard()
+        self.assertEqual(self.row(first)["advisory_action"], "review")
+        self.assertEqual(self.row(second)["advisory_action"], "review")
+        self.assertEqual(second["action_counts"], {"review": 1})
+        self.assertEqual([row["pr"] for row in second["sweep_candidates_by_action"]["review"]], [1])
+        self.assertEqual(self.detail_calls(), [])
+        queries = [item for call in self.calls for item in call if item.startswith("query=")]
+        self.assertEqual(queries, ["query=" + pr_review.CENSUS_PR_QUERY])
+        self.assertNotIn("files(", queries[0])
+        self.assertNotIn("body", queries[0])
+        self.assertNotIn("commits(last:20)", queries[0])
+        self.assertEqual(second["discovery"]["since"], "2026-10-06T11:59:00Z")
+        self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], self.clock)
+
+    def test_rest_since_complete_pages_dedup_and_ordinary_issue_filter(self) -> None:
+        self.run_dashboard()
+        self.calls.clear()
+        self.issues = [{"id": 9, "number": 1, "pull_request": {"url": "pull"}}] * 2
+        self.issues += [{"id": number + 100, "number": number + 100} for number in range(4)]
+        self.comments = [{"id": 99, "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"}]
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 2):
+            result = self.run_dashboard()
+        issue_calls = [call for call in self.calls if call[2].endswith("/issues")]
+        self.assertEqual(len(issue_calls), 8)
+        for call in issue_calls:
+            self.assertIn("state=all", call)
+            self.assertIn("sort=created", call)
+            self.assertIn("direction=asc", call)
+            self.assertIn("since=2026-10-06T11:59:00Z", call)
+        self.assertEqual(result["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(len(self.detail_calls()), 1)
+        self.assertNotIn("number:999", str(self.detail_calls()))
+
+    def test_query_start_cursor_and_overlap_replays_equal_second_updates(self) -> None:
+        self.run_dashboard()
+        self.clock = "2026-10-06T12:02:00Z"
+        original = self.github
+        def advance_during_query(command):
+            result = original(command)
+            if command[2].endswith("/issues"):
+                self.clock = "2026-10-06T12:03:00Z"
+            return result
+        with mock.patch.object(pr_review, "run_json", side_effect=advance_during_query):
+            self.run_dashboard()
+        self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], "2026-10-06T12:02:00Z")
+        self.issues = [{"id": 1, "number": 1, "pull_request": {}, "updated_at": "2026-10-06T12:02:00Z"}]
+        # The marker's presence identifies PRs even if GitHub supplies an empty object.
+        self.issues[0]["pull_request"] = {"url": "pull"}
+        result = self.run_dashboard()
+        self.assertEqual(result["discovery"]["since"], "2026-10-06T12:01:00Z")
+        self.assertEqual(result["discovery"]["refreshed_prs"], [1])
+
+    def test_old_comment_entering_before_read_page_is_recovered_during_long_sweep(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.record("held")
+        self.run_dashboard()
+        old_comment = {"id": 10, "node_id": "old-comment", "user": {"login": "contributor"},
+            "author_association": "CONTRIBUTOR", "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-10-06T08:00:00Z", "body": "I addressed the feedback.",
+            "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"}
+        self.comments = [old_comment] + [
+            {"id": number, "created_at": f"2026-08-{number:02d}T00:00:00Z",
+             "updated_at": "2026-10-06T12:00:30Z",
+             "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"}
+            for number in (20, 30)
+        ]
+        self.clock = "2026-10-06T12:02:00Z"
+        original = self.github
+        edited = False
+
+        def paginate_live_membership(command):
+            nonlocal edited
+            if not command[2].endswith("issues/comments"):
+                return original(command)
+            self.calls.append(command)
+            since = next(item.split("=", 1)[1] for item in command if item.startswith("since="))
+            page = int(next(item.split("=", 1)[1] for item in command if item.startswith("page=")))
+            count = int(next(item.split("=", 1)[1] for item in command if item.startswith("per_page=")))
+            matching = sorted((row for row in self.comments if row["updated_at"] > since),
+                              key=lambda row: row["created_at"])
+            result = copy.deepcopy(matching[(page - 1) * count:page * count])
+            if not edited:
+                # An old comment enters before page 1 AFTER page 1 was read.
+                old_comment["updated_at"] = "2026-10-06T12:02:01Z"
+                edited = True
+                self.clock = "2026-10-06T12:10:00Z"
+            return result
+
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
+                mock.patch.object(pr_review, "run_json", side_effect=paginate_live_membership):
+            first = self.run_dashboard()
+            self.assertEqual(self.row(first)["advisory_action"], "review")
+            self.assertEqual(first["discovery"]["refreshed_prs"], [1])
+            self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], "2026-10-06T12:02:00Z")
+            second = self.run_dashboard()
+        self.assertEqual(second["discovery"]["since"], "2026-10-06T12:01:00Z")
+        self.assertEqual(second["discovery"]["refreshed_prs"], [])
+        self.assertEqual(self.row(second)["advisory_action"], "review")
+        self.assertEqual(self.row(second)["reason"], "author_followup_after_maintainer_activity")
+
+    def test_deletion_before_page_offset_cannot_drop_unread_old_comment_edit(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.record("held")
+        self.run_dashboard()
+        self.clock = "2026-10-06T12:02:00Z"
+        self.comments = [
+            {"id": 10, "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"},
+            {"id": 20, "node_id": "old-comment", "user": {"login": "contributor"},
+             "author_association": "CONTRIBUTOR", "created_at": "2026-07-01T00:00:00Z",
+             "updated_at": "2026-10-06T12:00:30Z", "body": "I addressed the feedback.",
+             "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"},
+            {"id": 30, "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/999"},
+        ]
+        original = self.github
+        deleted = False
+
+        def delete_read_comment(command):
+            nonlocal deleted
+            result = original(command)
+            if command[2].endswith("issues/comments") and not deleted:
+                # Removing page 1 shifts the unread edit behind page 2's offset.
+                self.comments.pop(0)
+                deleted = True
+            return result
+
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
+                mock.patch.object(pr_review, "run_json", side_effect=delete_read_comment):
+            result = self.run_dashboard()
+        self.assertEqual(result["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(self.row(result)["advisory_action"], "review")
+        self.assertEqual(self.row(result)["reason"], "author_followup_after_maintainer_activity")
+        self.assertEqual(json.loads(self.cache_bytes())["query_started_at"], "2026-10-06T12:02:00Z")
+
+    def test_compact_watch_refreshes_independent_ci_queue_head_label_issue_and_review_edits(self) -> None:
+        self.run_dashboard()
+        mutations = [
+            lambda node: node["commits"]["nodes"][-1]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0].update(conclusion="FAILURE"),
+            lambda node: node.update(isInMergeQueue=True, mergeQueueEntry={"position": 1, "state": "QUEUED"}),
+            lambda node: node.update(isInMergeQueue=False, mergeQueueEntry=None),
+            lambda node: node.update(headRefOid="new-head"),
+            lambda node: node.update(labels=self.connection([{"name": "approved-for-review"}])),
+            lambda node: node.update(closingIssuesReferences=self.connection([
+                {"number": 42, "state": "OPEN", "labels": self.connection([{"name": "accepted"}])}])),
+            lambda node: node.update(reviews=self.connection([self.review("contributor", "2026-10-06T10:00:00Z")])),
+            lambda node: node["reviews"]["nodes"][0].update(lastEditedAt="2026-10-06T11:30:00Z"),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                self.calls.clear()
+                old_updated_at = self.nodes[1]["updatedAt"]
+                mutate(self.nodes[1])
+                result = self.run_dashboard()
+                self.assertEqual(self.nodes[1]["updatedAt"], old_updated_at)
+                self.assertEqual(result["discovery"]["refreshed_prs"], [1])
+                self.assertEqual(len(self.detail_calls()), 1)
+        self.assertEqual(self.row(result)["freshness"]["author_followup_after_maintainer_activity"], True)
+
+    def test_edited_author_comment_beyond_recent_window_routes_production_dashboard(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.record("held")
+        first = self.run_dashboard()
+        self.assertEqual(self.row(first)["advisory_action"], "hold")
+        self.comments = [{"id": 55, "node_id": "old-comment", "user": {"login": "contributor"},
+            "author_association": "CONTRIBUTOR", "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-10-06T11:00:00Z", "body": "I addressed the feedback.",
+            "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"}]
+        result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "review")
+        self.assertEqual(self.row(result)["reason"], "author_followup_after_maintainer_activity")
+        self.assertTrue(self.row(result)["freshness"]["author_followup_after_local_event"])
+        self.assertEqual([row["pr"] for row in result["sweep_candidates_by_action"]["review"]], [1])
+
+    def test_author_review_edit_routes_production_dashboard_and_member_comment_holds(self) -> None:
+        author_review = self.review("contributor", "2026-10-06T08:00:00Z")
+        self.nodes[1]["reviews"] = self.connection([author_review, self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.record("held")
+        first = self.run_dashboard()
+        self.assertEqual(self.row(first)["advisory_action"], "hold")
+        author_review["lastEditedAt"] = "2026-10-06T11:00:00Z"
+        result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "review")
+        self.assertTrue(self.row(result)["freshness"]["author_followup_after_maintainer_activity"])
+        self.assertFalse(self.row(result)["freshness"]["member_activity_is_latest"])
+        self.nodes[1]["comments"] = self.connection([{"id": "member-comment", "author": {"login": "maintainer"},
+            "authorAssociation": "MEMBER", "createdAt": "2026-10-06T11:30:00Z", "updatedAt": "2026-10-06T11:30:00Z", "body": "Held on `head-1`: waiting for author evidence. Next step: recheck after the author responds."}])
+        result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "hold")
+        self.assertTrue(self.row(result)["freshness"]["member_activity_is_latest"])
+        self.calls.clear()
+        result = self.run_dashboard()
+        self.assertEqual(result["sweep_candidates_by_action"], {})
+        self.assertEqual(result["action_counts"], {"hold": 1})
+        self.assertEqual(self.detail_calls(), [])
+
+    def test_lifecycle_new_closed_merged_reopened_without_terminal_history_rescan(self) -> None:
+        self.nodes[9] = self.node(9)
+        self.nodes[9].update(state="CLOSED", closedAt="2026-09-01T00:00:00Z")
+        self.run_dashboard()
+        self.nodes[2] = self.node(2)
+        self.nodes[1].update(state="MERGED", mergedAt=self.clock, closedAt=self.clock)
+        self.calls.clear()
+        result = self.run_dashboard()
+        self.assertEqual([row["pr"] for rows in result["candidates_by_action"].values() for row in rows], [2])
+        self.assertEqual({row["pr"] for row in result["terminal_archive"]}, {1, 9})
+        self.assertEqual(result["discovery"]["terminal_changed_prs"], [1])
+        self.nodes[9].update(state="OPEN", closedAt=None)
+        self.nodes[2].update(state="CLOSED", closedAt=self.clock)
+        result = self.run_dashboard()
+        self.assertEqual({row["pr"] for row in result["terminal_archive"]}, {1, 2})
+        self.assertEqual(self.row(result, 9)["advisory_action"], "review")
+        self.assertFalse(any("states:[CLOSED,MERGED]" in str(call) for call in self.calls))
+
+    def test_new_terminal_delta_ordinary_issues_and_complete_census_cover_page_race(self) -> None:
+        self.run_dashboard()
+        self.nodes[8] = self.node(8)
+        self.nodes[8].update(state="CLOSED", closedAt=self.clock)
+        self.issues = [{"id": 8, "number": 8, "pull_request": {"url": "pull"}}, {"id": 99, "number": 99}]
+        self.nodes[2] = self.node(2)  # Created between REST pages, absent from its result.
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), mock.patch.object(pr_review, "SCAN_PAGE_SIZE", 1):
+            result = self.run_dashboard()
+        self.assertEqual(result["discovery"]["refreshed_prs"], [2, 8])
+        self.assertEqual(self.row(result, 2)["advisory_action"], "review")
+        self.assertEqual({row["pr"] for row in result["terminal_archive"]}, {8})
+
+    def test_local_history_and_policy_changes_recompute_without_detail_fetch(self) -> None:
+        self.run_dashboard()
+        self.calls.clear()
+        self.record("held")
+        result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "hold")
+        self.assertEqual([row["pr"] for row in result["sweep_candidates_by_action"]["hold"]], [1])
+        result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "hold")
+        self.assertIn("hold", result["sweep_candidates_by_action"])
+        private_path = self.state_dir / pr_review.PRIVATE_OVERRIDES
+        private_path.write_text(json.dumps({"contributor_standing": {"contributor": {"standing": "skip"}}}) + "\n")
+        result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "skip")
+        self.assertEqual(self.detail_calls(), [])
+
+    def test_elapsed_requested_changes_deadline_recomputes_without_detail_fetch(self) -> None:
+        self.nodes[1]["reviewDecision"] = "CHANGES_REQUESTED"
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-05T09:00:00Z", "CHANGES_REQUESTED")])
+        with mock.patch.object(pr_review, "age_in_days", return_value=1):
+            first = self.run_dashboard()
+        self.assertNotEqual(self.row(first)["advisory_action"], "warn_stale_changes_for_handler")
+        self.calls.clear()
+        with mock.patch.object(pr_review, "age_in_days", return_value=8):
+            result = self.run_dashboard()
+        self.assertEqual(self.row(result)["advisory_action"], "warn_stale_changes_for_handler")
+        self.assertIn("warn_stale_changes_for_handler", result["sweep_candidates_by_action"])
+        self.assertEqual(self.detail_calls(), [])
+
+    def test_partial_graphql_and_page_failures_leave_cursor_and_outputs_unchanged(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        dashboard = (self.state_dir / "review-dashboard.json").read_bytes()
+        original = self.github
+        for failure in ("rest", "graphql"):
+            with self.subTest(failure=failure):
+                def fail(command):
+                    if failure == "rest" and command[2].endswith("issues/comments"):
+                        raise subprocess.CalledProcessError(1, command)
+                    result = original(command)
+                    if failure == "graphql" and command[2] == "graphql":
+                        result["errors"] = [{"message": "Partial response"}]
+                    return result
+                with mock.patch.object(pr_review, "run_json", side_effect=fail):
+                    with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                        self.run_dashboard()
+                self.assertEqual(self.cache_bytes(), previous)
+                self.assertEqual((self.state_dir / "review-dashboard.json").read_bytes(), dashboard)
+
+    def test_gateway_timeouts_shrink_heavy_graphql_reads(self) -> None:
+        self.nodes = {number: self.node(number) for number in (1, 2, 3)}
+        original = self.github
+
+        def timeout_unless_single(command):
+            query = next((item for item in command if item.startswith("query=")), "")
+            first = next((int(item.split("=", 1)[1]) for item in command if item.startswith("first=")), 1)
+            if ("pullRequests(states:[OPEN]" in query and first > 1) or query.count(":pullRequest(") > 1:
+                raise subprocess.CalledProcessError(1, command, stderr="gh: HTTP 504")
+            return original(command)
+
+        with mock.patch.object(pr_review, "run_json", side_effect=timeout_unless_single):
+            self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1, 2, 3])
+            self.issues = [{"id": number, "number": number, "pull_request": {"url": "pull"}} for number in (1, 2, 3)]
+            self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1, 2, 3])
+
+    def test_non_timeout_graphql_failure_is_not_retried_smaller(self) -> None:
+        self.nodes = {number: self.node(number) for number in (1, 2)}
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        self.issues = [{"id": number, "number": number, "pull_request": {"url": "pull"}} for number in (1, 2)]
+        original = self.github
+
+        def unauthorized_detail(command):
+            if any("q0:pullRequest(" in item for item in command):
+                self.calls.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="gh: HTTP 401")
+            return original(command)
+
+        self.calls = []
+        with mock.patch.object(pr_review, "run_json", side_effect=unauthorized_detail):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_dashboard()
+        self.assertEqual(len(self.detail_calls()), 1)
+        self.assertEqual(self.cache_bytes(), previous)
+
+    def test_second_rest_page_failure_replays_and_does_not_consume_changes(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        self.issues = [{"id": 1, "number": 1, "pull_request": {"url": "pull"}}]
+        original = self.github
+        def fail(command):
+            if command[2].endswith("/issues") and "page=2" in command:
+                raise ValueError("failed page")
+            return original(command)
+        with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), mock.patch.object(pr_review, "run_json", side_effect=fail):
+            with self.assertRaises(ValueError):
+                self.run_dashboard()
+        self.assertEqual(self.cache_bytes(), previous)
+        self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1])
+
+    def test_delta_volume_and_membership_churn_exhaust_budget_without_publishing(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        dashboard_path = self.state_dir / "review-dashboard.json"
+        html_path = self.state_dir / "review-dashboard.html"
+        dashboard, html = dashboard_path.read_bytes(), html_path.read_bytes()
+        original = self.github
+        for endpoint in ("issues", "issues/comments"):
+            for scenario in ("volume", "churn"):
+                with self.subTest(endpoint=endpoint, scenario=scenario):
+                    requests = 0
+
+                    def exceed_budget(command):
+                        nonlocal requests
+                        if command[2] != f"repos/phase-rs/phase/{endpoint}":
+                            return original(command)
+                        requests += 1
+                        self.assertLessEqual(requests, 3, "REST budget must also bound replay passes")
+                        page = int(next(item.split("=", 1)[1] for item in command if item.startswith("page=")))
+                        if scenario == "volume" or page == 1:
+                            return [{"id": requests, "number": requests}]
+                        return []
+
+                    with mock.patch.object(pr_review, "DISCOVERY_REST_PAGE_SIZE", 1), \
+                            mock.patch.object(pr_review, "DISCOVERY_REST_MAX_REQUESTS", 3), \
+                            mock.patch.object(pr_review, "run_json", side_effect=exceed_budget):
+                        with self.assertRaisesRegex(ValueError, "budget; discovery is incomplete"):
+                            self.run_dashboard()
+                    self.assertEqual(requests, 3)
+                    self.assertEqual(self.cache_bytes(), previous)
+                    self.assertEqual(dashboard_path.read_bytes(), dashboard)
+                    self.assertEqual(html_path.read_bytes(), html)
+        self.assertEqual(self.run_dashboard()["discovery"]["mode"], "incremental")
+
+    def test_truncated_open_bootstrap_and_census_never_advance(self) -> None:
+        self.args.limit = 1
+        self.nodes[2] = self.node(2)
+        with self.assertRaisesRegex(ValueError, "increase --limit"):
+            self.run_dashboard()
+        self.assertFalse((self.state_dir / "github-discovery.json").exists())
+        self.nodes.pop(2)
+        self.run_dashboard()  # Exactly at limit is complete, not truncated.
+        previous = self.cache_bytes()
+        self.nodes[2] = self.node(2)
+        with self.assertRaisesRegex(ValueError, "increase --limit"):
+            self.run_dashboard()
+        self.assertEqual(self.cache_bytes(), previous)
+
+    def test_json_html_and_packet_failures_never_advance_checkpoint(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        self.clock = "2026-10-06T12:02:00Z"
+        for owner, name in ((pr_review, "write_json_atomically"),
+                            (pr_review_dashboard, "write_text_atomically"),
+                            (pr_review, "packet_for_pr")):
+            with self.subTest(failure=name), mock.patch.object(owner, name, side_effect=ValueError("failed output")):
+                with self.assertRaises(ValueError):
+                    self.run_dashboard()
+                self.assertEqual(self.cache_bytes(), previous)
+        result = self.run_dashboard()
+        self.assertEqual(result["discovery"]["since"], "2026-10-06T11:59:00Z")
+
+    def test_invalid_repo_version_corrupt_cache_and_full_refresh_bootstrap(self) -> None:
+        self.run_dashboard()
+        cache_path = self.state_dir / "github-discovery.json"
+        for field, value in (("repo", "other/repo"), ("version", -1), ("open_nodes", {})):
+            cache = json.loads(cache_path.read_text())
+            if field == "open_nodes":
+                cache["query_started_at"] = "not-a-time"
+            else:
+                cache[field] = value
+            cache_path.write_text(json.dumps(cache) + "\n")
+            self.assertEqual(self.run_dashboard()["discovery"]["mode"], "bootstrap")
+        cache_path.write_text("{broken\n")
+        self.assertEqual(self.run_dashboard()["discovery"]["mode"], "bootstrap")
+        self.args.full_refresh = True
+        self.assertEqual(self.run_dashboard()["discovery"]["mode"], "bootstrap")
+
+    def test_missing_or_invalid_detail_never_advances(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        self.nodes[1]["headRefOid"] = "changed"
+        original = self.github
+        for missing in (True, False):
+            def invalid(command):
+                result = original(command)
+                if any("q0:pullRequest(" in item for item in command):
+                    if missing:
+                        result["data"]["repository"]["q0"] = None
+                    else:
+                        result["data"]["repository"]["q0"].pop("reviews")
+                return result
+            with mock.patch.object(pr_review, "run_json", side_effect=invalid):
+                with self.assertRaises(ValueError):
+                    self.run_dashboard()
+            self.assertEqual(self.cache_bytes(), previous)
+
+    def test_scan_is_full_diagnostic_and_does_not_advance_dashboard_cursor(self) -> None:
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        self.calls.clear()
+        with contextlib.redirect_stdout(io.StringIO()):
+            pr_review.command_scan(self.args)
+        self.assertEqual(self.cache_bytes(), previous)
+        self.assertTrue(any("query=" + pr_review.SCAN_PR_QUERY in call for call in self.calls))
+
+
+
+    def test_identical_overlap_does_not_refetch_but_same_second_comment_edit_does(self) -> None:
+        self.run_dashboard()
+        self.issues = [{"id": 1, "number": 1, "pull_request": {"url": "pull"}, "updated_at": self.clock}]
+        self.comments = [{"id": 51, "node_id": "comment", "user": {"login": "contributor"},
+            "created_at": "2026-10-06T08:00:00Z", "updated_at": self.clock, "body": "First version",
+            "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"}]
+        self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1])
+        self.calls.clear()
+        result = self.run_dashboard()
+        self.assertEqual(result["discovery"]["refreshed_prs"], [])
+        self.assertEqual(self.detail_calls(), [])
+        self.comments[0]["body"] = "Edited within the same second"
+        self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1])
+
+    def test_old_edited_comment_survives_later_ci_refresh_and_complete_history_proves_deletion(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z")])
+        self.nodes[1]["comments"] = self.connection([], total=101)
+        self.record("held")
+        first = self.run_dashboard()
+        self.assertEqual(self.row(first)["reason"], "author_activity_history_incomplete")
+        self.comments = [{"id": 55, "node_id": "old-comment", "user": {"login": "contributor"},
+            "author_association": "CONTRIBUTOR", "created_at": "2026-07-01T00:00:00Z",
+            "updated_at": "2026-10-06T11:00:00Z", "body": "Fixed it",
+            "issue_url": "https://api.github.com/repos/phase-rs/phase/issues/1"}]
+        edited = self.run_dashboard()
+        self.assertEqual(self.row(edited)["reason"], "author_followup_after_maintainer_activity")
+        self.comments = []
+        self.nodes[1]["commits"]["nodes"][-1]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0]["conclusion"] = "FAILURE"
+        refreshed = self.run_dashboard()
+        self.assertEqual(refreshed["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(self.row(refreshed)["reason"], "author_followup_after_maintainer_activity")
+        self.assertTrue(self.row(refreshed)["freshness"]["comment_history_incomplete"])
+        self.calls.clear()
+        unchanged = self.run_dashboard()
+        self.assertEqual(unchanged["discovery"]["refreshed_prs"], [])
+        self.assertTrue(self.row(unchanged)["freshness"]["author_followup_after_maintainer_activity"])
+        # Once the complete authoritative history is available, the absent ID is
+        # a proven deletion rather than an omission from the last-100 window.
+        self.nodes[1]["comments"] = self.connection([])
+        deleted = self.run_dashboard()
+        self.assertFalse(self.row(deleted)["freshness"]["author_followup_after_maintainer_activity"])
+        self.assertFalse(self.row(deleted)["freshness"]["comment_history_incomplete"])
+
+    def test_ci_hold_completion_routes_handler_with_unchanged_parent_timestamp(self) -> None:
+        check = self.nodes[1]["commits"]["nodes"][-1]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0]
+        check.update(status="IN_PROGRESS", conclusion=None)
+        self.record("hold_ci")
+        first = self.run_dashboard()
+        self.assertEqual(self.row(first)["advisory_action"], "hold_ci")
+        check.update(status="COMPLETED", conclusion="SUCCESS")
+        second = self.run_dashboard()
+        self.assertEqual(self.row(second)["advisory_action"], "recheck_ci_hold_for_handler")
+        self.assertIn("recheck_ci_hold_for_handler", second["sweep_candidates_by_action"])
+        self.assertEqual(second["discovery"]["refreshed_prs"], [1])
+
+    def test_editing_old_review_preserves_newer_current_head_approval(self) -> None:
+        older = self.review("maintainer", "2026-10-05T09:00:00Z")
+        older["commit"] = {"oid": "old-head"}
+        approval = self.review("maintainer", "2026-10-06T09:00:00Z", "APPROVED")
+        self.nodes[1]["reviews"] = self.connection([older, approval])
+        self.nodes[1].update(reviewDecision="APPROVED", isInMergeQueue=True,
+                             mergeQueueEntry={"position": 1, "state": "QUEUED"})
+        self.assertEqual(self.row(self.run_dashboard())["advisory_action"], "queued")
+        older.update(updatedAt="2026-10-06T11:00:00Z", lastEditedAt="2026-10-06T11:00:00Z")
+        edited = self.run_dashboard()
+        self.assertEqual(edited["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(self.row(edited)["advisory_action"], "queued")
+        self.assertEqual(self.row(edited)["freshness"]["latest_maintainer_activity_at"],
+                         "2026-10-06T11:00:00Z")
+
+    def test_nullable_author_survives_bootstrap_census_and_detail_refresh(self) -> None:
+        self.nodes[1]["author"] = None
+        self.assertEqual(self.row(self.run_dashboard())["pr"], 1)
+        self.nodes[1]["title"] = "Updated title with a deleted author"
+        refreshed = self.run_dashboard()
+        self.assertEqual(refreshed["discovery"]["refreshed_prs"], [1])
+        self.assertEqual(self.row(refreshed)["title"], self.nodes[1]["title"])
+
+    def test_queue_drop_and_stale_approval_route_production_dashboard(self) -> None:
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", "2026-10-06T09:00:00Z", "APPROVED")])
+        self.nodes[1].update(reviewDecision="APPROVED", isInMergeQueue=True,
+                             mergeQueueEntry={"position": 1, "state": "QUEUED"})
+        first = self.run_dashboard()
+        self.assertEqual(self.row(first)["advisory_action"], "queued")
+        self.nodes[1].update(isInMergeQueue=False, mergeQueueEntry=None)
+        dropped = self.run_dashboard()
+        self.assertEqual(self.row(dropped)["advisory_action"], "approve_ready_for_handler")
+        self.assertIn("approve_ready_for_handler", dropped["sweep_candidates_by_action"])
+        self.nodes[1].update(headRefOid="unreviewed-head", autoMergeRequest={"enabledAt": self.clock})
+        stale = self.run_dashboard()
+        self.assertEqual(self.row(stale)["advisory_action"], "dequeue_stale_for_handler")
+        self.assertEqual(self.row(stale)["reason"], "stale_approval")
+
+    def test_live_routing_label_and_linked_issue_labels_reach_actual_packets(self) -> None:
+        self.nodes[1]["files"] = self.connection([{"path": "client/src/Component.tsx"}])
+        first = self.run_dashboard()
+        self.assertEqual(self.row(first)["advisory_action"], "defer")
+        label = pr_review.load_policy(self.args.config).approved_for_review_label
+        self.nodes[1]["labels"] = self.connection([{"name": label}])
+        labelled = self.run_dashboard()
+        self.assertEqual(self.row(labelled)["reason"], "approved_for_review_label")
+        self.assertEqual(self.row(labelled)["advisory_action"], "review")
+        self.nodes[1]["closingIssuesReferences"] = self.connection([
+            {"number": 77, "state": "OPEN", "labels": self.connection([{"name": "accepted"}])}])
+        accepted = self.run_dashboard()
+        records = self.row(accepted)["architecture_scope"]["evidence"]["closing_issue_records"]
+        self.assertEqual(records[0]["number"], 77)
+        self.assertEqual(records[0]["labels"], [{"name": "accepted"}])
+        self.assertEqual(accepted["discovery"]["refreshed_prs"], [1])
+
+    def test_concurrent_dashboard_processes_serialize_the_entire_publish(self) -> None:
+        script = '''import argparse,json,sys,time
+from pathlib import Path
+import pr_review
+state = Path(sys.argv[1])
+def publish(args):
+    path = state / "counter.json"
+    before = json.loads(path.read_text()) if path.exists() else 0
+    with (state / "order.log").open("a") as log:
+        log.write("start\\n")
+    time.sleep(0.15)
+    path.write_text(json.dumps(before + 1))
+    with (state / "order.log").open("a") as log:
+        log.write("end\\n")
+    return 0
+pr_review.publish_dashboard_data = publish
+pr_review.command_dashboard_data(argparse.Namespace(state_dir=state))
+'''
+        # Both enter the real dashboard command's flock before the replaced
+        # publisher reads state. Without the lock both read zero and lose a run.
+        commands = ["python3", "-c", script, str(self.state_dir)]
+        env = {**os.environ, "PYTHONPATH": str(pr_review.REPO_ROOT / "scripts")}
+        processes = [subprocess.Popen(commands, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for _ in range(2)]
+        for process in processes:
+            _, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr.decode())
+        self.assertEqual(json.loads((self.state_dir / "counter.json").read_text()), 2)
+        self.assertEqual((self.state_dir / "order.log").read_text().splitlines(), ["start", "end", "start", "end"])
+
+
+    def test_unchanged_eventless_defer_stays_work_until_disposition_is_visible(self) -> None:
+        self.nodes[1]["files"] = self.connection([{"path": "client/src/Component.tsx"}])
+        self.assertEqual(self.row(self.run_dashboard())["advisory_action"], "defer")
+        self.calls.clear()
+        second = self.run_dashboard()
+        self.assertEqual([row["pr"] for row in second["sweep_candidates_by_action"]["defer"]], [1])
+        self.assertEqual(self.detail_calls(), [])
+        self.record("deferred")
+        self.run_dashboard()
+        self.assertIn("defer", self.run_dashboard()["sweep_candidates_by_action"])
+        self.nodes[1]["comments"] = self.connection([{
+            "id": "defer-response", "author": {"login": "maintainer"}, "authorAssociation": "MEMBER",
+            "createdAt": self.clock, "updatedAt": self.clock,
+            "body": "<!-- pr-review-deferred -->\nDeferred current head `head-1` by frontend policy. A maintainer must take this review.",
+        }])
+        self.run_dashboard()
+        self.assertEqual(self.run_dashboard()["sweep_candidates_by_action"], {})
+
+    def test_unchanged_local_block_needs_formal_current_head_review_to_finish(self) -> None:
+        self.record("blocked")
+        self.run_dashboard()
+        second = self.run_dashboard()
+        self.assertEqual(self.row(second)["advisory_action"], "blocked")
+        self.assertIn("blocked", second["sweep_candidates_by_action"])
+        self.nodes[1]["reviews"] = self.connection([self.review("maintainer", self.clock, "CHANGES_REQUESTED")])
+        self.nodes[1]["reviewDecision"] = "CHANGES_REQUESTED"
+        self.run_dashboard()
+        self.assertEqual(self.run_dashboard()["sweep_candidates_by_action"], {})
+        # Formal visible disposition still suffices on a host with no local log.
+        (self.state_dir / "review-events.jsonl").unlink()
+        self.run_dashboard()
+        stable = self.run_dashboard()
+        self.assertEqual(self.row(stable)["advisory_action"], "blocked")
+        self.assertEqual(stable["sweep_candidates_by_action"], {})
+
+
+    def test_local_only_waiting_events_and_ambiguous_member_comments_remain_actionable(self) -> None:
+        for event_type, action in (("held", "hold"), ("hold_ci", "hold_ci"), ("deferred", "defer")):
+            with self.subTest(event=event_type):
+                (self.state_dir / "github-discovery.json").unlink(missing_ok=True)
+                (self.state_dir / "review-events.jsonl").unlink(missing_ok=True)
+                self.nodes[1] = self.node(1)
+                if action == "hold_ci":
+                    self.nodes[1]["commits"]["nodes"][-1]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0].update(status="IN_PROGRESS", conclusion=None)
+                elif action == "defer":
+                    self.nodes[1]["files"] = self.connection([{"path": "client/src/Component.tsx"}])
+                self.record(event_type)
+                responses = [
+                    None,
+                    "Thanks for contributing to `head-1`.",
+                    "Held on `head-1-old`: pending artifact publication. Next step: recheck after publication.",
+                    "Held on `head-1`: pending artifact publication.",
+                    "Held on `head-1`. Next step: recheck after publication.",
+                    "<!-- pr-review-deferred -->\nDeferred head `head-1-old` by frontend policy.",
+                ]
+                for index, body in enumerate(responses):
+                    with self.subTest(event=event_type, body=body):
+                        self.nodes[1]["comments"] = self.connection([] if body is None else [{
+                            "id": f"response-{index}", "author": {"login": "maintainer"}, "authorAssociation": "MEMBER",
+                            "createdAt": self.clock, "updatedAt": self.clock, "body": body,
+                        }])
+                        self.run_dashboard()
+                        self.calls.clear()
+                        unchanged = self.run_dashboard()
+                        self.assertEqual(self.row(unchanged)["advisory_action"], action)
+                        self.assertEqual([row["pr"] for row in unchanged["sweep_candidates_by_action"][action]], [1])
+                        self.assertEqual(self.detail_calls(), [])
+
+    def test_matching_visible_hold_and_ci_hold_finish_unchanged_waiting_routes(self) -> None:
+        for event_type, action in (("held", "hold"), ("hold_ci", "hold_ci")):
+            with self.subTest(event=event_type):
+                (self.state_dir / "github-discovery.json").unlink(missing_ok=True)
+                (self.state_dir / "review-events.jsonl").unlink(missing_ok=True)
+                self.nodes[1] = self.node(1)
+                if action == "hold_ci":
+                    self.nodes[1]["commits"]["nodes"][-1]["commit"]["statusCheckRollup"]["contexts"]["nodes"][0].update(status="IN_PROGRESS", conclusion=None)
+                self.record(event_type)
+                self.nodes[1]["comments"] = self.connection([{
+                    "id": "visible-hold", "author": {"login": "maintainer"}, "authorAssociation": "MEMBER",
+                    "createdAt": self.clock, "updatedAt": self.clock,
+                    "body": "**Held** on `head-1`: pending artifact publication. Next step: recheck after the artifacts publish.",
+                }])
+                self.run_dashboard()
+                self.calls.clear()
+                unchanged = self.run_dashboard()
+                self.assertEqual(self.row(unchanged)["advisory_action"], action)
+                self.assertEqual(unchanged["sweep_candidates_by_action"], {})
+                self.assertEqual(unchanged["action_counts"], {action: 1})
+                self.assertEqual(self.detail_calls(), [])
 
 
 if __name__ == "__main__":

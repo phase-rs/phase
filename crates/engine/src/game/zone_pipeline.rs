@@ -1839,6 +1839,7 @@ mod paused_search_audience_tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
 
         // The owner parks on the unanswered event.
@@ -4118,16 +4119,13 @@ pub(crate) fn deliver_replaced_zone_change(
                     duration_subject: ObjectIncarnationRef::from_object(&state.objects[&object_id]),
                     duration: copy.sacrifice_at.unwrap_or(Duration::Permanent),
                     values: *copy.values,
-                    display_source: copy.display_source,
-                    printed_ref: copy.printed_ref,
-                    token_image_ref: copy.token_image_ref,
                     // The recipient keeps its own base (Clone is a 0/0
                     // Shapeshifter underneath), so it rides the source's
                     // captured descriptor — or the legacy live-field search
-                    // when the source had none — exactly like the exact refs
-                    // above. Created copy-tokens never pass through here;
-                    // their descriptor is derived by the creation injectors.
-                    token_art: copy.token_art,
+                    // when the source had none — exactly like the exact refs.
+                    // Created copy-tokens never pass through here; their
+                    // descriptor is derived by the creation injectors.
+                    display: copy.display,
                     additional_modifications: copy.additional_modifications,
                     effect_kind: EffectKind::BecomeCopy,
                 };
@@ -4576,6 +4574,11 @@ fn execute_zone_move_with_applied_terminal(
             .get(&obj_id)
             .is_some_and(|obj| obj.back_face.is_none())
     {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    }
+    // CR 400.7 + CR 701.24c: a library card put into its own library at no stated
+    // position does not change zones; a shuffle the instruction names is its own step.
+    if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
         return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
@@ -5600,6 +5603,47 @@ mod w3_library_placement_tests {
             )),
             "a placement must not emit a shuffle event (CR 701.24a: a placement is not a shuffle)"
         );
+    }
+
+    #[test]
+    fn library_card_into_its_own_library_moves_only_with_a_placement() {
+        let mut state = GameState::new_two_player(42);
+        let [a, b, c] = [1, 2, 3].map(|n| {
+            create_object(
+                &mut state,
+                CardId(n),
+                PlayerId(0),
+                format!("Card {n}"),
+                Zone::Library,
+            )
+        });
+        state.players[0].library = crate::im::vector![a, b, c];
+        let mover = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Mover".to_string(),
+            Zone::Battlefield,
+        );
+        let library =
+            |state: &GameState| state.players[0].library.iter().copied().collect::<Vec<_>>();
+
+        let mut events = Vec::new();
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(b, Zone::Library, mover),
+            &mut events,
+        );
+        assert_eq!(library(&state), vec![a, b, c]);
+        assert!(events.is_empty(), "{events:?}");
+
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(c, Zone::Library, mover)
+                .at_library_position(LibraryPosition::Top),
+            &mut events,
+        );
+        assert_eq!(library(&state), vec![c, a, b]);
     }
 
     /// F1 (CR 701.24a): a library placement whose replacement consult PARKS on a

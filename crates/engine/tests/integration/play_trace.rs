@@ -95,7 +95,7 @@ fn activates(source: ObjectId) -> impl Fn(&GameAction) -> bool {
 
 fn activates_index(source: ObjectId, index: usize) -> impl Fn(&GameAction) -> bool {
     move |action| {
-        matches!(action, GameAction::ActivateAbility { source_id, ability_index }
+        matches!(action, GameAction::ActivateAbility { source_id, ability_index, .. }
             if *source_id == source && *ability_index == index)
     }
 }
@@ -139,6 +139,7 @@ pub(crate) fn activate(runner: &mut GameRunner, source: ObjectId, index: usize) 
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
 }
@@ -255,6 +256,7 @@ fn names_the_period(state: &GameState, wanted: &[PeriodStep], resolves: bool) ->
                     GameAction::ActivateAbility {
                         source_id,
                         ability_index,
+                        ..
                     } => PeriodStep::Activate(*source_id, Some(*ability_index)),
                     GameAction::TapLandForMana { selection }
                     | GameAction::ActivateManaSource { selection } => {
@@ -394,7 +396,9 @@ fn restore_dump(gz: &[u8]) -> GameState {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture inflates");
-    let envelope: serde_json::Value = serde_json::from_str(&json).expect("dump parses");
+    let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("dump parses");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     serde_json::from_value::<engine::types::game_state::PersistedGameState>(
         envelope["gameState"].clone(),
     )
@@ -814,6 +818,7 @@ fn play_trace_names_each_members_period_grand_architect_pili_pala() {
                 == GameAction::ActivateAbility {
                     source_id: architect,
                     ability_index: tap_blue,
+                    payment_mode: CastPaymentMode::Auto,
                 }),
             play_node(&view, activates(pili)),
         ],

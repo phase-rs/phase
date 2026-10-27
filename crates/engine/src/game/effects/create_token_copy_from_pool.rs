@@ -22,7 +22,7 @@
 use crate::game::effects::token::{no_token, resolve_token_owner};
 use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
-use crate::game::game_object::DisplaySource;
+use crate::game::game_object::{DisplayIdentity, DisplaySource};
 use crate::game::printed_cards::{
     copiable_values_from_face, printed_prepare_face, printed_ref_from_face,
 };
@@ -148,10 +148,12 @@ pub fn resolve(
         count,
         copy: Box::new(CopyTokenSpec {
             values: Box::new(values),
-            display_source: DisplaySource::Card,
-            printed_ref,
-            token_image_ref: None,
-            token_art: None,
+            display: DisplayIdentity {
+                display_source: DisplaySource::Card,
+                printed_ref,
+                token_image_ref: None,
+                token_art: None,
+            },
             extra_keywords: Vec::new(),
             additional_modifications: Vec::new(),
             tapped,
@@ -159,6 +161,8 @@ pub fn resolve(
             sacrifice_at: ability.duration.clone(),
             source_id: ability.source_id,
             controller: ability.controller,
+            // Pool-drawn values name no donor object; empty mods are stamp-proof.
+            donor: None,
         }),
     });
 

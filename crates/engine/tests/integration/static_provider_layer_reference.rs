@@ -2,6 +2,7 @@
 //! March of the Machines changes Sol Ring's type in layer 4; Marvin's printed
 //! static ability must then see Sol Ring as a creature in layer 6.
 
+use engine::types::game_state::CastPaymentMode;
 use std::sync::Arc;
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
@@ -143,6 +144,7 @@ fn march_animation_updates_marvins_live_activated_ability_providers() {
         .act(GameAction::ActivateAbility {
             source_id: marvin,
             ability_index: *ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Marvin must activate Sol Ring's donated mana ability");
     assert!(runner.state().objects[&marvin].tapped);
@@ -453,6 +455,7 @@ fn coupled_provider_cycles_wait_for_outgoing_dependencies() {
                 .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source,
                     cap: None,
+                    kind: None,
                 }]),
         );
     }
@@ -535,6 +538,7 @@ fn retained_multilayer_trigger_grant_survives_earlier_ability_removal() {
                 ContinuousModification::GrantAllActivatedAbilitiesOf {
                     source: TargetFilter::SpecificObject { id: provider },
                     cap: None,
+                    kind: None,
                 },
             ]),
     );
@@ -603,6 +607,7 @@ fn distinct_granted_static_generators_order_a_provider_writer_before_its_reader(
         .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::SpecificObject { id: donor },
             cap: None,
+            kind: None,
         }]);
     let inner_writer = StaticDefinition::continuous()
         .affected(TargetFilter::SpecificObject { id: donor })
@@ -706,6 +711,7 @@ fn nested_meta_grants_read_original_static_granter_suppression() {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: provider },
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: provider },
@@ -835,6 +841,7 @@ fn inactive_original_grant_cannot_start_an_earlier_inner_type_part() {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: donor },
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: donor },
@@ -935,6 +942,7 @@ fn original_grant_qualifies_carrier_independently_of_inner_target_and_controller
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: first_donor },
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: first_donor },
@@ -947,6 +955,7 @@ fn original_grant_qualifies_carrier_independently_of_inner_target_and_controller
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: second_donor },
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: second_donor },
@@ -1061,6 +1070,7 @@ fn outside_slice_granted_static_carrier_escalates_only_for_reachable_entrant() {
         .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::SpecificObject { id: donor },
             cap: None,
+            kind: None,
         }]);
     attach_synthetic_static(
         &mut runner,
@@ -1149,6 +1159,7 @@ fn freshly_entering_carrier_uses_restricted_parent_qualification() {
         .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::SpecificObject { id: donor },
             cap: None,
+            kind: None,
         }]);
     attach_synthetic_static(
         &mut runner,
@@ -1216,6 +1227,7 @@ fn remote_mana_ability_writer_enables_exact_original_grant_before_nested_reader(
             .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: donor },
                 cap: None,
+                kind: None,
             }]);
         attach_synthetic_static(
             &mut runner,
@@ -1359,6 +1371,7 @@ fn ordinary_granted_static_keeps_keyword_filter_dependency_in_referenced_bucket(
             .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: TargetFilter::SpecificObject { id: donor },
                 cap: None,
+                kind: None,
             }]),
     );
     assert!(runner.state().objects[&granter].timestamp < runner.state().objects[&writer].timestamp);
@@ -1430,6 +1443,7 @@ fn participating_granted_static_keeps_keyword_filter_dependency_without_inner_re
         .modifications(vec![ContinuousModification::GrantAllActivatedAbilitiesOf {
             source: TargetFilter::SpecificObject { id: inner_donor },
             cap: None,
+            kind: None,
         }]);
     let outer = StaticDefinition::continuous()
         .affected(TargetFilter::And {
@@ -1459,6 +1473,7 @@ fn participating_granted_static_keeps_keyword_filter_dependency_without_inner_re
                 id: independent_donor,
             },
             cap: None,
+            kind: None,
         }]);
     attach_synthetic_static(&mut runner, meta_host, independent_meta.clone());
 

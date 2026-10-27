@@ -40,7 +40,7 @@ async function loadRuntime(
   engineModuleMock.modulePromise = null;
   engineModuleMock.rejectImport = rejectImport;
   vi.resetModules();
-  return import("../engineRuntime.ts");
+  return import("../main-thread-engine.ts");
 }
 
 beforeEach(() => {
@@ -54,18 +54,20 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("engine runtime initialization", () => {
+describe("main-thread fallback engine initialization", () => {
   it("wraps an engine module import failure as reload-required for the document lifetime", async () => {
     const importFailure = new Error("module unavailable");
     const engineFactory = vi.fn(async () => {
       throw importFailure;
     });
     const runtime = await loadRuntime(engineFactory, { rejectImport: true });
+    // Same module graph as `runtime`, which `loadRuntime` just reset.
+    const { EngineModuleReloadRequiredError } = await import("../types");
 
     const firstError = await runtime.ensureWasmInit().catch((error: unknown) => error);
     const secondError = await runtime.ensureWasmInit().catch((error: unknown) => error);
 
-    expect(firstError).toBeInstanceOf(runtime.EngineModuleReloadRequiredError);
+    expect(firstError).toBeInstanceOf(EngineModuleReloadRequiredError);
     expect(secondError).toBe(firstError);
     expect(engineFactory).toHaveBeenCalledOnce();
   });

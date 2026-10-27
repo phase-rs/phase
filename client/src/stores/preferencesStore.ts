@@ -23,6 +23,12 @@ import {
 } from "../animation/types";
 import type { AIDifficulty } from "../constants/ai";
 import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
+import { isMemoryConstrainedDevice } from "../utils/device";
+import {
+  emptyPoolSelection,
+  normalizePoolSelection,
+  type RandomPoolSelection,
+} from "../services/randomPoolSelection";
 import type { DeckArchetype } from "../services/engineRuntime";
 import { detectInitialLanguage, normalizeSupportedLng, type SupportedLng } from "../i18n/resources";
 
@@ -283,7 +289,9 @@ function buildDefaultPreferences(): PreferencesState {
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
     vfxQuality: "full",
-    cardAnimationStyle: "webgl",
+    // The WebGL card overlay adds GPU contexts and textures on top of an engine
+    // that already sits near iOS Safari's memory ceiling.
+    cardAnimationStyle: isMemoryConstrainedDevice() ? "classic" : "webgl",
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
@@ -327,6 +335,8 @@ function buildDefaultPreferences(): PreferencesState {
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
+    humanPoolSelection: emptyPoolSelection(),
+    aiPoolSelection: emptyPoolSelection(),
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
@@ -445,6 +455,12 @@ interface PreferencesState {
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
+  /** Folder/deck inclusion for the player's own Random deck. All-empty means
+   *  include everything (the pre-feature behavior). */
+  humanPoolSelection: RandomPoolSelection;
+  /** Folder/deck inclusion for every AI Random seat (single-player setup,
+   *  Host Game, live room tile). All-empty means include everything. */
+  aiPoolSelection: RandomPoolSelection;
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
@@ -533,6 +549,8 @@ interface PreferencesActions {
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
+  setHumanPoolSelection: (selection: RandomPoolSelection) => void;
+  setAiPoolSelection: (selection: RandomPoolSelection) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
@@ -731,6 +749,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),
+      setHumanPoolSelection: (selection) => set({ humanPoolSelection: selection }),
+      setAiPoolSelection: (selection) => set({ aiPoolSelection: selection }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
@@ -848,7 +868,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 38,
+      version: 40,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -941,6 +961,13 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v37 → v38: Add priorityAlertVisual/Sound/Title. Existing users get all
       //          three on (true) through the shallow merge, the same as fresh
       //          stores, so no migrate block is needed.
+      // v38 → v39: Add humanPoolSelection/aiPoolSelection. Absent keys fall
+      //          through the shallow merge to include-all; present-but-malformed
+      //          blobs normalize below (and in `merge` for current-version blobs).
+      // v39 → v40: iOS devices and Android phones default to "classic" card animations.
+      //          Their stores persisted v36's "webgl" default, which almost no
+      //          one chose, so they move to "classic" once; picking New again
+      //          afterwards sticks.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1155,6 +1182,26 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           }
         }
 
+        if (version < 39) {
+          const legacy = migrated as {
+            humanPoolSelection?: unknown;
+            aiPoolSelection?: unknown;
+          };
+          migrated = {
+            ...migrated,
+            humanPoolSelection: legacy.humanPoolSelection === undefined
+              ? undefined
+              : normalizePoolSelection(legacy.humanPoolSelection),
+            aiPoolSelection: legacy.aiPoolSelection === undefined
+              ? undefined
+              : normalizePoolSelection(legacy.aiPoolSelection),
+          };
+        }
+
+        if (version < 40 && isMemoryConstrainedDevice()) {
+          migrated = { ...migrated, cardAnimationStyle: "classic" };
+        }
+
         return {
           ...migrated,
           language: normalizeSupportedLng(migrated.language, detectInitialLanguage()),
@@ -1174,6 +1221,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           logDockSide: saved.logDockSide === "left" || saved.logDockSide === "right"
             ? saved.logDockSide
             : "right",
+          humanPoolSelection: saved.humanPoolSelection === undefined
+            ? current.humanPoolSelection
+            : normalizePoolSelection(saved.humanPoolSelection),
+          aiPoolSelection: saved.aiPoolSelection === undefined
+            ? current.aiPoolSelection
+            : normalizePoolSelection(saved.aiPoolSelection),
         };
       },
     },

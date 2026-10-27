@@ -16,7 +16,7 @@
 
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AnnouncementEventScope, GameState, InFlightSpellTriggerCarrier, PendingCastOwner,
+    AnnouncementEventScope, GameState, InFlightSpellTriggerCarrier, PendingCast, PendingCastOwner,
     PendingCostMoveResume, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
@@ -36,9 +36,41 @@ fn live_spell_announcement(state: &GameState) -> Option<ObjectId> {
         .then_some(pending.object_id)
 }
 
+/// Whether an ACTIVATION is announced right now, so its cost events have one
+/// custodian: [`end_action`], which stages them into the carrier of the
+/// action's resulting prompt.
+///
+/// CR 602.2a + CR 602.2b: an activated ability is announced like a spell and
+/// its costs are paid in the announcement. CR 603.3b: every ability that
+/// triggered since a player last received priority goes on the stack in one
+/// APNAP batch, so an activation's cost triggers wait for the activation's own
+/// and are put on the stack with them. A cost-payment step that parks those
+/// events itself (publicly, or in a carrier the action boundary then
+/// overwrites) splits that batch or loses them. A spell is deliberately not
+/// covered: its paid-cost events stay parked publicly and survive a cancel;
+/// routing them into a spell carrier would drop them on cancel, which needs the
+/// announcement-reversal machinery and is out of scope here. (Engine policy,
+/// compare CR 733.1: an activation is not offered a cancel once a cost is paid,
+/// so its carrier is not dropped with paid-cost events in it.)
+///
+/// `next_wait` is the prompt the paying step is about to return; the live
+/// announcement is read from the state and from that prompt, since a step that
+/// pauses on the activation's first action has not stored it yet.
+pub(crate) fn activation_announcement_is_live(state: &GameState, next_wait: &WaitingFor) -> bool {
+    state
+        .pending_trigger_carrier_owner()
+        .and_then(|owner| state.pending_cast_at(owner))
+        .or_else(|| next_wait.pending_cast_ref())
+        .is_some_and(|pending| pending.activation_ability_index.is_some())
+}
+
 /// The unscanned events in `events[start..]`, after occurrence claims and the
 /// queued zone-change witness (CR 603.2c: one trigger per occurrence).
-fn unclaimed_events(state: &GameState, events: &[GameEvent], start: usize) -> Vec<GameEvent> {
+pub(crate) fn unclaimed_events(
+    state: &GameState,
+    events: &[GameEvent],
+    start: usize,
+) -> Vec<GameEvent> {
     triggers::filter_already_collected_trigger_events_from(
         state,
         events,
@@ -101,24 +133,31 @@ pub(crate) fn claim_ordinary_collected_span(
 fn retained_by_cost_owners(state: &GameState) -> Vec<GameEvent> {
     let mut retained = super::engine_priority::retained_logical_zone_events(state);
     match state.pending_cost_move_resume.as_ref() {
-        Some(PendingCostMoveResume::SacrificeForCost {
-            deferred_cost_events,
-            ..
-        }) => retained.extend(deferred_cost_events.iter().cloned()),
+        Some(
+            PendingCostMoveResume::Cast {
+                deferred_cost_events,
+                ..
+            }
+            | PendingCostMoveResume::SacrificeForCost {
+                deferred_cost_events,
+                ..
+            },
+        ) => retained.extend(deferred_cost_events.iter().cloned()),
         Some(PendingCostMoveResume::ManaAbilityPayment { cursor, .. }) => {
             retained.extend(cursor.deferred_cost_events.iter().cloned());
         }
         Some(
-            PendingCostMoveResume::Cast { .. }
-            | PendingCostMoveResume::WardSacrificePayment { .. }
+            PendingCostMoveResume::WardSacrificePayment { .. }
             | PendingCostMoveResume::ReplacementMayCost { .. }
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::CollectEvidencePayment { .. }
             | PendingCostMoveResume::UnlessBouncePayment { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. }
             | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
-            | PendingCostMoveResume::RandomDiscardUnlessPayment(..),
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. },
         )
         | None => {}
     }
@@ -136,6 +175,63 @@ fn take_announcing(
         .map(|carrier| carrier.collection)
 }
 
+/// CR 601.2h + CR 602.2b + CR 603.3: whether a live announcement owns
+/// `events[start..]` of the current action buffer — exactly the condition under
+/// which [`stage_announcement_trigger_events`] takes custody. `Some` holds the
+/// first index the announcement owns (`start`, or later when the announcement
+/// began part-way through the span).
+fn announcement_owned_from(state: &GameState, start: usize) -> Option<usize> {
+    let AnnouncementEventScope::From { start: owned_from } = state.announcement_event_scope else {
+        return None;
+    };
+    state.pending_trigger_carrier_owner()?;
+    Some(start.max(owned_from))
+}
+
+/// CR 601.2h + CR 602.2b + CR 603.3 + CR 605.4a: the entry for a collector
+/// that scans `events[start..]` of the current action buffer inline (a
+/// resolution choice, a mana-colour choice, a change-zone iteration). Under a
+/// live announcement those events wait in its carrier until the announcement
+/// is complete, so this stages and claims the owned part and returns the
+/// sub-range the caller still collects itself: empty when the announcement
+/// owns the whole span, the whole span when none is live. The caller then does
+/// no inline scan, no deferred collection and no `triggers_processed_inline`
+/// for what was taken; events a cost root retains are left to that owner.
+///
+/// Triggered mana abilities still resolve immediately (CR 605.4a): those of a
+/// `TapsForMana` or `ManaAbilityProduced` trigger resolve here before custody
+/// is taken. The residual is a `ManaAdded`-mode triggered mana ability, which
+/// the carrier holds until the announcement's drain; classifying the span's
+/// contexts through `triggers::partition_collected_mana_frame_contexts` is the
+/// follow-up route.
+pub(crate) fn take_inline_trigger_span(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    start: usize,
+) -> std::ops::Range<usize> {
+    let Some(owned_from) = announcement_owned_from(state, start) else {
+        return start..events.len();
+    };
+    triggers::resolve_tap_mana_triggers_inline(state, events, start);
+    stage_announcement_trigger_events(state, events, start);
+    start..owned_from.min(events.len())
+}
+
+/// CR 601.2c + CR 603.2: stage a spell's announcement triggers while
+/// it owns `state.pending_cast` (the spell is still in flight and has not yet
+/// parked in an external payment root or waiting prompt), so the staging
+/// authority sees the spell before payment can move its targets.
+pub(crate) fn stage_with_pending_owner(
+    state: &mut GameState,
+    pending: &PendingCast,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    let prior_pending = state.pending_cast.replace(Box::new(pending.clone()));
+    stage_announcement_trigger_events(state, events, event_start);
+    state.pending_cast = prior_pending;
+}
+
 /// Stages the not-yet-collected events of `events[event_start..]` into the
 /// live announcement's carrier. A no-op when no announcement is live.
 ///
@@ -147,10 +243,9 @@ pub(crate) fn stage_announcement_trigger_events(
     events: &[GameEvent],
     event_start: usize,
 ) {
-    let AnnouncementEventScope::From { start: owned_from } = state.announcement_event_scope else {
+    let Some(start) = announcement_owned_from(state, event_start) else {
         return;
     };
-    let start = event_start.max(owned_from);
     if start >= events.len() {
         return;
     }
@@ -215,6 +310,22 @@ pub(crate) fn disown_events_through(state: &mut GameState, end: usize) {
     state.announcement_event_scope = state.announcement_event_scope.advanced_to(end);
 }
 
+/// CR 602.2a + CR 602.2b + CR 700.2a: whether an announcement is already live
+/// when an action begins. A live `PendingCastOwner` holds one; so does an
+/// activated ability's mode prompt, because its modes are chosen as part of
+/// activating it (CR 700.2a) and its `PendingCast` is built only once they are
+/// known. A triggered ability's mode prompt is not an announcement.
+fn announcement_live_at_action_entry(state: &GameState) -> bool {
+    !state.live_pending_cast_owners().is_empty()
+        || matches!(
+            state.waiting_for,
+            WaitingFor::AbilityModeChoice {
+                is_activated: true,
+                ..
+            }
+        )
+}
+
 /// Action entry: an announcement already live owns the action's buffer from
 /// its start; otherwise none does until an announcement begins
 /// ([`begin_announcement`]). A spell announcement's carrier also leaves its
@@ -226,10 +337,10 @@ pub(crate) fn begin_action(state: &mut GameState) {
         state.in_flight_spell_trigger_carrier.is_none(),
         "a spell trigger carrier outlived its action"
     );
-    state.announcement_event_scope = if state.live_pending_cast_owners().is_empty() {
-        AnnouncementEventScope::Unowned
-    } else {
+    state.announcement_event_scope = if announcement_live_at_action_entry(state) {
         AnnouncementEventScope::From { start: 0 }
+    } else {
+        AnnouncementEventScope::Unowned
     };
     let Some(object_id) = live_spell_announcement(state) else {
         return;
@@ -303,13 +414,59 @@ pub(crate) fn commit_spell_announcement(
     events: &[GameEvent],
 ) {
     let scope = std::mem::take(&mut state.announcement_event_scope);
-    let Some(mut collection) = take_announcing(state, object_id) else {
+    let Some(collection) = take_announcing(state, object_id) else {
         return;
     };
     let start = match scope {
         AnnouncementEventScope::From { start } => start.min(events.len()),
         AnnouncementEventScope::Unowned => events.len(),
     };
+    commit_announcement_span(state, *collection, events, start);
+}
+
+/// CR 602.2b + CR 603.3b: the activation reached the stack. A carrier-less
+/// activation (untargeted, unpaused) only ends the announcement scope: its cost
+/// triggers are collected by the priority pipeline that follows. A carrier
+/// collects the finishing fragment and commits it in one batch, exactly as the
+/// spell commit does (`commit_announcement_span`).
+///
+/// No trigger is lost by reading `unclaimed_events`: every writer of
+/// `consumed_before_priority_trigger_events` pairs its claim with a collection
+/// (the carrier, the deferred queue, a mana frame, a cost owner's own pass), so
+/// the filter removes only re-collections. The commit point is unchanged, so
+/// nothing is reordered.
+pub(crate) fn commit_activation_announcement(
+    state: &mut GameState,
+    collection: Option<Box<PendingActivationTriggerCollection>>,
+    events: &[GameEvent],
+) {
+    let scope = std::mem::take(&mut state.announcement_event_scope);
+    let Some(collection) = collection else {
+        return;
+    };
+    let start = match scope {
+        AnnouncementEventScope::From { start } => start.min(events.len()),
+        AnnouncementEventScope::Unowned => {
+            debug_assert!(
+                false,
+                "a carrier-bearing activation committed with no announcement scope"
+            );
+            0
+        }
+    };
+    commit_announcement_span(state, *collection, events, start);
+}
+
+/// The commit body shared by spells and activations: collect `events[start..]`
+/// not yet claimed (minus what a cost root retains) and the delayed scan into
+/// `collection`, commit it into the deferred queue, and claim the span for
+/// every collector.
+fn commit_announcement_span(
+    state: &mut GameState,
+    mut collection: PendingActivationTriggerCollection,
+    events: &[GameEvent],
+    start: usize,
+) {
     let retained = retained_by_cost_owners(state);
     let new_events: Vec<GameEvent> = unclaimed_events(state, events, start)
         .into_iter()
@@ -333,6 +490,12 @@ pub(crate) fn commit_spell_announcement(
     let mut deferred = std::mem::take(&mut state.deferred_triggers);
     collection.commit_into(state, &mut deferred);
     state.deferred_triggers = deferred;
+    // CR 400.7 + CR 601.2h: the priority pipeline clears the transient cast
+    // payment stamps after a non-empty trigger collection; a committed
+    // announcement is that collection for its span, so it clears them too.
+    if !new_events.is_empty() {
+        triggers::clear_post_collection_transients(state);
+    }
     // The span is claimed below by its identities in the full buffer.
     triggers::collect_delayed_trigger_contexts_into_deferred(state, &delayed_events);
     // CR 603.2c: each occurrence is collected once, by this commit, for both
@@ -348,32 +511,81 @@ pub(crate) fn commit_spell_announcement(
     );
 }
 
-/// CR 602.2b: the activation reached the stack; the announcement no longer
-/// owns this action's later events.
-pub(crate) fn end_activation_announcement(state: &mut GameState) {
-    state.announcement_event_scope = AnnouncementEventScope::Unowned;
-}
-
 /// CR 800.4a: the announcement's controller left the game. The events it
 /// produced still occurred (CR 603.2), so the carrier is committed rather than
 /// dropped; contexts controlled by a departed player are retired by
 /// `commit_into` (CR 800.4d).
 pub(crate) fn publish_abandoned_announcement(state: &mut GameState, owner: PendingCastOwner) {
+    // CR 603.2 + CR 800.4a: the departures a replacement-paused cost already
+    // completed still occurred. The Cast root withholds them from announcement
+    // staging (they wait for the group to finish), and abandoning the unpaid
+    // current move retires that root, so they are drained and collected here,
+    // once, before it goes.
+    let raw_completed_prefix = take_completed_cast_prefix(state, owner);
+    let completed_prefix = triggers::filter_already_collected_trigger_events_from(
+        state,
+        &raw_completed_prefix,
+        0,
+        &[],
+    );
     let Some(pending) = state.pending_cast_at_mut(owner) else {
         return;
     };
     let object_id = pending.object_id;
     let is_spell = pending.activation_ability_index.is_none();
+    if !completed_prefix.is_empty() && !is_spell {
+        pending.begin_activation_trigger_collection();
+    }
     let mut collection = pending.activation_trigger_collection.take();
     if is_spell {
         if let Some(carried) = take_announcing(state, object_id) {
             collection = Some(carried);
         }
+        if collection.is_none() && !completed_prefix.is_empty() {
+            collection = Some(Box::new(PendingActivationTriggerCollection::for_spell()));
+        }
     }
-    let Some(collection) = collection else {
+    // CR 603.2 + CR 603.7 + CR 800.4d: completed events also belong to
+    // surviving delayed observers, independently of the ordinary projection
+    // or carrier. The old prefix has no occurrence ordinal in this action.
+    triggers::collect_delayed_trigger_contexts_into_deferred(state, &raw_completed_prefix);
+    let Some(mut collection) = collection else {
         return;
     };
+    if !completed_prefix.is_empty() {
+        collection.collect(state, &completed_prefix);
+    }
     let mut deferred = std::mem::take(&mut state.deferred_triggers);
     collection.commit_into(state, &mut deferred);
     state.deferred_triggers = deferred;
+}
+
+/// Drains the completed-prefix ledger of the typed Cast cost root owned by
+/// `owner`, if that root is the one being abandoned.
+fn take_completed_cast_prefix(state: &mut GameState, owner: PendingCastOwner) -> Vec<GameEvent> {
+    if owner != PendingCastOwner::CostMove {
+        return Vec::new();
+    }
+    match state.pending_cost_move_resume.as_mut() {
+        Some(PendingCostMoveResume::Cast {
+            deferred_cost_events,
+            ..
+        }) => std::mem::take(deferred_cost_events),
+        Some(
+            PendingCostMoveResume::SacrificeForCost { .. }
+            | PendingCostMoveResume::WardSacrificePayment { .. }
+            | PendingCostMoveResume::ReplacementMayCost { .. }
+            | PendingCostMoveResume::Foretell { .. }
+            | PendingCostMoveResume::CollectEvidencePayment { .. }
+            | PendingCostMoveResume::UnlessBouncePayment { .. }
+            | PendingCostMoveResume::ManaAbilityPayment { .. }
+            | PendingCostMoveResume::ActivationMillPayment { .. }
+            | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+            | PendingCostMoveResume::LoyaltyActivation { .. }
+            | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+            | PendingCostMoveResume::RandomDiscardUnlessPayment(_)
+            | PendingCostMoveResume::TurnFaceUpCostMove { .. },
+        )
+        | None => Vec::new(),
+    }
 }

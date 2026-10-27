@@ -142,6 +142,7 @@ fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
 }

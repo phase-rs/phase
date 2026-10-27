@@ -8,14 +8,15 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
+use super::super::oracle_nom::condition::take_group_shared_quality;
 use super::super::oracle_nom::filter as nom_filter;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity;
 use super::super::oracle_target::{
     distribute_properties_to_or, parse_mana_value_suffix, parse_shared_quality_clause,
-    parse_target, parse_target_disjunction, parse_target_with_ctx, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, parse_zone_word,
+    parse_shared_quality_reference, parse_target, parse_target_disjunction, parse_target_with_ctx,
+    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, parse_zone_word,
 };
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
@@ -76,7 +77,7 @@ pub(super) fn parse_search_library_details(
 
     // CR 701.23a: Detect "search target opponent's/player's library" patterns.
     // These target a player, searching that player's library instead of the controller's.
-    let target_player = parse_search_target_player(lower);
+    let target_player = parse_search_target_player(lower, ctx);
 
     // CR 107.1c: "any number of [FILTER] cards" — searcher may find 0..=matching.len()
     // cards. Detected before "up to N" since they share no overlap: "any number of"
@@ -160,7 +161,7 @@ pub(super) fn parse_search_library_details(
     // the filter tail on this conjunction BEFORE parsing so each side becomes a
     // distinct `TargetFilter` and the suffix parser for the primary filter does
     // not consume the extras as a dangling "and a ..." fragment.
-    let (filter, extra_filters) = if let Some(type_start) = count_end_in_for {
+    let (mut filter, extra_filters) = if let Some(type_start) = count_end_in_for {
         // "for up to five creature cards" or "for any number of dragon creature cards"
         // — type text starts after the number / quantity phrase. Multi-filter is
         // not supported for explicit-count searches (grammar always uses "a X and a Y").
@@ -188,14 +189,15 @@ pub(super) fn parse_search_library_details(
     };
 
     // CR 608.2c + CR 701.23: "with different names" / "with different powers"
-    // and "don't share ..." are printed-text restrictions on the chosen set,
-    // not filters on individual library cards.
+    // and "don't share ..." (and a reference-less "that share a <quality>"
+    // marker) are printed-text restrictions on the chosen set, not filters on
+    // individual library cards.
     let selection_constraint = if let Some(constraint) = scan_total_mana_value_constraint(lower) {
         constraint
     } else if let Some(constraint) = scan_distinct_qualities_constraint(lower) {
         constraint
     } else {
-        SearchSelectionConstraint::None
+        lift_group_shared_qualities(&mut filter)
     };
 
     // CR 701.23a + CR 608.2c: Detect cultivate-class split destinations ("put
@@ -308,9 +310,29 @@ fn parse_quality_list_constraint(
     input: &str,
 ) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
     map(parse_search_selection_quality_list, |qualities| {
-        SearchSelectionConstraint::DistinctQualities { qualities }
+        SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation: SharedQualityRelation::DoesNotShare,
+        }
     })
     .parse(input)
+}
+
+/// CR 608.2c + CR 701.23a: a reference-less "that share a <quality>" clause
+/// restricts the chosen set, not each library card. Move every such marker
+/// out of the per-card filter (where `evaluate_shares_quality` is vacuously
+/// true) into the set constraint. Delegates to the shared lift authority.
+fn lift_group_shared_qualities(filter: &mut TargetFilter) -> SearchSelectionConstraint {
+    let qualities: Vec<SharedQuality> =
+        std::iter::from_fn(|| take_group_shared_quality(filter)).collect();
+    if qualities.is_empty() {
+        SearchSelectionConstraint::None
+    } else {
+        SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation: SharedQualityRelation::Shares,
+        }
+    }
 }
 
 fn parse_each_other_quality_constraint(
@@ -323,7 +345,10 @@ fn parse_each_other_quality_constraint(
     .parse(input)?;
     Ok((
         rest,
-        SearchSelectionConstraint::DistinctQualities { qualities },
+        SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation: SharedQualityRelation::DoesNotShare,
+        },
     ))
 }
 
@@ -642,10 +667,12 @@ fn scan_after_tag(lower: &str, tag_prefix: &str) -> Option<usize> {
 
 /// CR 701.23a: Detect player-targeting search patterns like "search target opponent's library"
 /// or "search target player's library". Returns a TargetFilter for the player.
-fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
+fn parse_search_target_player(lower: &str, ctx: &ParseContext) -> Option<TargetFilter> {
     use nom::branch::alt;
     use nom::combinator::value;
     use nom::sequence::preceded;
+
+    let has_declared_player = ctx.declared_player_scope.is_some();
 
     // CR 701.23a: The possessive determiner identifies the searched player; the
     // zone(s) that follow ("library" for a single-zone tutor, or "graveyard,
@@ -667,6 +694,12 @@ fn parse_search_target_player(lower: &str) -> Option<TargetFilter> {
                 value(
                     TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
                     tag("an opponent's "),
+                ),
+                // CR 608.2c + CR 701.23a: "that player" names the player the chain
+                // already declared; the caster still searches.
+                value(
+                    TargetFilter::ParentTarget,
+                    verify(tag("that player's "), |_: &str| has_declared_player),
                 ),
             )),
         )
@@ -1860,7 +1893,7 @@ fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
     }
 }
 
-/// CR 201.2a + CR 201.2c: the verb-and-negation core of a same-name comparison,
+/// CR 201.2a: the verb-and-negation core of a same-name comparison,
 /// with any leading determiner already consumed by the caller.
 ///
 /// Composed as two independent axes rather than enumerated as whole phrases, so
@@ -1898,9 +1931,25 @@ fn parse_name_relation_body(
     ))
 }
 
-pub(crate) fn parse_search_name_reference_suffix(
-    input: &str,
-) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+/// CR 201.2a: parse one same-name frame and its reference
+/// population into [`FilterProp::SharesQuality`].
+///
+/// Three entry frames share this authority: the relative-clause frame
+/// ("that (doesn't) have/share …"), the bare predicate frame ("if it …"), and
+/// the prepositional frame ("with the same name as …"). Relation and verb are
+/// two independent axes (see [`parse_name_relation_body`]), so callers select a
+/// frame and receive the typed relation rather than a string.
+///
+/// `ctx` is the caller's parse context. Filter-position callers pass the live
+/// context so a demonstrative reference ("that creature") resolves through the
+/// same contextual reference resolver as the sibling "doesn't share a name
+/// with that creature" grammar; callers with no context (the search-suffix
+/// loop, trigger conditions) pass `None` and keep the context-free reference
+/// parse. Nested target/type parsing stays on throwaway contexts either way.
+pub(crate) fn parse_search_name_reference_suffix<'a>(
+    input: &'a str,
+    ctx: Option<&ParseContext>,
+) -> Result<(&'a str, FilterProp), nom::Err<OracleError<'a>>> {
     let (rest, relation) = alt((
         // Relative-clause frame: "<noun> that (doesn't) have/share ...".
         preceded(tag("that "), parse_name_relation_body),
@@ -1920,7 +1969,16 @@ pub(crate) fn parse_search_name_reference_suffix(
         )));
     }
 
-    let (reference, after_reference) = parse_target_disjunction(rest);
+    // CR 608.2k: with a caller context, a demonstrative reference ("that
+    // creature") must bind exactly like the sibling shared-quality grammar;
+    // without one, keep the context-free noun-phrase/disjunction parse.
+    let (reference, after_reference) = match ctx {
+        Some(ctx) => match parse_shared_quality_reference(rest, ctx) {
+            Ok((after_reference, reference)) => (reference, after_reference),
+            Err(_) => (TargetFilter::Any, rest),
+        },
+        None => parse_target_disjunction(rest),
+    };
     if !matches!(reference, TargetFilter::Any) {
         return Ok((
             after_reference,
@@ -2159,18 +2217,24 @@ fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectS
 }
 
 fn last_shared_quality_reference_in_filter(filter: &TargetFilter) -> Option<TargetFilter> {
-    match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(|property| {
-            if let FilterProp::SharesQuality {
+    fn reference_of(property: &FilterProp) -> Option<TargetFilter> {
+        match property {
+            FilterProp::SharesQuality {
                 reference: Some(reference),
                 ..
-            } = property
-            {
-                Some(reference.as_ref().clone())
-            } else {
-                None
-            }
-        }),
+            } => Some(reference.as_ref().clone()),
+            // CR 201.2a: the negated same-name arm composes `Not` around the
+            // positive comparison; the linked-reference suffix must still find
+            // the population inside it. `AnyOf` mirrors the other consumers that
+            // recurse through composite props.
+            FilterProp::Not { prop } => reference_of(prop),
+            FilterProp::AnyOf { props } => props.iter().rev().find_map(reference_of),
+            _ => None,
+        }
+    }
+
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(reference_of),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
             .iter()
             .rev()
@@ -2430,7 +2494,7 @@ fn parse_search_filter_suffixes(
             }
         }
 
-        if let Ok((rest, prop)) = parse_search_name_reference_suffix(remaining) {
+        if let Ok((rest, prop)) = parse_search_name_reference_suffix(remaining, None) {
             suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
@@ -2784,7 +2848,9 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
+    use crate::types::ability::{
+        AttachmentReferent, Comparator, QuantityRef, SharedQuality, SharedQualityRelation,
+    };
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
 
@@ -3228,6 +3294,23 @@ mod tests {
             &mut ParseContext::default(),
         );
         assert_eq!(details.target_player, None);
+    }
+
+    #[test]
+    fn search_that_players_library_after_declared_player_binds_parent_target() {
+        let mut ctx = ParseContext {
+            declared_player_scope: Some(ControllerRef::DeclaredPlayer {
+                group: crate::types::ability::ChosenGroupId::declared_player(0),
+            }),
+            ..Default::default()
+        };
+        let details = parse_search_library_details(
+            "search that player's library for up to fifteen cards",
+            &mut ctx,
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 15 });
+        assert_eq!(details.target_player, Some(TargetFilter::ParentTarget));
     }
 
     #[test]
@@ -4293,6 +4376,59 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_curse_card_name_reference_with_enchanted_player() {
+        // CR 201.2a + CR 303.4b + CR 303.4m: Curse of Misfortunes'
+        // search filter — "a Curse card that doesn't have the same name as a
+        // Curse attached to enchanted player". The negated name relation is
+        // consumed by the shared name authority through the type phrase as the
+        // LITERAL negation of a same-name comparison (CR 201.2a), so a nameless
+        // candidate satisfies it; the reference population is the Curses
+        // attached to the enchanted player on the battlefield (CR 109.2's zone
+        // default).
+        let filter = parse_search_filter(
+            "curse card that doesn't have the same name as a curse attached to enchanted player",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        // The subtype description's core type is inferred (CR 205.3h).
+        assert!(
+            filter.type_filters.contains(&TypeFilter::Enchantment),
+            "expected the inferred Enchantment core type, got {:?}",
+            filter.type_filters
+        );
+        assert_eq!(filter.get_subtype(), Some("Curse"));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Not { prop } if matches!(
+                prop.as_ref(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::Shares,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        properties,
+                        ..
+                    }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Curse"))
+                        && properties.iter().any(|property| matches!(
+                            property,
+                            FilterProp::AttachedTo {
+                                to: AttachmentReferent::Player {
+                                    player: ControllerRef::EnchantedPlayer
+                                }
+                            }
+                        ))
+                        && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+                )
+            )
+        )));
+    }
+
+    #[test]
     fn parse_search_filter_different_name_from_room_you_control() {
         let filter = parse_search_filter(
             "room card that doesn't have the same name as a room you control",
@@ -4303,18 +4439,21 @@ mod tests {
         };
         assert!(filter.properties.iter().any(|property| matches!(
             property,
-            FilterProp::SharesQuality {
-                quality: SharedQuality::Name,
-                reference: Some(reference),
-                relation: SharedQualityRelation::DoesNotShare,
-            } if matches!(
-                reference.as_ref(),
-                TargetFilter::Typed(TypedFilter {
-                    type_filters,
-                    controller: Some(ControllerRef::You),
-                    properties,
-                }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Room"))
-                    && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+            FilterProp::Not { prop } if matches!(
+                prop.as_ref(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(reference),
+                    relation: SharedQualityRelation::Shares,
+                } if matches!(
+                    reference.as_ref(),
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller: Some(ControllerRef::You),
+                        properties,
+                    }) if type_filters.iter().any(|type_filter| matches!(type_filter, TypeFilter::Subtype(subtype) if subtype == "Room"))
+                        && properties.iter().any(|property| matches!(property, FilterProp::InZone { zone } if *zone == Zone::Battlefield))
+                )
             )
         )));
     }
@@ -4888,8 +5027,8 @@ mod tests {
 
     /// CR 608.2c + CR 701.23: Gifts Ungiven — "search your library for up to
     /// four cards with different names". The "with different names" clause
-    /// must surface as `SearchSelectionConstraint::DistinctQualities` rather than
-    /// silently degrading the per-card filter.
+    /// must surface as `SearchSelectionConstraint::SharesQualities`
+    /// (`DoesNotShare`) rather than silently degrading the per-card filter.
     #[test]
     fn search_with_different_names_emits_distinct_names_constraint() {
         let details = parse_search_library_details(
@@ -4898,8 +5037,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctQualities {
+            SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
             }
         );
         assert!(details.up_to);
@@ -4914,8 +5054,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctQualities {
+            SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
             }
         );
         assert!(details.up_to);
@@ -4930,8 +5071,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctQualities {
+            SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
             }
         );
         assert!(details.up_to);
@@ -4947,8 +5089,9 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctQualities {
+            SearchSelectionConstraint::SharesQualities {
                 qualities: vec![SharedQuality::Power],
+                relation: SharedQualityRelation::DoesNotShare,
             }
         );
         assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
@@ -4967,13 +5110,14 @@ mod tests {
         );
         assert_eq!(
             details.selection_constraint,
-            SearchSelectionConstraint::DistinctQualities {
+            SearchSelectionConstraint::SharesQualities {
                 qualities: vec![
                     SharedQuality::ManaValue,
                     SharedQuality::Power,
                     SharedQuality::Toughness,
                     SharedQuality::CardType,
                 ],
+                relation: SharedQualityRelation::DoesNotShare,
             }
         );
         assert_eq!(details.filter, TargetFilter::Typed(TypedFilter::card()));
@@ -4982,6 +5126,151 @@ mod tests {
             OracleDiagnostic::TargetFallback { context, .. }
                 if context == "search-filter-suffix unmatched"
         )));
+    }
+
+    /// Every `FilterProp::SharesQuality` reachable in `filter` (descending through
+    /// `Or`/`And`), so a sibling test can tell a lifted marker from a retained one.
+    fn collect_shares_quality_props(filter: &TargetFilter) -> Vec<&FilterProp> {
+        match filter {
+            TargetFilter::Typed(tf) => tf
+                .properties
+                .iter()
+                .filter(|prop| matches!(prop, FilterProp::SharesQuality { .. }))
+                .collect(),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+                .iter()
+                .flat_map(collect_shares_quality_props)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// SHAPE. CR 608.2c + CR 701.23a: Myriad Landscape — "search your library for
+    /// up to two basic land cards that share a land type". The reference-less
+    /// "that share a land type" marker restricts the chosen set, so it must be
+    /// lifted out of the per-card filter (where it is vacuously true) into
+    /// `SearchSelectionConstraint::SharesQualities { relation: Shares }`.
+    #[test]
+    fn search_that_share_a_land_type_lifts_to_selection_constraint() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for up to two basic land cards that share a land type, put them onto the battlefield tapped, then shuffle",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::SharesQualities {
+                qualities: vec![SharedQuality::LandType],
+                relation: SharedQualityRelation::Shares,
+            }
+        );
+        let TargetFilter::Typed(tf) = &details.filter else {
+            panic!("expected a Typed filter, got {:?}", details.filter);
+        };
+        assert_eq!(tf.type_filters, vec![TypeFilter::Land]);
+        assert_eq!(
+            tf.properties,
+            vec![FilterProp::HasSupertype {
+                value: Supertype::Basic
+            }],
+            "the share marker must be removed from the per-card filter"
+        );
+        assert!(collect_shares_quality_props(&details.filter).is_empty());
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        assert!(details.up_to);
+        assert!(ctx.diagnostics.iter().all(|diagnostic| !matches!(
+            diagnostic,
+            OracleDiagnostic::TargetFallback { context, .. }
+                if context == "search-filter-suffix unmatched" // allow-noncombinator: test assertion matching diagnostic content
+        )));
+    }
+
+    /// Siblings of the lift: a "shares a <quality> with <reference>" search is a
+    /// per-card predicate (the reference is a different object), so it must stay
+    /// in the filter and produce no set constraint.
+    #[test]
+    fn search_share_with_reference_stays_a_per_card_filter() {
+        for text in [
+            // Hiveheart Shaman
+            "search your library for a basic land card that doesn't share a land type with a land you control, put that card onto the battlefield, then shuffle",
+            // Kasmina, Enigma Sage
+            "search your library for an instant or sorcery card that shares a color with this planeswalker, exile that card, then shuffle",
+            // Pyre of Heroes
+            "search your library for a creature card that shares a creature type with the sacrificed creature and has mana value equal to 1 plus that creature's mana value",
+        ] {
+            let details = parse_search_library_details(text, &mut ParseContext::default());
+            assert_eq!(
+                details.selection_constraint,
+                SearchSelectionConstraint::None,
+                "{text}"
+            );
+            let props = collect_shares_quality_props(&details.filter);
+            assert!(!props.is_empty(), "reach guard: marker retained for {text}");
+            assert!(
+                props.iter().all(|prop| matches!(
+                    prop,
+                    FilterProp::SharesQuality {
+                        reference: Some(_),
+                        ..
+                    }
+                )),
+                "{text}: {props:?}"
+            );
+        }
+        // Hiveheart keeps its DoesNotShare relation on the retained predicate.
+        let hiveheart = parse_search_library_details(
+            "search your library for a basic land card that doesn't share a land type with a land you control, put that card onto the battlefield, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert!(collect_shares_quality_props(&hiveheart.filter)
+            .iter()
+            .all(|prop| matches!(
+                prop,
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::LandType,
+                    relation: SharedQualityRelation::DoesNotShare,
+                    ..
+                }
+            )));
+    }
+
+    /// Legacy `DistinctQualities` JSON (no `relation`) keeps its old meaning:
+    /// the named default is `DoesNotShare`, not the type-level `Shares` default.
+    #[test]
+    fn legacy_distinct_qualities_json_deserializes_as_does_not_share() {
+        let legacy: SearchSelectionConstraint = serde_json::from_value(serde_json::json!({
+            "type": "DistinctQualities",
+            "qualities": ["Name"],
+        }))
+        .expect("legacy DistinctQualities tag deserializes via serde alias");
+        assert_eq!(
+            legacy,
+            SearchSelectionConstraint::SharesQualities {
+                qualities: vec![SharedQuality::Name],
+                relation: SharedQualityRelation::DoesNotShare,
+            }
+        );
+
+        let new_tag_without_relation: SearchSelectionConstraint =
+            serde_json::from_value(serde_json::json!({
+                "type": "SharesQualities",
+                "qualities": ["Name"],
+            }))
+            .expect("new tag without relation deserializes");
+        assert_eq!(new_tag_without_relation, legacy);
+
+        let round_trip = SearchSelectionConstraint::SharesQualities {
+            qualities: vec![SharedQuality::LandType],
+            relation: SharedQualityRelation::Shares,
+        };
+        let json = serde_json::to_value(&round_trip).expect("serializes");
+        assert_eq!(json["relation"], "Shares");
+        assert_eq!(
+            serde_json::from_value::<SearchSelectionConstraint>(json).expect("round-trips"),
+            round_trip
+        );
+        let distinct_json = serde_json::to_value(&legacy).expect("serializes");
+        assert_eq!(distinct_json["relation"], "DoesNotShare");
     }
 
     #[test]

@@ -30,17 +30,19 @@ use super::oracle_ir::feature::{
     audit_units, scope_to_unit, AuditUnit, ItemIdTracks, OracleSemanticFeature,
 };
 use super::oracle_nom::error::OracleError;
-use super::oracle_nom::primitives::{scan_contains, split_sentence_units};
+use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
+use super::oracle_target::parse_source_blocked_history_clause;
+use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, Comparator, ContinuousModification, CopyRetargetPermission,
-    DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
-    ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    RestrictionExpiry, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, UnlessPayScaling,
-    ZoneOwner,
+    ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation, Comparator,
+    ContinuousModification, CopyRetargetPermission, DamageModification, DelayedTriggerCondition,
+    Duration, Effect, FilterProp, ManaProduction, ModalSelectionConstraint, OpponentMayScope,
+    ParsedCondition, PerPlayerScope, PlayerFilter, QuantityExpr, QuantityRef, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, RestrictionExpiry, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, UnlessPayScaling, ZoneOwner,
 };
 use crate::types::ability_visit::{
     visit_ability_def, visit_replacement, visit_static, visit_trigger,
@@ -222,6 +224,7 @@ pub(crate) fn check_swallowed_clauses(
         detect_condition_unless(&cleaned, fragment, &evidence, &mut found);
         detect_condition_as_long_as(&cleaned, fragment, &evidence, &scoped, &mut found);
         detect_duration_this_turn(&cleaned, fragment, &evidence, &mut found);
+        detect_combat_history_relation(&cleaned, fragment, &evidence, &mut found);
         detect_duration_next_turn(&cleaned, fragment, &evidence, &mut found);
         detect_optional_may_have(&cleaned, fragment, &evidence, &mut found);
         detect_apnap(&cleaned, fragment, &scoped, &mut found);
@@ -1127,16 +1130,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
         // CR 705: Flip-coin branches carry win/lose payloads as nested defs;
         // "you may choose new targets for the copy" on the win branch (Krark)
         // lives in `win_effect`, not at `def.optional`.
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        } => win_effect
-            .as_ref()
-            .is_some_and(|def| def_tree_has_optional(def))
-            || lose_effect
-                .as_ref()
-                .is_some_and(|def| def_tree_has_optional(def)),
         Effect::FlipCoins {
             win_effect,
             lose_effect,
@@ -1147,7 +1140,6 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             || lose_effect
                 .as_ref()
                 .is_some_and(|def| def_tree_has_optional(def)),
-        Effect::FlipCoinUntilLose { win_effect, .. } => def_tree_has_optional(win_effect),
         _ => false,
     }
 }
@@ -1159,7 +1151,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
 /// `expiry: EndOfTurn`). Its presence satisfies the Replacement_Instead,
 /// Condition_If, and Duration_ThisTurn detectors when the original text matches
 /// the "die this turn, exile instead" rider grammar. Flip-coin branches
-/// (Desperate Gambit) nest these under `Effect::FlipCoin`, so recurse there too.
+/// (Desperate Gambit) nest these under `Effect::FlipCoins`, so recurse there too.
 /// Flip-coin branch payloads may carry one-shot damage replacements.
 fn flip_branch_has_target_replacement(
     win_effect: &Option<Box<AbilityDefinition>>,
@@ -1178,12 +1170,8 @@ fn def_tree_has_target_replacement(def: &AbilityDefinition) -> bool {
         Effect::AddTargetReplacement { .. } | Effect::CreateDamageReplacement { .. } => {
             return true
         }
-        Effect::FlipCoin {
-            win_effect,
-            lose_effect,
-            ..
-        }
-        | Effect::FlipCoins {
+        // Branch recursion is mode-agnostic (single, N and until-loss runs).
+        Effect::FlipCoins {
             win_effect,
             lose_effect,
             ..
@@ -2797,7 +2785,7 @@ fn ward_power_life_payments(cost: &WardCost) -> usize {
         WardCost::PayLifeEqualToPower => 1,
         WardCost::Mana(_)
         | WardCost::PayLife(_)
-        | WardCost::DiscardCard
+        | WardCost::Discard { .. }
         | WardCost::Sacrifice { .. }
         | WardCost::Waterbend(_)
         | WardCost::GetPlayerCounters { .. }
@@ -4314,6 +4302,210 @@ fn enters_with_finality_this_way_is_only_if_marker(
     !has_other_if
 }
 
+/// CR 608.2c + CR 611.2a: the delivering read for the gains-modifications rider —
+/// a `CastFromZone` host's transitive `sub_ability` chain, `sub_ability` links
+/// only and with no `sub_link` gate. The parser-side mirror of the runtime
+/// authority `game::effects::cast_from_zone::cast_from_zone_enters_with_modifications`
+/// (walk `ability.sub_ability`, then each `sub.sub_ability`), which every
+/// delivering route (`resolve`, `open_resolution_cast_window`,
+/// `resolution_cast_request_for_single_target`, `record_lingering_permissions`)
+/// reads. A rider that chain would not deliver must not exempt the sentence.
+fn def_is_delivered_gains_rider_carrier(
+    def: &AbilityDefinition,
+    quality: Option<&TargetFilter>,
+) -> bool {
+    match &*def.effect {
+        // The carrier must prove the very predicate the sentence printed: a
+        // carrier whose `cast_filter` is absent or names a different quality
+        // cannot clear the warning for this sentence.
+        Effect::AddPendingEntersModifications { rider } => rider.cast_filter.as_ref() == quality,
+        _ => {
+            // Mirror the runtime authority's METADATA-chain bound: only the
+            // enters-with-counter rider and the graveyard-destination rider are
+            // transparent links to the gains rider; any other node ends the
+            // chain, so a rider stored under an unrelated instruction is not
+            // delivered and must not exempt the sentence.
+            let transparent = matches!(&*def.effect, Effect::AddPendingETBCounters { .. })
+                || crate::game::effects::cast_from_zone::graveyard_destination_rider(
+                    &def.effect,
+                    def.condition.as_ref(),
+                )
+                .is_some();
+            transparent
+                && def
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|sub| def_is_delivered_gains_rider_carrier(sub, quality))
+        }
+    }
+}
+
+/// True when any definition in this tree is a `CastFromZone` whose transitive
+/// `sub_ability` chain carries the gains-modifications rider (the delivering
+/// class). Tree recursion mirrors `def_tree_has_cast_from_zone_alt_ability_cost`:
+/// `CreateDelayedTrigger` inner definitions plus `sub_ability`, `else_ability`,
+/// and `mode_abilities` are visited to find hosts. The carrier test is anchored
+/// to the host's own `sub_ability` chain — a host's `else_ability` /
+/// `mode_abilities` branch is not read, because delivery does not read it.
+///
+/// CR 118.9: a host carrying an `alt_ability_cost` is NOT a delivering host —
+/// that branch grants `ExileWithAltAbilityCost`, which has no
+/// `enters_with_modifications` channel, so the rider would be dropped. Keeping
+/// such a host out of the exemption preserves an honest warning instead of
+/// clearing it over a represented-but-undelivered rider.
+fn def_tree_has_delivered_gains_rider(
+    def: &AbilityDefinition,
+    quality: Option<&TargetFilter>,
+) -> bool {
+    if matches!(
+        &*def.effect,
+        Effect::CastFromZone {
+            alt_ability_cost: None,
+            ..
+        }
+    ) && def
+        .sub_ability
+        .as_deref()
+        .is_some_and(|sub| def_is_delivered_gains_rider_carrier(sub, quality))
+    {
+        return true;
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if def_tree_has_delivered_gains_rider(effect, quality) {
+            return true;
+        }
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_delivered_gains_rider(sub, quality) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_delivered_gains_rider(else_ab, quality) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(|mode| def_tree_has_delivered_gains_rider(mode, quality))
+}
+
+/// Any ability or trigger-execute tree in this scoped unit delivers the
+/// gains-modifications rider carrying `quality`. Mirrors the sibling
+/// `any_ability_has_*` helpers (`parsed.abilities` plus each
+/// `parsed.triggers[].execute`); `scope_to_unit` has already reduced `parsed`
+/// to this audit unit.
+fn any_ability_has_delivered_gains_rider(
+    parsed: &ParsedAbilities,
+    quality: Option<&TargetFilter>,
+) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(|def| def_tree_has_delivered_gains_rider(def, quality))
+        || parsed.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(|def| def_tree_has_delivered_gains_rider(def, quality))
+        })
+}
+
+/// CR 608.2c + CR 611.2a: a gains-modifications cast-permission rider ("If you
+/// cast a [quality] spell this way, it gains …" — Strago and Relm) is
+/// represented by the typed `Effect::AddPendingEntersModifications` carrier
+/// attached to the `CastFromZone` clause (consumed as permission metadata). The
+/// leading "if" is the CR 608.2c back-reference to the granted cast, not a
+/// swallowed game-state condition — so the represented carrier sentence is
+/// exempted exactly like the counter/alt-cost rider siblings, and only when
+/// that carrier is DELIVERED: it sits in the transitive `sub_ability` chain of
+/// a `CastFromZone` parent, the exact shape
+/// `game::effects::cast_from_zone::cast_from_zone_enters_with_modifications`
+/// reads at every delivering route. A represented-but-undelivered carrier —
+/// under a `CastCopyOfCard` parent (which records, it does not apply) or under
+/// any other non-`CastFromZone` parent — keeps the warning standing.
+///
+/// The sentence is located by the recognizer's OWN consumed span
+/// (`cast_this_way_gains_rider_consumed_len`) rather than a pre-split sentence
+/// list: the rider quotes a granted ability that contains an internal period
+/// ("…sacrifice this creature.\""), which a period-only sentence model would
+/// sever. Exactly one match is required — zero (no carrier sentence) or two or
+/// more (the evidence cannot name which sentence produced it) both leave every
+/// " if " visible to the caller's marker scan.
+fn cast_this_way_gains_rider_is_only_if_marker(stripped: &str, parsed: &ParsedAbilities) -> bool {
+    let Some((residual, sentence_quality)) = cast_this_way_gains_rider_residual(stripped) else {
+        return false;
+    };
+    // The delivered carrier must carry the sentence's own recognized quality:
+    // a represented carrier missing the predicate (or naming a different one)
+    // cannot clear the warning for this sentence.
+    if !any_ability_has_delivered_gains_rider(parsed, sentence_quality.as_ref()) {
+        return false;
+    }
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
+/// Locate the represented gains-modifications rider sentence by the parser
+/// recognizer's own consumed span and return the text with that span removed
+/// plus the sentence's recognized spell-quality predicate (`None` for the
+/// unconditional anaphoric form). `None` when the cardinality guard is not
+/// exactly one or the matched sentence does not parse as a rider. Sentence
+/// starts are walked with
+/// [`crate::parser::oracle_nom::primitives::parse_period_sentence`], but a
+/// match advances the walk past the recognizer's full span, so the quoted
+/// internal period inside the rider cannot split it (BF-P2-1).
+fn cast_this_way_gains_rider_residual(stripped: &str) -> Option<(String, Option<TargetFilter>)> {
+    let mut remaining = stripped;
+    let mut offset = 0usize;
+    let mut matched: Option<(usize, usize, Option<TargetFilter>)> = None;
+    while !remaining.is_empty() {
+        // `parse_period_sentence` skips leading whitespace; trim it here too so
+        // the recognizer's consumed length (measured from its first recognized
+        // byte) slices at the exact byte boundary.
+        let trimmed = remaining.trim_start();
+        offset += remaining.len() - trimmed.len();
+        remaining = trimmed;
+        if remaining.is_empty() {
+            break;
+        }
+        if let Some(len) =
+            crate::parser::oracle_effect::cast_this_way_gains_rider_consumed_len(remaining)
+        {
+            if matched.is_some() {
+                // A second syntactically matching carrier sentence means the
+                // typed evidence cannot be linked to a single sentence, so no
+                // suppression is sound.
+                return None;
+            }
+            // The consumed span IS a rider sentence; its recognized quality is
+            // the predicate the delivered carrier must prove.
+            let quality = crate::parser::oracle_effect::cast_this_way_gains_rider_sentence_quality(
+                remaining,
+            )?;
+            matched = Some((offset, offset + len, quality));
+            offset += len;
+            remaining = &remaining[len..];
+            continue;
+        }
+        match crate::parser::oracle_nom::primitives::parse_period_sentence(remaining) {
+            Ok((rest, _sentence)) => {
+                offset += remaining.len() - rest.len();
+                remaining = rest;
+            }
+            // Unterminated tail: no further sentence start exists.
+            Err(_) => break,
+        }
+    }
+    let (start, end, sentence_quality) = matched?;
+    let mut residual = String::with_capacity(stripped.len() - (end - start));
+    residual.push_str(&stripped[..start]);
+    residual.push_str(&stripped[end..]);
+    Some((residual, sentence_quality))
+}
+
 /// CR 118.9 + CR 607.1 + CR 608.2c: conservative cardinality guard shared by
 /// every detector that exempts an alternative-cost-rider carrier's OWN
 /// sentence ("[if you cast a spell / it this way,] pay <cost> rather than pay
@@ -4427,6 +4619,36 @@ fn cast_this_way_alt_cost_is_only_if_marker(stripped: &str, evidence: &UnitEvide
         return false;
     };
     let residual = residual_sentences.join(" ");
+    let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
+        && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
+    !has_other_if
+}
+
+/// CR 603.4 + CR 603.2: the distributed `{X}`-in-cost intervening-if of a split
+/// cast-or-activate trigger ("Whenever you cast an instant or sorcery spell or
+/// activate an ability, if that spell's mana cost or that ability's activation
+/// cost contains {X}, …" — Unbound Flourishing). The trigger parser answers
+/// each disjunct once, in its own half's event filter
+/// (`FilterProp::HasXInManaCost` on the spell half, CR 202.1;
+/// `FilterProp::HasXInActivationCost` on the activation half, CR 602.1a), so
+/// no condition slot is populated although the condition is represented.
+///
+/// Recognition and lowering cannot disagree: the clause is located with the
+/// combinator that folds it (`oracle_trigger::parse_distributed_x_cost_condition`),
+/// and both folded properties must be present in the unit's evidence. It is
+/// text-scoped: only the recognized clause is removed before the residual scan,
+/// so any other bare " if " in the unit still flags.
+fn distributed_x_cost_if_is_only_if_marker(stripped: &str, evidence: &UnitEvidence) -> bool {
+    let folded = |prop: FilterProp| evidence.any::<FilterProp>(|found| *found == prop);
+    if !(folded(FilterProp::HasXInManaCost) && folded(FilterProp::HasXInActivationCost)) {
+        return false;
+    }
+    let Some((before, (), after)) = scan_preceded(stripped, parse_distributed_x_cost_condition)
+    else {
+        return false;
+    };
+    let residual = format!("{before}{after}");
     let has_other_if = residual.contains(" if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" as if ") // allow-noncombinator: swallow detector marker scan on classified text
         && !residual.contains(" even if "); // allow-noncombinator: swallow detector marker scan on classified text
@@ -4562,10 +4784,25 @@ fn detect_condition_if(
     if enters_with_finality_this_way_is_only_if_marker(&stripped, evidence) {
         return;
     }
+    // CR 608.2c + CR 611.2a: "If you cast a [quality] spell this way, it gains …"
+    // — represented by the typed `AddPendingEntersModifications` carrier
+    // (Strago and Relm). Scopes the carrier to a `CastFromZone` parent's
+    // transitive `sub_ability` chain (the delivering class every runtime route
+    // reads); the cardinality guard is shared with the sibling riders.
+    if cast_this_way_gains_rider_is_only_if_marker(&stripped, parsed) {
+        return;
+    }
     if cast_this_way_alt_cost_is_only_if_marker(&stripped, evidence) {
         return;
     }
     if play_from_exile_alt_ability_cost_is_only_if_marker(&stripped, parsed) {
+        return;
+    }
+    // CR 603.4: the distributed `{X}`-in-cost intervening-if of a split
+    // cast-or-activate trigger (Unbound Flourishing) is answered in each half's
+    // event filter. Text-scoped: suppresses only when that clause is the
+    // unit's only bare " if ".
+    if distributed_x_cost_if_is_only_if_marker(&stripped, evidence) {
         return;
     }
     // CR 615.5: "If damage is prevented this way, [effect]" is not an
@@ -4678,8 +4915,14 @@ fn detect_condition_if(
     }) {
         return;
     }
-    // CR 603.4: an explicit quantity comparison IS the conditional gate.
-    if evidence.any::<AbilityCondition>(|c| matches!(c, AbilityCondition::QuantityCheck { .. })) {
+    // CR 603.4: an explicit quantity comparison or arithmetic-quality predicate IS the
+    // conditional gate.
+    if evidence.any::<AbilityCondition>(|c| {
+        matches!(
+            c,
+            AbilityCondition::QuantityCheck { .. } | AbilityCondition::QuantityQuality { .. }
+        )
+    }) {
         return;
     }
     // CR 614.1a: replacement riders whose carried event/destination IS the "if X would Y"
@@ -4692,8 +4935,10 @@ fn detect_condition_if(
             e,
             Effect::AddTargetReplacement { .. }
                 | Effect::CreatePlaneswalkReplacement { .. }
-                | Effect::FlipCoin { .. }
-                | Effect::FlipCoins { .. }
+                | Effect::FlipCoins {
+                    flips: CoinFlipRun::Exactly { .. },
+                    ..
+                }
                 | Effect::RollDie { .. }
                 | Effect::ForceBlock { .. }
                 | Effect::ForceAttack { .. }
@@ -6026,6 +6271,51 @@ fn detect_damage_subject_conjunction(
     ));
 }
 
+// ── Detector Q: CombatHistoryRelation ───────────────────────────────────
+
+/// CR 509.1g + CR 608.2i: "creatures it blocked this combat" / "all creatures it
+/// blocked this turn" (Cathedral Membrane, Defiant Vanguard) is a look-back
+/// restriction on the affected object set. Every clause the shared recognizer
+/// `parse_source_blocked_history_clause` finds must surface as a
+/// `CombatRelation::BlockedBySubject` filter with the same window; otherwise the
+/// relative clause was dropped and the mass effect silently widened to every
+/// creature (#9179). The duration-ownership guard in `strip_trailing_duration`
+/// keeps the window from reappearing as a spurious effect duration, so without
+/// this detector a declined clause would leave no trace at all.
+fn detect_combat_history_relation(
+    cleaned: &str,
+    original: &str,
+    evidence: &UnitEvidence,
+    diagnostics: &mut Vec<OracleDiagnostic>,
+) {
+    let represented = |scope: CombatHistoryScope| {
+        evidence.any::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockedBySubject { scope: found },
+                    ..
+                } if *found == scope
+            )
+        })
+    };
+    let mut remaining = cleaned;
+    let mut swallowed = false;
+    while let Some((_, (_, scope), rest)) =
+        scan_preceded(remaining, parse_source_blocked_history_clause)
+    {
+        swallowed |= !represented(scope);
+        remaining = rest;
+    }
+    if swallowed {
+        diagnostics.push(OracleDiagnostic::swallowed_clause(
+            OracleSemanticFeature::CombatHistoryRelation.detector_label(),
+            truncate(original, 140),
+            None,
+        ));
+    }
+}
+
 // ── Cascade-vs-AST structural diff (option 3) ──────────────────────────
 //
 // Complementary to the oracle-text-scanning detectors above. Where those
@@ -6607,9 +6897,11 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     }
 
     /// The nine detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit` and `ModalDynamicMaxDropped` are deliberately absent: both
-    /// have ZERO corpus warnings at base, so no fixture can reach them. They are bought by
-    /// the compiler instead — the constructor's new parameter makes omission a compile error.
+    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
+    /// deliberately absent: none has a corpus warning (`CombatHistoryRelation`'s clause is
+    /// printed on exactly two cards, both represented since #9179), so no corpus fixture
+    /// can reach them. They are bought by the compiler instead — the constructor's new
+    /// parameter makes omission a compile error.
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -6695,7 +6987,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
              observed = {observed:?}"
         );
 
-        // A blanket `swallowed_clause_gap(...)` applied at all sixteen push sites turns
+        // A blanket `swallowed_clause_gap(...)` applied at all seventeen push sites turns
         // this red.
         assert!(
             gapful.is_empty(),
@@ -9938,7 +10230,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 705 + CR 707.10c: Krark nests CopySpell retarget permission inside
     /// the flip-coin win branch; `effect_has_internal_optionality` must recurse
-    /// into `FlipCoin.win_effect`.
+    /// into `FlipCoins.win_effect`.
     #[test]
     fn optional_you_may_accepts_copy_retarget_clause_in_flip_coin_win_branch() {
         let parsed = parse_named(
@@ -12722,12 +13014,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     fn def_tree_has_create_damage_replacement(def: &AbilityDefinition) -> bool {
         match def.effect.as_ref() {
             Effect::CreateDamageReplacement { .. } => return true,
-            Effect::FlipCoin {
-                win_effect,
-                lose_effect,
-                ..
-            }
-            | Effect::FlipCoins {
+            Effect::FlipCoins {
                 win_effect,
                 lose_effect,
                 ..
@@ -12749,7 +13036,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 614.9 + CR 705: Desperate Gambit — flip-coin win/lose branches carry
     /// one-shot damage replacements; the Replacement_Instead detector must walk
-    /// `FlipCoin` payloads (issue #2236).
+    /// `FlipCoins` payloads (issue #2236).
     #[test]
     fn replacement_instead_accepts_desperate_gambit_flip_coin_damage_replacements() {
         let parsed = parse_named(
@@ -14615,6 +14902,235 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             parsed.parse_warnings
         );
     }
+
+    // ── Detector Q: CombatHistoryRelation ───────────────────────────────
+
+    /// Does the parse carry a `CombatRelation::BlockedBySubject` filter anywhere?
+    fn parse_has_blocked_history_filter(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
+        use crate::types::ability::CombatRelation;
+        UnitEvidence::of(parsed).any::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockedBySubject { .. },
+                    ..
+                }
+            )
+        })
+    }
+
+    /// Does the parse carry `effect` with an unrestricted creature filter — the
+    /// widened mass effect a declined clause leaves behind?
+    fn parse_has_bare_creature_mass_effect(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        is_mass_effect: fn(&Effect) -> Option<&TargetFilter>,
+    ) -> bool {
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        UnitEvidence::of(parsed)
+            .any::<Effect>(|effect| is_mass_effect(effect).is_some_and(|target| *target == bare))
+    }
+
+    fn destroy_all_target(effect: &Effect) -> Option<&TargetFilter> {
+        match effect {
+            Effect::DestroyAll { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    fn damage_all_target(effect: &Effect) -> Option<&TargetFilter> {
+        match effect {
+            Effect::DamageAll { target, .. } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// CR 509.1g + CR 608.2i: every shape whose bare "it" has no `SelfRef`
+    /// antecedent declines the blocked-history clause and must be REPORTED, in
+    /// both windows: a typed trigger subject in an anaphoric compound (a), a
+    /// spell's chosen target (b), a chain-pinned target (c), a typed subject in a
+    /// delayed body (d), and a typed dies-trigger subject (e). Each row pairs the
+    /// negative (no `BlockedBySubject` in the parse) with its reach guard — the
+    /// mass effect parsed with its unrestricted creature filter — and with the
+    /// detector firing, which itself proves the unit was not skipped as
+    /// unimplemented.
+    #[test]
+    fn combat_history_relation_detector_reports_every_declined_clause() {
+        // (a) Typed trigger subject, anaphoric compound: the primary acted on the
+        // triggering creature, so the continuation gets no `SelfRef` pin.
+        let parsed = parse_named(
+            "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
+            "Test Card",
+            &["Enchantment"],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .expect("reach guard: the trigger body parsed");
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Destroy {
+                    target: TargetFilter::TriggeringSource,
+                    ..
+                }
+            ),
+            "reach guard: primary must destroy the triggering creature, got {:?}",
+            execute.effect
+        );
+        assert!(
+            execute
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
+            "reach guard: the DestroyAll continuation must exist"
+        );
+
+        // (b) A spell's chosen target: the continuation's "it" names a target,
+        // which has no sound combat-relation subject.
+        let spell = parse_named(
+            "Destroy target creature and all creatures it blocked this turn.",
+            "Test Card",
+            &["Instant"],
+        );
+        let primary = &spell.abilities[0];
+        assert!(
+            matches!(
+                &*primary.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: primary must destroy the chosen target, got {:?}",
+            primary.effect
+        );
+        assert!(
+            primary
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
+            "reach guard: the DestroyAll continuation must exist"
+        );
+
+        for (label, parsed, is_mass_effect) in [
+            ("(a) typed compound", parsed, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
+            ("(b) spell target", spell, destroy_all_target),
+            (
+                "(c) chain-pinned target",
+                parse_named(
+                    "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
+                    "Test Card",
+                    &["Creature"],
+                ),
+                destroy_all_target,
+            ),
+            (
+                "(d) typed delayed body",
+                parse_named(
+                    "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
+                    "Test Card",
+                    &["Enchantment"],
+                ),
+                destroy_all_target,
+            ),
+            (
+                "(e) typed dies subject, this combat",
+                parse_named(
+                    "Whenever a creature you control dies, it deals 2 damage to each creature it blocked this combat.",
+                    "Test Card",
+                    &["Enchantment"],
+                ),
+                damage_all_target,
+            ),
+        ] {
+            assert!(
+                parse_has_bare_creature_mass_effect(&parsed, is_mass_effect),
+                "{label}: reach guard — the mass effect must parse with its bare creature filter"
+            );
+            assert!(
+                !parse_has_blocked_history_filter(&parsed),
+                "{label}: a non-source antecedent must not bind the clause"
+            );
+            assert!(
+                has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{label}: the declined clause must be reported; warnings = {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// The detector is silent when the clause is represented. For the two printed
+    /// cards the silence is paired with a reach guard proving the shared
+    /// recognizer finds the clause in the text and the parse carries the filter,
+    /// so silence is not vacuous. The unary "that blocked this turn" (Hezrou
+    /// style) has no source anchor and is outside the detector's grammar.
+    #[test]
+    fn combat_history_relation_detector_is_silent_when_represented() {
+        // MTGJSON keywords are passed as production does: `parse_named`'s empty list
+        // would leave Membrane's bare "Defender" line `Unimplemented`.
+        for (name, keywords, types, text) in [
+            (
+                "Cathedral Membrane",
+                &["Defender"][..],
+                &["Artifact", "Creature"][..],
+                "({W/P} can be paid with either {W} or 2 life.)\nDefender\nWhen this creature dies during combat, it deals 6 damage to each creature it blocked this combat.",
+            ),
+            (
+                "Defiant Vanguard",
+                &[][..],
+                &["Creature"][..],
+                "When this creature blocks, at end of combat, destroy it and all creatures it blocked this turn.\n{5}, {T}: Search your library for a Rebel permanent card with mana value 4 or less, put it onto the battlefield, then shuffle.",
+            ),
+        ] {
+            let cleaned = text.to_ascii_lowercase();
+            assert!(
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_source_blocked_history_clause,
+                )
+                .is_some(),
+                "{name}: reach guard — the recognizer must find the clause"
+            );
+            let parsed = parse_oracle_text(
+                text,
+                name,
+                &keywords.iter().map(|kw| (*kw).to_string()).collect::<Vec<_>>(),
+                &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+                &[],
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: reach guard — an unimplemented unit is skipped before the detector runs"
+            );
+            assert!(
+                parse_has_blocked_history_filter(&parsed),
+                "{name}: reach guard — the clause must be represented"
+            );
+            assert!(
+                !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+
+        let unary = parse(
+            "At end of combat, destroy each creature that blocked this turn.",
+            &["Enchantment"],
+        );
+        assert!(
+            !any_ability_has_unimplemented(&unary),
+            "unary: reach guard — an unimplemented unit is skipped before the detector runs"
+        );
+        assert!(
+            UnitEvidence::of(&unary).any::<Effect>(|effect| destroy_all_target(effect).is_some()),
+            "unary: reach guard — the DestroyAll must parse"
+        );
+        assert!(
+            !has_swallowed_detector(&unary, "CombatHistoryRelation"),
+            "{:?}",
+            unary.parse_warnings
+        );
+    }
 }
 
 #[cfg(test)]
@@ -14625,6 +15141,11 @@ mod detect_condition_if_replacement_exemption_tests {
     // `ReplacementDefinition` (the description-channel helpers that did are deleted), so a
     // lib-level import would be dead. Only this fixture still builds one.
     use crate::types::ability::ReplacementDefinition;
+    use crate::types::ability::{
+        AbilityKind, CardPlayMode, CastFromZoneDriver, SubAbilityLink, TypeFilter, TypedFilter,
+    };
+    use crate::types::counter::CounterType;
+    use crate::types::identifiers::TrackedSetId;
     use crate::types::replacements::ReplacementEvent;
 
     /// Plague Drone-class text: a single represented gain-life replacement,
@@ -14801,6 +15322,518 @@ mod detect_condition_if_replacement_exemption_tests {
              still be flagged as a swallowed Condition_If — a cardinality-blind carrier \
              exemption strips BOTH matching sentences and reports nothing; \
              diagnostics: {diagnostics:?}"
+        );
+    }
+
+    /// The exact printed quality predicate of Strago and Relm's rider sentence
+    /// ("a creature spell").
+    fn gains_rider_creature_predicate() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature))
+    }
+
+    /// The typed gains-modifications carrier (Strago and Relm's rider body
+    /// shape): `AddPendingEntersModifications { [AddKeyword Haste] }` carrying
+    /// the sentence's printed creature predicate, linked as a sequential
+    /// sibling like the live parse.
+    fn gains_rider_carrier_def() -> AbilityDefinition {
+        gains_rider_carrier_def_with_filter(Some(gains_rider_creature_predicate()))
+    }
+
+    /// The same carrier with an explicit `cast_filter`, for the quality-proof
+    /// negatives.
+    fn gains_rider_carrier_def_with_filter(cast_filter: Option<TargetFilter>) -> AbilityDefinition {
+        let mut carrier = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddPendingEntersModifications {
+                rider: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }],
+                    cast_filter,
+                },
+            },
+        );
+        carrier.sub_link = SubAbilityLink::SequentialSibling;
+        carrier
+    }
+
+    /// The delivering host shape: Strago and Relm's `CastFromZone` grant (free,
+    /// during resolution), with no sub-ability attached.
+    fn cast_from_zone_host_def() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastFromZone {
+                target: TargetFilter::ParentTarget,
+                without_paying_mana_cost: true,
+                mode: CardPlayMode::Cast,
+                cast_transformed: false,
+                alt_ability_cost: None,
+                constraint: None,
+                duration: None,
+                driver: CastFromZoneDriver::DuringResolution,
+                mana_spend_permission: None,
+                additional_cost: None,
+                cast_cost_modifier: None,
+            },
+        )
+    }
+
+    /// Minimal `ParsedAbilities` carrying exactly `abilities` (all other fields
+    /// empty). Field list taken verbatim from `ParsedAbilities` in
+    /// `parser/oracle.rs`.
+    fn parsed_with_abilities(abilities: Vec<AbilityDefinition>) -> ParsedAbilities {
+        ParsedAbilities {
+            abilities,
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// `host` as the sole ability, with the gains-rider carrier as its
+    /// sequential `sub_ability` — the delivery shape
+    /// `cast_from_zone_enters_with_modifications` reads.
+    fn parsed_with_host_and_gains_rider(host: AbilityDefinition) -> ParsedAbilities {
+        let mut host = host;
+        host.sub_ability = Some(Box::new(gains_rider_carrier_def()));
+        parsed_with_abilities(vec![host])
+    }
+
+    /// CR 608.2c + CR 611.2a: the delivering carrier fixture — a `CastFromZone`
+    /// parent (Strago and Relm's shape) whose `sub_ability` chain carries the
+    /// typed `AddPendingEntersModifications` effect.
+    fn parsed_with_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_host_and_gains_rider(cast_from_zone_host_def())
+    }
+
+    /// The delivering shape with an explicit carrier `cast_filter`, for the
+    /// detector's quality-proof negatives.
+    fn parsed_with_host_and_gains_rider_filtered(
+        cast_filter: Option<TargetFilter>,
+    ) -> ParsedAbilities {
+        let mut host = cast_from_zone_host_def();
+        host.sub_ability = Some(Box::new(gains_rider_carrier_def_with_filter(cast_filter)));
+        parsed_with_abilities(vec![host])
+    }
+
+    /// The Tomb-of-Aclazotz depth-1 shape: the gains rider nested under the
+    /// counter rider (`CastFromZone` → `AddPendingETBCounters` → APEM), the
+    /// chain `cast_from_zone_enters_with_modifications` walks transitively.
+    fn parsed_with_nested_gains_rider_carrier() -> ParsedAbilities {
+        let mut counter = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::AddPendingETBCounters {
+                counter_type: CounterType::Finality,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        counter.sub_link = SubAbilityLink::SequentialSibling;
+        counter.sub_ability = Some(Box::new(gains_rider_carrier_def()));
+        let mut host = cast_from_zone_host_def();
+        host.sub_ability = Some(Box::new(counter));
+        parsed_with_abilities(vec![host])
+    }
+
+    /// The Mysterious Sphere's recorded-not-applied shape: a `CastCopyOfCard`
+    /// parent with the carrier as its sub-ability (the copy route consumes no
+    /// `enters_with_modifications`, so this carrier is never delivered).
+    fn parsed_with_copy_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_host_and_gains_rider(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CastCopyOfCard {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                cost: ManaCost::zero(),
+                count: None,
+            },
+        ))
+    }
+
+    /// A bare carrier with no delivering parent (the pre-fix fixture shape),
+    /// next to a `CastFromZone` host that carries no rider: a sibling outside
+    /// any `CastFromZone` sub-chain even though a delivering host exists in the
+    /// unit.
+    fn parsed_with_sibling_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_abilities(vec![cast_from_zone_host_def(), gains_rider_carrier_def()])
+    }
+
+    /// The direct-parsed `FreeCastFromZones` + rider shape (BF-P2-9): the rider
+    /// becomes a sequential sibling of a non-`CastFromZone` host, so no
+    /// delivering route reads it. No corpus card produces this shape today.
+    fn parsed_with_free_cast_gains_rider_carrier() -> ParsedAbilities {
+        parsed_with_host_and_gains_rider(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FreeCastFromZones {
+                count: None,
+                max_total_mv: None,
+                filter: TargetFilter::Any,
+                zones: vec![Zone::Graveyard],
+                graveyard_replacement: None,
+            },
+        ))
+    }
+
+    /// The exact rider sentence shape Strago and Relm print, with a quoted
+    /// granted ability that carries an INTERNAL period — the sentence a naive
+    /// period-split would sever (BF-P2-1). Prefixed with a neutral grant
+    /// sentence so the rider's " if " is not at byte offset 0 (the detector's
+    /// marker scans require a preceding space).
+    fn gains_rider_unit_text() -> String {
+        "You may cast that card without paying its mana cost. If you cast a creature spell \
+         this way, it gains haste and \"At the beginning of the end step, sacrifice this \
+         creature.\" Activate only as a sorcery."
+            .to_string()
+    }
+
+    /// CR 608.2c + CR 611.2a: the gains-modifications carrier exemption clears
+    /// ONLY the represented carrier sentence. The positive also pins BF-P2-1:
+    /// the rider sentence quotes a granted ability with an internal period, so
+    /// the exemption must locate it by the recognizer's own consumed span, not
+    /// by a period-only sentence split.
+    #[test]
+    fn gains_rider_carrier_suppresses_only_its_own_sentence() {
+        let parsed = parsed_with_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Positive — the represented carrier's own sentence is exempted.
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "the represented gains rider must clear its own warning, got {diagnostics:?}"
+        );
+
+        // Negative — an unrelated second conditional in the same unit must
+        // remain visible.
+        let text = format!(
+            "{} If you control a Forest, draw a card.",
+            gains_rider_unit_text()
+        );
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "an unrelated second conditional must remain visible, got {diagnostics:?}"
+        );
+
+        // Negative — two matching carrier sentences with ONE typed carrier
+        // cannot be linked, so nothing is suppressed (cardinality guard).
+        let rider = gains_rider_unit_text();
+        let text = format!("{rider} {rider}");
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "two matching rider sentences with one carrier must not be suppressed, \
+             got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: the exemption must prove the sentence's OWN
+    /// printed quality against the delivered carrier's `cast_filter`. A carrier
+    /// missing the predicate, or naming a different one, keeps the "creature
+    /// spell" sentence's warning standing; the exact predicate is the positive
+    /// control.
+    #[test]
+    fn gains_rider_carrier_requires_the_sentences_printed_quality() {
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+
+        for (label, parsed) in [
+            (
+                "missing predicate",
+                parsed_with_host_and_gains_rider_filtered(None),
+            ),
+            (
+                "mismatched predicate",
+                parsed_with_host_and_gains_rider_filtered(Some(TargetFilter::Typed(
+                    TypedFilter::default().with_type(TypeFilter::Instant),
+                ))),
+            ),
+        ] {
+            let evidence = UnitEvidence::of(&parsed);
+            let mut diagnostics = Vec::new();
+            detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+            assert!(
+                has_condition_if_swallow(&diagnostics),
+                "{label}: a carrier that does not prove the sentence's quality must keep the \
+                 warning, got {diagnostics:?}"
+            );
+        }
+
+        // Positive control — the exact sentence predicate clears the warning.
+        let parsed =
+            parsed_with_host_and_gains_rider_filtered(Some(gains_rider_creature_predicate()));
+        let evidence = UnitEvidence::of(&parsed);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "the exact sentence predicate must clear the warning, got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: only a unit whose tree contains the typed
+    /// carrier is eligible; a sentence that merely has the shape is not
+    /// suppressed, and a non-gains cast-this-way sentence is never claimed by
+    /// this exemption even when the carrier is present.
+    #[test]
+    fn gains_rider_carrier_requires_typed_evidence() {
+        let parsed = parsed_with_gains_rider_carrier();
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+
+        // Negative — no carrier in the parsed tree: the sentence shape alone
+        // must keep warning.
+        let no_carrier = parsed_with_abilities(Vec::new());
+        let no_carrier_evidence = UnitEvidence::of(&no_carrier);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            &text,
+            &no_carrier_evidence,
+            &no_carrier,
+            &mut diagnostics,
+        );
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "the sentence shape without a carrier must keep warning, got {diagnostics:?}"
+        );
+
+        // Positive reach guard — the same text with evidence suppresses, so
+        // the negative above is not vacuous.
+        let evidence = UnitEvidence::of(&parsed);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the same text with evidence must suppress, got {diagnostics:?}"
+        );
+
+        // Negative — Tomb's non-gains sentence ("if you do, it enters with a
+        // finality counter on it …") does not match this recognizer's prefix
+        // even with a carrier present, so it stays visible to this exemption.
+        let text = "You may cast a creature spell from your graveyard this turn. If you do, it \
+                    enters with a finality counter on it and is a Vampire in addition to its \
+                    other types.";
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "Tomb's non-gains sentence must not be suppressed by the gains exemption, \
+             got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a (P2-6 r2): the exemption keys on the recognizer's
+    /// COMPLETE-clause span. A partially-consumed rider sentence yields no
+    /// span, so even with the typed carrier present the " if " stays visible to
+    /// the residual scan. The reach guard in the same test proves the same
+    /// evidence suppresses the complete sentence, so this negative cannot pass
+    /// vacuously.
+    #[test]
+    fn partial_gains_rider_sentence_stays_warned() {
+        let parsed = parsed_with_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Negative — the Dash-style partial body (a mid-list stop) with the
+        // typed carrier present.
+        let text = "You may cast that card without paying its mana cost. If you cast a creature \
+                    spell this way, it gains haste, and it's returned from the battlefield to \
+                    its owner's hand at the beginning of the next end step. Activate only as a \
+                    sorcery.";
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "a partial rider sentence must keep its Condition_If warning even with the typed \
+             carrier present, got {diagnostics:?}"
+        );
+
+        // Reach guard — the same evidence suppresses the COMPLETE sentence
+        // (the sibling positive's fixture), so the negative is discriminating.
+        let complete = gains_rider_unit_text();
+        let cleaned = complete.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &complete, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the complete sentence with the same evidence must suppress, \
+             got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: the delivering walk is TRANSITIVE. The Tomb of
+    /// Aclazotz shape nests the gains rider under the counter rider
+    /// (`CastFromZone` → `AddPendingETBCounters` → APEM), which the runtime
+    /// `cast_from_zone_enters_with_modifications` walks at depth 1. A depth-0-only
+    /// chain test would fail this row; the card's own clearance comes from its
+    /// condition slot, so this hand-built fixture is the only discriminator for
+    /// transitivity.
+    #[test]
+    fn gains_rider_carrier_is_delivered_through_a_nested_counter_rider() {
+        let parsed = parsed_with_nested_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // White-box reach guard: the transitive walk finds the depth-1 carrier
+        // carrying the sentence's own predicate.
+        assert!(
+            any_ability_has_delivered_gains_rider(&parsed, Some(&gains_rider_creature_predicate())),
+            "the walk must find the carrier nested under the counter rider"
+        );
+        // Carrier-present reach guard: the APEM node exists in this tree, so the
+        // clear below cannot pass by an empty fixture.
+        assert!(
+            evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })),
+            "the nested fixture must carry the APEM node"
+        );
+
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "the depth-1 delivered carrier must clear the rider sentence, got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: a represented-but-undelivered carrier keeps the
+    /// warning. The Mysterious Sphere's shape is a `CastCopyOfCard` parent; the
+    /// copy route RECORDS the rider as permission metadata and never applies it
+    /// (`game/effects/mod.rs`: "records, it does not apply"), so this carrier is
+    /// not delivered and the sentence must stay honest red. Revert-fail: the
+    /// pre-fix tree-global probe (an APEM under an `effect` key) clears it.
+    #[test]
+    fn cast_copy_of_card_gains_rider_carrier_keeps_warning() {
+        let parsed = parsed_with_copy_gains_rider_carrier();
+        let evidence = UnitEvidence::of(&parsed);
+
+        // Reach guard: the APEM node is present in this tree, so the negative
+        // below cannot pass by a missing carrier.
+        assert!(
+            evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })),
+            "the copy-parent fixture must carry the APEM node"
+        );
+
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+        let mut diagnostics = Vec::new();
+        detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+        assert!(
+            has_condition_if_swallow(&diagnostics),
+            "a carrier under a CastCopyOfCard parent must keep the warning, got {diagnostics:?}"
+        );
+
+        // Paired reach guard — the same text with the delivered fixture clears.
+        let delivered = parsed_with_gains_rider_carrier();
+        let delivered_evidence = UnitEvidence::of(&delivered);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            &text,
+            &delivered_evidence,
+            &delivered,
+            &mut diagnostics,
+        );
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the same text with a delivered carrier must clear, got {diagnostics:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 611.2a: a carrier outside any `CastFromZone` sub-chain
+    /// keeps the warning. Two hostile shapes: a bare carrier next to a
+    /// `CastFromZone` host that carries no rider (co-present authority must not
+    /// clear the sentence), and the direct-parsed `FreeCastFromZones` +
+    /// sibling-rider shape (BF-P2-9), which has no delivering reader at all.
+    /// Revert-fail: the pre-fix tree-global probe clears both fixtures.
+    #[test]
+    fn gains_rider_carrier_outside_cast_from_zone_chain_keeps_warning() {
+        let text = gains_rider_unit_text();
+        let cleaned = text.to_ascii_lowercase();
+
+        for (label, parsed) in [
+            ("sibling", parsed_with_sibling_gains_rider_carrier()),
+            ("free-cast", parsed_with_free_cast_gains_rider_carrier()),
+        ] {
+            let evidence = UnitEvidence::of(&parsed);
+
+            // Reach guard: the APEM node is present in this tree, so each
+            // negative below cannot pass by a missing carrier.
+            assert!(
+                evidence.any_effect(|e| matches!(e, Effect::AddPendingEntersModifications { .. })),
+                "{label}: the fixture must carry the APEM node"
+            );
+
+            let mut diagnostics = Vec::new();
+            detect_condition_if(&cleaned, &text, &evidence, &parsed, &mut diagnostics);
+            assert!(
+                has_condition_if_swallow(&diagnostics),
+                "{label}: a carrier outside any CastFromZone sub-chain must keep the \
+                 warning, got {diagnostics:?}"
+            );
+        }
+
+        // Paired reach guard — the same text with the delivered fixture clears.
+        let delivered = parsed_with_gains_rider_carrier();
+        let delivered_evidence = UnitEvidence::of(&delivered);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            &text,
+            &delivered_evidence,
+            &delivered,
+            &mut diagnostics,
+        );
+        assert!(
+            !has_condition_if_swallow(&diagnostics),
+            "reach guard: the same text with a delivered carrier must clear, got {diagnostics:?}"
+        );
+    }
+
+    /// Strago and Relm's verbatim Oracle text (Scryfall / MTGJSON), the same
+    /// string pinned by the whole-card parser test in `oracle_effect/tests.rs`.
+    const STRAGO_ORACLE_TEXT: &str = "Sketch and Lore — {2}{R}, {T}: Target opponent exiles cards from the top of their library until they exile an instant, sorcery, or creature card. You may cast that card without paying its mana cost. If you cast a creature spell this way, it gains haste and \"At the beginning of the end step, sacrifice this creature.\" Activate only as a sorcery.";
+
+    /// CR 608.2c + CR 611.2a: production-path positive — the live Strago parse
+    /// must carry the rider in a `CastFromZone` chain (the delivering shape) and
+    /// must not be flagged as a swallowed `Condition_If`. This attributes R1's
+    /// measured clear to the re-pointed exemption: it fails if the walk misses
+    /// the live shape or if the parser stops parenting the rider.
+    #[test]
+    fn strago_and_relm_gains_rider_is_not_swallowed_condition() {
+        let parsed = parse_oracle_text(
+            STRAGO_ORACLE_TEXT,
+            "Strago and Relm",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Wizard".to_string()],
+        );
+        assert!(
+            any_ability_has_delivered_gains_rider(&parsed, Some(&gains_rider_creature_predicate())),
+            "the live Strago parse must carry the rider in a CastFromZone chain"
+        );
+        assert!(
+            !has_condition_if_swallow(&parsed.parse_warnings),
+            "Strago's delivered rider must not be flagged as a swallowed Condition_If; \
+             warnings: {:?}",
+            parsed.parse_warnings
         );
     }
 
@@ -14982,5 +16015,130 @@ mod detect_condition_if_replacement_exemption_tests {
             result, " if a player would sacrifice a permanent, exile it instead.",
             "only the represented sentence should have been stripped"
         );
+    }
+}
+
+#[cfg(test)]
+mod distributed_x_cost_if_exemption_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Unbound Flourishing, verbatim from MTGJSON.
+    const UNBOUND_FLOURISHING: &str = "Whenever you cast a permanent spell with a mana cost that contains {X}, double the value of X.\nWhenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+    /// Unbound Flourishing's second line, verbatim.
+    const UNBOUND_COPY_LINE: &str = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy.";
+    /// Vazi, Keen Negotiator's third line, verbatim: a cast-or-activate
+    /// intervening-if that is not the `{X}`-in-cost restatement.
+    const VAZI_LINE: &str = "Whenever an opponent casts a spell or activates an ability, if mana from a Treasure was spent to cast it or activate it, put a +1/+1 counter on target creature, then draw a card.";
+
+    /// Evidence carrying both folded halves of the distributed condition.
+    const FOLDED: &str = r#"{"triggers":[
+        {"valid_card":{"type":"Typed","properties":[{"type":"HasXInManaCost"}]}},
+        {"valid_card":{"type":"Typed","properties":[{"type":"HasXInActivationCost"}]}}
+    ]}"#;
+
+    fn has_condition_if_swallow(diagnostics: &[OracleDiagnostic]) -> bool {
+        diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                OracleDiagnostic::SwallowedClause { detector, .. } if detector == "Condition_If"
+            )
+        })
+    }
+
+    fn no_parsed_abilities() -> ParsedAbilities {
+        ParsedAbilities {
+            abilities: Vec::new(),
+            triggers: Vec::new(),
+            statics: Vec::new(),
+            replacements: Vec::new(),
+            extracted_keywords: Vec::new(),
+            modal: None,
+            additional_cost: None,
+            casting_restrictions: Vec::new(),
+            casting_options: Vec::new(),
+            solve_condition: None,
+            strive_cost: None,
+            parse_warnings: Vec::new(),
+        }
+    }
+
+    /// Runs Detector G on one unit's text, cleaned as `check_swallowed_clauses`
+    /// cleans it, against `evidence_json`.
+    fn condition_if_fires(text: &str, evidence_json: &str) -> bool {
+        let cleaned = strip_parens(&text.to_ascii_lowercase());
+        let evidence = UnitEvidence::from_json_for_test(evidence_json);
+        let mut diagnostics = Vec::new();
+        detect_condition_if(
+            &cleaned,
+            text,
+            &evidence,
+            &no_parsed_abilities(),
+            &mut diagnostics,
+        );
+        has_condition_if_swallow(&diagnostics)
+    }
+
+    /// CR 603.4: Unbound Flourishing's line-2 intervening-if is folded into each
+    /// half's event filter, so the real parse raises no swallowed `Condition_If`.
+    /// Reach guards: the line lowers to its spell-cast and activation halves and
+    /// nothing on the card is unimplemented, so the per-unit audit is not
+    /// skipped. Paired positive: the same line with the condition left unfolded
+    /// (no `HasXIn*Cost` evidence) still warns.
+    #[test]
+    fn unbound_copy_line_is_not_a_swallowed_condition_if() {
+        let parsed = parse_oracle_text(
+            UNBOUND_FLOURISHING,
+            "Unbound Flourishing",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        let modes: Vec<&TriggerMode> = parsed.triggers.iter().map(|t| &t.mode).collect();
+        assert_eq!(
+            modes,
+            vec![
+                &TriggerMode::SpellCast,
+                &TriggerMode::SpellCast,
+                &TriggerMode::AbilityActivated
+            ]
+        );
+        assert!(
+            !any_ability_has_unimplemented(&parsed),
+            "reach: the audit must run over line 2: {parsed:?}"
+        );
+        assert!(
+            !has_condition_if_swallow(&parsed.parse_warnings),
+            "{:?}",
+            parsed.parse_warnings
+        );
+
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, "{}"));
+        assert!(!condition_if_fires(UNBOUND_COPY_LINE, FOLDED));
+    }
+
+    /// The exemption needs both folded properties: one half's evidence alone
+    /// does not represent a condition that names both cost slots.
+    #[test]
+    fn distributed_x_cost_if_needs_both_folded_halves() {
+        let mana_only =
+            r#"{"valid_card":{"type":"Typed","properties":[{"type":"HasXInManaCost"}]}}"#;
+        let activation_only =
+            r#"{"valid_card":{"type":"Typed","properties":[{"type":"HasXInActivationCost"}]}}"#;
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, mana_only));
+        assert!(condition_if_fires(UNBOUND_COPY_LINE, activation_only));
+        assert!(!condition_if_fires(UNBOUND_COPY_LINE, FOLDED));
+    }
+
+    /// Text-scoped: only the recognized restatement is removed, so another bare
+    /// " if " in the same unit still flags (SYNTHETIC: Unbound's line with a
+    /// trailing "if you control an artifact"; no printed card pairs the
+    /// restatement with a second condition), and an intervening-if the
+    /// combinator does not recognize (Vazi's, verbatim) is never exempted.
+    #[test]
+    fn distributed_x_cost_if_exempts_only_the_recognized_clause() {
+        let with_second_if = "Whenever you cast an instant or sorcery spell or activate an ability, if that spell's mana cost or that ability's activation cost contains {X}, copy that spell or ability. You may choose new targets for the copy if you control an artifact.";
+        assert!(condition_if_fires(with_second_if, FOLDED));
+        assert!(condition_if_fires(VAZI_LINE, FOLDED));
     }
 }

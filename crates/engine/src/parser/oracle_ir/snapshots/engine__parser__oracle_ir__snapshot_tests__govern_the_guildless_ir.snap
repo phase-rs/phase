@@ -253,7 +253,10 @@ expression: "&ir"
                 },
                 {
                   "type": "Reveal",
-                  "count": 1
+                  "count": {
+                    "type": "Fixed",
+                    "value": 1
+                  }
                 }
               ]
             },

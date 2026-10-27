@@ -38,6 +38,8 @@ watch_dir = [
   "broker-wasm/.cargo/config.toml",
   "../crates/lobby-broker/src",
   "../crates/lobby-broker/Cargo.toml",
+  "../crates/lobby-broker/build.rs",
+  "../protocol",
   "../crates/engine/src",
   "../crates/engine/Cargo.toml",
   "../Cargo.toml",

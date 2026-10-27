@@ -79,7 +79,7 @@
 // resource, locally, on engine-source edits. It is NOT checked in GitHub CI, and CI
 // enrollment is policy-blocked (`.agents/pr-review-policy.toml` `[hard_stops]` lists
 // `.github/workflows/**`). A green block in a merged commit is not a CI-verified block.
-// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:be25a33368402483
+// PROBE-PIN:BEGIN manifest=probe-pin/engine-census.toml digest=sha256:0553f51f3b146368
 // instrument rustc = rustc 1.97.0-nightly (0febdbab2 2026-04-18)
 // | probe | mutation | expect | verdict | firing assertion (anchor) | provenance |
 // |---|---|---|---|---|---|
@@ -91,7 +91,7 @@
 // | P5_relocation_preserves_the_count | scenario.rs ×1, interaction.rs ×1 | fail | fail | the COUNT can be preserved by a move that relocates a writer / ("engine/src/game/interaction.rs", 6) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P6_second_validate_pins_consumer | scenario.rs ×1 | fail | fail | expected `validate_pins(` to appear in production exactly twice | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // | P7_coverage_half_unpaired | decision_template.rs ×1 | fail | fail | validating pin VALUES without also running | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
-// | P8_authority_call_site_removed | engine.rs ×1 | fail | fail | expected 1 definition + 3 call sites / ("engine/src/game/engine.rs", 1) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
+// | P8_authority_call_site_removed | engine.rs ×1 | fail | fail | expected 1 definition + 4 call sites / ("engine/src/game/engine.rs", 2) | crates/engine/tests/integration/loop_shortcut_offer_writer_census.rs |
 // probe-pin validates only the lines between BEGIN and END. Prose outside is never checked.
 // PROBE-PIN:END
 
@@ -339,7 +339,11 @@ fn census(needle: &str) -> Vec<Hit> {
 /// `WaitingFor::chooses_play_before_announcement` in `types/game_state.rs`, names
 /// the variant only in its exhaustive `=> false` arm (not a pre-announcement
 /// prompt). A sixth benign read, `drive_mana_outlet_offer` in `analysis/corpus.rs`,
-/// reads the certificate of an offer `apply()` already minted and mints none.
+/// reads the certificate of an offer `apply()` already minted and mints none. A
+/// seventh benign read, the restore validator's `visit_waiting_for_chains` in
+/// `types/game_state.rs`, names the variant only in its exhaustive no-op arm: a
+/// loop-shortcut offer holds no suspended ability chain to check, and the walk
+/// mints no offer and reads none of its fields.
 ///
 /// R8 CONJUNCT 2, same test — pin VALUE-legality has exactly ONE production
 /// consumer (`analysis::decision_template::declaration_conforms`), that consumer
@@ -372,7 +376,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
 
     assert_eq!(
         (production.len(), in_test.len()),
-        (27, 29),
+        (28, 29),
         "CR 732.2a OFFER-WRITER SURFACE CHANGED (not re-measured — this number is an \
          INVARIANCE pin over the whole 5d U-series).\n\
          The three CERTIFICATION-PATH writers are `reconcile_terminal_result` (object-growth \
@@ -408,7 +412,7 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
             ("engine/src/game/play_trace.rs".to_string(), 1),
             ("engine/src/game/scenario.rs".to_string(), 1),
             ("engine/src/game/visibility.rs".to_string(), 3),
-            ("engine/src/types/game_state.rs".to_string(), 5),
+            ("engine/src/types/game_state.rs".to_string(), 6),
             ("phase-ai/src/decision_kind.rs".to_string(), 1),
             ("phase-ai/src/policies/loop_shortcut.rs".to_string(), 1),
             ("phase-ai/src/projection.rs".to_string(), 1),
@@ -505,12 +509,13 @@ fn the_loop_shortcut_offer_writer_surface_is_pinned_and_every_declare_site_valid
         authority_per_file.into_iter().collect::<Vec<_>>(),
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
-            ("engine/src/game/engine.rs", 2),
+            ("engine/src/game/engine.rs", 3),
             ("engine/src/game/interaction.rs", 1),
         ],
-        "expected 1 definition + 3 call sites: \
+        "expected 1 definition + 4 call sites: \
          `game/engine.rs::handle_declare_shortcut` (accept), \
          `game/engine.rs::build_bounded_declaration` (publish), \
+         `game/engine.rs::bounded_offer_tail` (publish the suggestion), \
          `game/interaction.rs::materialize_loop_shortcut_response` (human emit). A MISSING \
          call site is a path that publishes or accepts a declaration under its own predicate; \
          a NEW one is benign but must be named here rather than absorbed. \

@@ -20,7 +20,7 @@ use std::str::FromStr;
 use crate::parser::oracle_nom::error::{OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
-use nom::combinator::{all_consuming, eof, map, map_opt, opt, peek, recognize, rest, value};
+use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value};
 use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
@@ -1041,21 +1041,6 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    // "the number of card types among cards in all graveyards"
-    // "the number of cards in your opponents' graveyards" / "cards in opponents' graveyards"
-    if text.contains("cards in your opponents' graveyards")
-        || text.contains("cards in opponents' graveyards")
-    {
-        return Some(QuantityExpr::Ref {
-            qty: QuantityRef::ZoneCardCount {
-                zone: ZoneRef::Graveyard,
-                card_types: vec![],
-                scope: CountScope::Opponents,
-                filter: None,
-            },
-        });
-    }
-
     // "the number of noncreature spells they've cast this turn"
     // "the number of spells they've cast this turn"
     // "the number of spells you've cast this turn from anywhere other than your hand"
@@ -1492,10 +1477,38 @@ fn parse_dealt_damage_phrase(input: &str) -> nom::IResult<&str, (), OracleError<
     Ok((input, ()))
 }
 
+/// CR 122.1 + CR 608.2c: "[the number of] [<type>] counter[s] removed" — the
+/// shared recognizer behind every "counters removed [this way]" reference.
+///
+/// Anchored at the phrase start: a skipped leading word (a group size, Sage of
+/// Hours' "five counters removed this way") would silently drop the count, so
+/// a leading group size declines here and is left to the for-each expression
+/// grammar. The `not` guard is required because `parse_counter_type_typed`'s
+/// open `Generic` arm would otherwise accept "five" as a counter type.
 fn parse_counters_removed_phrase(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (input, _) = opt(take_until("counter")).parse(input)?;
-    let (input, _) = alt((tag("counters removed"), tag("counter removed"))).parse(input)?;
-    Ok((input, ()))
+    fn counter_noun(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
+        alt((tag("counters"), tag("counter"))).parse(input)
+    }
+    value(
+        (),
+        (
+            opt(alt((tag("the number of "), tag("number of ")))),
+            not(nom_quantity::parse_for_each_group_size),
+            alt((
+                value(
+                    (),
+                    (
+                        nom_primitives::parse_counter_type_typed,
+                        tag(" "),
+                        counter_noun,
+                    ),
+                ),
+                value((), counter_noun),
+            )),
+            tag(" removed"),
+        ),
+    )
+    .parse(input)
 }
 
 /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Parse "[your]
@@ -2479,9 +2492,10 @@ fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
 /// the count in a downstream effect (Coalition Relic, Storage Counter cycle).
 ///
 /// We accept the singular and plural forms with or without a leading
-/// counter-type word. The combinator is run at every word boundary so the
-/// surrounding clause can be either "counter removed this way",
-/// "counters removed this way", or "<type> counter[s] removed this way".
+/// counter-type word. The combinator is anchored at the phrase start (a
+/// skipped leading group size would drop the count) and accepts
+/// "counter removed this way", "counters removed this way", or
+/// "<type> counter[s] removed this way".
 /// The counter-type word, when present, is intentionally NOT extracted —
 /// the resolved quantity is whatever the parent `Effect::RemoveCounter`
 /// removed, and the parent already restricts by counter type.
@@ -2681,17 +2695,15 @@ fn parse_destroyed_or_sacrificed_this_way_quantity(lower: &str) -> Option<Quanti
     }
 }
 
+/// CR 122.1 + CR 608.2c: "[<type>] counter[s] removed this way", anchored at
+/// the phrase start (see [`parse_counters_removed_phrase`]).
 fn try_parse_counters_removed_this_way(lower: &str) -> bool {
-    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
-        let (rest, _) = alt((
-            value((), tag::<_, _, OracleError<'_>>("counters")),
-            value((), tag::<_, _, OracleError<'_>>("counter")),
-        ))
-        .parse(input)?;
-        let (rest, _) = tag(" removed this way").parse(rest)?;
-        Ok((rest, ()))
-    })
-    .is_some()
+    (
+        parse_counters_removed_phrase,
+        tag::<_, _, OracleError<'_>>(" this way"),
+    )
+        .parse(lower)
+        .is_ok()
 }
 
 /// Parse the clause after "for each" into a `QuantityExpr`, supporting
@@ -2782,6 +2794,10 @@ fn parse_for_each_clause_expr_with_parser(
         return Some(expr);
     }
 
+    if let Some(expr) = parse_for_each_grouped_clause_expr_with_parser(clause, parse_clause) {
+        return Some(expr);
+    }
+
     fn segment(i: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
@@ -2868,6 +2884,33 @@ fn parse_for_each_short_of_clause_expr_with_parser(
 /// [`parse_for_each_short_of_clause_expr_with_parser`].
 pub(crate) fn parse_for_each_short_of_clause_expr(clause: &str) -> Option<QuantityExpr> {
     parse_for_each_short_of_clause_expr_with_parser(clause, parse_for_each_clause)
+}
+
+/// CR 107.1 + CR 608.2c: "for each N <things>" counts complete groups of N —
+/// floor(count / N). Sage of Hours: "For each five counters removed this way,
+/// take an extra turn after this one." The group size is the shared
+/// [`nom_quantity::parse_for_each_group_size`]; the counted clause is parsed by
+/// the caller's reference parser, which itself declines a leading group size,
+/// so "for each N M …" is not accepted. No partial acceptance: if the counted
+/// clause does not parse, this returns `None` and the reference level declines
+/// the whole clause too.
+fn parse_for_each_grouped_clause_expr_with_parser(
+    input: &str,
+    parse_clause: impl Fn(&str) -> Option<QuantityRef>,
+) -> Option<QuantityExpr> {
+    let (counted, group) = nom_quantity::parse_for_each_group_size(input).ok()?;
+    let qty = parse_clause(counted)?;
+    Some(QuantityExpr::DivideRounded {
+        inner: Box::new(QuantityExpr::Ref { qty }),
+        divisor: group,
+        rounding: RoundingMode::Down,
+    })
+}
+
+/// CR 107.1 + CR 608.2c: the leading-prefix entry for
+/// [`parse_for_each_grouped_clause_expr_with_parser`].
+pub(crate) fn parse_for_each_grouped_clause_expr(clause: &str) -> Option<QuantityExpr> {
+    parse_for_each_grouped_clause_expr_with_parser(clause, parse_for_each_clause)
 }
 
 /// CR 109.4 + CR 400.1 + CR 608.2c: Parse an anaphoric hand-card union like
@@ -3440,6 +3483,14 @@ fn parse_for_each_clause_with_they_controller(
     ctx: &ParseContext,
 ) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
+    let lower = clause.to_ascii_lowercase();
+
+    // CR 107.1: a QuantityRef cannot express "complete groups of N"; a leading
+    // group size belongs to the for-each expression grammar, so ref-only
+    // consumers decline it.
+    if nom_quantity::parse_for_each_group_size(&lower).is_ok() {
+        return None;
+    }
 
     if let Some(qty) = parse_for_each_kicker_count(clause) {
         return Some(qty);
@@ -3458,7 +3509,6 @@ fn parse_for_each_clause_with_they_controller(
     // activated ability whose cost removed counters scales the effect without
     // an explicit "this way". Dispatches to `PreviousEffectAmount`, same runtime
     // channel as "counter removed this way" (Coalition Relic class).
-    let lower = clause.to_ascii_lowercase();
     if all_consuming(parse_counters_removed_phrase)
         .parse(lower.as_str())
         .is_ok()
@@ -4818,6 +4868,72 @@ mod tests {
         }
     }
 
+    /// CR 107.1 + CR 608.2c: a leading group size N ≥ 2 divides the counted
+    /// clause at the expression level and is declined at the reference level,
+    /// which cannot express the grouping.
+    #[test]
+    fn for_each_group_of_n_divides_at_the_expression_level_and_declines_as_a_ref() {
+        let previous_effect_amount = QuantityRef::PreviousEffectAmount {
+            channel: crate::types::ability::DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
+        };
+        assert_eq!(
+            parse_for_each_clause("five counters removed this way"),
+            None
+        );
+        assert_eq!(
+            parse_for_each_clause_expr("five counters removed this way"),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: previous_effect_amount.clone(),
+                }),
+                divisor: 5,
+                rounding: RoundingMode::Down,
+            })
+        );
+        assert_eq!(
+            parse_for_each_grouped_clause_expr("five counters removed this way"),
+            parse_for_each_clause_expr("five counters removed this way")
+        );
+
+        let creatures = parse_for_each_clause("creatures you control")
+            .expect("reach: the counted clause parses on its own");
+        assert_eq!(parse_for_each_clause("two creatures you control"), None);
+        assert_eq!(
+            parse_for_each_clause_expr("two creatures you control"),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref { qty: creatures }),
+                divisor: 2,
+                rounding: RoundingMode::Down,
+            })
+        );
+
+        // "the number of five counters removed this way" is not a grouping
+        // construct: it declines (no reference at all) rather than reading the
+        // bare count or another "the number of …" count.
+        assert_eq!(
+            parse_quantity_ref("the number of five counters removed this way"),
+            None
+        );
+        assert_eq!(
+            parse_quantity_ref("the number of counters removed this way"),
+            Some(previous_effect_amount)
+        );
+
+        // N = 1 and non-numeral leads are unchanged; "two-headed" is not a group.
+        assert_eq!(
+            parse_for_each_clause_expr("creature you control"),
+            parse_for_each_clause("creature you control").map(|qty| QuantityExpr::Ref { qty })
+        );
+        assert!(nom_quantity::parse_for_each_group_size("two-headed giant").is_err());
+        assert!(nom_quantity::parse_for_each_group_size("one creature").is_err());
+        assert!(nom_quantity::parse_for_each_group_size("a creature").is_err());
+        assert_eq!(
+            nom_quantity::parse_for_each_group_size("12 cards").ok(),
+            Some(("cards", 12))
+        );
+    }
+
     #[test]
     fn quantity_ref_number_of_counters_removed_this_way_is_previous_effect_amount() {
         let qty = parse_quantity_ref("the number of study counters removed this way").unwrap();
@@ -5213,6 +5329,110 @@ mod tests {
                     .expect("statically valid property aggregate")
                 ),
             }
+        );
+    }
+
+    /// The whole-phrase reading: one `ZoneCardCount` over the opponents' graveyards.
+    fn opponents_graveyard_zone_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Graveyard,
+                card_types: vec![],
+                scope: CountScope::Opponents,
+                filter: None,
+            },
+        }
+    }
+
+    /// CR 604.3 + CR 208.2a + CR 404.1 + CR 102.2/102.3: preservation and reach
+    /// guard for the whole-phrase reading. Passes before and after the
+    /// substring fallback arm is removed.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_whole_phrase_reads_zone_count() {
+        for phrase in [
+            "the number of cards in your opponents' graveyards",
+            "the number of cards in opponents' graveyards",
+            "the number of cards in your opponents' graveyards.",
+            "cards in your opponents' graveyards",
+        ] {
+            assert_eq!(
+                parse_cda_quantity(phrase),
+                Some(opponents_graveyard_zone_count()),
+                "{phrase}"
+            );
+        }
+    }
+
+    /// CR 614.1c + CR 122.6: an enters-with amount the parser cannot read must
+    /// fail closed. The shared nom grammar requires full consumption, so an
+    /// extremum head, a supertype qualifier, or a trailing relative clause must
+    /// decline the whole phrase rather than leave a truncated zone count.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_extended_text_fails_closed() {
+        // Positive reach guard: the unextended phrase is still read.
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards"),
+            Some(opponents_graveyard_zone_count())
+        );
+        for phrase in [
+            "the greatest number of cards an opponent has drawn this turn among cards in your opponents' graveyards",
+            "the greatest number of cards an opponent has drawn this turn among cards in opponents' graveyards",
+            "the number of nonbasic land cards in your opponents' graveyards",
+            "the number of cards in your opponents' graveyards that were put there from the battlefield this turn",
+        ] {
+            assert_eq!(parse_cda_quantity(phrase), None, "{phrase}");
+        }
+    }
+
+    /// The arithmetic forms compose over the whole-phrase reading instead of
+    /// being shadowed by a bare substring count.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_composes_in_arithmetic() {
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards plus 1"),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(opponents_graveyard_zone_count()),
+                offset: 1,
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity(
+                "the number of cards in your hand plus the number of cards in your opponents' graveyards",
+            ),
+            Some(QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    opponents_graveyard_zone_count(),
+                ],
+            })
+        );
+    }
+
+    /// CR 205.2a + CR 604.3: Nighthawk Scavenger's "1 plus the number of card
+    /// types among cards in your opponents' graveyards" is the preserved
+    /// sibling — the leading offset arm reads the distinct-card-type count
+    /// directly and is unaffected by the whole-phrase arm.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_card_types_among_reads_distinct_types() {
+        assert_eq!(
+            parse_cda_quantity(
+                "1 plus the number of card types among cards in your opponents' graveyards",
+            ),
+            Some(QuantityExpr::Offset {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Opponents,
+                        },
+                    },
+                }),
+                offset: 1,
+            })
         );
     }
 
@@ -9035,6 +9255,7 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::CreatureTypes,
+                restrict: None,
             })
         );
     }
@@ -9051,7 +9272,24 @@ mod tests {
                     scope: CountScope::All,
                 },
                 exclude: SubtypeExclusion::None,
+                restrict: None,
             })
+        );
+    }
+
+    /// CR 205.3 scope cut: unprinted category heads fail closed — "land types"
+    /// and "artifact types" have no producer (only the attested creature /
+    /// planeswalker heads bind) and must stay `None`. Reach-guard: the P2/R4
+    /// positives pass in the same run.
+    #[test]
+    fn cda_unprinted_category_heads_fail_closed() {
+        assert_eq!(
+            parse_cda_quantity("the number of land types among lands you control"),
+            None
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of artifact types among artifacts you control"),
+            None
         );
     }
 
@@ -9070,9 +9308,11 @@ mod tests {
         );
     }
 
-    /// Honest gaps: ETB-snapshot and flavor-text CDA tails have no live ref and
-    /// MUST remain `None` (no green-wash). Forcing a live ref would misread
-    /// these (a live recount reads 0 for sacrificed-Forest / life-paid cards).
+    /// Honest gaps: sacrificed-Forest-style ETB snapshots (which would need a
+    /// live recount that reads 0) and flavor-text CDA tails have no live ref
+    /// and MUST remain `None` (no green-wash). Minion of the Wastes is NOT in
+    /// this class: its "life paid" ref is a pre-entry `ChosenNumber` LATCH
+    /// (correct by construction, not a live recount), so it parses below.
     #[test]
     fn cda_gapped_cards_remain_unparsed() {
         // Graveyard Busybody — "cards with flavor text in your graveyards"
@@ -9085,8 +9325,11 @@ mod tests {
             parse_cda_quantity("the number of Forests sacrificed as it entered"),
             None
         );
-        // Minion of the Wastes — "the life paid as it entered" (ETB snapshot)
-        assert_eq!(parse_cda_quantity("the life paid as it entered"), None);
+        // Minion of the Wastes — "the life paid as it entered" (pre-entry latch)
+        assert_eq!(
+            parse_cda_quantity("the life paid as it entered"),
+            ref_of(QuantityRef::ChosenNumber)
+        );
     }
 
     /// CR 402.1 + CR 109.5 (issue #5637): "for each opponent who has one or fewer

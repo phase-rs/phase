@@ -339,7 +339,7 @@ export function formatKeywordManaCost(cost: ManaCost): string {
 /** Keywords whose payload is a bare ManaCost. */
 const MANA_COST_KEYWORDS = new Set([
   "Unearth", "Reconfigure", "Kicker", "Equip", "Ninjutsu", "CommanderNinjutsu",
-  "Prowl", "Morph", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
+  "Prowl", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
   "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
   "Spectacle", "Surge", "Encore", "Entwine", "Outlast", "Scavenge", "Fortify",
   "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
@@ -353,7 +353,7 @@ const MANA_COST_KEYWORDS = new Set([
  */
 const MANA_OR_NON_MANA_COST_KEYWORDS = new Set([
   "Bestow", "Embalm", "Eternalize", "Cycling", "Flashback", "Escape", "Evoke",
-  "Buyback", "Echo", "Blitz",
+  "Buyback", "Echo", "Blitz", "Morph",
 ]);
 
 /** Keywords whose payload is an AbilityCost. */
@@ -496,7 +496,18 @@ function formatWard(val: unknown): string {
   const w = val as { type: string; data?: unknown };
   if (w.type === "Mana") return formatKeywordManaCost(w.data as ManaCost);
   if (w.type === "PayLife") return `pay ${w.data} life`;
-  if (w.type === "DiscardCard") return "discard a card";
+  if (w.type === "Discard") {
+    const d = w.data as
+      | { count: number; filter: unknown; selection: "Chosen" | "Random" }
+      | undefined;
+    if (!d || d.filter != null) return "";
+    return i18n.t(
+      d.selection === "Random"
+        ? "game:keywordDetail.wardDiscardAtRandom"
+        : "game:keywordDetail.wardDiscard",
+      { count: d.count },
+    );
+  }
   if (w.type === "Sacrifice") {
     const d = w.data as { count: number; filter: { type: string } } | undefined;
     if (d?.filter.type !== "Any") return "";

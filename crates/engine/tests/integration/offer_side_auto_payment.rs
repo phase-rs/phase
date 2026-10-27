@@ -1270,7 +1270,7 @@ fn payable_morph_exact_cast_binds_face_down_three_and_completes() {
     let morph = scenario
         .add_creature_to_hand(P0, "Offer-Probe Morph", 4, 4)
         .with_mana_cost(ManaCost::NoCost)
-        .with_keyword(Keyword::Morph(ManaCost::generic(5)))
+        .with_keyword(Keyword::morph(ManaCost::generic(5)))
         .id();
     scenario.with_mana_pool(
         P0,
@@ -1319,7 +1319,7 @@ fn exile_alt_cost_permission(
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }

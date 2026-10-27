@@ -107,7 +107,7 @@ describe("getKeywordDetail", () => {
   it("formats Ward variants (adjacently-tagged serde)", () => {
     expect(getKeywordDetail({ Ward: { type: "Mana", data: { type: "Cost", shards: [], generic: 2 } } })).toBe("{2}");
     expect(getKeywordDetail({ Ward: { type: "PayLife", data: 3 } })).toBe("pay 3 life");
-    expect(getKeywordDetail({ Ward: { type: "DiscardCard" } })).toBe("discard a card");
+    expect(getKeywordDetail({ Ward: { type: "Discard", data: { count: 1, filter: null, selection: "Chosen" } } })).toBe("discard a card");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 1, filter: { type: "Any" } } } })).toBe("sacrifice a permanent");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 2, filter: { type: "Any" } } } })).toBe("sacrifice 2 permanents");
     expect(getKeywordDetail({ Ward: { type: "Sacrifice", data: { count: 1, filter: { type: "Typed", type_filters: ["Creature"] } } } })).toBe("");
@@ -243,6 +243,7 @@ describe("keyword detail over the engine's keyword payload golden", () => {
   const wire = payloadWire as unknown as {
     samples: Keyword[];
     parsed_ward: Record<string, Keyword>;
+    parsed_ward_discard: Record<string, Keyword>;
   };
   const samples = wire.samples;
   const keyOf = (kw: Keyword) => Object.keys(kw)[0];
@@ -298,6 +299,8 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     expect(detailOf("Ward", isType("Waterbend"))).toBe("Ward waterbend {4}");
     expect(detailOf("Blitz", isType("NonMana"))).toBe("Blitz Pay 3 life");
     expect(detailOf("Blitz", isType("Mana"))).toBe("Blitz {2}{R}");
+    expect(detailOf("Morph", isType("NonMana"))).toBe("Morph Pay 3 life");
+    expect(detailOf("Morph", isType("Mana"))).toBe("Morph {2}{R}");
     expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
       "Foretell its mana cost reduced by {2}",
     );
@@ -334,6 +337,30 @@ describe("keyword detail over the engine's keyword payload golden", () => {
       playerCounters: "Ward",
     });
   });
+
+  // CR 702.21a + CR 701.9: the count and random-selection axes of a discard ward
+  // cost reach the display; a card-type-filtered discard shows no detail rather
+  // than a misleading "discard a card". Oracle text → engine parser → serde →
+  // this formatter.
+  it("renders a parsed discard ward with its count and selection", () => {
+    const parsed = (oracle: string) => {
+      const kw = wire.parsed_ward_discard[oracle];
+      expect(kw, oracle).toBeDefined();
+      return getKeywordDisplayText(kw);
+    };
+    expect(Object.keys(wire.parsed_ward_discard)).toHaveLength(4);
+    expect({
+      plain: parsed("Ward—Discard a card."),
+      random: parsed("Ward—Discard a card at random."),
+      counted: parsed("Ward—Discard two cards."),
+      filtered: parsed("Ward—Discard an enchantment, instant, or sorcery card."),
+    }).toEqual({
+      plain: "Ward discard a card",
+      random: "Ward discard a card at random",
+      counted: "Ward discard 2 cards",
+      filtered: "Ward",
+    });
+  });
 });
 
 describe("keyword AbilityCost detail", () => {
@@ -357,6 +384,9 @@ describe("keyword AbilityCost detail", () => {
     ).toBe("{1}{G}, Pay 3 life");
     expect(
       getKeywordDetail({ Blitz: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
+    ).toBe("{1}{G}, Pay 3 life");
+    expect(
+      getKeywordDetail({ Morph: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
     ).toBe("{1}{G}, Pay 3 life");
   });
 

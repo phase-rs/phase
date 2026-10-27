@@ -1,17 +1,18 @@
 use crate::types::ability::{
-    cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousModification, CopyCountStatus,
-    DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition, KeywordAction,
-    PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext, SubAbilityLink,
-    TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef, TargetSelectionMode,
-    TriggerCondition, TriggerDefinitionRef,
+    cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
+    CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
+    KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext,
+    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
+    TargetSelectionMode, TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, CastingVariant, DepartedStackSpell, ExileLink, ExileLinkKind,
-    GameState, MayTriggerAutoChoiceKey, PendingCounterPostAction, PendingSpellResolution,
-    StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext, WaitingFor,
+    GameState, MayTriggerAutoChoiceKey, OwedSpellFinalPart, PendingCounterPostAction,
+    PendingSpellResolution, StackEntry, StackEntryKind, StackPaidSnapshot, TriggerSourceContext,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, TriggerFiring};
 use crate::types::player::PlayerId;
@@ -44,18 +45,33 @@ pub enum ResolutionCarrierError {
 ///
 /// CR 608.2: Exactly one stack object resolves at a time. Refuses, leaving the
 /// installed carrier and its firing untouched, when one is already resolving.
+/// CR 608.2n: a final part still owed belongs to the carrier that owes it; a
+/// leftover marker is a contract breach and refuses like a leftover carrier.
 pub(super) fn begin_resolving_stack_entry(
     state: &mut GameState,
     entry: StackEntry,
     firing: Option<TriggerFiring>,
 ) -> Result<(), ResolutionCarrierError> {
-    if state.resolving_stack_entry.is_some() || state.resolving_trigger_firing.is_some() {
+    if state.resolving_stack_entry.is_some()
+        || state.resolving_trigger_firing.is_some()
+        || state.resolving_spell_final_part.is_some()
+    {
         return Err(ResolutionCarrierError::AlreadyResolving);
     }
     debug_assert_eq!(
         matches!(&entry.kind, StackEntryKind::TriggeredAbility { .. }),
         firing.is_some()
     );
+    // CR 400.7 + CR 608.2h: pin the exact object this carrier resolves while it is
+    // still on the stack — the incarnation whose stack-exit snapshot is its last
+    // known information if it leaves mid-resolution (CR 608.2m). An entry whose id
+    // names no object row in `Zone::Stack` (an ability, whose controller CR 113.8
+    // fixes) pins nothing.
+    state.resolving_stack_object = state
+        .objects
+        .get(&entry.id)
+        .filter(|object| object.zone == Zone::Stack)
+        .map(crate::types::identifiers::ObjectIncarnationRef::from_object);
     state.resolving_stack_entry = Some(entry);
     state.resolving_trigger_firing = firing;
     Ok(())
@@ -72,6 +88,10 @@ pub(super) fn finish_resolving_stack_entry(
 ) {
     let entry = state.resolving_stack_entry.take();
     let firing = state.resolving_trigger_firing.take();
+    // CR 608.2n: an owed final part belongs to this carrier and ends with it.
+    state.resolving_spell_final_part = None;
+    // CR 608.2n: the resolution's object pin ends with its carrier.
+    state.resolving_stack_object = None;
     // CR 608.2c: the resolving stack entry owns every nested instruction-result
     // occurrence, including ones parked across replacement choices.
     state.return_result_frames.clear();
@@ -144,6 +164,10 @@ fn record_illegal_target_slots(
 
 /// Abandon the currently resolving family as one lifecycle unit. Prompt owners
 /// call this only after settling any events already completed by their cursor.
+///
+/// CR 608.2n: an instant or sorcery still owing its final part is not part of
+/// the abandoned family; its carrier and marker survive so the final-part
+/// authority delivers it once.
 pub(super) fn abandon_active_resolution_carrier(
     state: &mut GameState,
     disposition: super::lifecycle::DelayedTerminalDisposition,
@@ -152,10 +176,20 @@ pub(super) fn abandon_active_resolution_carrier(
     let _ = state
         .clear_active_ability_continuation()
         .expect("resolution abandonment cannot clear a buried ability continuation");
+    let owed_spell = spell_awaiting_final_part(state).is_some().then(|| {
+        (
+            state.resolving_stack_entry.take(),
+            state.resolving_spell_final_part.take(),
+            state.resolving_stack_object.take(),
+        )
+    });
     finish_resolving_stack_entry(state, disposition);
+    if let Some((entry, owed, object)) = owed_spell {
+        state.resolving_stack_entry = entry;
+        state.resolving_spell_final_part = owed;
+        state.resolving_stack_object = object;
+    }
     state.resolution_source_relatch = None;
-    // CR 608.2n: an abandoned resolution owes no final move any more.
-    state.deferred_spell_delivery = None;
     state.deferred_entry_events.clear();
     state.pending_token_battlefield_entry = None;
 }
@@ -200,9 +234,14 @@ fn push_to_stack_with_firing(
         StackEntryKind::ActivatedAbility { .. } | StackEntryKind::TriggeredAbility { .. }
     ) {
         if let Some(ability) = entry.ability_mut() {
-            // CR 400.7 + CR 113.7a: Capture the source incarnation for every
-            // activated or triggered ability, including non-transforming
-            // permanents. The transformation guard below has a narrower scope.
+            // CR 400.7 + CR 113.7a: Capture the as-placed source incarnation for
+            // every activated or triggered ability, including non-transforming
+            // permanents — the epoch after any self-moving cost was paid, which
+            // is what the source-reconstruction consumers reconstruct from. The
+            // announcement epoch rides its own field
+            // (`announced_source_incarnation`), captured by
+            // `record_activation_announcement` and never restamped here. The
+            // transformation guard below has a narrower scope.
             if ability.source_incarnation.is_none() {
                 ability
                     .set_source_incarnation_recursive(source_ref.map(|source| source.incarnation));
@@ -419,6 +458,67 @@ pub fn apply_resolved_stack_push(
         state.next_spell_announcement = state.next_spell_announcement.max(announcement.0);
     }
     Ok(())
+}
+
+/// The X a stack object had and has after a rewrite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct XRewrite {
+    pub(crate) from: u32,
+    pub(crate) to: u32,
+}
+
+/// CR 107.3a + CR 107.3i + CR 107.3k + CR 107.3m + CR 202.3e: the single
+/// authority that changes the value of X of a spell or activated ability
+/// already on the stack (CR 107.3c's note). It reads the current X and writes
+/// every channel together:
+/// - a spell: the object's `cost_x_paid` (CR 107.3m / CR 202.3e), its CR 601.2i
+///   paid snapshot `x_value` (read first by a resolving permanent's intrinsic
+///   counters), and its ability chain's `chosen_x` (CR 107.3i);
+/// - an activated ability: only its own chain's `chosen_x` (CR 107.3k — never
+///   the source object's cast X).
+///
+/// Triggered abilities and combat damage have no announced X (CR 107.3a names
+/// spells and activated abilities). A keyword-action entry (CR 113.3b) is an
+/// activated ability but carries no announced X: equip/crew/saddle/station
+/// costs have no {X} to announce, and a granted equip {X} is text-defined
+/// (CR 107.3c). Payment state is never
+/// touched (CR 601.2h: costs were paid while casting).
+pub(crate) fn rewrite_stack_object_x(
+    state: &mut GameState,
+    entry_id: ObjectId,
+    modify: impl FnOnce(u32) -> u32,
+) -> Option<XRewrite> {
+    let object_x = state.objects.get(&entry_id).and_then(|obj| obj.cost_x_paid);
+    let entry = state.stack.iter_mut().rev().find(|e| e.id == entry_id)?;
+    match &mut entry.kind {
+        // CR 107.3i: every instance of X on the spell shares one value, so the
+        // object, its paid snapshot and its ability chain move together.
+        StackEntryKind::Spell { ability, .. } => {
+            let from = object_x?;
+            let to = modify(from);
+            if let Some(a) = ability.as_mut() {
+                a.set_chosen_x_recursive(to);
+            }
+            if let Some(obj) = state.objects.get_mut(&entry_id) {
+                obj.cost_x_paid = Some(to);
+            }
+            if let Some(paid) = state.stack_paid_facts.get_mut(&entry_id) {
+                paid.x_value = Some(to);
+            }
+            Some(XRewrite { from, to })
+        }
+        // CR 107.3k: an activated ability's X is its own, independent of any X
+        // its source object has.
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            let from = ability.chosen_x?;
+            let to = modify(from);
+            ability.set_chosen_x_recursive(to);
+            Some(XRewrite { from, to })
+        }
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => None,
+    }
 }
 
 /// Installs one already-resolved CR 601.2i cast finalization verbatim.
@@ -640,8 +740,9 @@ fn remove_stack_entry_at_unobserved(
 /// cast was never finalized and has no CR 707.2 choices to remember. Called
 /// from the zone-exit path
 /// (`zones.rs::apply_zone_exit_cleanup`, before the `cast_occurrence` clear
-/// that would make this guard vacuous) and `remove_nonresolving_stack_entry_at`
-/// below — a resolution pop (`pop_top_stack_entry`) calls neither.
+/// that would make this guard vacuous) and, through `record_departed_stack_entry`,
+/// `remove_nonresolving_stack_entry_at` below — a resolution pop
+/// (`pop_top_stack_entry`) calls neither.
 pub(crate) fn record_departed_stack_spell(state: &mut GameState, entry: &StackEntry) {
     let StackEntryKind::Spell { .. } = &entry.kind else {
         return;
@@ -664,6 +765,36 @@ pub(crate) fn record_departed_stack_spell(state: &mut GameState, entry: &StackEn
         .insert(incarnation, record);
 }
 
+/// CR 701.6a + CR 113.3b + CR 608.2h: record a stack object removed without
+/// resolving (countered, or removed with its controller under CR 800.4a), as it last
+/// existed on the stack, for a trigger that still names it. The non-resolving-removal
+/// writer of both departed-stack tables, called only from
+/// `remove_nonresolving_stack_entry_at` (a departed spell is also recorded at its zone
+/// exit, `zones.rs::apply_zone_exit_cleanup`). A resolution pop records nothing: the
+/// object resolved. An end-the-turn exile
+/// (CR 724.1b, `pop_nonresolving_top_stack_entry`) records nothing either, because
+/// every trigger that could name the object is exiled in the same pass.
+fn record_departed_stack_entry(state: &mut GameState, entry: &StackEntry) {
+    match &entry.kind {
+        StackEntryKind::Spell { .. } => record_departed_stack_spell(state, entry),
+        // CR 113.1c + CR 113.7a: an activated ability on the stack is an object that
+        // exists independently of its source; its whole last-known state is its entry,
+        // kept under the id its activation event names (CR 602.2a).
+        StackEntryKind::ActivatedAbility { .. } => {
+            state
+                .departed_activated_abilities
+                .insert(entry.id, entry.clone());
+        }
+        // No trigger event names these as "that spell or ability": a spell-cast event
+        // names a spell, an activation event names an activated ability's entry, a
+        // keyword-action entry is named by no activation event, and combat damage is
+        // not an ability.
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => {}
+    }
+}
+
 /// Removes a stack entry for a non-resolution reason and observes the exact
 /// firing only after the entry and side tables have been settled.
 pub(super) fn remove_nonresolving_stack_entry_at(
@@ -673,7 +804,7 @@ pub(super) fn remove_nonresolving_stack_entry_at(
 ) -> Option<PoppedStackEntry> {
     let popped = remove_stack_entry_at_unobserved(state, index)?;
     release_departed_entry_reveals(state, &popped);
-    record_departed_stack_spell(state, &popped.entry);
+    record_departed_stack_entry(state, &popped.entry);
     if let Some(firing) = popped.trigger_firing {
         super::lifecycle::record_delayed_terminal(firing, disposition);
     }
@@ -1001,9 +1132,8 @@ pub(crate) fn restore_alternative_spell_normal_face(
 /// redirects (the Invoke Calamity rider) and board-wide RIP/Leyline redirects
 /// fire, then record a Rod of Absorption link and apply an exile-instead
 /// consequence rider when the spell landed in exile. Shared by `resolve_top`
-/// and the deferred delivery after a free-cast window
-/// (`deliver_deferred_spell`). A `NeedsChoice` result means the move is parked
-/// for a CR 616.1 ordering choice.
+/// and the deferred final part (`finish_deferred_spell_resolution`). A
+/// `NeedsChoice` result means the move is parked for a CR 616.1 ordering choice.
 fn deliver_resolved_spell_off_stack(
     state: &mut GameState,
     spell_id: ObjectId,
@@ -1122,55 +1252,6 @@ fn finish_spell_stack_exit(
             effects::change_zone::shuffle_library(state, owner, events);
         }
     }
-}
-
-/// CR 608.2n + CR 608.2g: deliver a spell whose move was held back while it was
-/// paused on its own free-cast window (`DeferredSpellDelivery`), once that
-/// window and the instructions behind it are done and its carrier is about to
-/// settle. A spell its own instructions already moved off the stack ("Exile
-/// Invoke Calamity") stays where they put it; its stack-exit bookkeeping still
-/// runs, as in `resolve_top`.
-pub(super) fn deliver_deferred_spell(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let Some(pending) = state.deferred_spell_delivery.clone() else {
-        return;
-    };
-    // Only the deferring spell's own carrier consumes the record; any other
-    // carrier leaves it in place.
-    let Some((controller, casting_variant)) = state
-        .resolving_stack_entry
-        .as_ref()
-        .filter(|entry| entry.id == pending.object_id)
-        .and_then(|entry| match &entry.kind {
-            StackEntryKind::Spell {
-                casting_variant, ..
-            } => Some((entry.controller, *casting_variant)),
-            StackEntryKind::ActivatedAbility { .. }
-            | StackEntryKind::TriggeredAbility { .. }
-            | StackEntryKind::KeywordAction { .. }
-            | StackEntryKind::CombatDamage { .. } => None,
-        })
-    else {
-        return;
-    };
-    state.deferred_spell_delivery = None;
-    // As in `resolve_top`: the default move is skipped for a spell its own
-    // instructions already moved, and a parked move returns before the
-    // stack-exit bookkeeping.
-    if spell_still_on_stack(state, pending.object_id)
-        && !matches!(
-            deliver_resolved_spell_off_stack(
-                state,
-                pending.object_id,
-                controller,
-                pending.destination,
-                events,
-            ),
-            ZoneMoveResult::Done
-        )
-    {
-        return;
-    }
-    finish_spell_stack_exit(state, pending.object_id, casting_variant, events);
 }
 
 /// CR 608.2n / CR 608.3 / CR 608.3e: Predicate guard for post-resolution
@@ -1363,6 +1444,52 @@ pub fn stack_object_controller(state: &GameState, entry: &StackEntry) -> PlayerI
         .objects
         .get(&entry.id)
         .map_or(entry.controller, |obj| obj.controller)
+}
+
+/// CR 109.4 + CR 113.8 + CR 400.7 + CR 608.2h + CR 608.2m + CR 613.1b: the
+/// controller of the object a resolution carrier (`state.resolving_stack_entry`)
+/// records, read now — for a decision the object owes after its resolution began
+/// (CR 800.4g's "controller of the object").
+///   * Still on the stack (a popped instant or sorcery keeps its object in
+///     `Zone::Stack` until its final part, CR 608.2n, and layer 2 re-applies to it
+///     through `LayerZoneObjectCache::ids_for`): the live, layer-derived
+///     controller. No caller of this authority resolves a paused permanent spell. The
+///     stack seed in `layers.rs` re-derives it for this carrier from the CR 112.2
+///     default every pass, so a layer-2 control change — or the end of one, as
+///     when a thief leaves the game (CR 800.4a) — is reflected here once layers are
+///     evaluated. `entry.controller` is that default, never the answer.
+///   * A spell that has left the stack while resolving (CR 608.2m — e.g. exiled
+///     with its departing owner or controller, CR 800.4a): it has no controller now
+///     (CR 109.4), so its last known controller as it left the stack (CR 608.2h) —
+///     the snapshot of the exact incarnation pinned when the carrier was installed
+///     (`GameState::resolving_stack_object`), read through
+///     `ability_utils::incarnation_controller`. Never the bare-id `lki_cache`: a
+///     later departure recorded under the same storage id (the exile of everything
+///     a departing owner owns, which moves the already-exiled card again)
+///     overwrites it.
+///   * An ability (no object row, so no pin, CR 113.8): `entry.controller`, fixed
+///     at activation or trigger; no card changes control of an ability on the
+///     stack.
+///
+/// A card that is again a live stack entry is a new object, not this resolution
+/// (the guard `resolving_instant_or_sorcery_on_stack` and the stack seed share);
+/// its pinned snapshot still answers for this resolution.
+pub(crate) fn resolving_object_controller(state: &GameState, entry: &StackEntry) -> PlayerId {
+    let recast = state.stack.iter().any(|live| live.id == entry.id);
+    match state.objects.get(&entry.id) {
+        Some(obj) if obj.zone == Zone::Stack && !recast => obj.controller,
+        Some(_) | None => state
+            .resolving_stack_object
+            .filter(|object| object.object_id == entry.id)
+            .and_then(|object| {
+                super::ability_utils::incarnation_controller(
+                    state,
+                    object.object_id,
+                    object.incarnation,
+                )
+            })
+            .unwrap_or(entry.controller),
+    }
 }
 
 /// CR 608.3 + CR 400.7d: Snapshot cast-link / target facts for a permanent spell
@@ -1727,8 +1854,474 @@ pub(crate) fn bind_resolving_ability_referents(
     }
 }
 
+/// CR 608.2c + CR 608.2d: whether the object now resolving still has an
+/// instruction of its own outstanding — a question it asked is open, or work
+/// it parked (a continuation, a typed resolution frame, a replacement choice,
+/// a spell it is casting) has not drained. Read right after its instructions
+/// ran. It is exactly the condition under which
+/// `engine::run_spell_final_part_if_due` (`engine::resolution_instructions_are_done`)
+/// refuses to retire the resolution, so a final part deferred on it is
+/// completed by that authority and by nothing else.
+///
+/// A game that ended during the resolution (CR 104.1) is not paused on
+/// anything: no answer will ever resume it, so the final part is not deferred.
+fn resolution_is_paused(state: &GameState) -> bool {
+    match state.waiting_for {
+        WaitingFor::GameOver { .. } => false,
+        WaitingFor::Priority { .. } => !super::engine::resolution_instructions_are_done(state),
+        _ => true,
+    }
+}
+
+/// What a resolving spell's on-resolution keyword hooks armed; the destination
+/// rule (`resolved_spell_destination`) reads it.
+#[derive(Debug, Clone, Copy, Default)]
+struct OnResolutionArming {
+    /// CR 702.192a: Paradigm primed — the spell is exiled instead of going to
+    /// the graveyard.
+    paradigm_armed: bool,
+    /// CR 702.88a: rebound's next-upkeep delayed trigger is queued — the spell
+    /// is exiled instead of going to the graveyard.
+    rebound_armed: bool,
+}
+
+/// The on-resolution keyword hooks of a resolving spell — cipher (CR 702.99a),
+/// paradigm (CR 702.192a), rebound (CR 702.88a) and epic (CR 702.50a) — which
+/// run once its instructions are done, as it is about to leave the stack.
+///
+/// Returns `None` when the cipher encode offer took the resolution's next
+/// answer: the card is held off the stack until that choice completes, and the
+/// caller must not route it anywhere. Otherwise, what the hooks armed.
+fn arm_on_resolution_hooks(
+    state: &mut GameState,
+    entry: &StackEntry,
+    ability: Option<&ResolvedAbility>,
+    live_controller: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Option<OnResolutionArming> {
+    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
+    // `Keyword::Cipher`, is represented by a card, and its controller has a
+    // creature to host it, pause for the optional "exile this card encoded on a
+    // creature you control" choice. The card is held off the stack until the
+    // choice completes (mirroring the Mutate merge pause); the choice handler
+    // exiles+encodes on accept, or routes the card to its graveyard on decline.
+    // Skipped (resolution proceeds to graveyard normally) when there is no legal
+    // host.
+    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
+    // control" — "you" is the object's controller, i.e. the spell's controller as
+    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
+    // selects `legal_encode_creatures(state, controller)` AND becomes
+    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
+    // same "you".
+    if super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
+        return None;
+    }
+
+    // CR 702.192a: Paradigm — first-resolution hook. If the
+    // resolving spell carries `Keyword::Paradigm` and this is the first
+    // resolution of any spell with this name by the controller (per the
+    // reminder text: "After you first resolve a spell with this name"), arm
+    // the Paradigm offer: push a `ParadigmPrime` record and mint an
+    // `ExileLinkKind::ParadigmSource` link, then override destination routing
+    // to Exile. Copies (`is_token`) never arm Paradigm because their card
+    // name is derived but they are not "the" spell per the reminder.
+    let paradigm_armed = {
+        let obj = state.objects.get(&entry.id);
+        let has_paradigm = obj.is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Paradigm)
+        });
+        if has_paradigm {
+            let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
+            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
+            // control with this spell's name has resolved this game, at the
+            // beginning of each of YOUR precombat main phases for the rest of the
+            // game, create a copy of this object in exile. You may cast the copy
+            // without paying its mana cost". ONE "you", both halves, no
+            // historical-cast clause — the same shape as epic's CR 702.50a below.
+            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
+            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
+            // free copy on the thief's precombat main phases. This argument is BOTH
+            // the `state.paradigm_primed` key and the `already_primed` gate that
+            // reads it three lines earlier inside `arm_paradigm` itself — one
+            // value, one site, so routing keeps the pair in agreement by
+            // construction rather than splitting it.
+            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
+        } else {
+            false
+        }
+    };
+
+    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
+    // non-permanent spell that carries `Keyword::Rebound`, was cast from
+    // its owner's hand, and is not a token, push the next-upkeep delayed
+    // triggered ability that offers an optional free recast and override
+    // the destination from graveyard to exile.
+    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
+    // CR 603.7a: delayed triggered abilities are created during resolution.
+    // CR 603.7d: source of the delayed trigger IS the resolving spell.
+    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
+    // CR 702.88c: multiple instances of rebound on the same spell are
+    // redundant — `has_keyword` returns true even if duplicates exist, so
+    // arming runs at most once per resolution.
+    let rebound_armed = if !is_permanent_spell(state, entry.id) {
+        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
+            !o.is_token
+                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
+        });
+        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
+        // popped, so real instant/sorcery spells must read the pre-announcement
+        // zone from the local ResolvedAbility context. `spell_cast_origin`
+        // remains the fallback for object-stamped placeholder/permanent paths.
+        let cast_from_zone = ability
+            .and_then(|a| a.context.cast_from_zone)
+            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
+        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
+        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
+        // both the arming condition and the entitlement. This argument is the
+        // entitlement half — the player who may recast — but the engine's arming
+        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
+        // above. Routing only this half would grant a thief a rebound whose own
+        // arming condition CR 702.88a makes false for them.
+        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
+        // record WHOSE hand, then both halves move together.
+        if has_rebound && cast_from_zone == Some(Zone::Hand) {
+            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // CR 702.50a-b: Epic — on-resolve hook. If the resolving spell still
+    // carries `Keyword::Epic`, lock its controller out of casting spells for
+    // the rest of the game (CR 702.50b) and arm a RECURRING delayed triggered
+    // ability that copies the spell at the beginning of each of the
+    // controller's upkeeps (CR 702.50a). A copied spell that still has Epic
+    // also arms this effect when it resolves; Epic-generated copies do not
+    // recurse because `EpicCopy` strips `Keyword::Epic` before pushing them.
+    // The Epic spell itself takes the normal destination (no override); that
+    // object is the prototype the upkeep copies clone.
+    let has_epic = state
+        .objects
+        .get(&entry.id)
+        .is_some_and(|o| super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Epic));
+    if has_epic {
+        if let Some(spell_ability) = ability {
+            // CR 702.50a: "For the rest of the game, you can't cast spells" and
+            // "At the beginning of each of your upkeeps for the rest of the
+            // game, copy this spell…" — ONE "you", used twice, with no
+            // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
+            // that is the spell's controller as it resolves, so a stolen Epic
+            // spell locks out its thief and copies on the thief's upkeeps.
+            super::effects::epic::arm_epic(state, entry.id, live_controller, spell_ability.clone());
+        }
+    }
+
+    Some(OnResolutionArming {
+        paradigm_armed,
+        rebound_armed,
+    })
+}
+
+/// The zone a resolving spell leaves the stack for once its instructions are
+/// done: the battlefield for a permanent spell (CR 608.3), its owner's
+/// graveyard for an instant or sorcery (CR 608.2n), or wherever a keyword,
+/// an alternative cost, a casting permission's rider or an armed hook sends it
+/// instead. One rule for the inline and the deferred (`finish_deferred_spell_resolution`)
+/// completion of a resolution.
+fn resolved_spell_destination(
+    state: &GameState,
+    entry_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
+    casting_variant: CastingVariant,
+    arming: OnResolutionArming,
+) -> Zone {
+    if arming.paradigm_armed {
+        // CR 702.192a: Paradigm-armed spell exiles instead of going to
+        // graveyard. The ExileLink is already created by arm_paradigm.
+        Zone::Exile
+    } else if arming.rebound_armed {
+        // CR 702.88a: Rebound-armed non-permanent spell exiles instead
+        // of going to graveyard — the delayed trigger is already
+        // queued by `arm_rebound`.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Adventure {
+        // CR 715.3d: Adventure spell resolves → exile with casting permission.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Omen {
+        // CR 720.3d: Omen spell resolves → shuffle into owner's library.
+        Zone::Library
+    } else if casting_variant == CastingVariant::Harmonize {
+        // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
+        if is_permanent_spell(state, entry_id) {
+            Zone::Battlefield
+        } else {
+            Zone::Exile
+        }
+    } else if casting_variant == CastingVariant::Aftermath {
+        // CR 702.127a: If an aftermath spell was cast from a graveyard,
+        // exile it instead of putting it anywhere else any time it would
+        // leave the stack.
+        Zone::Exile
+    } else if casting_variant == CastingVariant::Flashback {
+        // CR 702.34a: If the flashback cost was paid, exile this card
+        // instead of putting it anywhere else any time it would leave the stack.
+        // Flashback only appears on instants/sorceries — unconditional exile is correct.
+        Zone::Exile
+    } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
+        || stack_exile_linked_source(state, entry_id).is_some())
+        && !is_permanent_spell(state, entry_id)
+    {
+        // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
+        // spell cast this way would be put into your graveyard, exile it
+        // instead") are a STATIC destination rule selected here. Permanent
+        // spells still resolve to the battlefield. The Invoke Calamity
+        // free-cast rider is no longer read here — it is a self-scoped
+        // `Moved` replacement on the spell, consulted by the pipeline when
+        // the spell's stack → graveyard move is delivered (CR 614.6).
+        // Rod of Absorption's per-object linked source is the same kind of
+        // STATIC destination rule and is honored here too.
+        Zone::Exile
+    } else if is_permanent_spell(state, entry_id) {
+        // CR 608.3: Permanent spells enter the battlefield.
+        Zone::Battlefield
+    } else if ability.is_some_and(|a| a.context.additional_cost_paid)
+        && state.objects.get(&entry_id).is_some_and(|o| {
+            o.keywords
+                .iter()
+                .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
+        })
+    {
+        // CR 702.27a: If the buyback cost was paid, put this spell into its
+        // owner's hand instead of into that player's graveyard as it resolves.
+        // Buyback appears only on instants/sorceries, so this branch is
+        // unreachable for permanent spells. Does NOT redirect on counter
+        // (CR 701.6a) or fizzle (CR 608.2b) — buyback applies only "as it
+        // resolves."
+        Zone::Hand
+    } else {
+        // CR 608.2n: Non-permanent spells are put into owner's graveyard.
+        Zone::Graveyard
+    }
+}
+
+/// What `finish_deferred_spell_resolution` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeferredFinalPart {
+    /// The resolving carrier is not an instant or sorcery whose final part was
+    /// deferred; there was nothing to run.
+    NotOwed,
+    /// The final part ran and the spell has left the stack.
+    Completed,
+    /// The final part raised a question of its own — a CR 616.1 ordering
+    /// choice on the spell's move, or the cipher encode offer — and the
+    /// carrier must stay installed until that prompt's resume path completes
+    /// the move.
+    Parked,
+}
+
+/// CR 608.2n: the owed final part, only while it names the installed carrier.
+fn owed_final_part(state: &GameState) -> Option<OwedSpellFinalPart> {
+    state.resolving_spell_final_part.filter(|owed| {
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|carrier| carrier.id == owed.spell)
+    })
+}
+
+/// CR 608.2c + CR 608.2n: whether the resolving carrier is an instant or
+/// sorcery spell whose instructions paused and whose final part — leaving the
+/// stack — therefore still has to run.
+///
+/// The authority is the carrier's own marker
+/// (`GameState::resolving_spell_final_part`), latched by `resolve_top` only
+/// when it deferred that final part; nothing is inferred from the carrier's
+/// shape. An unlatched carrier owes nothing: one whose instructions are still
+/// running, one paused on an inline cipher offer (CR 702.99a), or one whose
+/// final part already ran and parked a question of its own (CR 616.1).
+pub(super) fn resolving_spell_owes_final_part(state: &GameState) -> bool {
+    owed_final_part(state).is_some()
+}
+
+/// CR 608.2n: the instant or sorcery whose deferred final part is still owed
+/// (see [`resolving_spell_owes_final_part`]) and that is still on the stack.
+/// It was popped from `state.stack` as it began resolving, but it is still an
+/// object on the stack, which `targeting::zone_object_ids(Zone::Stack)` cannot
+/// see; it is the final part's own subject (`finish_deferred_spell_resolution`).
+///
+/// The marker decides whether the final part is owed. A card that is again a
+/// live stack entry is a new cast of it (buyback, a recursion loop), not the
+/// paused resolution.
+pub(super) fn spell_awaiting_final_part(state: &GameState) -> Option<&StackEntry> {
+    owed_final_part(state)
+        .and(state.resolving_stack_entry.as_ref())
+        .filter(|entry| {
+            matches!(entry.kind, StackEntryKind::Spell { .. })
+                && spell_still_on_stack(state, entry.id)
+                && !state.stack.iter().any(|live| live.id == entry.id)
+        })
+}
+
+/// CR 800.4a + CR 608.2n: the instant or sorcery the resolution carrier names,
+/// while it is still an object on the stack — whether its final part is still
+/// owed or already ran and parked a question of its own (a CR 616.1 ordering of
+/// its own move). `resolve_top` popped it from `state.stack` as it began
+/// resolving, so `targeting::zone_object_ids(Zone::Stack)` cannot list it; the
+/// player-leaves-the-game procedure and the end procedures (CR 724.1b /
+/// CR 724.2b) ask for it here. A card that is again a
+/// live stack entry is a new cast of it, not this resolution. Permanent spells
+/// (CR 608.3) keep their own paused-entry carrier and are not included.
+pub(super) fn resolving_instant_or_sorcery_on_stack(state: &GameState) -> Option<&StackEntry> {
+    state.resolving_stack_entry.as_ref().filter(|entry| {
+        matches!(entry.kind, StackEntryKind::Spell { .. })
+            && !is_permanent_spell(state, entry.id)
+            && spell_still_on_stack(state, entry.id)
+            && !state.stack.iter().any(|live| live.id == entry.id)
+    })
+}
+
+/// CR 608.2c + CR 608.2n: run the final part of a resolution `resolve_top`
+/// deferred because one of the spell's instructions paused for a choice — the
+/// on-resolution keyword hooks, the destination rule, and the move off the
+/// stack, exactly as the inline completion runs them — now that every
+/// instruction has been followed. Called only by
+/// `engine::run_spell_final_part_if_due`, which retires the carrier on
+/// `Completed` or `NotOwed`.
+///
+/// This is also where the resolution is reported (`GameEvent::StackResolved`):
+/// at the pause the spell was still on the stack, still resolving. As on the
+/// inline path, the report accompanies the final part whether the move
+/// completes or parks a question of its own.
+pub(super) fn finish_deferred_spell_resolution(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DeferredFinalPart {
+    if owed_final_part(state).is_none() {
+        return DeferredFinalPart::NotOwed;
+    }
+    let Some(entry) = spell_awaiting_final_part(state).cloned() else {
+        return finish_deferred_resolution_of_departed_spell(state, events);
+    };
+    let StackEntryKind::Spell {
+        ability,
+        casting_variant,
+        ..
+    } = &entry.kind
+    else {
+        unreachable!("`spell_awaiting_final_part` admits only spell carriers");
+    };
+    let casting_variant = *casting_variant;
+    // CR 608.2c + CR 400.7a + CR 613.1b + CR 109.4: the LIVE controller, read
+    // while the object is still on the stack — the same latch `resolve_top`
+    // takes before its instructions run, taken again here because a layer-2
+    // control change can have moved the spell while it was paused.
+    let live_controller = stack_object_controller(state, &entry);
+    // CR 608.2c + CR 109.5: re-stamp the baked announcement controller so the
+    // hooks run for whoever controls the spell now (mirrors `resolve_top`).
+    let ability = ability.as_deref().map(|ability| {
+        let mut ability = ability.clone();
+        if ability.controller != live_controller {
+            ability.set_controller_recursive(live_controller);
+        }
+        ability
+    });
+    let resolved = GameEvent::StackResolved {
+        object_id: entry.id,
+    };
+    let Some(arming) =
+        arm_on_resolution_hooks(state, &entry, ability.as_ref(), live_controller, events)
+    else {
+        // CR 702.99a: the cipher encode offer owns the resolution's next
+        // answer; its choice handler moves the card.
+        events.push(resolved);
+        clear_deferred_final_part(state);
+        return DeferredFinalPart::Parked;
+    };
+    let dest =
+        resolved_spell_destination(state, entry.id, ability.as_ref(), casting_variant, arming);
+    // `spell_awaiting_final_part` admits only a spell still on the stack, so
+    // the inline path's stack-residency guard holds here by construction.
+    match deliver_resolved_spell_off_stack(state, entry.id, entry.controller, dest, events) {
+        ZoneMoveResult::Done => {
+            finish_spell_stack_exit(state, entry.id, casting_variant, events);
+            events.push(resolved);
+            DeferredFinalPart::Completed
+        }
+        // CR 616.1: a replacement-ordering choice parked the move; the
+        // replacement-choice resume path delivers it.
+        ZoneMoveResult::NeedsChoice(_) | ZoneMoveResult::NeedsAuraAttachmentChoice => {
+            events.push(resolved);
+            clear_deferred_final_part(state);
+            DeferredFinalPart::Parked
+        }
+    }
+}
+
+/// CR 608.2m + CR 608.2n: the final part of a deferred resolution whose spell
+/// is no longer on the stack — its own instructions moved it ("Exile Invoke
+/// Calamity"), or its owner left the game while its controller finished it.
+/// It keeps resolving fully (CR 608.2m), so it owes the stack-exit bookkeeping
+/// of how it was cast, as on the inline path; only the move is skipped, because
+/// it is already where it was put (issue #323). Reported resolved exactly once
+/// (CR 608.2m) — whether its own instruction moved it, its owner left, its
+/// controller left while another player still had its instruction to answer,
+/// or the departure itself settled its departed controller's owner arrangement
+/// (CR 401.4) and its remaining instructions. A carrier the elimination retires
+/// as `Eliminated` (the departed player's unanswered question was its last live
+/// work) never reaches here and is not reported resolved. A carrier whose final
+/// part was not deferred owes nothing here.
+fn finish_deferred_resolution_of_departed_spell(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DeferredFinalPart {
+    let Some((spell_id, casting_variant)) = owed_final_part(state)
+        .and(state.resolving_stack_entry.as_ref())
+        .filter(|entry| {
+            !spell_still_on_stack(state, entry.id)
+                && !state.stack.iter().any(|live| live.id == entry.id)
+        })
+        .and_then(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                casting_variant, ..
+            } => Some((entry.id, *casting_variant)),
+            StackEntryKind::ActivatedAbility { .. }
+            | StackEntryKind::TriggeredAbility { .. }
+            | StackEntryKind::KeywordAction { .. }
+            | StackEntryKind::CombatDamage { .. } => None,
+        })
+    else {
+        return DeferredFinalPart::NotOwed;
+    };
+    finish_spell_stack_exit(state, spell_id, casting_variant, events);
+    events.push(GameEvent::StackResolved {
+        object_id: spell_id,
+    });
+    DeferredFinalPart::Completed
+}
+
+/// The deferred final part has run (and parked a question of its own): clear
+/// the carrier's deferral latch, so the carrier, which stays installed until
+/// that question is answered, is not later read as still owing it.
+fn clear_deferred_final_part(state: &mut GameState) {
+    state.resolving_spell_final_part = None;
+}
+
 /// CR 608.2: Resolve the top object on the stack.
-pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
+///
+/// Returns the number of entries popped: 0 if admission refused or only an
+/// owed final part ran, and 1 after a successful pop, even if instructions
+/// pause or the object does not resolve. This is consumption, not completion.
+pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
+    // Engine invariant: a player-scope clause's per-seat creation handoff
+    // lives only inside its detached tail's resolution call, so none can be
+    // live when a stack object begins resolving.
+    debug_assert!(
+        state.resolving_created_token_seats.is_none(),
+        "a player-scope created-token handoff leaked past its tail's resolution"
+    );
     // CR 603.3c + CR 603.3d: The top of the stack may be a trigger entry that
     // is still being constructed (mode / target / division pending). Such an
     // entry MUST NOT resolve — it is mid-flight while the controller is
@@ -1739,7 +2332,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending_id) = state.pending_trigger_entry {
         if state.stack.back().map(|e| e.id) == Some(pending_id) {
             if !top_pending_trigger_has_no_legal_required_targets(state, pending_id) {
-                return;
+                return 0;
             }
             // CR 603.3d: A stale construction cursor on a malformed trigger
             // with no legal required targets cannot keep a triggered ability
@@ -1755,26 +2348,31 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
+    // CR 608.2n + CR 405.5: a resolution whose paused instructions completed has
+    // its final part run before another object begins resolving. When it runs
+    // here nothing is popped: the pass's pipeline puts its batch on the stack
+    // above this entry first (`engine::pass_priority_once_with_pipeline`).
+    if super::engine::run_spell_final_part_if_due(state, events) {
+        return 0;
+    }
     // CR 608.2c: A resolution that completed at the preceding Priority
     // boundary must settle its exact carrier before another stack object can
     // begin resolving. A parked continuation remains live and therefore still
     // fails the invariant below rather than being silently cleared.
-    if matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && super::engine::resolution_instructions_are_done(state)
-    {
-        deliver_deferred_spell(state, events);
-    }
     super::engine::settle_resolving_stack_entry_after_continuation_resume(state);
     // CR 608.2c + CR 608.2m: A prior resolution must finish its instructions
     // before another stack object begins resolving. A parked continuation owns
     // its carrier until its own completion or abort path; silently clearing it here would
     // lose a receipt-eligible delayed firing. This holds in release builds too:
     // with a live carrier the top entry stays on the stack and nothing begins.
-    if state.resolving_stack_entry.is_some() || state.resolving_trigger_firing.is_some() {
+    if state.resolving_stack_entry.is_some()
+        || state.resolving_trigger_firing.is_some()
+        || state.resolving_spell_final_part.is_some()
+    {
         tracing::error!(
             "resolve_top refused: a resolution carrier is still installed; the stack top was not popped"
         );
-        return;
+        return 0;
     }
     // CR 400.7j: the self-move re-latch is resolution-scoped; clear it alongside
     // `resolving_stack_entry` so it never leaks into the next resolution.
@@ -1802,7 +2400,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         trigger_firing,
     }) = pop_top_stack_entry(state)
     else {
-        return;
+        return 0;
     };
     // CR 603.4 + CR 608.2b: transfer the exact firing before any branch can
     // abort, resolve, or park this popped triggered ability.
@@ -1824,7 +2422,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             super::lifecycle::DelayedTerminalDisposition::Resolved,
         );
         state.resolution_source_relatch = None;
-        return;
+        return 1;
     }
 
     // CR 603.4: the intervening-if recheck lives inside `bind_resolution_scope`; a `false`
@@ -1842,7 +2440,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             super::lifecycle::DelayedTerminalDisposition::InterveningIfFalse,
         );
         state.resolution_source_relatch = None;
-        return;
+        return 1;
     }
 
     // CR 714.2: Snapshot the Saga-chapter identity while the Saga is still
@@ -1969,7 +2567,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             super::lifecycle::DelayedTerminalDisposition::NoLegalChoice,
         );
         state.resolution_source_relatch = None;
-        return;
+        return 1;
     }
 
     // Capture targets for Aura attachment after resolution. Prefer the full
@@ -2093,7 +2691,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 state.current_trigger_events.clear();
                 state.current_trigger_match_count = None;
                 state.die_result_this_resolution = None;
-                return;
+                return 1;
             }
             None => {
                 // CR 702.140b: illegal target — revert to a plain creature spell
@@ -2126,7 +2724,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     {
         state.announced_source_x = activated.chosen_x.map(|x| (*source_id, x));
     }
-    let resolution_start_phase = state.phase;
 
     // Only run targeting validation and effect execution when an ability exists.
     // Permanent spells with no spell ability (ability is None) skip straight to
@@ -2220,7 +2817,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     super::lifecycle::DelayedTerminalDisposition::AllTargetsIllegal,
                 );
                 state.resolution_source_relatch = None;
-                return;
+                return 1;
             }
             // CR 608.2b: validation already stamped each node's local illegal
             // positions; the carrier receives the chain-numbered stamp.
@@ -2233,241 +2830,89 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         }
     }
 
-    // CR 702.99a: Cipher — on-resolution hook. If the resolving spell carries
-    // `Keyword::Cipher`, is represented by a card, and its controller has a
-    // creature to host it, pause for the optional "exile this card encoded on a
-    // creature you control" choice. The card is held off the stack until the
-    // choice completes (mirroring the Mutate merge pause); the choice handler
-    // exiles+encodes on accept, or routes the card to its graveyard on decline.
-    // Skipped (resolution proceeds to graveyard normally) when there is no legal
-    // host. `is_spell` gates out triggered/activated stack entries.
-    // CR 702.99a + CR 109.5: "you may exile this card encoded on a creature you
-    // control" — "you" is the object's controller, i.e. the spell's controller as
-    // it resolves (CR 608.2c). This argument does double duty in `cipher.rs`: it
-    // selects `legal_encode_creatures(state, controller)` AND becomes
-    // `PendingCipherEncode.controller`, which owns the prompt. Both halves are the
-    // same "you".
-    if is_spell && super::cipher::begin_encode_choice(state, entry.id, live_controller, events) {
-        events.push(GameEvent::StackResolved {
-            object_id: entry.id,
-        });
+    // CR 608.2c + CR 608.2n: the controller follows the spell's instructions in
+    // the order written, and "as the final part of an instant or sorcery
+    // spell's resolution, the spell is put into its owner's graveyard." When
+    // one of those instructions paused for a player's choice (a chosen
+    // discard or a library search, CR 608.2d; a free-cast window, CR 608.2g),
+    // the instructions have not all been followed yet, so that final part has
+    // not come: the spell stays on the stack, still resolving, and
+    // `finish_deferred_spell_resolution` runs the final part — the
+    // on-resolution keyword hooks, the destination, the move, and the
+    // `StackResolved` report — at the priority boundary that proves its
+    // instructions done (`engine::run_spell_final_part_if_due`). Moving the spell now
+    // would put Faithless Looting into the graveyard BENEATH the cards it then
+    // discards, and Doomsday into the graveyard its own search then exiles
+    // "the rest" of.
+    //
+    // The owed final part is latched on the resolution carrier
+    // (`GameState::resolving_spell_final_part`), never on the spell's ability,
+    // so a copy cannot inherit it (CR 707.10).
+    //
+    // Permanent spells are CR 608.3, not CR 608.2n: their entry is its own
+    // pipeline below, with its own paused-entry carrier (`PendingSpellResolution`).
+    if is_spell && !is_permanent_spell(state, entry.id) && resolution_is_paused(state) {
+        let carrier_is_this_spell = state
+            .resolving_stack_entry
+            .as_ref()
+            .is_some_and(|carrier| carrier.id == entry.id);
+        debug_assert!(
+            carrier_is_this_spell,
+            "a deferred final part is latched on the resolving spell's own carrier"
+        );
+        // Latched whatever the shape of the spell's ability (a spell with no
+        // ability owes its final part too); only the carrier's identity gates it.
+        if carrier_is_this_spell {
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell: entry.id });
+        }
         state.current_trigger_event = None;
         state.current_trigger_events.clear();
         state.current_trigger_match_count = None;
         state.die_result_this_resolution = None;
-        return;
+        return 1;
     }
 
-    // CR 702.xxx: Paradigm (Strixhaven) — first-resolution hook. If the
-    // resolving spell carries `Keyword::Paradigm` and this is the first
-    // resolution of any spell with this name by the controller (per the
-    // reminder text: "After you first resolve a spell with this name"), arm
-    // the Paradigm offer: push a `ParadigmPrime` record and mint an
-    // `ExileLinkKind::ParadigmSource` link, then override destination routing
-    // to Exile. Copies (`is_token`) never arm Paradigm because their card
-    // name is derived but they are not "the" spell per the reminder. Assign
-    // when WotC publishes SOS CR update.
-    let paradigm_armed = if is_spell {
-        let obj = state.objects.get(&entry.id);
-        let has_paradigm = obj.is_some_and(|o| {
-            !o.is_token
-                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Paradigm)
-        });
-        if has_paradigm {
-            let card_name = obj.map(|o| o.name.clone()).unwrap_or_default();
-            // CR 702.192a: Paradigm means "If this is the first time a spell YOU
-            // control with this spell's name has resolved this game, at the
-            // beginning of each of YOUR precombat main phases for the rest of the
-            // game, create a copy of this object in exile. You may cast the copy
-            // without paying its mana cost". ONE "you", both halves, no
-            // historical-cast clause — the same shape as epic's CR 702.50a below.
-            // Per CR 608.2c and CR 109.5 that "you" is the spell's controller AS IT
-            // RESOLVES, so a stolen Paradigm spell primes its THIEF and offers the
-            // free copy on the thief's precombat main phases. This argument is BOTH
-            // the `state.paradigm_primed` key and the `already_primed` gate that
-            // reads it three lines earlier inside `arm_paradigm` itself — one
-            // value, one site, so routing keeps the pair in agreement by
-            // construction rather than splitting it.
-            super::effects::paradigm::arm_paradigm(state, entry.id, live_controller, &card_name)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // CR 702.88a: Rebound — on-resolve hook. If the resolving spell is a
-    // non-permanent spell that carries `Keyword::Rebound`, was cast from
-    // its owner's hand, and is not a token, push the next-upkeep delayed
-    // triggered ability that offers an optional free recast and override
-    // the destination from graveyard to exile.
-    // CR 704.5d: tokens cease to exist off the battlefield (gate `!is_token`).
-    // CR 603.7a: delayed triggered abilities are created during resolution.
-    // CR 603.7d: source of the delayed trigger IS the resolving spell.
-    // CR 608.2n: default destination for a resolved instant/sorcery is graveyard.
-    // CR 702.88c: multiple instances of rebound on the same spell are
-    // redundant — `has_keyword` returns true even if duplicates exist, so
-    // arming runs at most once per resolution.
-    let rebound_armed = if is_spell && !is_permanent_spell(state, entry.id) {
-        let has_rebound = state.objects.get(&entry.id).is_some_and(|o| {
-            !o.is_token
-                && super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Rebound)
-        });
-        // CR 601.2a + CR 702.88a: the resolving stack entry has already been
-        // popped, so real instant/sorcery spells must read the pre-announcement
-        // zone from the local ResolvedAbility context. `spell_cast_origin`
-        // remains the fallback for object-stamped placeholder/permanent paths.
-        let cast_from_zone = ability
-            .as_ref()
-            .and_then(|a| a.context.cast_from_zone)
-            .or_else(|| super::casting::spell_cast_origin(state, entry.id));
-        // CR 702.88a: "If this spell was cast from YOUR hand … at the beginning of
-        // YOUR next upkeep, YOU may cast this card from exile." ONE "you" serves
-        // both the arming condition and the entitlement. This argument is the
-        // entitlement half — the player who may recast — but the engine's arming
-        // test is the separate, player-blind `cast_from_zone == Some(Zone::Hand)`
-        // above. Routing only this half would grant a thief a rebound whose own
-        // arming condition CR 702.88a makes false for them.
-        // KNOWN LIMITATION (CR 702.88a): closing it requires the arming test to
-        // record WHOSE hand, then both halves move together.
-        if has_rebound && cast_from_zone == Some(Zone::Hand) {
-            super::effects::rebound::arm_rebound(state, entry.id, entry.controller, events)
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // CR 702.50a-b: Epic — on-resolve hook. If the resolving spell still
-    // carries `Keyword::Epic`, lock its controller out of casting spells for
-    // the rest of the game (CR 702.50b) and arm a RECURRING delayed triggered
-    // ability that copies the spell at the beginning of each of the
-    // controller's upkeeps (CR 702.50a). A copied spell that still has Epic
-    // also arms this effect when it resolves; Epic-generated copies do not
-    // recurse because `EpicCopy` strips `Keyword::Epic` before pushing them.
-    // The Epic spell itself takes the normal destination below (no override);
-    // that object is the prototype the upkeep copies clone.
-    if is_spell {
-        let has_epic = state.objects.get(&entry.id).is_some_and(|o| {
-            super::keywords::has_keyword(o, &crate::types::keywords::Keyword::Epic)
-        });
-        if has_epic {
-            if let Some(spell_ability) = ability.clone() {
-                // CR 702.50a: "For the rest of the game, you can't cast spells" and
-                // "At the beginning of each of your upkeeps for the rest of the
-                // game, copy this spell…" — ONE "you", used twice, with no
-                // historical-cast clause to entangle it. Per CR 608.2c and CR 109.5
-                // that is the spell's controller as it resolves, so a stolen Epic
-                // spell locks out its thief and copies on the thief's upkeeps.
-                super::effects::epic::arm_epic(state, entry.id, live_controller, *spell_ability);
+    let arming = if is_spell {
+        match arm_on_resolution_hooks(state, &entry, ability.as_deref(), live_controller, events) {
+            Some(arming) => arming,
+            // CR 702.99a: the cipher encode offer owns the resolution's next
+            // answer; the card is held off the stack until it completes.
+            None => {
+                events.push(GameEvent::StackResolved {
+                    object_id: entry.id,
+                });
+                state.current_trigger_event = None;
+                state.current_trigger_events.clear();
+                state.current_trigger_match_count = None;
+                state.die_result_this_resolution = None;
+                return 1;
             }
         }
-    }
+    } else {
+        OnResolutionArming::default()
+    };
 
-    // CR 608.2g + CR 608.3: A spell paused on a during-resolution free-cast
-    // window remains on the stack and targetable until its continuation ends.
-    let paused_on_free_cast_window = matches!(
-        state.waiting_for,
-        WaitingFor::CastOffer {
-            kind: CastOfferKind::FreeCastWindow { .. },
-            ..
-        }
-    );
-    if is_spell {
-        let end_procedure_exiles_resolving_object = ability.as_ref().is_some_and(|ability| {
-            matches!(ability.effect, Effect::EndTheTurn)
-                || (matches!(ability.effect, Effect::EndCombatPhase)
-                    && resolution_start_phase.is_combat())
-        });
-        let dest = if end_procedure_exiles_resolving_object {
-            // CR 724.1b / CR 724.2b: The "end the turn" and "end the combat
-            // phase" procedures exile every object on the stack, including the
-            // resolving object that `resolve_top` already popped before
-            // executing its effect.
-            Zone::Exile
-        } else if paradigm_armed {
-            // CR 702.xxx: Paradigm-armed spell exiles instead of going to
-            // graveyard. The ExileLink is already created by arm_paradigm.
-            Zone::Exile
-        } else if rebound_armed {
-            // CR 702.88a: Rebound-armed non-permanent spell exiles instead
-            // of going to graveyard — the delayed trigger is already
-            // queued by `arm_rebound`.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Adventure {
-            // CR 715.3d: Adventure spell resolves → exile with casting permission.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Omen {
-            // CR 720.3d: Omen spell resolves → shuffle into owner's library.
-            Zone::Library
-        } else if casting_variant == CastingVariant::Harmonize {
-            // CR 702.180a: If the harmonize cost was paid, exile this card instead of putting it anywhere else.
-            if is_permanent_spell(state, entry.id) {
-                Zone::Battlefield
-            } else {
-                Zone::Exile
+    // CR 608.2g + CR 608.3: A permanent spell paused on a during-resolution
+    // free-cast window remains on the stack and targetable until its
+    // continuation ends. (A non-permanent spell paused there never reaches this
+    // point: the CR 608.2n deferral above returned.)
+    if is_spell
+        && !matches!(
+            state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::FreeCastWindow { .. },
+                ..
             }
-        } else if casting_variant == CastingVariant::Aftermath {
-            // CR 702.127a: If an aftermath spell was cast from a graveyard,
-            // exile it instead of putting it anywhere else any time it would
-            // leave the stack.
-            Zone::Exile
-        } else if casting_variant == CastingVariant::Flashback {
-            // CR 702.34a: If the flashback cost was paid, exile this card
-            // instead of putting it anywhere else any time it would leave the stack.
-            // Flashback only appears on instants/sorceries — unconditional exile is correct.
-            Zone::Exile
-        } else if (casting_variant.replaces_stack_to_graveyard_with_exile()
-            || stack_exile_linked_source(state, entry.id).is_some())
-            && !is_permanent_spell(state, entry.id)
-        {
-            // CR 614.1a + CR 608.2n: Graveyard-cast permission riders ("If a
-            // spell cast this way would be put into your graveyard, exile it
-            // instead") are a STATIC destination rule selected here. Permanent
-            // spells still resolve to the battlefield. The Invoke Calamity
-            // free-cast rider is no longer read here — it is a self-scoped
-            // `Moved` replacement on the spell, consulted by the pipeline when
-            // the spell's stack → graveyard move is delivered below (CR 614.6).
-            // Rod of Absorption's per-object linked source is the same kind of
-            // STATIC destination rule and is honored here too.
-            Zone::Exile
-        } else if is_permanent_spell(state, entry.id) {
-            // CR 608.3: Permanent spells enter the battlefield.
-            Zone::Battlefield
-        } else if ability
-            .as_ref()
-            .is_some_and(|a| a.context.additional_cost_paid)
-            && state.objects.get(&entry.id).is_some_and(|o| {
-                o.keywords
-                    .iter()
-                    .any(|k| matches!(k, crate::types::keywords::Keyword::Buyback(_)))
-            })
-        {
-            // CR 702.27a: If the buyback cost was paid, put this spell into its
-            // owner's hand instead of into that player's graveyard as it resolves.
-            // Buyback appears only on instants/sorceries, so this branch is
-            // unreachable for permanent spells. Does NOT redirect on counter
-            // (CR 701.5a) or fizzle (CR 608.2b) — buyback applies only "as it
-            // resolves."
-            Zone::Hand
-        } else {
-            // CR 608.2n: Non-permanent spells are put into owner's graveyard.
-            Zone::Graveyard
-        };
-        // CR 608.2n + CR 608.2g: the spell is put into its zone "as the final
-        // part" of its resolution, which its open free-cast window and the
-        // instructions parked behind it have not reached. Record the
-        // destination selected above; the continuation's completion delivers
-        // it (`deliver_deferred_spell`). A permanent spell keeps its earlier
-        // handling: it stays where it is.
-        if paused_on_free_cast_window && dest != Zone::Battlefield {
-            state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
-                object_id: entry.id,
-                destination: dest,
-            });
-        }
-        if dest == Zone::Battlefield && !paused_on_free_cast_window {
+        )
+    {
+        let dest = resolved_spell_destination(
+            state,
+            entry.id,
+            ability.as_deref(),
+            casting_variant,
+            arming,
+        );
+        if dest == Zone::Battlefield {
             // CR 707.10f + CR 608.3f: A copy of a permanent spell becomes a token
             // permanent AS it resolves onto the battlefield — BEFORE the ETB
             // replacement pipeline matches the ZoneChange and before the
@@ -2806,7 +3251,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                                     state.current_trigger_events.clear();
                                     state.current_trigger_match_count = None;
                                     state.die_result_this_resolution = None;
-                                    return;
+                                    return 1;
                                 }
                             }
                             // CR 702.146b / CR 702.162a + CR 712.11a + CR
@@ -2931,7 +3376,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state.current_trigger_events.clear();
                             state.current_trigger_match_count = None;
                             state.die_result_this_resolution = None;
-                            return;
+                            return 1;
                         }
                     }
                 }
@@ -2980,7 +3425,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // the same cross-resolution boundary as the batched subject
                     // count.
                     state.die_result_this_resolution = None;
-                    return;
+                    return 1;
                 }
             }
         } else {
@@ -2992,7 +3437,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // the source via `SelfRef`), the post-resolution default move must
             // be skipped — otherwise the spell card travels exile→graveyard
             // and undoes its own self-exile clause (issue #323).
-            if !paused_on_free_cast_window && spell_still_on_stack(state, entry.id) {
+            if spell_still_on_stack(state, entry.id) {
                 // CR 608.2n + CR 614.6: route the spell's stack → graveyard/exile
                 // default move through the pipeline — see
                 // `deliver_resolved_spell_off_stack`.
@@ -3020,15 +3465,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         state.current_trigger_events.clear();
                         state.current_trigger_match_count = None;
                         state.die_result_this_resolution = None;
-                        return;
+                        return 1;
                     }
                 }
             }
         }
 
-        if !paused_on_free_cast_window {
-            finish_spell_stack_exit(state, entry.id, casting_variant, events);
-        }
+        finish_spell_stack_exit(state, entry.id, casting_variant, events);
 
         // CR 608.3c: An Aura spell resolving becomes a permanent put onto the
         // battlefield attached to the player or object it was targeting.
@@ -3041,7 +3484,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 .map(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"))
                 .unwrap_or(false);
             if is_aura {
-                match spell_targets.first() {
+                let attached = match spell_targets.first() {
                     // CR 608.3c + CR 608.2b: Object Aura — verify the target is
                     // still a legal host per the Aura's own zone-scoped enchant
                     // ability (`is_valid_attachment_target`, the single legality
@@ -3060,10 +3503,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             state, entry.id, *target_id,
                         ) =>
                     {
-                        effects::attach::attach_to(state, entry.id, *target_id);
+                        effects::attach::attach_to_reporting_change(state, entry.id, *target_id)
                     }
                     Some(crate::types::ability::TargetRef::Object(_)) => {
                         // Target is no longer a legal host — SBA cleanup follows.
+                        false
                     }
                     // CR 608.3c + CR 702.5d: Player Aura (Curse cycle, Faith's
                     // Fetters-class). Validity check is "player still in game"
@@ -3071,13 +3515,29 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // `check_unattached_auras` (CR 303.4c) will detach + grave
                     // a Curse whose enchanted player has left the game.
                     Some(crate::types::ability::TargetRef::Player(player_id)) => {
-                        effects::attach::attach_to_player(state, entry.id, *player_id);
+                        effects::attach::attach_to_player_reporting_change(
+                            state, entry.id, *player_id,
+                        )
                     }
                     None => {
                         // CR 303.4g: An Aura entering the battlefield with no
                         // legal target goes to its owner's graveyard. The SBA
                         // path catches this on the next pass.
+                        false
                     }
+                };
+                if attached {
+                    // CR 608.3c / CR 603.2e: an Aura spell resolves and becomes
+                    // attached — is an effect resolution — emit
+                    // `EffectResolved { kind: Attach }` so "whenever an Aura
+                    // becomes attached" triggers (e.g. Bramble Elemental) fire on
+                    // spell-resolution attach, not only on effect-resolver attach
+                    // via `deliver_attach`.
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        source_id: entry.id,
+                        subject: state.capture_event_object_snapshot(entry.id).map(Box::new),
+                    });
                 }
             }
 
@@ -3457,6 +3917,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         );
         state.resolution_source_relatch = None;
     }
+    1
 }
 
 /// CR 113.3b + CR 113.7a: Resolve an activated keyword ability from the stack.
@@ -3622,7 +4083,7 @@ fn resolve_keyword_action(
 
 /// CR 608.2: Resolve the next stack object, collapsing a batch-safe run when
 /// one begins at the top. Returns the number of stack entries consumed
-/// (≥ 1) so the caller can correct the auto-pass baseline (§7.2).
+/// (0 when the top was not popped) so the caller can correct the auto-pass baseline (§7.2).
 pub fn resolve_next(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
     resolve_next_with_limit(state, events, None)
 }
@@ -3707,8 +4168,10 @@ pub fn resolve_next_with_limit(
             }
         }
     }
-    resolve_top(state, events);
-    1
+    // §7.2: callers shrink their auto-pass baselines and advance the session
+    // cursor by the pop authority's count. It reports zero for admission
+    // refusals and final-part-only work, even when that work emits completion.
+    resolve_top(state, events)
 }
 
 fn created_token_ids(events: &[GameEvent]) -> Vec<ObjectId> {
@@ -4336,6 +4799,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         source_id: _,
         cast_occurrence,
         source_incarnation,
+        announced_source_incarnation,
         trigger_source,
         trigger_definition_ref,
         delayed_origin: _,
@@ -4396,6 +4860,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         replacement_applied: _,
         sub_link,
         target_reads,
+        entry_onset,
         sibling_condition,
         modal,
         mode_abilities,
@@ -4419,6 +4884,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && reads_return_result.is_none()
         && cast_occurrence.is_none()
         && source_incarnation.is_none()
+        && announced_source_incarnation.is_none()
         && trigger_source.is_none()
         && trigger_definition_ref.is_none()
         && original_controller.is_none()
@@ -4487,6 +4953,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
         && *target_reads == TargetReadOrigin::OwnAnnouncement
+        && *entry_onset == ContinuousEffectOnset::WhenFollowed
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -4586,6 +5053,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         source_id: _,
         cast_occurrence,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -4646,6 +5114,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         replacement_applied: _,
         sub_link,
         target_reads,
+        entry_onset,
         sibling_condition,
         modal,
         mode_abilities,
@@ -4715,6 +5184,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
         && *target_reads == TargetReadOrigin::OwnAnnouncement
+        && *entry_onset == ContinuousEffectOnset::WhenFollowed
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -4816,6 +5286,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         source_id: _,
         cast_occurrence,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -4876,6 +5347,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         replacement_applied: _,
         sub_link,
         target_reads,
+        entry_onset,
         sibling_condition,
         modal,
         mode_abilities,
@@ -4949,6 +5421,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && repeat_until.is_none()
         && *sub_link == SubAbilityLink::ContinuationStep
         && *target_reads == TargetReadOrigin::OwnAnnouncement
+        && *entry_onset == ContinuousEffectOnset::WhenFollowed
         // CR 702.1c ("the same is true") + CR 608.2c (written order): a
         // `ReplicatedOrBranch` per-item keyword-list sibling (Mutable Pupa,
         // Kathril) is not the vanilla batchable shape this proof
@@ -5124,6 +5597,7 @@ fn normalize_ability_source(ability: &ResolvedAbility) -> ResolvedAbility {
     let mut out = ability.clone();
     out.source_id = ObjectId(0);
     out.source_incarnation = None;
+    out.announced_source_incarnation = None;
     out.trigger_source = None;
     out.trigger_definition_ref = None;
     out.may_trigger_origin = None;
@@ -5155,6 +5629,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -5219,6 +5694,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         replacement_applied: a_replacement_applied,
         sub_link: a_sub_link,
         target_reads: a_target_reads,
+        entry_onset: a_entry_onset,
         sibling_condition: a_sibling_condition,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
@@ -5242,6 +5718,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         source_id: _,
         cast_occurrence: _,
         source_incarnation: _,
+        announced_source_incarnation: _,
         trigger_source: _,
         trigger_definition_ref: _,
         delayed_origin: _,
@@ -5306,6 +5783,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         replacement_applied: b_replacement_applied,
         sub_link: b_sub_link,
         target_reads: b_target_reads,
+        entry_onset: b_entry_onset,
         sibling_condition: b_sibling_condition,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
@@ -5402,6 +5880,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_replacement_applied == b_replacement_applied
         && a_sub_link == b_sub_link
         && a_target_reads == b_target_reads
+        && a_entry_onset == b_entry_onset
         && a_sibling_condition == b_sibling_condition
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities
@@ -5872,6 +6351,451 @@ mod tests {
         GameState::new_two_player(42)
     }
 
+    /// CR 109.4 + CR 113.8 + CR 400.7 + CR 608.2h + CR 613.1b: the resolving
+    /// object's controller is its live, layer-derived controller while this
+    /// resolution's object is on the stack; its last known controller once it has
+    /// left, read from the stack incarnation the carrier pinned at install; and
+    /// the entry's for an ability, which has no object. A same-id live stack
+    /// entry is a new object, so the popped carrier's object row does not answer
+    /// for it. The owner P3, the default P0, the live controller P2 and the
+    /// ability's P1 are distinct, so each rung is told apart from the others.
+    ///
+    /// REVERT-FAILING: the live and last-known asserts fail when the authority
+    /// reads `entry.controller` (P0); the last-known assert fails when it reads
+    /// `stack_object_controller` (off the stack, the reset owner P3); the recast
+    /// assert fails without the recast guard. The re-exile assert fails when the
+    /// authority reads the bare-id `lki_cache` (the re-exile's reset owner P3);
+    /// the real-recast assert fails when the pin is not read; the foreign-pin
+    /// assert fails without the pin's id filter (the decoy's P1); the settle
+    /// assert fails when `finish_resolving_stack_entry` keeps the pin.
+    #[test]
+    fn resolving_object_controller_reads_live_then_last_known_then_the_entry() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 4, 42);
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(3),
+            "Stolen Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&spell).unwrap().controller = PlayerId(2);
+        let entry = StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+
+        // Install: the carrier pins the exact stack incarnation it resolves.
+        begin_resolving_stack_entry(&mut state, entry.clone(), None)
+            .expect("no carrier is installed yet");
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&spell]);
+        assert_eq!(state.resolving_stack_object, Some(pin));
+
+        // Recast guard, before any zone exit: a live entry of the same id is a
+        // new object, and with no last known information the entry's controller
+        // answers. REVERT-FAILING: without the recast guard the authority
+        // answers the row's P2.
+        state.stack.push_back(entry.clone());
+        assert!(
+            state.lki_cache.get(&spell).is_none(),
+            "reach guard: no last known information yet"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert_eq!(state.objects[&spell].controller, PlayerId(2));
+        assert_eq!(
+            resolving_object_controller(&state, &entry),
+            PlayerId(0),
+            "a recast is not this resolution's object"
+        );
+        state.stack.pop_back();
+
+        // Live: the popped carrier's object is on the stack.
+        assert_eq!(
+            resolving_object_controller(&state, &entry),
+            PlayerId(2),
+            "CR 613.1b: the live, layer-derived controller"
+        );
+
+        // Last known: the object left the stack while resolving (CR 608.2m).
+        let mut events = Vec::new();
+        zones::move_to_zone(&mut state, spell, Zone::Exile, &mut events);
+        assert_eq!(state.objects[&spell].zone, Zone::Exile);
+        assert_ne!(
+            state.objects[&spell].controller,
+            PlayerId(2),
+            "reach guard: CR 109.4 reset the controller off the stack"
+        );
+        assert_eq!(
+            resolving_object_controller(&state, &entry),
+            PlayerId(2),
+            "CR 608.2h: the controller it had as it left the stack"
+        );
+
+        // Re-exile: a later departure recorded under the same storage id (the
+        // CR 800.4a exile of an already-exiled card) overwrites `lki_cache`, but
+        // a same-zone move keeps the incarnation, so the pinned stack snapshot
+        // still answers (CR 400.7).
+        let exile_incarnation = state.objects[&spell].incarnation;
+        zones::move_to_zone(&mut state, spell, Zone::Exile, &mut events);
+        assert_eq!(
+            state.objects[&spell].incarnation, exile_incarnation,
+            "reach guard: an Exile→Exile move keeps the incarnation"
+        );
+        assert_ne!(
+            state.lki_cache[&spell].controller,
+            PlayerId(2),
+            "reach guard: the re-exile overwrote the bare-id last known information"
+        );
+        assert_eq!(
+            resolving_object_controller(&state, &entry),
+            PlayerId(2),
+            "CR 608.2h: the pinned stack incarnation's snapshot, not the re-exile's"
+        );
+
+        // Real recast: the card is a new object on the stack (incarnation
+        // bumped) under a new controller; the pinned resolution still answers.
+        zones::move_to_zone(&mut state, spell, Zone::Stack, &mut events);
+        assert_ne!(
+            state.objects[&spell].incarnation, pin.incarnation,
+            "reach guard: a move between zones bumps the incarnation"
+        );
+        state.stack.push_back(entry.clone());
+        state.objects.get_mut(&spell).unwrap().controller = PlayerId(1);
+        assert_eq!(
+            resolving_object_controller(&state, &entry),
+            PlayerId(2),
+            "CR 400.7: the recast is a new object; the pinned resolution answers"
+        );
+
+        // A pin naming another object, with its own snapshot, is inert.
+        let recorded_pin = state.resolving_stack_object;
+        state.stack.pop_back();
+        zones::move_to_zone(&mut state, spell, Zone::Graveyard, &mut events);
+        let decoy = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Decoy Spell".to_string(),
+            Zone::Stack,
+        );
+        assert_ne!(decoy, spell);
+        let decoy_incarnation = state.objects[&decoy].incarnation;
+        zones::move_to_zone(&mut state, decoy, Zone::Exile, &mut events);
+        assert_eq!(
+            crate::game::ability_utils::incarnation_controller(&state, decoy, decoy_incarnation),
+            Some(PlayerId(1)),
+            "reach guard: the decoy's stack-exit snapshot names P1"
+        );
+        state.resolving_stack_object = Some(ObjectIncarnationRef::of(decoy, decoy_incarnation));
+        assert_eq!(
+            resolving_object_controller(&state, &entry),
+            PlayerId(0),
+            "a pin naming another object does not answer for this carrier"
+        );
+
+        // Ability: no object row, so the entry's controller (CR 113.8).
+        let ability_id = ObjectId(900);
+        assert!(!state.objects.contains_key(&ability_id));
+        let ability_entry = StackEntry {
+            id: ability_id,
+            source_id: ability_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ability_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ability_id,
+                    PlayerId(1),
+                )),
+            },
+        };
+        assert_eq!(
+            resolving_object_controller(&state, &ability_entry),
+            PlayerId(1),
+            "CR 113.8: an ability's controller is fixed at activation"
+        );
+
+        // Settle: the pin ends with its carrier (CR 608.2n).
+        state.resolving_stack_object = recorded_pin;
+        assert_eq!(state.resolving_stack_object, Some(pin));
+        finish_resolving_stack_entry(
+            &mut state,
+            super::super::lifecycle::DelayedTerminalDisposition::Removed,
+        );
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_stack_object.is_none());
+    }
+
+    /// A-1 (CR 107.3i + CR 107.3k + CR 601.2h): the X-rewrite authority moves
+    /// every X channel of a spell together, only an activated ability's own
+    /// chain, nothing for a kind with no announced X, and never payment state.
+    #[test]
+    fn rewrite_stack_object_x_moves_each_kinds_x_channels() {
+        let draw = |source: ObjectId, x: Option<u32>| {
+            let mut ability = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 0 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source,
+                PlayerId(0),
+            );
+            ability.chosen_x = x;
+            ability
+        };
+        let spell_entry = |id: ObjectId, ability: Option<Box<ResolvedAbility>>| StackEntry {
+            id,
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 5,
+            },
+        };
+        // An object with a cast X and its paid-facts row, in `zone`.
+        let x_object = |state: &mut GameState, zone: Zone, x: Option<u32>| {
+            let id = create_object(state, CardId(1), PlayerId(0), "X Spell".to_string(), zone);
+            state.objects.get_mut(&id).unwrap().cost_x_paid = x;
+            state.stack_paid_facts.insert(
+                id,
+                StackPaidSnapshot {
+                    actual_mana_spent: 5,
+                    x_value: x,
+                    ..Default::default()
+                },
+            );
+            id
+        };
+        let no_x = |_: u32| -> u32 { unreachable!("no X to rewrite") };
+        let mut state = setup();
+
+        // (1) A spell with an ability chain: object, paid snapshot, root and
+        // sub-ability all move; the mana spent does not.
+        let spell = x_object(&mut state, Zone::Stack, Some(3));
+        let mut root = draw(spell, Some(3));
+        root.sub_ability = Some(Box::new(draw(spell, Some(3))));
+        state
+            .stack
+            .push_back(spell_entry(spell, Some(Box::new(root))));
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, spell, |x| x * 2),
+            Some(XRewrite { from: 3, to: 6 })
+        );
+        assert_eq!(state.objects[&spell].cost_x_paid, Some(6));
+        let paid = &state.stack_paid_facts[&spell];
+        assert_eq!((paid.x_value, paid.actual_mana_spent), (Some(6), 5));
+        let StackEntryKind::Spell {
+            ability: Some(chain),
+            actual_mana_spent,
+            ..
+        } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the spell entry keeps its chain");
+        };
+        assert_eq!(chain.chosen_x, Some(6));
+        assert_eq!(chain.sub_ability.as_ref().unwrap().chosen_x, Some(6));
+        assert_eq!(*actual_mana_spent, 5);
+
+        // (2) A permanent spell with no ability chain: object and paid only.
+        let permanent = x_object(&mut state, Zone::Stack, Some(1));
+        state.stack.push_back(spell_entry(permanent, None));
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, permanent, |x| x * 2),
+            Some(XRewrite { from: 1, to: 2 })
+        );
+        assert_eq!(state.objects[&permanent].cost_x_paid, Some(2));
+        assert_eq!(state.stack_paid_facts[&permanent].x_value, Some(2));
+
+        // (3) An activated ability: its own chain only; its source's cast X and
+        // paid row stay put (CR 107.3k).
+        let source = x_object(&mut state, Zone::Battlefield, Some(7));
+        let activation = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: activation,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(draw(source, Some(2))),
+            },
+        });
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, activation, |x| x * 2),
+            Some(XRewrite { from: 2, to: 4 })
+        );
+        let StackEntryKind::ActivatedAbility { ability, .. } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the activation stays on the stack");
+        };
+        assert_eq!(ability.chosen_x, Some(4));
+        assert_eq!(state.objects[&source].cost_x_paid, Some(7));
+        assert_eq!(state.stack_paid_facts[&source].x_value, Some(7));
+
+        // (4) A triggered ability has no announced X: untouched.
+        let trigger = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id: trigger,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(draw(source, Some(5))),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        assert_eq!(rewrite_stack_object_x(&mut state, trigger, no_x), None);
+        let StackEntryKind::TriggeredAbility { ability, .. } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the trigger stays on the stack");
+        };
+        assert_eq!(ability.chosen_x, Some(5));
+
+        // (5) An id with no stack entry.
+        assert_eq!(
+            rewrite_stack_object_x(&mut state, ObjectId(9_999), no_x),
+            None
+        );
+
+        // (6) A spell with no announced X: nothing written.
+        let plain = x_object(&mut state, Zone::Stack, None);
+        state
+            .stack
+            .push_back(spell_entry(plain, Some(Box::new(draw(plain, None)))));
+        assert_eq!(rewrite_stack_object_x(&mut state, plain, no_x), None);
+        assert_eq!(state.objects[&plain].cost_x_paid, None);
+        assert_eq!(state.stack_paid_facts[&plain].x_value, None);
+        let StackEntryKind::Spell {
+            ability: Some(chain),
+            ..
+        } = &state.stack.back().unwrap().kind
+        else {
+            panic!("the spell entry keeps its chain");
+        };
+        assert_eq!(chain.chosen_x, None);
+    }
+
+    /// S-1 (CR 701.6a + CR 113.7a + CR 608.2h): a non-resolving removal of an
+    /// activated ability records its entry whole under the entry's id; a
+    /// non-resolving removal of a triggered ability records nothing, and neither
+    /// does the CR 405.5 resolution pop of an activated ability.
+    #[test]
+    fn a_nonresolving_removal_records_an_activated_ability_whole_and_no_trigger() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let push_entry = |state: &mut GameState, kind: StackEntryKind| {
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            let entry = StackEntry {
+                id,
+                source_id: source,
+                controller: PlayerId(0),
+                kind,
+            };
+            state.stack.push_back(entry.clone());
+            entry
+        };
+        let ability = |x: Option<u32>| {
+            let mut ability = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, PlayerId(0));
+            ability.chosen_x = x;
+            Box::new(ability)
+        };
+
+        // (1) A countered activated ability is recorded exactly as it was.
+        let activated = push_entry(
+            &mut state,
+            StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: ability(Some(2)),
+            },
+        );
+        let popped = remove_nonresolving_stack_entry_at(
+            &mut state,
+            0,
+            super::super::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("reach guard: the activated entry was removed");
+        assert_eq!(popped.entry.id, activated.id, "reach guard: that entry");
+        assert_eq!(
+            state.departed_activated_abilities.get(&activated.id),
+            Some(&activated),
+            "the countered activated ability is recorded whole"
+        );
+
+        // (2) A countered triggered ability is not recorded.
+        let triggered = push_entry(
+            &mut state,
+            StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: ability(None),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        );
+        remove_nonresolving_stack_entry_at(
+            &mut state,
+            0,
+            super::super::lifecycle::DelayedTerminalDisposition::Countered,
+        )
+        .expect("reach guard: the triggered entry was removed");
+        assert!(
+            !state
+                .departed_activated_abilities
+                .contains_key(&triggered.id),
+            "a triggered ability is never recorded"
+        );
+        assert_eq!(state.departed_activated_abilities.len(), 1);
+
+        // (3) The resolution pop of an activated ability records nothing.
+        let resolving = push_entry(
+            &mut state,
+            StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: ability(Some(1)),
+            },
+        );
+        let popped = pop_top_stack_entry(&mut state).expect("reach guard: popped");
+        assert_eq!(popped.entry.id, resolving.id, "reach guard: that entry");
+        assert!(
+            !state
+                .departed_activated_abilities
+                .contains_key(&resolving.id),
+            "a resolving ability is not departed"
+        );
+        assert_eq!(state.departed_activated_abilities.len(), 1);
+    }
+
     /// CR 608.2b (typed composition, not printed Oracle): an unjudged
     /// `PassThrough` occurrence supplies no information to an application
     /// reader either. Chain: `TargetOnly(C)` (slot 0) -> an `Attach` node whose
@@ -6329,13 +7253,26 @@ mod tests {
         }
     }
 
-    /// CR 608.2n + CR 608.2g: a spell held on the stack by its own free-cast
-    /// window owes its final move. A settle site without the event stream
-    /// cannot retire its carrier while that move is owed; the next resolution
-    /// delivers it first, and only then is the carrier retired.
+    /// CR 608.2c + CR 608.2n: a carrier whose instant or sorcery is still on the
+    /// stack and whose marker says it owes that spell's final part. The settle
+    /// before a trigger selection does not retire it; the next resolution runs
+    /// the final part first, and only then is the carrier retired.
     #[test]
-    fn an_owed_spell_move_blocks_settling_until_it_is_delivered() {
+    fn an_owed_final_part_blocks_settling_until_it_is_run() {
         let mut state = setup();
+        let lower: Vec<_> = (0..3)
+            .map(|index| {
+                let id = create_object(
+                    &mut state,
+                    CardId(10 + index),
+                    PlayerId(0),
+                    format!("Lower spell {index}"),
+                    Zone::Stack,
+                );
+                state.stack.push_back(pending_spell_entry(id));
+                id
+            })
+            .collect();
         let spell = create_object(
             &mut state,
             CardId(1),
@@ -6344,30 +7281,426 @@ mod tests {
             Zone::Stack,
         );
         state.resolving_stack_entry = Some(pending_spell_entry(spell));
-        state.deferred_spell_delivery = Some(crate::types::game_state::DeferredSpellDelivery {
-            object_id: spell,
-            destination: Zone::Graveyard,
-        });
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
 
-        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        super::super::engine::settle_resolving_stack_entry_before_trigger_selection(&mut state);
         assert!(
             state.resolving_stack_entry.is_some(),
-            "the carrier stays while its spell's move is owed"
+            "the carrier stays while its spell's final part is owed"
         );
         assert_eq!(state.objects[&spell].zone, Zone::Stack);
 
         let mut events = Vec::new();
-        resolve_top(&mut state, &mut events);
+        assert_eq!(resolve_next(&mut state, &mut events), 0);
+        assert_eq!(
+            state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            lower
+        );
         assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
         assert!(state.players[0].graveyard.contains(&spell));
-        assert!(state.deferred_spell_delivery.is_none());
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == spell)
+        ));
         assert!(
             state.resolving_stack_entry.is_none(),
             "then the carrier settles"
         );
+        assert!(
+            state.resolving_spell_final_part.is_none(),
+            "and the owed final part ends with its carrier"
+        );
+        assert_eq!(resolve_next(&mut state, &mut events), 1);
+        assert_eq!(
+            state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            lower[..2]
+        );
+        assert_eq!(state.objects[&lower[2]].zone, Zone::Graveyard);
+    }
+
+    /// CR 608.2n: abandoning a resolution family keeps the carrier of an instant
+    /// or sorcery still owing its final part, which then delivers it, and drops
+    /// a carrier whose spell already left the stack.
+    #[test]
+    fn abandoning_a_resolution_keeps_only_a_spell_still_owing_its_final_part() {
+        for (zone, kept) in [(Zone::Stack, true), (Zone::Graveyard, false)] {
+            let mut state = setup();
+            let spell = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Paused Sorcery".to_string(),
+                zone,
+            );
+            state.resolving_stack_entry = Some(pending_spell_entry(spell));
+            state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+            let pin = ObjectIncarnationRef::from_object(&state.objects[&spell]);
+            state.resolving_stack_object = Some(pin);
+            state.waiting_for = WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+
+            abandon_active_resolution_carrier(
+                &mut state,
+                super::super::lifecycle::DelayedTerminalDisposition::Removed,
+            );
+            assert_eq!(
+                state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+                kept.then_some(spell),
+                "{zone:?}"
+            );
+            assert_eq!(
+                state.resolving_spell_final_part.map(|owed| owed.spell),
+                kept.then_some(spell),
+                "{zone:?}"
+            );
+            assert_eq!(
+                state.resolving_stack_object,
+                kept.then_some(pin),
+                "{zone:?}: the kept carrier keeps its object pin"
+            );
+            if !kept {
+                continue;
+            }
+
+            let mut events = Vec::new();
+            assert!(super::super::engine::run_spell_final_part_if_due(
+                &mut state,
+                &mut events
+            ));
+            assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::StackResolved { object_id } if *object_id == spell
+                    ))
+                    .count(),
+                1
+            );
+            assert!(state.resolving_stack_entry.is_none());
+            assert!(state.resolving_spell_final_part.is_none());
+            assert!(state.resolving_stack_object.is_none());
+        }
+    }
+
+    /// CR 608.2c + CR 608.2n: "the instructions are done" and "the carrier may
+    /// settle" are different questions. A carrier whose instructions are done
+    /// but which still owes its spell's final part is not retired by the settle
+    /// wrappers; only `run_spell_final_part_if_due` runs that part, retires the
+    /// carrier, and claims the part's events for the ordinary collector.
+    #[test]
+    fn the_settle_wrappers_never_run_an_owed_final_part() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paused Sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart { spell });
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        assert!(super::super::engine::resolution_instructions_are_done(
+            &state
+        ));
+        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        assert_eq!(
+            state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+            Some(spell),
+            "the wrapper does not retire a carrier that owes its final part"
+        );
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+
+        let mut events = Vec::new();
+        assert!(super::super::engine::run_spell_final_part_if_due(
+            &mut state,
+            &mut events
+        ));
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::StackResolved { object_id } if *object_id == spell
+                ))
+                .count(),
+            1
+        );
+        assert!(state.resolving_stack_entry.is_none());
+        assert!(state.resolving_spell_final_part.is_none());
+        assert!(!state.consumed_before_priority_trigger_events.is_empty());
+        assert!(state
+            .consumed_before_priority_trigger_events
+            .iter()
+            .all(|claimed| claimed.scope
+                == crate::game::triggers::ConsumedTriggerEventScope::OrdinaryCollectorsOnly));
+
+        // Paired positive: with no owed final part the same carrier is done
+        // and may settle, and the wrapper retires it.
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Finished Sorcery".to_string(),
+            Zone::Graveyard,
+        );
+        state.resolving_stack_entry = Some(pending_spell_entry(spell));
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        super::super::engine::settle_resolving_stack_entry_after_continuation_resume(&mut state);
+        assert!(state.resolving_stack_entry.is_none());
+    }
+
+    /// §7.2: the resolver's count is the number of entries it took off the
+    /// stack. A refusal that leaves the top entry in place consumes nothing.
+    #[test]
+    fn the_resolver_counts_only_an_entry_it_popped() {
+        let mut state = setup();
+        let lower: Vec<_> = (0..3)
+            .map(|index| {
+                let id = create_object(
+                    &mut state,
+                    CardId(10 + index),
+                    PlayerId(0),
+                    format!("Lower spell {index}"),
+                    Zone::Stack,
+                );
+                state.stack.push_back(pending_spell_entry(id));
+                id
+            })
+            .collect();
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pending spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: source,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    Vec::new(),
+                    source,
+                    PlayerId(0),
+                ))),
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        // A residual firing makes `resolve_top` refuse without popping.
+        crate::game::effects::restore_continuation_trigger_firing(
+            &mut state,
+            Some(TriggerFiring::Ordinary),
+        );
+        let mut events = Vec::new();
+
+        assert_eq!(resolve_next(&mut state, &mut events), 0);
+        assert_eq!(
+            state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            lower.iter().copied().chain([source]).collect::<Vec<_>>()
+        );
+
+        // Paired positive: once the firing is cleared the entry pops and
+        // resolves, and the count is 1.
+        state.resolving_trigger_firing = None;
+        assert_eq!(resolve_next(&mut state, &mut events), 1);
+        assert_eq!(
+            state.stack.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            lower
+        );
+        assert_eq!(state.objects[&source].zone, Zone::Graveyard);
+
+        let mut empty = setup();
+        assert_eq!(resolve_next(&mut empty, &mut Vec::new()), 0);
+    }
+
+    /// CR 707.10 + CR 707.10c: Reverberate copies its chosen Opt once, and
+    /// Twinning Staff adds one copy. The copies are additional stack objects,
+    /// not casts. This characterizes consumption despite net-flat/growing
+    /// stack lengths; it is not a runtime performance discriminator.
+    #[test]
+    fn single_entry_count_survives_copy_created_stack_growth() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::actions::GameAction;
+
+        const OPT: &str = "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.";
+        const REVERBERATE: &str =
+            "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+        const STAFF: &str = "If you would copy a spell one or more times, instead copy it that many times plus an additional time. You may choose new targets for the additional copy.\n{7}, {T}: Copy target instant or sorcery spell you control. You may choose new targets for the copy.";
+
+        for (with_staff, expected_copies) in [(false, 1), (true, 2)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            for player in [P0, P1] {
+                scenario.with_library_top(player, &["Library A", "Library B", "Library C"]);
+            }
+            if with_staff {
+                scenario.add_artifact_from_oracle(P0, "Twinning Staff", STAFF);
+            }
+            // Free costs isolate stack accounting; payment behavior is not under test.
+            let older = scenario
+                .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let chosen = scenario
+                .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let reverberate = scenario
+                .add_spell_to_hand_from_oracle(P0, "Reverberate", true, REVERBERATE)
+                .with_mana_cost(ManaCost::generic(0))
+                .id();
+            let mut runner = scenario.build();
+            runner.cast(older).commit();
+            runner.cast(chosen).commit();
+            runner.cast(reverberate).target_object(chosen).commit();
+            assert_eq!(
+                runner
+                    .state()
+                    .stack
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<Vec<_>>(),
+                [older, chosen, reverberate]
+            );
+            assert!(runner.state().priority_passes.is_empty());
+
+            // Supplementary authority-count assertion on the same committed board.
+            let mut direct = runner.state().clone();
+            let mut direct_events = Vec::new();
+            assert_eq!(resolve_next(&mut direct, &mut direct_events), 1);
+
+            // CR 117.4: close exactly the current all-pass cycle, following the
+            // holder selected by each real action; do not drain the Opt copies.
+            let mut action_events = Vec::new();
+            for _ in 0..2 {
+                let WaitingFor::Priority { player } = runner.state().waiting_for else {
+                    panic!("Reverberate's targetless copies need no retarget prompt");
+                };
+                assert!(matches!(player, P0 | P1));
+                action_events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
+
+            for (state, events) in [
+                (&direct, direct_events.as_slice()),
+                (runner.state(), action_events.as_slice()),
+            ] {
+                // CR 608.2n: only Reverberate has finished; neither Opt began.
+                assert_eq!(state.objects[&reverberate].zone, Zone::Graveyard);
+                assert_eq!(state.stack.len(), 2 + expected_copies);
+                assert_eq!(
+                    state
+                        .stack
+                        .iter()
+                        .take(2)
+                        .map(|entry| entry.id)
+                        .collect::<Vec<_>>(),
+                    [older, chosen]
+                );
+                for id in [older, chosen] {
+                    assert_eq!(state.objects[&id].zone, Zone::Stack);
+                }
+                let copies: Vec<_> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        GameEvent::SpellCopied {
+                            object_id,
+                            original_id,
+                            ..
+                        } => {
+                            assert_eq!(
+                                *original_id, chosen,
+                                "the older Opt is not the chosen source"
+                            );
+                            Some(*object_id)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(copies.len(), expected_copies);
+                assert_eq!(
+                    copies
+                        .iter()
+                        .copied()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len(),
+                    expected_copies
+                );
+                assert_eq!(
+                    state
+                        .stack
+                        .iter()
+                        .skip(2)
+                        .map(|entry| entry.id)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    copies.iter().copied().collect()
+                );
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::SpellCast { .. })));
+                assert!(state.players[0].hand.is_empty());
+                assert_eq!(state.players[0].library.len(), 3);
+                assert_eq!(state.players[1].library.len(), 3);
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            }
+        }
+    }
+
+    /// CR 608.2n: an owed final part belongs to the carrier that owes it. A
+    /// marker left with no carrier is a contract breach: a new carrier cannot
+    /// begin, and `resolve_top` refuses without popping the stack.
+    #[test]
+    fn a_leftover_final_part_marker_refuses_a_new_carrier() {
+        let mut state = setup();
+        let spell = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Pending sorcery".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(pending_spell_entry(spell));
+        state.resolving_spell_final_part = Some(OwedSpellFinalPart {
+            spell: ObjectId(spell.0 + 100),
+        });
+
+        assert_eq!(
+            begin_resolving_stack_entry(&mut state, pending_spell_entry(spell), None),
+            Err(ResolutionCarrierError::AlreadyResolving)
+        );
+        assert!(state.resolving_stack_entry.is_none());
+
+        let mut events = Vec::new();
+        assert_eq!(resolve_top(&mut state, &mut events), 0);
+        assert_eq!(state.stack.len(), 1, "the stack top was not popped");
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert!(events.is_empty());
+
+        // Paired reach control: with no leftover marker the same spell pops
+        // and resolves, so the refusal above was the marker's.
+        state.resolving_spell_final_part = None;
+        assert_eq!(resolve_top(&mut state, &mut events), 1);
+        assert!(state.stack.is_empty());
+        assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+        assert!(events.iter().any(
+            |event| matches!(event, GameEvent::StackResolved { object_id } if *object_id == spell)
+        ));
     }
 
     #[test]
@@ -7195,7 +8528,7 @@ mod tests {
         let aura_id = create_aura_on_stack(&mut state, creature);
 
         let mut events = Vec::new();
-        resolve_top(&mut state, &mut events);
+        assert_eq!(resolve_top(&mut state, &mut events), 1);
 
         // Aura should be on the battlefield
         assert!(state.battlefield.contains(&aura_id));
@@ -7248,7 +8581,7 @@ mod tests {
         state.players[1].graveyard.push_back(creature);
 
         let mut events = Vec::new();
-        resolve_top(&mut state, &mut events);
+        assert_eq!(resolve_top(&mut state, &mut events), 1);
 
         // Aura should fizzle to graveyard (not to battlefield)
         assert!(!state.battlefield.contains(&aura_id));
@@ -7288,7 +8621,7 @@ mod tests {
         });
 
         let mut events = Vec::new();
-        resolve_top(&mut state, &mut events);
+        assert_eq!(resolve_top(&mut state, &mut events), 1);
 
         // Should be on battlefield, not attached to anything
         assert!(state.battlefield.contains(&ench_id));
@@ -7926,7 +9259,7 @@ mod tests {
 
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -8021,7 +9354,7 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        resolve_top(&mut state, &mut events);
+        assert_eq!(resolve_top(&mut state, &mut events), 1);
 
         assert_eq!(
             state.objects[&obj_id].zone,
@@ -8111,7 +9444,7 @@ mod tests {
         zones::move_to_zone(&mut state, target_id, Zone::Graveyard, &mut Vec::new());
 
         let mut events = Vec::new();
-        resolve_top(&mut state, &mut events);
+        assert_eq!(resolve_top(&mut state, &mut events), 1);
 
         assert_eq!(
             state.objects[&spell_id].zone,
@@ -15588,7 +16921,7 @@ mod tests {
             let depth = state.stack.len();
 
             let mut events = Vec::new();
-            resolve_top(&mut state, &mut events);
+            assert_eq!(resolve_top(&mut state, &mut events), 1);
 
             assert_eq!(state.stack.len(), depth - 1, "reach-guard (a): it resolved");
             assert_eq!(
@@ -15645,7 +16978,7 @@ mod tests {
             let life_before = state.players[0].life;
 
             let mut events = Vec::new();
-            resolve_top(&mut state, &mut events);
+            assert_eq!(resolve_top(&mut state, &mut events), 1);
 
             assert_eq!(
                 state.stack.len(),
@@ -15706,7 +17039,7 @@ mod tests {
             let depth = state.stack.len();
 
             let mut events = Vec::new();
-            resolve_top(&mut state, &mut events);
+            assert_eq!(resolve_top(&mut state, &mut events), 1);
 
             assert_eq!(
                 state.stack.len(),

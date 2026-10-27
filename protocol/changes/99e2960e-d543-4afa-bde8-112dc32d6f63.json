@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Preserve owning trigger scope across pre-roll die replacement ordering"
+}

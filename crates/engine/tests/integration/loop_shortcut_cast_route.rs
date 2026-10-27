@@ -110,8 +110,7 @@ fn graft_cast_trigger(state: &mut GameState, name: &str) -> ObjectId {
         .objects
         .get_mut(&host)
         .expect("the just-created graft host is in `objects`")
-        .trigger_definitions
-        .push(TriggerDefinition::new(TriggerMode::SpellCast));
+        .push_printed_trigger(TriggerDefinition::new(TriggerMode::SpellCast));
     // Positional read-back (`Definitions<T>` exposes no `iter()`): prove the graft actually landed,
     // so a row that later reads `Batched` is a route failure rather than a fixture failure.
     let entries = &state

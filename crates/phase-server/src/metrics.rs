@@ -152,6 +152,7 @@ pub struct ServerMetrics {
     jev_upstream_timeout: AtomicU64,
     jev_upstream_unreachable: AtomicU64,
     ws_disconnects: [AtomicU64; DisconnectCause::ALL.len()],
+    ws_quota_discards: AtomicU64,
 }
 
 impl ServerMetrics {
@@ -201,6 +202,14 @@ impl ServerMetrics {
     pub(crate) fn ws_disconnect_count(&self, cause: DisconnectCause) -> u64 {
         self.ws_disconnects[cause.index()].load(Ordering::Relaxed)
     }
+
+    pub(crate) fn record_ws_quota_discard(&self) {
+        self.ws_quota_discards.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn ws_quota_discard_count(&self) -> u64 {
+        self.ws_quota_discards.load(Ordering::Relaxed)
+    }
 }
 
 /// Build identity, mirroring what `ServerHello` advertises to clients.
@@ -244,6 +253,7 @@ pub struct Snapshot {
     pub jev_relay: Vec<(JevRelayStatus, u64)>,
     /// First-observed transport failures, using a fixed label set.
     pub ws_disconnects: [u64; DisconnectCause::ALL.len()],
+    pub ws_discarded_frames: u64,
     pub build: BuildInfo,
 }
 
@@ -323,6 +333,7 @@ pub async fn collect(app: &AppState) -> Snapshot {
             .collect(),
         ws_disconnects: DisconnectCause::ALL
             .map(|cause| app.context.metrics.ws_disconnect_count(cause)),
+        ws_discarded_frames: app.context.metrics.ws_quota_discard_count(),
         build: BuildInfo::current(app.mode),
     }
 }
@@ -427,6 +438,13 @@ pub fn render(snapshot: &Snapshot) -> String {
             cause.label()
         );
     }
+    let _ = writeln!(&mut out, "# HELP phase_ws_discarded_frames_total WebSocket frames discarded by bounded ingress policy.");
+    let _ = writeln!(&mut out, "# TYPE phase_ws_discarded_frames_total counter");
+    let _ = writeln!(
+        &mut out,
+        "phase_ws_discarded_frames_total{{reason=\"quota_exhausted\"}} {}",
+        snapshot.ws_discarded_frames
+    );
 
     let _ = writeln!(
         &mut out,
@@ -483,6 +501,7 @@ mod tests {
     fn snapshot() -> Snapshot {
         Snapshot {
             ws_disconnects: Default::default(),
+            ws_discarded_frames: 12,
             connections: 7,
             connections_capacity: 200,
             games_active: 4,
@@ -520,7 +539,8 @@ mod tests {
     #[test]
     fn render_preserves_scraper_types_labels_and_values() {
         let mut fixture = snapshot();
-        fixture.ws_disconnects[DisconnectCause::RawDecodeQuota.index()] = 9;
+        fixture.ws_disconnects[DisconnectCause::QuotaRefusalOverflow.index()] = 9;
+        fixture.ws_disconnects[DisconnectCause::QuotaDiscardOverflow.index()] = 2;
         let body = render(&fixture);
         for expected in [
             "# TYPE phase_connections gauge",
@@ -540,8 +560,11 @@ mod tests {
             "# TYPE phase_replica_ordinal gauge",
             "phase_replica_ordinal 3",
             "# TYPE phase_ws_disconnects_total counter",
-            "phase_ws_disconnects_total{cause=\"raw_decode_quota\"} 9",
+            "phase_ws_disconnects_total{cause=\"quota_refusal_overflow\"} 9",
+            "phase_ws_disconnects_total{cause=\"quota_discard_overflow\"} 2",
             "phase_ws_disconnects_total{cause=\"peer_close\"} 0",
+            "# TYPE phase_ws_discarded_frames_total counter",
+            "phase_ws_discarded_frames_total{reason=\"quota_exhausted\"} 12",
             "# TYPE phase_admission_rejects_total counter",
             "phase_admission_rejects_total{reason=\"connection_limit\"} 5",
             "# TYPE phase_jev_relay_requests_total counter",

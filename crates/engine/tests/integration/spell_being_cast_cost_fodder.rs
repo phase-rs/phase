@@ -189,6 +189,7 @@ fn spell_with_other_exile_fodder_is_offered_and_completes() {
         .act(GameAction::ActivateAbility {
             source_id: b.source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the exile source activates during payment");
     let WaitingFor::PayCost { choices, .. } = b.runner.state().waiting_for.clone() else {
@@ -286,6 +287,7 @@ fn skirge_familiar_pays_by_discarding_another_card() {
         .act(GameAction::ActivateAbility {
             source_id: b.source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Skirge Familiar activates during payment");
     let WaitingFor::PayCost { choices, .. } = b.runner.state().waiting_for.clone() else {
@@ -408,6 +410,7 @@ fn flashback_spell_pays_by_exiling_another_graveyard_card() {
         .act(GameAction::ActivateAbility {
             source_id: b.source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the exile source activates during payment");
     let WaitingFor::PayCost { choices, .. } = b.runner.state().waiting_for.clone() else {

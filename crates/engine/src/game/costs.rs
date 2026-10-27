@@ -43,17 +43,17 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityCost, EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
-    REMOVE_COUNTER_COST_ALL,
+    AbilityCost, EffectKind, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
+    TurnUpCostSource, TypedFilter, REMOVE_COUNTER_COST_ALL,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CostResume, GameState, ManaAbilityResume, PayCostKind, PendingCostMoveCompletion,
-    PendingCostMoveResume, WaitingFor,
+    CostResume, GameState, ManaAbilityResume, PausedCounterCostRemoval, PayCostKind,
+    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
+    ReplacementSubtreeBoundary, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
-use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
 use super::casting::{
@@ -225,6 +225,12 @@ pub(crate) enum PaymentScope<'a> {
         ability: &'a ResolvedAbility,
         cost_move_root: ResolutionCostMoveRoot,
     },
+    /// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Turn a face-down permanent face up
+    /// by paying its morph / megamorph / disguise cost as a special action.
+    TurnFaceUp {
+        source: ObjectIncarnationRef,
+        cost_source: TurnUpCostSource,
+    },
 }
 
 impl PaymentScope<'_> {
@@ -239,6 +245,7 @@ impl PaymentScope<'_> {
                 super::casting::activated_ability_granting_object(state, source_id, *ability_index)
             }
             PaymentScope::Resolution { ability, .. } => ability.context.granting_object,
+            PaymentScope::TurnFaceUp { .. } => None,
         }
     }
 }
@@ -418,7 +425,9 @@ fn resolve_cost_quantity(
     scope: &PaymentScope,
 ) -> i32 {
     match scope {
-        PaymentScope::Activation { .. } => resolve_quantity(state, expr, player, source_id),
+        PaymentScope::Activation { .. } | PaymentScope::TurnFaceUp { .. } => {
+            resolve_quantity(state, expr, player, source_id)
+        }
         PaymentScope::Resolution { ability, .. } => {
             resolve_quantity_with_targets(state, expr, ability)
         }
@@ -537,6 +546,9 @@ fn move_self_activation_cost(
                 paused_at_index: 0,
                 destination,
                 completion: PendingCostMoveCompletion::FinishPending,
+                // A self-move is one object, so no group can form.
+                deferred_cost_events: Vec::new(),
+                departure_record_indices: Vec::new(),
             });
             // A mandatory replacement may have delivered this cost move and
             // surfaced its own post-effect prompt. Only a still-pending CR
@@ -621,12 +633,18 @@ pub(crate) fn resume_replacement_may_cost_move(
     super::engine_replacement::handle_replacement_choice(state, 0, events)
 }
 
+/// CR 602.2b + CR 601.2h: pay an activated ability's cost. `cost_removed_counters`
+/// is the ledger owned by this activation in flight (its continuing
+/// `ResolvedAbility.context.cost_removed_counter_amount` on the stack route, its
+/// `ManaAbilityCostCursor::cost_removed_counters` on the mana route): every
+/// counter leg this payment completes adds the number it actually removed.
 pub fn pay_ability_cost_for_activation(
     state: &mut GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_index: Option<usize>,
+    cost_removed_counters: &mut Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     pay_ability_cost_for_activation_with_cost_move_replacement(
@@ -635,6 +653,7 @@ pub fn pay_ability_cost_for_activation(
         source_id,
         cost,
         ability_index,
+        cost_removed_counters,
         events,
     )
 }
@@ -645,6 +664,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
     source_id: ObjectId,
     cost: &AbilityCost,
     ability_index: Option<usize>,
+    cost_removed_counters: &mut Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
@@ -658,6 +678,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
             excluded_sources: &excluded_sources,
             ability_index,
         },
+        Some(cost_removed_counters),
         None,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
@@ -720,6 +741,45 @@ pub(crate) fn pay_ability_cost_for_replacement_may_cost(
     )
 }
 
+/// CR 702.37e + CR 116.2b + CR 118.1 + CR 118.3: Pay an ability cost to turn a face-down
+/// permanent face up as a special action. Supported costs: Mana, ReturnToHand, Discard,
+/// PayLife, Reveal, and non-self Sacrifice.
+pub(crate) fn pay_ability_cost_for_turn_face_up(
+    state: &mut GameState,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+    cost_source: TurnUpCostSource,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let outcome = pay_ability_cost_inner(
+        state,
+        player,
+        source.object_id,
+        cost,
+        events,
+        &PaymentScope::TurnFaceUp {
+            source,
+            cost_source,
+        },
+        None,
+        Some(cost),
+    )?;
+    match outcome {
+        PaymentOutcome::Paid => {
+            super::morph::finish_paid_turn_face_up(state, player, source, cost_source, None, events)
+        }
+        PaymentOutcome::Paused { .. } => {
+            // CR 603.2 + CR 603.3b: Retain ordinary cost observers across the
+            // interactive pause until priority can drain them.
+            crate::game::triggers::park_observer_triggers_if_paused(state, events, 0);
+            crate::game::triggers::park_delayed_observer_triggers_if_paused(state, events, 0);
+            Ok(state.waiting_for.clone())
+        }
+        PaymentOutcome::Failed { reason } => Err(EngineError::ActionNotAllowed(reason.reason)),
+    }
+}
+
 fn pay_ability_cost_for_resolution_with_cost_move_root(
     state: &mut GameState,
     payer: PlayerId,
@@ -738,10 +798,87 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
             ability,
             cost_move_root,
         },
+        // CR 118.12: a resolution-time PayCost has no activation to own a count.
+        None,
         Some(cost),
     )
 }
 
+/// How [`pay_counter_cost_removals`] left a counter-removal cost.
+pub(crate) enum CounterCostRemovalProgress {
+    /// Every removal of the cost is over.
+    Complete,
+    /// A removal waits on a replacement choice. The record holds it and the
+    /// cost's later removals, none of which has been made.
+    AwaitingReplacementChoice(PausedCounterCostRemoval),
+}
+
+/// CR 602.2b + CR 118.11: credit `removed` counters to an activation's own
+/// removed-counter count. A credited zero still reads `Some(0)` (a counter cost
+/// that removed none; CR 107.1c lets an "any number" cost choose zero), distinct
+/// from `None` (no counter removal of this payment has completed).
+pub(crate) fn credit_cost_removed_counters(ledger: &mut Option<u32>, removed: u32) {
+    let total = ledger.get_or_insert(0);
+    *total = total.saturating_add(removed);
+}
+
+/// CR 118.3 + CR 122.1 + CR 601.2h + CR 616.1: the applier of planned
+/// counter-removal costs (the Loyalty arm and the resolution-time unless
+/// payments remove their counters directly). Makes each planned removal in order through the
+/// replacement pipeline and credits each completed removal's actual count to
+/// the paying activation's ledger (`None` for a spell's cost, a resolution-time
+/// payment and the `can_pay` dry run). A removal that waits on a replacement
+/// choice stops the payment: nothing is credited for it until its owner
+/// settles it, and the later removals wait for it (CR 601.2h: partial payments
+/// are not allowed, so the owner finishes them before the payment proceeds).
+/// Only a completed removal materializes the ledger, so a completed cost that
+/// removed none reads `Some(0)`, and a cost paused on its first removal still
+/// reads `None`.
+pub(crate) fn pay_counter_cost_removals(
+    state: &mut GameState,
+    removals: Vec<PendingCounterRemoval>,
+    mut cost_removed_counters: Option<&mut Option<u32>>,
+    events: &mut Vec<GameEvent>,
+) -> CounterCostRemovalProgress {
+    // CR 616.1 + CR 608.2c: everything a removal's replacement installs sits
+    // above this position, so the parked root can tell when that subtree retires.
+    let replacement_subtree = ReplacementSubtreeBoundary::at(&state.resolution_stack);
+    let mut removals = removals.into_iter();
+    while let Some(removal) = removals.next() {
+        let in_flight = super::effects::counters::begin_in_flight_counter_removal(state, removal);
+        match super::effects::counters::remove_counter_with_replacement(
+            state,
+            in_flight.removal.object_id,
+            in_flight.removal.counter_type.clone(),
+            in_flight.removal.count,
+            events,
+        ) {
+            super::effects::counters::CounterRemovalOutcome::Removed(removed) => {
+                if let Some(ledger) = cost_removed_counters.as_deref_mut() {
+                    credit_cost_removed_counters(ledger, removed);
+                }
+            }
+            super::effects::counters::CounterRemovalOutcome::AwaitingReplacementChoice => {
+                return CounterCostRemovalProgress::AwaitingReplacementChoice(
+                    PausedCounterCostRemoval {
+                        in_flight,
+                        remaining: removals.collect(),
+                        replacement_subtree,
+                    },
+                );
+            }
+        }
+    }
+    if let Some(ledger) = cost_removed_counters {
+        ledger.get_or_insert(0);
+    }
+    CounterCostRemovalProgress::Complete
+}
+
+/// `cost_removed_counters` is the paying activation's ledger (CR 602.2b). `None`
+/// is resolution scope (CR 118.12) and the `can_pay` dry run: no activation
+/// reads the count.
+#[allow(clippy::too_many_arguments)]
 fn pay_ability_cost_inner(
     state: &mut GameState,
     player: PlayerId,
@@ -749,6 +886,7 @@ fn pay_ability_cost_inner(
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
     scope: &PaymentScope,
+    mut cost_removed_counters: Option<&mut Option<u32>>,
     resume_cost: Option<&AbilityCost>,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
@@ -761,6 +899,11 @@ fn pay_ability_cost_inner(
     if matches!(scope, PaymentScope::Resolution { .. }) && !supported_at_resolution(cost) {
         return Ok(payment_failed(
             "unsupported resolution-time AbilityCost payment shape",
+        ));
+    }
+    if matches!(scope, PaymentScope::TurnFaceUp { .. }) && !supported_for_turn_face_up(cost) {
+        return Ok(payment_failed(
+            "unsupported turn-face-up AbilityCost payment shape",
         ));
     }
     match cost {
@@ -908,6 +1051,11 @@ fn pay_ability_cost_inner(
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
+            PaymentScope::TurnFaceUp { .. } => {
+                unreachable!(
+                    "TurnFaceUp mana costs are normalized to TurnFaceUpCost::Mana in turn_face_up_prepare"
+                )
+            }
         },
         // CR 118.4 + CR 107.3c: Dynamic-generic mana. At activation it should
         // have been announced/resolved upstream (error). At resolution it
@@ -960,6 +1108,7 @@ fn pay_ability_cost_inner(
                     return Ok(payment_failed("insufficient mana"));
                 }
             }
+            PaymentScope::TurnFaceUp { .. } => unreachable!(),
         },
         AbilityCost::Composite { costs } => {
             let enclosing_suffix = enclosing_composite_suffix(cost, resume_cost);
@@ -978,6 +1127,7 @@ fn pay_ability_cost_inner(
                     sub_cost,
                     events,
                     scope,
+                    cost_removed_counters.as_deref_mut(),
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
                 )?;
                 match outcome {
@@ -1035,6 +1185,39 @@ fn pay_ability_cost_inner(
         AbilityCost::PayLife { amount } => {
             let amount = resolve_cost_quantity(state, amount, player, source_id, scope);
             let amount = u32::try_from(amount.max(0)).unwrap_or(0);
+            if let PaymentScope::TurnFaceUp {
+                source,
+                cost_source,
+            } = scope
+            {
+                // CR 614.6 + CR 616.1: Capture depth BEFORE calling helper (C4)
+                let resume_at_resolution_depth = state.resolution_stack.len();
+                // CR 116.2b + CR 702.37e: Turning face up is a special action, not a
+                // cast or activation, so cast/activation-only prohibitions do not apply.
+                let result = super::life_costs::pay_life_as_cost(state, player, amount, events);
+                return match result {
+                    super::life_costs::PayLifeCostResult::Paid { .. } => Ok(PaymentOutcome::Paid),
+                    super::life_costs::PayLifeCostResult::PaidWithDeferredSubstitution { .. }
+                    | super::life_costs::PayLifeCostResult::DeferredReplacementChoice { .. } => {
+                        state.pending_deferred_life_cost_resume = Some(
+                            crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
+                                player,
+                                source: *source,
+                                cost_source: *cost_source,
+                                resume_at_resolution_depth,
+                                remaining_cost: None,
+                            },
+                        );
+                        Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        })
+                    }
+                    super::life_costs::PayLifeCostResult::InsufficientLife
+                    | super::life_costs::PayLifeCostResult::Prohibited => {
+                        Ok(payment_failed("Cannot pay life cost"))
+                    }
+                };
+            }
             let result = match scope {
                 PaymentScope::Activation { .. } => {
                     super::life_costs::pay_life_as_cast_or_activation_cost(
@@ -1044,6 +1227,7 @@ fn pay_ability_cost_inner(
                 PaymentScope::Resolution { .. } => {
                     super::life_costs::pay_life_as_cost(state, player, amount, events)
                 }
+                PaymentScope::TurnFaceUp { .. } => unreachable!(),
             };
             match result {
                 super::life_costs::PayLifeCostResult::Paid { .. } => {}
@@ -1061,6 +1245,50 @@ fn pay_ability_cost_inner(
         }
         // CR 118.3: Sacrifice as a cost — sacrifice the source (SelfRef) or a chosen permanent.
         AbilityCost::Sacrifice(cost) => {
+            if let PaymentScope::TurnFaceUp {
+                source,
+                cost_source,
+            } = scope
+            {
+                if matches!(cost.target, TargetFilter::SelfRef) {
+                    return Ok(payment_failed(
+                        "Cannot sacrifice a face-down permanent to turn itself face up",
+                    ));
+                }
+                let Some(count) = cost.requirement.fixed_count() else {
+                    return Ok(payment_failed(
+                        "Aggregate sacrifice requirements are not supported for turn-face-up costs",
+                    ));
+                };
+                let count = count as usize;
+                let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
+                    state,
+                    player,
+                    source.object_id,
+                    None,
+                    &cost.target,
+                    Some(scope),
+                );
+                if eligible.len() < count {
+                    return Ok(payment_failed("Not enough eligible permanents to sacrifice"));
+                }
+                state.waiting_for = WaitingFor::PayCost {
+                    player,
+                    kind: PayCostKind::Sacrifice,
+                    choices: eligible,
+                    count,
+                    // CR 118.3: the turn-face-up handler requires exactly `count`.
+                    min_count: count,
+                    resume: CostResume::TurnFaceUp {
+                        source: *source,
+                        cost_source: *cost_source,
+                        remaining_cost: None,
+                    },
+                };
+                return Ok(PaymentOutcome::Paused {
+                    remaining_cost: None,
+                });
+            }
             if matches!(cost.target, TargetFilter::SelfRef) {
                 if super::static_abilities::player_cant_sacrifice_as_cost(state, player, source_id)
                 {
@@ -1094,6 +1322,56 @@ fn pay_ability_cost_inner(
                 });
             }
         },
+        // CR 702.37e + CR 118.1 + CR 118.3: Turn-face-up discard cost.
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope,
+        } if matches!(scope, PaymentScope::TurnFaceUp { .. }) => {
+            if self_scope.is_source_card()
+                || *selection == crate::types::ability::CardSelectionMode::Random
+            {
+                return Ok(payment_failed(
+                    "Random or source-card discard costs are not supported for turn-face-up costs",
+                ));
+            }
+            let PaymentScope::TurnFaceUp {
+                source,
+                cost_source,
+            } = scope
+            else {
+                unreachable!()
+            };
+            let count_num =
+                resolve_cost_quantity(state, count, player, source_id, scope).max(0) as usize;
+            let eligible = super::casting::find_eligible_discard_targets(
+                state,
+                player,
+                source.object_id,
+                None,
+                filter.as_ref(),
+            );
+            if eligible.len() < count_num {
+                return Ok(payment_failed("Not enough eligible cards in hand to discard"));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Discard,
+                choices: eligible,
+                count: count_num,
+                // CR 118.3: the turn-face-up handler requires exactly `count`.
+                min_count: count_num,
+                resume: CostResume::TurnFaceUp {
+                    source: *source,
+                    cost_source: *cost_source,
+                    remaining_cost: None,
+                },
+            };
+            return Ok(PaymentOutcome::Paused {
+                remaining_cost: None,
+            });
+        }
         // CR 118.12 + CR 701.9: Resolution-time "discard N cards of your choice"
         // cost (e.g. "discard a card"). The choice of which cards to discard is
         // acquired via a `WaitingFor::DiscardChoice` round-trip when there is a
@@ -1515,7 +1793,7 @@ fn pay_ability_cost_inner(
                         }
                         // CR 602.1a: an activation cost belongs to an activated ability,
                         // which has no triggered identity to record.
-                        PaymentScope::Activation { .. } => {}
+                        PaymentScope::Activation { .. } | PaymentScope::TurnFaceUp { .. } => {}
                     }
                 }
                 // CR 118.3 + CR 701.26a: tapping one determined permanent (the granter, or the
@@ -1747,7 +2025,13 @@ fn pay_ability_cost_inner(
                 }
                 _ => source_id,
             };
-            if *count == REMOVE_COUNTER_COST_ALL
+            // CR 601.2h: plan the removal before any counter moves. ALL of every
+            // type removes each type present; otherwise `CounterMatch::Any`
+            // resolves to the concrete type currently present on the payer
+            // before the replacement pipeline sees it —
+            // `remove_counter_with_replacement` operates on a single concrete
+            // kind. `OfType(t)` passes through unchanged.
+            let removals: Vec<PendingCounterRemoval> = if *count == REMOVE_COUNTER_COST_ALL
                 && matches!(counter_type, crate::types::counter::CounterMatch::Any)
             {
                 let mut counters: Vec<_> = state
@@ -1764,39 +2048,76 @@ fn pay_ability_cost_inner(
                 // sort by CounterType so the removal (and any per-type triggers
                 // it emits) happen in a deterministic, process-independent order.
                 counters.sort_by(|a, b| a.0.cmp(&b.0));
-                for (counter_type, count) in counters {
-                    super::effects::counters::remove_counter_with_replacement(
-                        state,
-                        payer,
+                counters
+                    .into_iter()
+                    .map(|(counter_type, count)| PendingCounterRemoval {
+                        object_id: payer,
                         counter_type,
                         count,
-                        events,
-                    );
-                }
-                return Ok(PaymentOutcome::Paid);
-            }
-            // CR 601.2h: Resolve `CounterMatch::Any` to the concrete counter
-            // type currently present on the source before the replacement
-            // pipeline sees it — `remove_counter_with_replacement` operates on
-            // a single concrete kind. `OfType(t)` passes through unchanged.
-            if let Some(resolved) = super::effects::counters::resolve_counter_match_for_removal(
+                    })
+                    .collect()
+            } else {
+                super::effects::counters::resolve_counter_match_for_removal(
+                    state,
+                    payer,
+                    counter_type,
+                )
+                .map(|resolved| {
+                    let count = if *count == REMOVE_COUNTER_COST_ALL {
+                        state
+                            .objects
+                            .get(&payer)
+                            .and_then(|obj| obj.counters.get(&resolved))
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        *count
+                    };
+                    PendingCounterRemoval {
+                        object_id: payer,
+                        counter_type: resolved,
+                        count,
+                    }
+                })
+                .into_iter()
+                .collect()
+            };
+            // CR 602.2b + CR 601.2h + CR 118.3: the activation's effect reads the
+            // count actually removed; a resolution-time PayCost has no activation
+            // to bind (its ledger is `None`).
+            match pay_counter_cost_removals(
                 state,
-                payer,
-                counter_type,
+                removals,
+                cost_removed_counters,
+                events,
             ) {
-                let count = if *count == REMOVE_COUNTER_COST_ALL {
-                    state
-                        .objects
-                        .get(&payer)
-                        .and_then(|obj| obj.counters.get(&resolved))
-                        .copied()
-                        .unwrap_or(0)
-                } else {
-                    *count
-                };
-                super::effects::counters::remove_counter_with_replacement(
-                    state, payer, resolved, count, events,
-                );
+                CounterCostRemovalProgress::Complete => {}
+                CounterCostRemovalProgress::AwaitingReplacementChoice(removal) => match scope {
+                    // CR 601.2h + CR 616.1: the activation pauses until the
+                    // replacement choice settles this removal; its caller
+                    // attaches the paused payment to this root, whose resume
+                    // credits the measured count before anything later is paid.
+                    PaymentScope::Activation { .. } => {
+                        state.pending_cost_move_resume =
+                            Some(PendingCostMoveResume::CounterCostRemovalPayment {
+                                player,
+                                pending: None,
+                                removal: Box::new(removal),
+                                cost_paid_object: None,
+                                completion: PendingCostMoveCompletion::FinishPending,
+                            });
+                        return Ok(PaymentOutcome::Paused {
+                            remaining_cost: None,
+                        });
+                    }
+                    // CR 118.12: a resolution-time payment keeps no root and no
+                    // count; the replacement pipeline owns the paused removal, and
+                    // the cost's later planned removals are not made (an accepted
+                    // resolution-scope gap: no printed card has a RemoveCounter
+                    // replacement). A turn-face-up payment likewise has no
+                    // counter-removal root (no morph cost removes counters).
+                    PaymentScope::Resolution { .. } | PaymentScope::TurnFaceUp { .. } => {}
+                },
             }
         }
         // Targeted remove-counter costs are paid by the interactive
@@ -1806,17 +2127,17 @@ fn pay_ability_cost_inner(
         AbilityCost::RemoveCounter {
             target: Some(_), ..
         } => {}
-        // CR 701.43a: "To exert a permanent, its controller chooses to have it
-        // not untap during its controller's next untap step." Modeled as a
-        // transient continuous effect with `StaticMode::CantUntap` scoped to
-        // `Duration::UntilNextStepOf { step: Untap, player: Controller }` on the source permanent,
-        // identical to the "doesn't untap during its controller's next untap
-        // step" pattern already handled by the layer system (see
-        // `layers::prune_controller_untap_step_effects`).
+        // CR 701.43a: "To exert a permanent, you choose to have it not untap
+        // during your next untap step." Paid as part of an activated ability's
+        // cost (CR 602.2b; CR 605.3b for mana abilities), so the bookkeeping -
+        // exerted status, the CantUntap effect and the `CreatureExerted` event
+        // that "whenever you exert" observers read - is the shared
+        // `exert::exert_permanent` authority, the same one the attack-cost path
+        // uses. The event goes to the caller's `events`; the post-action trigger
+        // pipeline (and the mana-ability settle seam) scans it.
         //
         // CR 701.43b: "A permanent can be exerted even if it's not tapped or
-        // has already been exerted in a turn." Pushing a second identical
-        // effect is harmless — both expire during the same untap step.
+        // has already been exerted in a turn." The helper exerts again.
         //
         // CR 701.43c: "An object that isn't on the battlefield can't be
         // exerted." Enforced here so off-battlefield activations (which
@@ -1831,22 +2152,14 @@ fn pay_ability_cost_inner(
                     "Cannot exert: source is not on the battlefield",
                 ));
             }
-            let controller = obj.controller;
-            state.add_transient_continuous_effect(
+            super::exert::exert_permanent(
+                state,
                 source_id,
-                controller,
-                crate::types::ability::Duration::UntilNextStepOf {
-                    step: crate::types::phase::Phase::Untap,
-                    player: crate::types::ability::PlayerScope::Controller,
-                },
-                TargetFilter::SpecificObject { id: source_id },
-                vec![
-                    crate::types::ability::ContinuousModification::AddStaticMode {
-                        mode: StaticMode::CantUntap,
-                    },
-                ],
+                player,
+                crate::types::events::ExertOrigin::AbilityCost,
                 None,
-            );
+                events,
+            )?;
         }
         // CR 118.3 + CR 602.2b + CR 601.2h: Self-return costs such as
         // Recurring Nightmare and Maze's End are automatic once chosen;
@@ -1880,6 +2193,104 @@ fn pay_ability_cost_inner(
             {
                 return Ok(outcome);
             }
+        }
+        // CR 702.37e + CR 118.1: Turn-face-up return-to-hand cost (e.g. Fathom Seer).
+        AbilityCost::ReturnToHand {
+            count,
+            filter,
+            from_zone,
+        } if matches!(scope, PaymentScope::TurnFaceUp { .. }) => {
+            let PaymentScope::TurnFaceUp {
+                source,
+                cost_source,
+            } = scope
+            else {
+                unreachable!()
+            };
+            let expected_zone = from_zone.unwrap_or(Zone::Battlefield);
+            if expected_zone != Zone::Battlefield {
+                return Ok(payment_failed(
+                    "turn-face-up return-to-hand cost requires cards on the battlefield",
+                ));
+            }
+            let eligible = super::casting::find_eligible_return_to_hand_targets(
+                state,
+                player,
+                source.object_id,
+                None,
+                filter.as_ref(),
+            );
+            if (eligible.len() as u32) < *count {
+                return Ok(payment_failed(
+                    "Not enough eligible permanents to return to hand",
+                ));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::ReturnToHand,
+                choices: eligible,
+                count: *count as usize,
+                // CR 118.3: the turn-face-up handler requires exactly `count`.
+                min_count: *count as usize,
+                resume: CostResume::TurnFaceUp {
+                    source: *source,
+                    cost_source: *cost_source,
+                    remaining_cost: None,
+                },
+            };
+            return Ok(PaymentOutcome::Paused {
+                remaining_cost: None,
+            });
+        }
+        // CR 702.37e + CR 701.20a/b: Turn-face-up reveal cost (e.g. Krosan Cloudscraper, Voidmage Prodigy).
+        AbilityCost::Reveal { count, filter }
+            if matches!(scope, PaymentScope::TurnFaceUp { .. }) =>
+        {
+            let PaymentScope::TurnFaceUp {
+                source,
+                cost_source,
+            } = scope
+            else {
+                unreachable!()
+            };
+            let eligible = match filter {
+                Some(f) => super::casting::find_eligible_reveal_targets(
+                    state,
+                    player,
+                    source.object_id,
+                    None,
+                    f,
+                ),
+                None => state.players[player.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect(),
+            };
+            // CR 107.3a: a symbolic count has no announced X outside casting.
+            let count = super::quantity::resolve_quantity(state, count, player, source.object_id)
+                .max(0) as usize;
+            if eligible.len() < count {
+                return Ok(payment_failed(
+                    "Not enough eligible cards in hand to reveal",
+                ));
+            }
+            state.waiting_for = WaitingFor::PayCost {
+                player,
+                kind: PayCostKind::Reveal,
+                choices: eligible,
+                count,
+                // CR 118.3: the turn-face-up handler requires exactly `count`.
+                min_count: count,
+                resume: CostResume::TurnFaceUp {
+                    source: *source,
+                    cost_source: *cost_source,
+                    remaining_cost: None,
+                },
+            };
+            return Ok(PaymentOutcome::Paused {
+                remaining_cost: None,
+            });
         }
         // Other cost types require interactive resolution and are intercepted
         // before reaching pay_ability_cost, or are not yet auto-payable.
@@ -2029,6 +2440,10 @@ pub(crate) fn can_pay(
             // …])`), nor sibling mana legs summed with a branch's mana (Camellia's
             // `Composite([Mana {2}, OneOf([Exile, Sacrifice])])`).
             if let Some(branches) = super::casting::find_one_of_cost(cost) {
+                // Each branch is judged on `state` as given: a manual activation's
+                // CR 601.2g life retry wraps this whole check
+                // (`can_pay_ability_cost_now`), so it already runs on that retry's
+                // board and must not open a second one here.
                 return branches.iter().any(|branch| {
                     super::casting::one_of_branch_payable_in(
                         state,
@@ -2037,6 +2452,7 @@ pub(crate) fn can_pay(
                         cost,
                         branch,
                         *ability_index,
+                        &super::casting::ActivationLifeWindow::Current,
                     )
                 });
             }
@@ -2066,6 +2482,7 @@ pub(crate) fn can_pay(
                     &mut Vec::new(),
                     scope,
                     None,
+                    None,
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
             );
@@ -2084,7 +2501,130 @@ pub(crate) fn can_pay(
             true
         }
         PaymentScope::Resolution { ability, .. } => can_pay_resolution(state, payer, cost, ability),
+        PaymentScope::TurnFaceUp { source, .. } => {
+            can_pay_turn_face_up(state, payer, source.object_id, cost)
+        }
     }
+}
+
+/// CR 702.37e + CR 118.1 + CR 118.3: Whether `payer` can pay `cost` right now
+/// to turn `object_id` face up.
+pub(crate) fn can_pay_turn_face_up(
+    state: &GameState,
+    payer: PlayerId,
+    object_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    if !supported_for_turn_face_up(cost) {
+        return false;
+    }
+    match cost {
+        AbilityCost::Mana { cost } => {
+            let cost = super::casting::apply_special_action_cost_reduction(
+                state,
+                payer,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+                cost.clone(),
+            );
+            super::casting::can_pay_special_action_mana_cost_after_auto_tap(
+                state,
+                payer,
+                Some(object_id),
+                &cost,
+                crate::types::mana::SpecialAction::TurnFaceUp,
+            )
+        }
+        AbilityCost::ReturnToHand {
+            count,
+            filter,
+            from_zone,
+        } => {
+            let expected_zone = from_zone.unwrap_or(Zone::Battlefield);
+            if expected_zone != Zone::Battlefield {
+                return false;
+            }
+            let eligible = super::casting::find_eligible_return_to_hand_targets(
+                state,
+                payer,
+                object_id,
+                None,
+                filter.as_ref(),
+            );
+            (eligible.len() as u32) >= *count
+        }
+        AbilityCost::Discard {
+            count,
+            filter,
+            selection,
+            self_scope,
+        } => {
+            if self_scope.is_source_card()
+                || *selection == crate::types::ability::CardSelectionMode::Random
+            {
+                return false;
+            }
+            let count_num = resolve_quantity(state, count, payer, object_id).max(0) as usize;
+            let eligible = super::casting::find_eligible_discard_targets(
+                state,
+                payer,
+                object_id,
+                None,
+                filter.as_ref(),
+            );
+            eligible.len() >= count_num
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount_num = resolve_quantity(state, amount, payer, object_id).max(0) as u32;
+            super::life_costs::can_pay_life_cost(state, payer, amount_num)
+        }
+        AbilityCost::Sacrifice(cost) => {
+            if matches!(cost.target, TargetFilter::SelfRef) {
+                return false;
+            }
+            let Some(count) = cost.requirement.fixed_count() else {
+                return false;
+            };
+            let count = count as usize;
+            let eligible = super::casting::find_eligible_sacrifice_targets_for_scope(
+                state,
+                payer,
+                object_id,
+                None,
+                &cost.target,
+                Some(&PaymentScope::TurnFaceUp {
+                    source: state
+                        .objects
+                        .get(&object_id)
+                        .map(ObjectIncarnationRef::from_object)
+                        .unwrap_or(ObjectIncarnationRef::of(object_id, 0)),
+                    cost_source: TurnUpCostSource::Morph,
+                }),
+            );
+            eligible.len() >= count
+        }
+        AbilityCost::Reveal { count, filter } => {
+            let eligible = match filter {
+                Some(f) => {
+                    super::casting::find_eligible_reveal_targets(state, payer, object_id, None, f)
+                }
+                None => state.players[payer.0 as usize]
+                    .hand
+                    .iter()
+                    .copied()
+                    .collect(),
+            };
+            let count =
+                super::quantity::resolve_quantity(state, count, payer, object_id).max(0) as usize;
+            eligible.len() >= count
+        }
+        _ => false,
+    }
+}
+
+/// CR 702.37e: Supported cost shapes for turn-face-up special actions.
+/// Delegates to the canonical keyword support predicate.
+pub(crate) fn supported_for_turn_face_up(cost: &AbilityCost) -> bool {
+    crate::types::keywords::is_ability_cost_supported_for_morph(cost)
 }
 
 /// CR 608.2d: choices made while applying an effect must be legal; CR 118.12:
@@ -2871,7 +3411,7 @@ mod tests {
             AbilityCost::Exert => AbilityCost::Exert,
             AbilityCost::Blight { .. } => AbilityCost::Blight { count: 1 },
             AbilityCost::Reveal { .. } => AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
             },
             AbilityCost::Behold { .. } => AbilityCost::Behold {
@@ -2994,7 +3534,7 @@ mod tests {
             AbilityCost::Exert,
             AbilityCost::Blight { count: 0 },
             AbilityCost::Reveal {
-                count: 0,
+                count: QuantityExpr::Fixed { value: 0 },
                 filter: None,
             },
             AbilityCost::Behold {
@@ -3050,6 +3590,16 @@ mod tests {
             // `supported_at_resolution` is exhaustive; calling it on every
             // variant proves the membership predicate is total.
             let _supported = supported_at_resolution(&cost);
+        }
+    }
+
+    /// CR 702.37e: every `AbilityCost` variant has a turn-face-up support
+    /// answer from `supported_for_turn_face_up` (the exhaustive `match` makes a
+    /// missing arm a compile error).
+    #[test]
+    fn every_ability_cost_variant_has_turn_face_up_support_answer() {
+        for cost in all_variants() {
+            let _supported = supported_for_turn_face_up(&cost);
         }
     }
 
@@ -3152,9 +3702,17 @@ mod tests {
             // Dry-run on a clone (each iteration independent): can_pay == true
             // must mean the authority does not report Failed.
             let mut sim = scenario.state.clone();
-            let outcome =
-                pay_ability_cost_inner(&mut sim, P0, src, &cost, &mut Vec::new(), &scope, None)
-                    .unwrap();
+            let outcome = pay_ability_cost_inner(
+                &mut sim,
+                P0,
+                src,
+                &cost,
+                &mut Vec::new(),
+                &scope,
+                None,
+                None,
+            )
+            .unwrap();
             assert!(
                 !matches!(outcome, PaymentOutcome::Failed { .. }),
                 "can_pay==true but pay_cost returned Failed for {cost:?}"
@@ -3183,6 +3741,7 @@ mod tests {
             &mut events,
             &scope,
             None,
+            None,
         )
         .unwrap();
         assert!(matches!(outcome, PaymentOutcome::Paid));
@@ -3200,6 +3759,7 @@ mod tests {
             &cost,
             &mut events,
             &scope,
+            None,
             None,
         );
         assert!(
@@ -3226,6 +3786,7 @@ mod tests {
             src,
             &graveyard_cost,
             Some(0),
+            &mut None,
             &mut Vec::new(),
         );
         assert!(matches!(rejected, Err(EngineError::ActionNotAllowed(_))));
@@ -3242,6 +3803,7 @@ mod tests {
             src,
             &battlefield_cost,
             Some(0),
+            &mut None,
             &mut Vec::new(),
         )
         .expect("battlefield self-return cost should be payable");
@@ -3278,6 +3840,7 @@ mod tests {
                 src,
                 &cost,
                 Some(0),
+                &mut None,
                 &mut Vec::new(),
             )
             .is_ok_and(|outcome| matches!(outcome, PaymentOutcome::Paid));
@@ -3896,6 +4459,7 @@ mod tests {
             &mut Vec::new(),
             &scope,
             None,
+            None,
         )
         .unwrap();
         assert!(
@@ -3912,6 +4476,7 @@ mod tests {
             &AbilityCost::Tap,
             &mut Vec::new(),
             &scope,
+            None,
             None,
         )
         .unwrap();
@@ -4146,6 +4711,7 @@ mod tests {
             wall,
             &cost,
             Some(0),
+            &mut None,
             &mut Vec::new(),
         );
         assert!(
@@ -4207,6 +4773,7 @@ mod tests {
                 ability,
                 cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
             },
+            None,
             None,
         )
         .expect("resolution-time tap-creatures payment must not error")

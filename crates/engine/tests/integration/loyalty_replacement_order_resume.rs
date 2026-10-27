@@ -80,6 +80,7 @@ fn activate_to_ordering_prompt() -> (GameRunner, ObjectId, usize) {
         .act(GameAction::ActivateAbility {
             source_id: pw,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the +3 loyalty ability");
 

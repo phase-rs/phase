@@ -27,6 +27,7 @@ import { YieldMuteIcon } from "./YieldMuteIcon.tsx";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import type {
   ObjectId,
+  StackAbilityKindView,
   StackEntry as StackEntryType,
   StackEntryDisplay,
   StackPaidFactView,
@@ -163,16 +164,12 @@ export function StackEntry({ entry, choiceObjectId = entry.id, groupedObjectIds,
       ? y.target.ThisObject.source_id === entry.source_id && descMatches
       : yieldCardId !== undefined && y.target.AllCopies.card_id === yieldCardId && descMatches;
   });
-  // Localize from the engine's typed `ability_kind`, never by parsing the
-  // English `kind_label`. Ability descriptions below remain in their original text.
-  const abilityKind = details?.ability_kind;
-  const abilityLabel = abilityKind?.type === "Triggered"
-    ? t("stack.triggeredAbility")
-    : abilityKind?.type === "Activated"
-      ? abilityKind.data.number != null
-        ? t("stack.activatedAbilityNumber", { number: abilityKind.data.number })
-        : t("stack.activatedAbility")
-      : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
+  // Localize from the engine's typed `ability_kind`; with none (an older engine),
+  // show the engine's `kind_label` verbatim. Never parse `kind_label`.
+  // Ability descriptions below remain in their original text.
+  const abilityLabel = details?.ability_kind
+    ? formatStackAbilityKind(details.ability_kind, t)
+    : details?.kind_label ?? (entry.kind.type === "ActivatedAbility"
     ? t("stack.activated")
     : isTriggered && triggerSourceName
       ? t("stack.triggeredFrom", { source: displaySourceName })
@@ -658,6 +655,17 @@ function formatPaidFact(fact: StackPaidFactView, t: TFunction<"game">): string {
       return t("stack.paidConvoked", { count: fact.data.count });
     default:
       return "";
+  }
+}
+
+function formatStackAbilityKind(kind: StackAbilityKindView, t: TFunction<"game">): string {
+  switch (kind.type) {
+    case "Activated":
+      return kind.data.number != null
+        ? t("stack.activatedAbilityNumber", { number: kind.data.number })
+        : t("stack.activatedAbility");
+    case "Triggered":
+      return t("stack.triggeredAbility");
   }
 }
 

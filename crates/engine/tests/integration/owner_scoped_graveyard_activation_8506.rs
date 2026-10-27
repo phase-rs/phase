@@ -162,6 +162,7 @@ fn offered_indices(runner: &GameRunner, id: ObjectId) -> Vec<usize> {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == id => Some(*ability_index),
             _ => None,
         })
@@ -294,7 +295,7 @@ fn controller_defaults_to_owner_after_a_foreign_cast_resolves() {
                 duration: None,
                 source_id: None,
                 enters_with_counter: None,
-                enters_with_modifications: vec![],
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             });

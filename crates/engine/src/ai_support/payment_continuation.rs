@@ -695,6 +695,13 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         PendingCostMoveResume::ActivationMillPayment { player, pending } => {
             PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player))
         }
+        // CR 602.2b + CR 616.1: a counter-cost removal paused on a replacement
+        // choice retains its attached cast or activation's payment root.
+        PendingCostMoveResume::CounterCostRemovalPayment {
+            player,
+            pending: Some(pending),
+            ..
+        } => PaymentContinuationState::Affiliated(root_from_pending_cast(pending, *player)),
         // These are distinct cost/resolution continuations. They intentionally
         // retain their existing policies rather than being misidentified from a
         // coincidental PendingCast elsewhere in state.
@@ -703,6 +710,7 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         }
         PendingCostMoveResume::Cast { .. }
         | PendingCostMoveResume::SacrificeForCost { pending: None, .. }
+        | PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. }
         | PendingCostMoveResume::WardSacrificePayment { .. }
         | PendingCostMoveResume::ReplacementMayCost { .. }
         | PendingCostMoveResume::Foretell { .. }
@@ -713,7 +721,8 @@ fn classify_parked_cost_move_root(state: &GameState) -> PaymentContinuationState
         // input — so like its counter-addition sibling it affiliates with no
         // payment-continuation root.
         | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
-        | PendingCostMoveResume::LoyaltyActivation { .. } => {
+        | PendingCostMoveResume::LoyaltyActivation { .. }
+        | PendingCostMoveResume::TurnFaceUpCostMove { .. } => {
             PaymentContinuationState::NotAffiliated
         }
     }
@@ -769,7 +778,9 @@ fn classify_deferred_life_root(
             | ManaAbilityResume::UnlessPayment { .. }
             | ManaAbilityResume::EffectPayCost { .. } => PaymentContinuationState::NotAffiliated,
         },
-        DeferredLifeCostResume::PayAmount { .. } => PaymentContinuationState::NotAffiliated,
+        DeferredLifeCostResume::PayAmount { .. } | DeferredLifeCostResume::TurnFaceUp { .. } => {
+            PaymentContinuationState::NotAffiliated
+        }
     }
 }
 
@@ -957,6 +968,10 @@ fn pending_cost_move_contains_root(
         Some(PendingCostMoveResume::ActivationMillPayment { pending, .. }) => {
             pending_matches_root(pending, root)
         }
+        Some(PendingCostMoveResume::CounterCostRemovalPayment {
+            pending: Some(pending),
+            ..
+        }) => pending_matches_root(pending, root),
         Some(PendingCostMoveResume::CollectEvidencePayment { resume, .. }) => match resume.as_ref()
         {
             CollectEvidenceResume::Casting { pending_cast, .. } => {
@@ -969,6 +984,7 @@ fn pending_cost_move_contains_root(
         },
         Some(PendingCostMoveResume::Cast { pending: None, .. })
         | Some(PendingCostMoveResume::SacrificeForCost { pending: None, .. })
+        | Some(PendingCostMoveResume::CounterCostRemovalPayment { pending: None, .. })
         | Some(PendingCostMoveResume::WardSacrificePayment { .. })
         | Some(PendingCostMoveResume::ReplacementMayCost { .. })
         | Some(PendingCostMoveResume::Foretell { .. })
@@ -977,6 +993,7 @@ fn pending_cost_move_contains_root(
         // CR 701.9b: holds no pending cast, so it can contain no root.
         | Some(PendingCostMoveResume::RandomDiscardUnlessPayment(..))
         | Some(PendingCostMoveResume::LoyaltyActivation { .. })
+        | Some(PendingCostMoveResume::TurnFaceUpCostMove { .. })
         | None => false,
     }
 }

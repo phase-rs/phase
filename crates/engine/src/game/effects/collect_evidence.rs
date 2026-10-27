@@ -638,6 +638,7 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -650,6 +651,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         }
     }

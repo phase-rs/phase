@@ -25,11 +25,12 @@ use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::error::OracleError;
 use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
-    CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId, Comparator, ControllerRef,
-    DamageChannel, Effect, EffectScope, FilterProp, PlayerFilter, PlayerScope, QuantityExpr,
-    QuantityRef, ReturnResultId, SharedQuality, SharedQualityRelation, SiblingCondition,
-    StaticCondition, SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
+    effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
+    AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
+    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
+    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -48,8 +49,7 @@ use super::lower::{
     consolidate_die_and_coin_defs, definition_targets_self_source,
     effect_publishes_revealed_subject, ensure_remember_card_after_object_choice,
     extract_bounded_target_multi_target, extract_exact_target_multi_target,
-    extract_optional_target_multi_target, extract_verb_up_to_multi_target,
-    fold_copy_spell_gains_haste_and_quoted_grant,
+    extract_verb_up_to_multi_target, fold_copy_spell_gains_haste_and_quoted_grant,
     fold_deal_damage_then_prevent_into_computed_amount, fold_enters_this_way_counter_rider,
     fold_exile_resolving_rider, fold_search_choose_type_conditional_destination,
     fold_token_it_has_grants_into_token_statics, gate_other_revealed_card_on_multiplayer_reveal,
@@ -82,18 +82,19 @@ use super::{
     def_is_keyword_counter_placement, def_is_perpetual_keyword_grant,
     demote_unbindable_batch_aggregate, draw_object_count_filter, fold_cast_copy_of_card_defs,
     has_explicit_player_target, inject_chosen_color_choice_grant,
-    inject_printed_color_choice_filter, intrinsic_continuation_effect, mark_uses_tracked_set,
-    nearest_publisher_is_self_move, parse_spell_graveyard_replacement_rider,
+    inject_printed_color_choice_filter, instead_override_body_mut, intrinsic_continuation_effect,
+    mark_uses_tracked_set, nearest_self_move_destination, parse_spell_graveyard_replacement_rider,
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
     resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
-    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
-    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
-    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
-    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
-    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
-    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
+    rewrite_delayed_singular_recall_to_self, rewrite_grant_parent_to_filter,
+    rewrite_parent_targets_to_tracked_set, rewrite_plural_library_recall_to_tracked_set,
+    rewrite_rounding_mode, rewrite_singular_battlefield_recall_to_self,
+    rewrite_that_type_mana_instead, singular_battlefield_recall, stamp_delayed_returns,
+    starts_with_plural_subject_anaphor, starts_with_singular_subject_anaphor,
+    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback, PrintedColorCarrier,
+    PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -1169,6 +1170,7 @@ impl AssemblyEnv {
         guard: Option<BindGuard>,
         on_miss: OnMiss,
     ) -> Option<usize> {
+        let _binding = tracing::debug_span!(target: "engine::parser::binding", "binding", ?selector, ?guard, ?on_miss).entered();
         debug_assert!(
             !matches!(selector, AntecedentSelector::AllWithRole(_)),
             "`AllWithRole` is a FAN-OUT selector — bind it with `resolve_all`. Taking one \
@@ -1176,6 +1178,17 @@ impl AssemblyEnv {
              CR 707.10c defect the selector exists to fix."
         );
         let hit = self.point_hit(defs, selector, guard);
+        if tracing::enabled!(target: "engine::parser::binding", tracing::Level::DEBUG) {
+            let selected = hit.map(|index| {
+                let node = self.arena.order[index];
+                (
+                    node,
+                    self.arena.node(node).prov,
+                    effect_variant_name(&defs[index].effect),
+                )
+            });
+            tracing::debug!(target: "engine::parser::binding", hit = hit.is_some(), ?selected, "binding result");
+        }
         match hit {
             Some(i) => Some(i),
             None => match on_miss {
@@ -1200,10 +1213,25 @@ impl AssemblyEnv {
         guard: Option<BindGuard>,
         on_miss: OnMiss,
     ) -> Vec<usize> {
+        let _binding = tracing::debug_span!(target: "engine::parser::binding", "binding", ?selector, ?guard, ?on_miss).entered();
         let hits: Vec<usize> = match selector {
             AntecedentSelector::AllWithRole(role) => self.role_members(defs, role, guard),
             point => self.point_hit(defs, point, guard).into_iter().collect(),
         };
+        if tracing::enabled!(target: "engine::parser::binding", tracing::Level::DEBUG) {
+            let selected: Vec<_> = hits
+                .iter()
+                .map(|&index| {
+                    let node = self.arena.order[index];
+                    (
+                        node,
+                        self.arena.node(node).prov,
+                        effect_variant_name(&defs[index].effect),
+                    )
+                })
+                .collect();
+            tracing::debug!(target: "engine::parser::binding", hit = !hits.is_empty(), ?selected, "binding result");
+        }
         if hits.is_empty() {
             return match on_miss {
                 OnMiss::Ignore => Vec::new(),
@@ -1220,7 +1248,7 @@ impl AssemblyEnv {
         index: usize,
         guard: Option<BindGuard>,
     ) -> bool {
-        match guard {
+        let passed = match guard {
             None => true,
             Some(BindGuard::NoSubAbility) => defs[index].sub_ability.is_none(),
             Some(BindGuard::EffectShape(EffectClass::PermanentCreator)) => matches!(
@@ -1251,7 +1279,12 @@ impl AssemblyEnv {
                         Effect::Sacrifice { .. } | Effect::PayCost { .. }
                     )
             }
+        };
+        if tracing::enabled!(target: "engine::parser::binding", tracing::Level::DEBUG) {
+            let node = self.arena.order[index];
+            tracing::debug!(target: "engine::parser::binding", ?node, provenance = ?self.arena.node(node).prov, effect_kind = ?effect_variant_name(&defs[index].effect), passed, "binding candidate");
         }
+        passed
     }
 
     /// EVERY index carrying `role` whose guard also holds, in emission order.
@@ -1317,6 +1350,9 @@ impl AssemblyEnv {
                 // Walk FORWARD over emission order from the anchor and take the
                 // FIRST qualifying node. Reads `order` only — never the output tree.
                 let anchor_pos = self.arena.order.iter().position(|id| *id == anchor);
+                if anchor_pos.is_none() {
+                    tracing::debug!(target: "engine::parser::binding", ?anchor, "binding anchor missing");
+                }
                 anchor_pos.and_then(|a| ((a + 1)..defs.len()).find(|i| passes(*i)))
             }
             // "The most recent node with the role" IS the last member of the same
@@ -1745,6 +1781,7 @@ fn subject_anchored_optional_actor(
             // ability's own firing event.
             TargetFilter::TriggeringPlayer
             | TargetFilter::DefendingPlayer
+            | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
             | TargetFilter::ScopedPlayer => None,
@@ -1862,6 +1899,11 @@ fn subject_anchored_optional_actor(
             // is a data-model fact about this variant's `PlayerId` payload, not a
             // CR one, so only CR 109.5 is cited.
             TargetFilter::SpecificPlayer { .. } => None,
+
+            // CR 506.3: a damage recipient read from combat at resolution (a
+            // player or a planeswalker permanent), not a player actor a "may" can
+            // be attributed to.
+            TargetFilter::AttackedPlayerOrPlaneswalker => None,
 
             // DEAD ADMISSIONS: player-denoting, but NO arm in
             // `targeting::resolve_effect_player_ref` NOR in
@@ -2087,6 +2129,7 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
 }
 
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
+    let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
     let continuation_kind = ir.continuation_kind.unwrap_or(AbilityKind::Spell);
 
@@ -2112,6 +2155,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let mut previous_clause_start = 0usize;
     let mut this_clause_start = 0usize;
     for clause_ir in &ir.clauses {
+        let _clause = tracing::debug_span!(target: "engine::parser::binding", "clause", clause_id = ?clause_ir.id, fragment = ?clause_ir.source.fragment(), source_span = ?clause_ir.source.span()).entered();
         if defs.len() > this_clause_start {
             previous_clause_start = this_clause_start;
         }
@@ -2569,8 +2613,12 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             // THAT damage instruction, not the chain's first one — the
                             // instructions before it (Goblin Charbelcher's reveal) are
                             // performed regardless and supply the quantity it reads.
-                            let base_index =
-                                instead_damage_antecedent_index(&env, &defs, instead_def);
+                            let mut instead = *instead_def.clone();
+                            let base_index = instead_damage_antecedent_index(
+                                &env,
+                                &defs,
+                                instead_override_body_mut(&mut instead),
+                            );
                             // Identity: the base is MOVED out of `defs` and back in —
                             // it keeps its NodeId (U6-C2 ruling). Capture before the take.
                             // The TAIL defs (after the base) are nested into it below, so
@@ -2584,10 +2632,9 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             for next in chain_defs {
                                 append_to_deepest_sub_ability(&mut root, Some(Box::new(next)));
                             }
-                            let mut instead = *instead_def.clone();
                             if base_index > 0 {
                                 rebind_damage_anaphor_to_antecedent(
-                                    &mut instead.effect,
+                                    &mut instead_override_body_mut(&mut instead).effect,
                                     intrinsic_continuation_effect(&root),
                                 );
                             }
@@ -2600,17 +2647,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                     .sub_ability
                                     .as_deref_mut()
                                     .expect("the optional-payment continuation was checked");
-                                rewrite_those_tokens_from_antecedent(
-                                    &mut instead.effect,
-                                    &continuation.effect,
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    continuation,
                                 );
-                                if rewrite_counter_instead_target_from_antecedent(
-                                    &mut instead.effect,
-                                    &continuation.effect,
-                                ) {
-                                    instead.target_choice_timing =
-                                        continuation.target_choice_timing;
-                                }
                                 if has_explicit_player_target(continuation.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2620,16 +2660,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                                 // CR 111.1 + CR 707.10: Resolve "create N of those
                                 // tokens" anaphor against the root (the antecedent
                                 // for a multi-clause base is the first printed clause).
-                                rewrite_those_tokens_from_antecedent(
-                                    &mut instead.effect,
-                                    &root.effect,
+                                bind_instead_body_to_antecedent(
+                                    instead_override_body_mut(&mut instead),
+                                    &root,
                                 );
-                                if rewrite_counter_instead_target_from_antecedent(
-                                    &mut instead.effect,
-                                    &root.effect,
-                                ) {
-                                    instead.target_choice_timing = root.target_choice_timing;
-                                }
                                 if has_explicit_player_target(root.effect.as_ref()) {
                                     rewrite_player_anaphor_targets_in_definition(&mut instead);
                                 }
@@ -2927,10 +2961,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // boundary→link authority (`oracle_ir::ast::sub_link_after_boundary`),
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
+        def.sibling_condition = clause_ir.sibling_condition;
         // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.
         def.unlowered_guard = clause_ir.parsed.unlowered_guard.clone();
+        // CR 611.2e: carry the onset the clause parser stamped from the verb form, so the
+        // resolution's entry-observation boundary knows whether this instruction applies
+        // with an entry of the same resolution.
+        def.entry_onset = clause_ir.parsed.entry_onset;
         // CR 608.2c: A mass zone move immediately followed by "deals that much
         // damage to each ..." reads ONE scalar result from the completed move,
         // not a different per-recipient event-context amount. Bind only this
@@ -3249,7 +3288,41 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // provably arrives here unstamped. Stated explicitly because the
             // helper no longer refuses a stamped node (it now READS the stamp),
             // so precedence belongs at the writer, not at the classifier.
-            if def.optional_for.is_none() && def.optional_player.is_none() {
+            // CR 115.1 + CR 608.2d: a `"target opponent may draw …"` clause names
+            // the ANNOUNCED target opponent as the actor — the targeted opponent
+            // announces the may. Provenance is the clause's own printed grammar,
+            // never the lowered shape: "you may have target opponent draw a card"
+            // (the CONTROLLER decides) lowers to a byte-identical
+            // `Draw{Typed{Opponent}}, optional:true` node, which is why
+            // `subject_anchored_optional_actor` refuses that slot by design and the
+            // clause provenance picks the actor here instead.
+            //
+            // The stamped ref is the clause's own DECLARED-player reference: the
+            // group this node declares, whose announced player target
+            // `declared_group_player_slot` reads back. `TargetFilter::DeclaredPlayer`
+            // is a context ref, so it claims no target slot of its own and
+            // fail-closes to nobody when that player is illegal (CR 608.2b). The
+            // Draw keeps its announced `Typed{controller: Opponent}` player target,
+            // so the seat that announces the may and the seat that draws are the
+            // same announced opponent WITHOUT rebinding the chain's controller —
+            // `player_scope` would rebind it, and every later "you" in the chain
+            // would then be read from the opponent's seat.
+            let fragment_lower = clause_ir
+                .source
+                .fragment()
+                .unwrap_or_default()
+                .to_lowercase();
+            if super::subject::targeted_opponent_may_player_action(&fragment_lower) {
+                // The clause always carries an explicit player target (the Draw's
+                // `Typed { controller: Opponent }`), so `tag_player_declarations`
+                // stamps the group. `TargetFilter::Opponent` is the fail-soft
+                // spelling if that stamp is ever absent (its resolver also prefers
+                // the announced player).
+                def.optional_player = Some(match def.declares_chosen_group {
+                    Some(group) => TargetFilter::DeclaredPlayer { group },
+                    None => TargetFilter::Opponent,
+                });
+            } else if def.optional_for.is_none() && def.optional_player.is_none() {
                 def.optional_player =
                     subject_anchored_optional_actor(&def, ActorBindingWindow::ThisResolution);
             }
@@ -3392,10 +3465,6 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 extract_bounded_target_multi_target(clause_ir.source.fragment().unwrap_or_default())
             {
                 def = def.multi_target(spec);
-            } else if let Some(spec) = extract_optional_target_multi_target(
-                clause_ir.source.fragment().unwrap_or_default(),
-            ) {
-                def = def.multi_target(spec);
             } else if let Some(spec) =
                 extract_verb_up_to_multi_target(clause_ir.source.fragment().unwrap_or_default())
             {
@@ -3405,6 +3474,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             } else if let Some(ref spec) = clause_ir.parsed.multi_target {
                 def = def.multi_target(spec.clone());
             }
+        }
+        // CR 115.1 + CR 115.6 + CR 601.2c + CR 602.2b + CR 603.3d: the Attach
+        // host frame's declared zero-target authority (the only writer of this
+        // clause field). OR-only: never clears a flag, and never rescans the
+        // text — the clause detector owns the non-Attach class.
+        if clause_ir.parsed.optional_targeting {
+            def = def.optional_targeting();
         }
         // CR 601.2c + CR 608.2c: A conjugated continuation after an "any
         // number of target players/opponents each" head shares the targets
@@ -3623,6 +3699,8 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // parent chain, so reset it to the default within-process step.
                 let lifted_sub_link = inner.sub_link;
                 inner.sub_link = SubAbilityLink::ContinuationStep;
+                // The clause's own guard scope belongs to the slot, like its link.
+                let lifted_sibling_condition = std::mem::take(&mut inner.sibling_condition);
                 let delayed_return_reader = inner.reads_return_result.take();
                 *current = AbilityDefinition::new(
                     kind,
@@ -3639,6 +3717,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 current.repeat_for = lifted_repeat_for;
                 current.player_scope = lifted_player_scope;
                 current.sub_link = lifted_sub_link;
+                current.sibling_condition = lifted_sibling_condition;
             }
         }
 
@@ -3712,14 +3791,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     // self-move antecedent binds to the source object; plural
                     // and mass-publisher recalls keep the chain tracked set.
                     let singular_self_recall = singular_battlefield_recall(&source_text_lower)
-                        && nearest_publisher_is_self_move(&defs);
+                        .then(|| nearest_self_move_destination(&defs))
+                        .flatten();
                     let plural_library_recall = plural_library_shuffle_recall(&source_text_lower);
                     for current in &mut current_defs {
                         mark_uses_tracked_set(current);
                         // Per-def branch: only a battlefield-recall-shaped leg
                         // enters the carve-out; sibling defs of the same clause
                         // keep today's tracked-set rewrite.
-                        if singular_self_recall
+                        if singular_self_recall.is_some()
                             && matches!(
                                 &*current.effect,
                                 Effect::ChangeZone {
@@ -3730,6 +3810,10 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                             )
                         {
                             rewrite_singular_battlefield_recall_to_self(&mut current.effect);
+                        } else if let (Some(origin), Effect::CreateDelayedTrigger { .. }) =
+                            (singular_self_recall, &*current.effect)
+                        {
+                            rewrite_delayed_singular_recall_to_self(&mut current.effect, origin);
                         } else {
                             if plural_library_recall {
                                 rewrite_plural_library_recall_to_tracked_set(&mut current.effect);
@@ -3961,7 +4045,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // re-cut this as JSON containers. Re-run if a candidate carries Dig; if the
     // Elemental-Appeal (a)∧(b) consumer probe exceeds one or T-ROW5 reds (the
     // silent-wrong-binding, highest-severity exposure); if CopySpell with
-    // ParentTarget/TrackedSet(0) is nonterminal; if a bare FlipCoin/RollDie and
+    // ParentTarget/TrackedSet(0) is nonterminal; if a bare single-flip FlipCoins/RollDie and
     // its branch share a payload; if ChooseDamageSource/ChosenDamageSource occurs
     // at any depth; or if an antecedent gains else_ability or an instead condition.
     // Record the data md5 for every re-run.
@@ -4140,7 +4224,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     fold_cast_copy_of_card_defs(&mut defs);
 
     // CR 706 + CR 705: Consolidate die result table lines into their parent RollDie,
-    // and coin flip conditional branches into their parent FlipCoin.
+    // and coin flip conditional branches into their parent FlipCoins.
     consolidate_die_and_coin_defs(&mut defs, kind);
 
     // CR 609.7a + CR 608.2c: Desperate Gambit — a preceding
@@ -4456,6 +4540,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     if let Some(ref continuation) = ir.repeat_until {
         result.repeat_until = Some(continuation.clone());
     }
+    // CR 608.2c: "If C, do A and repeat this process" — loop the chain while
+    // the repeat directive (a tail child of A's gated clause) is reached.
+    if bind_repeat_directives(&mut result) && result.repeat_until.is_none() {
+        result.repeat_until = Some(RepeatContinuation::WhileCondition {
+            condition: Box::new(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::RepeatDirectiveReached,
+            }),
+            max_iterations: None,
+        });
+    }
 
     // CR 607.2d: fill every committed-choice guess with the head Choose's domain.
     super::propagate_committed_choice_type_to_guesses(&mut result);
@@ -4476,6 +4570,48 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     super::lower::refuse_unenforced_aggregate_resolution_selection(&mut result);
 
     result
+}
+
+/// CR 608.2c: validate the structural "repeat this process" directives of an
+/// assembled chain and report whether one survives (the root then loops on
+/// `EffectOutcomeSignal::RepeatDirectiveReached`).
+///
+/// A directive is meaningful only as the TAIL child of a GATED clause: the gate
+/// is what decides whether the process repeats, and a gated sub is skipped
+/// together with its continuation children. An ungated parent or a directive
+/// with successors cannot express that, so the directive is replaced by an
+/// `Effect::unimplemented` gap (fail closed: no loop is stamped, and coverage
+/// stays honest) rather than left to loop until a zone runs dry. Validation lives
+/// at assembly because an outer "if" scope is applied after the nested body parse.
+pub(super) fn bind_repeat_directives(root: &mut AbilityDefinition) -> bool {
+    let mut survives = false;
+    let mut node = root;
+    loop {
+        let gated = node.condition.is_some();
+        let invalid = node.sub_ability.as_ref().is_some_and(|sub| {
+            sub.effect.is_repeat_directive() && (!gated || sub.sub_ability.is_some())
+        });
+        if invalid {
+            // Replace the invalid directive in place with an honest gap, keeping
+            // its position and successors linked: the clause must not read as a
+            // clean supported parse with its "repeat this process" dropped.
+            if let Some(sub) = node.sub_ability.as_deref_mut() {
+                *sub.effect = super::gap_diagnosis::clause_gap_unimplemented("repeat this process");
+            }
+            continue;
+        }
+        if node
+            .sub_ability
+            .as_ref()
+            .is_some_and(|sub| sub.effect.is_repeat_directive())
+        {
+            survives = true;
+        }
+        match node.sub_ability.as_deref_mut() {
+            Some(next) => node = next,
+            None => return survives,
+        }
+    }
 }
 
 // ===========================================================================
@@ -4713,6 +4849,15 @@ fn rebind_condition_instead_damage_anaphor(
     false
 }
 
+/// CR 111.1 + CR 608.2c: an override body's "those tokens" / counter-target
+/// anaphors name the instruction it replaces.
+fn bind_instead_body_to_antecedent(body: &mut AbilityDefinition, antecedent: &AbilityDefinition) {
+    rewrite_those_tokens_from_antecedent(&mut body.effect, &antecedent.effect);
+    if rewrite_counter_instead_target_from_antecedent(&mut body.effect, &antecedent.effect) {
+        body.target_choice_timing = antecedent.target_choice_timing;
+    }
+}
+
 /// CR 608.2c: identify the structural "you may pay ... If you do, X" form
 /// whose immediate paid continuation, rather than the payment itself, can be
 /// modified by a following "Y instead" clause.
@@ -4797,10 +4942,238 @@ mod arena_tests {
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::parser::oracle_ir::effect_chain::{ClauseIr, ClauseIrBuilder, InjectedColorChoice};
     use crate::parser::oracle_nom::context::ParseContext;
-    use crate::types::ability::{DelayedTriggerCondition, ReplacementDefinition};
+    #[cfg(feature = "cli")]
+    use crate::types::ability::OpponentMayScope;
+    use crate::types::ability::{
+        AttachmentReferent, DelayedTriggerCondition, FilterProp, ReplacementDefinition,
+        TargetFilter,
+    };
     use crate::types::phase::Phase;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::zones::EtbTapState;
+
+    #[cfg(feature = "cli")]
+    #[derive(Clone)]
+    struct BindingLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    #[cfg(feature = "cli")]
+    impl std::io::Write for BindingLog {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "cli")]
+    fn capture_binding<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = BindingLog(bytes.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("engine::parser::binding=debug")
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::ENTER)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let log = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        (result, log)
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn binding_diagnostics_report_actual_candidates_and_ordered_results() {
+        let mut env = AssemblyEnv::default();
+        // OptionalHead membership follows optional_for, not the optional flag.
+        let mut defs = vec![AbilityDefinition {
+            optional_for: Some(OpponentMayScope::AnyOpponent),
+            ..shuffle_def().optional()
+        }];
+        env.observe(&defs, Some(ClauseId(0)), NodeRole::Primary);
+        defs.push(AbilityDefinition {
+            optional_for: Some(OpponentMayScope::AnyOpponent),
+            ..shuffle_def().optional().sub_ability(shuffle_def())
+        });
+        env.observe(&defs, Some(ClauseId(1)), NodeRole::Primary);
+        defs.push(shuffle_def());
+        env.observe(&defs, Some(ClauseId(2)), NodeRole::Primary);
+        let (hit, log) = capture_binding(|| {
+            env.resolve(
+                &defs,
+                AntecedentSelector::LastWithRole(AntecedentRole::OptionalHead),
+                Some(BindGuard::NoSubAbility),
+                OnMiss::Ignore,
+            )
+        });
+        assert_eq!(hit, Some(0));
+        assert!(log.contains("selector=LastWithRole(OptionalHead)"), "{log}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(log.contains("guard=Some(NoSubAbility)"), "{log}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(
+            log.contains("node=NodeId(1)") && log.contains("passed=false"), // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+            "{log}"
+        );
+        assert!(
+            log.contains("selected=Some((NodeId(0), NodeProvenance { origin: Some(ClauseId(0))"), // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+            "{log}"
+        );
+        assert!(log.contains("on_miss=Ignore")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        let (hits, log) = capture_binding(|| {
+            env.resolve_all(
+                &defs,
+                AntecedentSelector::AllWithRole(AntecedentRole::OptionalHead),
+                None,
+                OnMiss::Ignore,
+            )
+        });
+        assert_eq!(hits, vec![0, 1]);
+        let result = log
+            .lines()
+            .find(|line| line.contains("binding result")) // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+            .unwrap();
+        assert!(result.contains("selected=[(NodeId(0)"), "{result}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(result.contains("(NodeId(1)"), "{result}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(!result.contains("NodeId(2)"), "{result}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn binding_diagnostics_distinguish_empty_rejected_and_missing_anchor() {
+        let mut env = AssemblyEnv::default();
+        let (empty, log) = capture_binding(|| {
+            env.resolve(&[], AntecedentSelector::LastEmitted, None, OnMiss::Ignore)
+        });
+        assert_eq!(empty, None);
+        assert!(log.contains("hit=false")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(!log.contains("binding candidate")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        let mut defs = vec![shuffle_def()];
+        env.observe(&defs, Some(ClauseId(0)), NodeRole::Primary);
+        let (wrong_shape, log) = capture_binding(|| {
+            env.resolve(
+                &defs,
+                AntecedentSelector::LastEmitted,
+                Some(BindGuard::EffectShape(EffectClass::PermanentCreator)),
+                OnMiss::Ignore,
+            )
+        });
+        assert_eq!(wrong_shape, None);
+        assert!(
+            log.contains("binding candidate") // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+                && log.contains("passed=false") // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+                && log.contains("hit=false") // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        );
+        assert!(!log.contains("binding anchor missing")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        defs.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            zone_change(Zone::Battlefield, TargetFilter::Controller),
+        ));
+        env.observe(&defs, Some(ClauseId(1)), NodeRole::Primary);
+        let (positive, log) = capture_binding(|| {
+            env.resolve(
+                &defs,
+                AntecedentSelector::LastEmitted,
+                Some(BindGuard::EffectShape(EffectClass::PermanentCreator)),
+                OnMiss::Ignore,
+            )
+        });
+        assert_eq!(positive, Some(1));
+        assert!(log.contains("passed=true") && log.contains("hit=true")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        let (missing, log) = capture_binding(|| {
+            env.resolve(
+                &defs,
+                AntecedentSelector::Between { anchor: NodeId(99) },
+                None,
+                OnMiss::Ignore,
+            )
+        });
+        assert_eq!(missing, None);
+        assert!(log.contains("binding anchor missing") && log.contains("hit=false")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(!log.contains("binding candidate")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn binding_diagnostics_public_context_is_observational_only() {
+        let text = "At the beginning of your draw step, you may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.";
+        let types = vec!["Enchantment".to_string()];
+        let plain =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                crate::parser::parse_oracle_text(text, "Sylvan Library", &[], &types, &[])
+            });
+        let (logged, log) = capture_binding(|| {
+            crate::parser::parse_oracle_text(text, "Sylvan Library", &[], &types, &[])
+        });
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::to_value(&logged).unwrap()
+        );
+        assert!(log.contains("binding result"), "{log}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        for field in [
+            "card_name=\"Sylvan Library\"",
+            "stage=\"ir_production\"",
+            "stage=\"ir_lowering\"",
+            "chain{",
+            "clause_id=ClauseId(",
+            "fragment=",
+            "ChainRelative",
+            "pass=\"unseeded\"",
+            "selected_pass=\"unseeded\"",
+        ] {
+            assert!(log.contains(field), "missing {field}: {log}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        }
+        let (traced, log) = capture_binding(|| {
+            crate::parser::oracle::parse_oracle_text_traced(
+                text,
+                "Sylvan Library",
+                &[],
+                &types,
+                &[],
+            )
+        });
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::to_value(&traced.production_output).unwrap()
+        );
+        assert!(log.contains("binding result") && log.contains("card_name=\"Sylvan Library\"")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        let mut context = ParseContext::default();
+        let ir = parse_effect_chain_ir("You may draw two cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.", AbilityKind::Spell, &mut context);
+        let (_, log) = capture_binding(|| assemble_effect_chain(&ir));
+        assert!(log.contains("binding result"), "{log}"); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(log.contains("ChainRelative")); // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        assert!(
+            !log.contains("card_name=") // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+                && !log.contains("selected_pass=") // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+                && !log.contains("assembly_attempt") // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+        );
+    }
+
+    #[cfg(feature = "cli")]
+    #[test]
+    fn binding_diagnostics_label_both_existing_assembly_attempts() {
+        let mut builder = ClauseIrBuilder::new("shuffle");
+        emitted_clause(&mut builder, "shuffle", shuffle_effect(), None);
+        let mut ir = chain_ir(builder.finish(), AbilityKind::Spell);
+        ir.clauses[0].accepting_player_bindings.push(
+            crate::parser::oracle_ir::effect_chain::AcceptingPlayerBinding {
+                node: 0,
+                unseeded: TargetFilter::Controller,
+                seeded: TargetFilter::Opponent,
+            },
+        );
+        let plain = super::super::lower::lower_effect_chain_ir(&ir);
+        let (logged, log) = capture_binding(|| super::super::lower::lower_effect_chain_ir(&ir));
+        assert_eq!(plain, logged);
+        assert!(
+            log.contains("pass=\"unseeded\"") && log.contains("pass=\"seeded\""), // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+            "{log}"
+        );
+        assert!(
+            log.contains("selected_pass=\"unseeded\"") && log.contains("confined=false"), // allow-noncombinator: captured diagnostic assertion, not Oracle dispatch.
+            "{log}"
+        );
+    }
 
     fn shuffle_def() -> AbilityDefinition {
         AbilityDefinition::new(
@@ -5858,11 +6231,12 @@ mod arena_tests {
 
     /// CR 608.2c + CR 301.5: "Destroy target creature with flying and all Equipment
     /// attached to that creature" must not lose the Equipment leg to the keyword
-    /// suffix, and the attachment relation has no filter form, so the leg fails
-    /// closed rather than destroying every Equipment. Paired positive: a
-    /// determiner-led second leg without the relation lowers to a second destroy.
+    /// suffix. The relation is the filter form `FilterProp::AttachedTo`, so the
+    /// leg lowers as an announced head plus one mass destroy whose population
+    /// unions the host and its attachments. Paired positive: a determiner-led
+    /// second leg without the relation lowers to a second destroy.
     #[test]
-    fn keyword_suffix_determiner_leg_is_kept_or_fails_closed() {
+    fn keyword_suffix_determiner_leg_keeps_the_attached_set() {
         let destroys = |text: &str| -> (usize, bool) {
             let parsed = crate::parser::parse_oracle_text(
                 text,
@@ -5891,9 +6265,62 @@ mod arena_tests {
             (2, false),
             "reach guard: the determiner-led leg survives the keyword suffix"
         );
-        let (_, has_gap) = destroys(
-            "Destroy target creature with flying and all Equipment attached to that creature.",
+        // CR 115.1 + CR 701.3a: the attached-set compound class parses as a
+        // head that announces the creature plus ONE mass destroy whose
+        // population unions the announced host with the Equipment attached to
+        // it — asserted structurally below, so a regression that dropped the
+        // announcing head (destroying every flyer) cannot pass.
+        let attached_set =
+            "Destroy target creature with flying and all Equipment attached to that creature.";
+        let parsed = crate::parser::parse_oracle_text(
+            attached_set,
+            "Leg Probe",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
         );
-        assert!(has_gap, "the attachment relation must fail closed");
+        let chain: Vec<&Effect> =
+            std::iter::successors(parsed.abilities.first(), |node| node.sub_ability.as_deref())
+                .map(|node| &*node.effect)
+                .collect();
+        assert!(
+            matches!(chain.first(), Some(Effect::TargetOnly { .. })),
+            "the announced head is a TargetOnly slot: {chain:?}"
+        );
+        let Some(Effect::DestroyAll { target, .. }) = chain.get(1) else {
+            panic!("one mass destroy follows the head: {chain:?}");
+        };
+        assert_eq!(
+            chain
+                .iter()
+                .filter(|effect| matches!(effect, Effect::DestroyAll { .. }))
+                .count(),
+            1,
+            "exactly one mass destroy in the chain: {chain:?}"
+        );
+        let TargetFilter::Or { filters } = target else {
+            panic!("the population unions host and attachments: {target:?}");
+        };
+        assert!(
+            filters
+                .iter()
+                .any(|leg| matches!(leg, TargetFilter::ParentTarget)),
+            "the announced host is in the population: {target:?}"
+        );
+        assert!(
+            filters.iter().any(|leg| {
+                matches!(
+                    leg,
+                    TargetFilter::Typed(tf)
+                        if tf.properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::AttachedTo {
+                                to: AttachmentReferent::Host { filter }
+                            } if matches!(**filter, TargetFilter::ParentTarget)
+                        ))
+                )
+            }),
+            "the attached set carries the Host relation: {target:?}"
+        );
     }
 }

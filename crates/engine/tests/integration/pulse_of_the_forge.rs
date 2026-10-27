@@ -61,7 +61,9 @@ fn pulse_of_the_forge_parses_damage_and_conditional_return_chain() {
             Some(AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::ParentObjectTargetController,
+                        player: PlayerScope::ParentObjectTarget {
+                            possession: engine::types::ability::PossessionAxis::Controller
+                        },
                     },
                 },
                 comparator: Comparator::GT,
