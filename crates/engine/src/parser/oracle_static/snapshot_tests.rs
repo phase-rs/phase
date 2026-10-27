@@ -7,6 +7,38 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn defining_modifier_full_static_route_ir_geometry_and_complete_lowered() {
+    use crate::parser::oracle::tests::defining_modifier_publication::{
+        assert_document, expected_program, printed_cards,
+    };
+    let cards = printed_cards();
+    assert_eq!(cards.len(), 102);
+    for card in cards {
+        let (document, lowered) = assert_document(&card);
+        let name = card.face_name.as_deref().unwrap_or(&card.name);
+        for expected in expected_program(name).statics {
+            let source = expected
+                .description
+                .as_deref()
+                .expect("entire independent static source");
+            assert_eq!(
+                parse_static_line_multi(source),
+                vec![expected],
+                "independent static owner before IR/lowered snapshots: {name}"
+            );
+        }
+        insta::assert_json_snapshot!(
+            format!("defining_modifier_static_route_{name}_ir"),
+            document
+        );
+        insta::assert_json_snapshot!(
+            format!("defining_modifier_static_route_{name}_lowered"),
+            lowered
+        );
+    }
+}
+
+#[test]
 fn population_relations_full_fifteen_static_route_ir_geometry_and_complete_lowered() {
     use crate::parser::oracle::tests::population_relation_publication::{
         assert_document, expected_program, printed_cards,

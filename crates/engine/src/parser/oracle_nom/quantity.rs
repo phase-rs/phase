@@ -2247,6 +2247,24 @@ pub(crate) struct HistoricalZoneAggregate {
     pub property: ObjectProperty,
 }
 
+/// CR 608.2c: the completed exile instruction owns this card cohort. The
+/// caller supplies the already selected producer and its actual source zone.
+pub(crate) fn parse_exiled_card_aggregate(
+    input: &str,
+) -> OracleResult<'_, (TargetFilter, AggregateFunction, ObjectProperty)> {
+    let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
+    let (rest, _) = opt(tag("the ")).parse(rest)?;
+    let (rest, creature) = opt(tag("creature ")).parse(rest)?;
+    let (rest, _) = alt((tag("cards"), tag("card"))).parse(rest)?;
+    let (rest, _) = tag(" exiled this way").parse(rest)?;
+    let filter = if creature.is_some() {
+        TargetFilter::Typed(TypedFilter::card().with_type(TypeFilter::Creature))
+    } else {
+        TargetFilter::Typed(TypedFilter::card())
+    };
+    Ok((rest, (filter, function, property)))
+}
+
 /// CR 608.2i: a qualified noun's past controller and completed action name departure facts.
 pub(crate) fn parse_historical_zone_aggregate(
     input: &str,

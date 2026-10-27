@@ -3880,7 +3880,7 @@ mod complete_source_choice_publication_tests {
                 );
                 assert_eq!(
                     db.get_layout_kind(face.scryfall_oracle_id.as_deref().unwrap()),
-                    Some(LayoutKind::Single)
+                    None
                 );
                 for format in LegalityFormat::ALL {
                     let expected = match source["legalities"]

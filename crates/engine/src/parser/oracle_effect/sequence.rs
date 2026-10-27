@@ -4839,6 +4839,51 @@ pub(super) fn expand_leading_duration_chunks(
 ) -> Vec<ClauseChunk> {
     let mut out: Vec<ClauseChunk> = Vec::with_capacity(chunks.len());
     for chunk in chunks {
+        let lower = chunk.text.to_lowercase();
+        if let Ok((tail, head)) = recognize((
+            tag::<_, _, OracleError<'_>>("destroy "),
+            alt((tag("this creature"), tag("~"))),
+        ))
+        .parse(lower.as_str())
+        {
+            if let Ok((target, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(tail) {
+                if all_consuming((
+                    tag::<_, _, OracleError<'_>>("target creature "),
+                    alt((tag("it's blocking"), tag("it is blocking"))),
+                    opt(tag(".")),
+                ))
+                .parse(target)
+                .is_ok()
+                {
+                    out.push(ClauseChunk {
+                        text: chunk.text[..head.len()].to_owned(),
+                        boundary_after: Some(ClauseBoundary::Comma),
+                        leading_duration: chunk.leading_duration.clone(),
+                    });
+                    out.push(ClauseChunk {
+                        text: chunk.text[chunk.text.len() - target.len()..].to_owned(),
+                        boundary_after: chunk.boundary_after,
+                        leading_duration: chunk.leading_duration,
+                    });
+                    continue;
+                }
+            }
+        }
+        if let Some((first, second, shared_duration)) =
+            super::subject::split_distinct_continuous_subjects(&chunk.text, ctx)
+        {
+            out.push(ClauseChunk {
+                text: first.to_owned(),
+                boundary_after: Some(ClauseBoundary::Comma),
+                leading_duration: chunk.leading_duration.clone().or(shared_duration.clone()),
+            });
+            out.push(ClauseChunk {
+                text: second.to_owned(),
+                boundary_after: chunk.boundary_after,
+                leading_duration: chunk.leading_duration.or(shared_duration),
+            });
+            continue;
+        }
         let Some((duration, body)) = super::lower::strip_leading_duration(&chunk.text) else {
             out.push(chunk);
             continue;

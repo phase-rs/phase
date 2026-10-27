@@ -14379,6 +14379,11 @@ fn collect_local_result_declarations(
 ) -> Result<(), EffectError> {
     if let Some(id) = node.declaration() {
         let zones = match node.effect() {
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                ..
+            } => Some((Zone::Graveyard, Zone::Exile)),
             Effect::ChangeZoneAll {
                 origin,
                 destination,
@@ -52150,6 +52155,186 @@ mod sought_result_serde_tests {
             .remove("declares_return_result");
         let legacy: AbilityDefinition = serde_json::from_value(historical).unwrap();
         assert!(legacy.reads_return_result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod targeted_departure_declaration_tests {
+    use super::*;
+
+    fn max_mana_value(result: u32, from: Zone, to: Zone) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(result),
+                },
+                from: Some(from),
+                to: Some(to),
+                filter: TargetFilter::Typed(TypedFilter::card()),
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+            },
+        }
+    }
+
+    fn program(origin: Option<Zone>, destination: Zone, mass: bool) -> AbilityDefinition {
+        // Independently constructed complete program, not parser output.
+        let effect: Effect = serde_json::from_value(if mass {
+            serde_json::json!({"type":"ChangeZoneAll", "origin":origin, "destination":destination})
+        } else {
+            serde_json::json!({"type":"ChangeZone", "origin":origin, "destination":destination})
+        })
+        .unwrap();
+        let mut root = AbilityDefinition::new(AbilityKind::Spell, effect);
+        root.declares_return_result = Some(ReturnResultId(17));
+        let from = origin.unwrap_or(Zone::Graveyard);
+        let mut draw = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: max_mana_value(17, from, destination),
+                target: TargetFilter::Controller,
+            },
+        );
+        draw.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: max_mana_value(17, from, destination),
+                target: None,
+            },
+        )));
+        root.sub_ability = Some(Box::new(draw));
+        root
+    }
+
+    fn assert_admitted(root: &AbilityDefinition) {
+        let expected = InstructionResultProcess::Local {
+            declarations: [ReturnResultId(17)].into_iter().collect(),
+        };
+        assert_eq!(
+            validate_instruction_result_definition(root).unwrap(),
+            expected
+        );
+        let resolved =
+            crate::game::ability_utils::build_resolved_from_def(root, ObjectId(91), PlayerId(0));
+        for entry in [
+            InstructionResultEntry::Independent,
+            InstructionResultEntry::SelectedBody,
+            InstructionResultEntry::ResumeOwned,
+        ] {
+            assert_eq!(
+                classify_instruction_result_invocation(&resolved, entry).unwrap(),
+                expected
+            );
+        }
+        let draw = root.sub_ability.as_deref().unwrap();
+        let lose = draw.sub_ability.as_deref().unwrap();
+        let (from, to) = match root.effect.as_ref() {
+            Effect::ChangeZone {
+                origin: Some(origin),
+                destination,
+                ..
+            }
+            | Effect::ChangeZoneAll {
+                origin: Some(origin),
+                destination,
+                ..
+            } => (*origin, *destination),
+            _ => unreachable!("positive has an explicit zone pair"),
+        };
+        assert_eq!(
+            draw.effect.as_ref(),
+            &Effect::Draw {
+                count: max_mana_value(17, from, to),
+                target: TargetFilter::Controller,
+            }
+        );
+        assert_eq!(
+            lose.effect.as_ref(),
+            &Effect::LoseLife {
+                amount: max_mana_value(17, from, to),
+                target: None,
+            }
+        );
+    }
+
+    #[test]
+    fn targeted_explicit_departure_program_and_mass_control_share_canonical_classifier() {
+        assert_admitted(&program(Some(Zone::Graveyard), Zone::Exile, false));
+        assert_admitted(&program(Some(Zone::Battlefield), Zone::Exile, true));
+    }
+
+    #[test]
+    fn targeted_departure_unknown_mismatch_foreign_premature_and_duplicate_stay_strict() {
+        let valid = program(Some(Zone::Graveyard), Zone::Exile, false);
+        assert_admitted(&valid);
+        let mut cases = vec![program(None, Zone::Exile, false)];
+        for (result, from, to) in [
+            (17, Zone::Battlefield, Zone::Exile),
+            (17, Zone::Graveyard, Zone::Hand),
+            (18, Zone::Graveyard, Zone::Exile),
+        ] {
+            let mut invalid = valid.clone();
+            invalid.sub_ability.as_mut().unwrap().effect = Box::new(Effect::Draw {
+                count: max_mana_value(result, from, to),
+                target: TargetFilter::Controller,
+            });
+            cases.push(invalid);
+        }
+        let mut early = valid.sub_ability.as_deref().unwrap().clone();
+        early.sub_ability = Some(Box::new(valid.clone()));
+        cases.push(early);
+        let mut duplicate = valid.clone();
+        duplicate
+            .sub_ability
+            .as_mut()
+            .unwrap()
+            .declares_return_result = Some(ReturnResultId(17));
+        cases.push(duplicate);
+        for invalid in cases {
+            assert!(
+                validate_instruction_result_definition(&invalid).is_err(),
+                "{invalid:#?}"
+            );
+            let resolved = crate::game::ability_utils::build_resolved_from_def(
+                &invalid,
+                ObjectId(91),
+                PlayerId(0),
+            );
+            assert!(classify_instruction_result_invocation(
+                &resolved,
+                InstructionResultEntry::Independent
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn targeted_departure_nested_local_shadow_cannot_borrow_outer_or_mix_imports() {
+        let valid = program(Some(Zone::Graveyard), Zone::Exile, false);
+        assert_admitted(&valid);
+        let nested = |branch| {
+            let mut root = valid.clone();
+            root.sub_ability.as_mut().unwrap().sub_ability =
+                Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![branch],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                )));
+            root
+        };
+        assert!(validate_instruction_result_definition(&nested(valid.clone())).is_ok());
+        let mut premature = valid.sub_ability.as_deref().unwrap().clone();
+        premature.sub_ability = Some(Box::new(valid.clone()));
+        assert!(validate_instruction_result_definition(&nested(premature)).is_err());
+        let mut mixed = valid.clone();
+        mixed.sub_ability.as_mut().unwrap().effect = Box::new(Effect::Draw {
+            count: max_mana_value(18, Zone::Graveyard, Zone::Exile),
+            target: TargetFilter::Controller,
+        });
+        assert!(validate_instruction_result_definition(&nested(mixed)).is_err());
     }
 }
 

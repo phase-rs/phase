@@ -276,6 +276,24 @@ pub(crate) fn parse_quantity_ref_with_context(
 ) -> Option<QuantityRef> {
     let trimmed = text.trim().trim_end_matches('.');
     let historical_text = trimmed.to_lowercase();
+    if let (
+        Some((producer, Zone::Graveyard, Zone::Exile)),
+        Ok(("", (filter, function, property))),
+    ) = (
+        ctx.chain_zone_result,
+        nom_quantity::parse_exiled_card_aggregate(&historical_text),
+    ) {
+        return Some(QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                result: crate::types::ability::ReturnResultId(producer.0),
+            },
+            from: Some(Zone::Graveyard),
+            to: Some(Zone::Exile),
+            filter,
+            function,
+            property,
+        });
+    }
     if nom_quantity::is_historical_zone_aggregate(&historical_text) {
         let (rest, historical) =
             nom_quantity::parse_historical_zone_aggregate(&historical_text).ok()?;

@@ -1020,6 +1020,18 @@ pub fn resolve(
         if ability.targeting_is_optional()
             && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
         {
+            if let Some(result) = ability.declares_return_result {
+                let occurrence = state.active_return_result_occurrence.ok_or_else(|| {
+                    EffectError::MissingParam("departure producer occurrence".into())
+                })?;
+                super::publish_return_result(
+                    state,
+                    occurrence,
+                    result,
+                    ability.return_result_process,
+                    Vec::new(),
+                )?;
+            }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1433,6 +1445,15 @@ pub fn resolve(
     // Tracked the same way the mass `resolve_all` path counts, so the chained
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
+    let pending_return_result_producer = ability
+        .declares_return_result
+        .map(|result| {
+            state
+                .active_return_result_occurrence
+                .map(|occurrence| (occurrence, result))
+                .ok_or_else(|| EffectError::MissingParam("departure producer occurrence".into()))
+        })
+        .transpose()?;
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
     super::bind_warp_forwarded_zone_group(state, ability, &logical_zone_change_group);
@@ -1506,7 +1527,7 @@ pub fn resolve(
                     crate::types::game_state::PendingChangeZoneIteration {
                         return_result_occurrence: state.active_return_result_occurrence,
                         return_result_process: ability.return_result_process,
-                        pending_return_result_producer: None,
+                        pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
                             boundary.append_delivery_events(&events[delivery_start..]);
@@ -1554,7 +1575,7 @@ pub fn resolve(
                     crate::types::game_state::PendingChangeZoneIteration {
                         return_result_occurrence: state.active_return_result_occurrence,
                         return_result_process: ability.return_result_process,
-                        pending_return_result_producer: None,
+                        pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: Some(
                             state
@@ -1626,6 +1647,18 @@ pub fn resolve(
     )
     .expect("completed ChangeZone owns every terminal member outcome");
     super::settle_forwarded_zone_result(state, &logical_zone_change_group);
+
+    if let Some((occurrence, result)) = pending_return_result_producer {
+        super::publish_return_result(
+            state,
+            occurrence,
+            result,
+            ability.return_result_process,
+            crate::types::game_state::settled_logical_zone_change_records(
+                &logical_zone_change_group,
+            ),
+        )?;
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),

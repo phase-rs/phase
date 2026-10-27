@@ -2098,7 +2098,7 @@ pub(crate) fn parse_complete_continuous_modifications(
         };
     let (predicate, where_x, remaining) = complete_static_where_x(predicate)?;
     let (mut modifications, verb) =
-        complete_modification_clause(predicate.original, where_x, ContinuousVerb::Grant)?;
+        complete_modification_clause(predicate.original, where_x, ContinuousVerb::Unbound)?;
     if let Some(remaining) = remaining {
         modifications.extend(complete_modification_clause(remaining, where_x, verb)?.0);
     }
@@ -2134,7 +2134,7 @@ pub(crate) fn parse_complete_continuous_members(
     let tp = TextPair::new(text, &lower);
     let (predicate, where_x, remaining) = complete_static_where_x(tp)?;
     let (mut members, verb) =
-        complete_continuous_members(predicate.original, where_x, ContinuousVerb::Grant)?;
+        complete_continuous_members(predicate.original, where_x, ContinuousVerb::Unbound)?;
     if let Some(remaining) = remaining {
         members.extend(complete_continuous_members(remaining, where_x, verb)?.0);
     }
@@ -2411,6 +2411,7 @@ fn complete_protection_rider(text: &str) -> Option<crate::types::ability::Protec
 
 #[derive(Clone, Copy)]
 enum ContinuousVerb {
+    Unbound,
     Pump,
     Grant,
     Remove,
@@ -2443,6 +2444,45 @@ fn complete_modification_clause(
         Ok((rest, verb)) => (&text[text.len() - rest.len()..], verb),
         Err(_) => (text, inherited_verb),
     };
+    if let Some(((), descriptor)) = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("becomes "),
+                tag("become "),
+                tag("is "),
+                tag("are "),
+            )),
+        )
+        .parse(input)
+    }) {
+        if let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+            descriptor,
+            &mut ParseContext::default(),
+        ) {
+            let additive =
+                super::oracle_effect::animation::has_in_addition_to_other_types(descriptor);
+            let mut modifications =
+                super::oracle_effect::animation::animation_modifications_with_replacement(
+                    &spec, additive,
+                );
+            if super::oracle_effect::animation::has_in_addition_to_other_colors(descriptor) {
+                modifications = modifications
+                    .into_iter()
+                    .flat_map(|modification| match modification {
+                        ContinuousModification::SetColor { colors } => colors
+                            .into_iter()
+                            .map(|color| ContinuousModification::AddColor { color })
+                            .collect(),
+                        other => vec![other],
+                    })
+                    .collect();
+            }
+            if !modifications.is_empty() {
+                return Some((modifications, ContinuousVerb::Unbound));
+            }
+        }
+    }
     // CR 613.1f: denial is a distinct rule mode. It never invents removal of a
     // different denied keyword. Resolving callers can retain the ordinary
     // recipient-local mode grant; hosted publication promotes it to a sibling.
@@ -2452,11 +2492,27 @@ fn complete_modification_clause(
     ))
     .parse(lower.as_str())
     {
-        let keyword = map_keyword_complete(keyword_text)?;
+        // OR in a denial names every forbidden keyword, rather than a choice.
+        let (_, parts) = all_consuming(separated_list1(
+            tag::<_, _, OracleError<'_>>(" or "),
+            recognize(many1(preceded(
+                not(tag(" or ")),
+                nom::character::complete::anychar,
+            ))),
+        ))
+        .parse(keyword_text)
+        .ok()?;
+        let keywords = parts
+            .into_iter()
+            .map(map_keyword_complete)
+            .collect::<Option<Vec<_>>>()?;
         return Some((
-            vec![ContinuousModification::AddStaticMode {
-                mode: StaticMode::CantHaveKeyword { keyword },
-            }],
+            keywords
+                .into_iter()
+                .map(|keyword| ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantHaveKeyword { keyword },
+                })
+                .collect(),
             verb,
         ));
     }
@@ -2469,6 +2525,14 @@ fn complete_modification_clause(
         .parse(input)?;
         value((), opt(nom_primitives::parse_article)).parse(input)
     }) {
+        if let Some(core_type) =
+            super::oracle_effect::animation::core_type_from_animation_word(subtype_text)
+        {
+            return Some((
+                vec![ContinuousModification::RemoveType { core_type }],
+                ContinuousVerb::Remove,
+            ));
+        }
         let (subtype, consumed) = parse_subtype(subtype_text)?;
         if consumed == subtype_text.len() {
             return Some((
@@ -2513,13 +2577,32 @@ fn complete_modification_clause(
         return (!modifications.is_empty()).then_some((modifications, verb));
     }
     let mut keyword_mods = Vec::new();
-    let mut keyword_complete = true;
+    let mut keyword_complete = !matches!(verb, ContinuousVerb::Unbound);
     let parts = complete_keyword_list_parts(body).unwrap_or_default();
     for part in &parts {
         if matches!(verb, ContinuousVerb::Remove) {
             // Only bare keyword legs inherit this removal verb. Explicit
             // transitions are owned by the transactional connector below.
-            if let Some(keyword) = map_keyword_complete(part) {
+            // Removal consumes the keyword kind: the runtime removes every
+            // parameterization by discriminant, including granted triggers.
+            let kind = all_consuming(alt((
+                value(
+                    Keyword::Protection(crate::types::keywords::ProtectionTarget::Everything),
+                    tag::<_, _, OracleError<'_>>("protection"),
+                ),
+                value(
+                    Keyword::Ward(crate::types::keywords::WardCost::Mana(ManaCost::zero())),
+                    tag("ward"),
+                ),
+                value(
+                    Keyword::BandsWithOther(String::new()),
+                    (tag("all \""), tag("bands with other"), tag("\" abilities")),
+                ),
+            )))
+            .parse(part.as_ref())
+            .ok()
+            .map(|(_, keyword)| keyword);
+            if let Some(keyword) = kind.or_else(|| map_keyword_complete(part)) {
                 keyword_mods.push(ContinuousModification::RemoveKeyword { keyword });
             } else {
                 keyword_complete = false;
@@ -2565,6 +2648,9 @@ fn complete_modification_clause(
     ))
     .parse(body)
     {
+        if !matches!(verb, ContinuousVerb::Grant) {
+            return None;
+        }
         let mods = classify_quoted_inner(inner);
         return (!mods.is_empty()).then_some((mods, verb));
     }

@@ -1294,9 +1294,21 @@ impl ClauseIr {
         }
     }
 
-    /// CR 608.2c: only the complete supported mass-exile producer supplies this result class.
+    /// CR 608.2c: a complete supported exile producer supplies this result class.
     pub(crate) fn zone_result_producer(&self) -> Option<(Zone, Zone)> {
-        if !self.sought_result_shell_is_empty()
+        let mut shell = self.clone();
+        if matches!(
+            self.parsed.effect,
+            Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                ..
+            }
+        ) {
+            shell.multi_target = None;
+            shell.parsed.multi_target = None;
+        }
+        if !shell.sought_result_shell_is_empty()
             || self.repeat_for.is_some()
             || self.where_x_expression.is_some()
             || self.reads_return_result.is_some()
@@ -1305,7 +1317,12 @@ impl ClauseIr {
         }
         match &self.parsed.effect {
             Effect::ChangeZoneAll {
-                origin: None | Some(Zone::Battlefield),
+                origin: None | Some(Zone::Battlefield | Zone::Graveyard),
+                destination: Zone::Exile,
+                ..
+            }
+            | Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 ..
             } => {
@@ -1318,7 +1335,13 @@ impl ClauseIr {
                     && proof.condition.is_none()
                     && !proof.optional
                     && proof.unless_pay.is_none())
-                .then_some((Zone::Battlefield, Zone::Exile))
+                .then(|| match &self.parsed.effect {
+                    Effect::ChangeZoneAll { origin, .. } => {
+                        (origin.unwrap_or(Zone::Battlefield), Zone::Exile)
+                    }
+                    Effect::ChangeZone { .. } => (Zone::Graveyard, Zone::Exile),
+                    _ => unreachable!("matched zone producer"),
+                })
             }
             _ => None,
         }
@@ -1326,6 +1349,11 @@ impl ClauseIr {
 
     pub(crate) fn is_transparent_zone_result_corridor(&self) -> bool {
         self.is_transparent_sought_corridor()
+            || self.sought_result_shell_is_empty()
+                && self.repeat_for.is_none()
+                && self.where_x_expression.is_none()
+                && self.reads_return_result.is_none()
+                && matches!(&self.parsed.effect, Effect::Draw { count: QuantityExpr::Ref { qty: QuantityRef::ZoneChangeAggregate { source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { .. }, from: Some(Zone::Graveyard), to: Some(Zone::Exile), .. } }, .. })
     }
 
     /// Empty structural shell shared by the producer, corridor and reader proof.
@@ -1843,11 +1871,15 @@ impl ClauseIrBuilder {
 
     /// CR 608.2c: selection occurs in sealed, earlier clause space, before lowering.
     pub(crate) fn zone_result_antecedent(&self) -> Option<(ClauseId, Zone, Zone)> {
+        self.zone_result_antecedent_before(self.clauses.len())
+    }
+
+    fn zone_result_antecedent_before(&self, end: usize) -> Option<(ClauseId, Zone, Zone)> {
         if self.repeats_a_process() {
             return None;
         }
         let mut candidates = Vec::new();
-        for clause in self.clauses.iter().rev() {
+        for clause in self.clauses[..end].iter().rev() {
             if let Some((from, to)) = clause.zone_result_producer() {
                 candidates.push((clause.id, from, to));
             } else if !clause.is_transparent_zone_result_corridor() {
@@ -1861,6 +1893,47 @@ impl ClauseIrBuilder {
     }
 
     fn bind_zone_result_quantities(&mut self) {
+        let Some(index) = self.clauses.len().checked_sub(1) else {
+            return;
+        };
+        // CR 608.2c: bind the definition while both its printed expression and
+        // preceding producer coexist. Never rediscover it in the lowered tree.
+        let expression = self.clauses[index].where_x_expression.clone();
+        if let Some(expression) = expression {
+            let lower = expression.to_lowercase();
+            if let Ok(("", (filter, function, property))) =
+                crate::parser::oracle_nom::quantity::parse_exiled_card_aggregate(&lower)
+            {
+                if let Some((producer, Zone::Graveyard, Zone::Exile)) =
+                    self.zone_result_antecedent_before(index)
+                {
+                    let bound = QuantityRef::ZoneChangeAggregate {
+                        source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                            result: crate::types::ability::ReturnResultId(producer.0),
+                        },
+                        from: Some(Zone::Graveyard),
+                        to: Some(Zone::Exile),
+                        filter,
+                        function,
+                        property,
+                    };
+                    let previous =
+                        crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(
+                            &expression,
+                        );
+                    self.clauses[index].for_each_quantity_ref_mut(&mut |reference| {
+                        if matches!(reference, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X"))
+                            || previous.as_ref().is_some_and(|value| matches!(value, QuantityExpr::Ref { qty } if qty == reference))
+                        {
+                            *reference = bound.clone();
+                        }
+                    });
+                    self.clauses[index].where_x_expression = None;
+                } else {
+                    self.clauses[index].replace_with_gap("departure_result_antecedent");
+                }
+            }
+        }
         let Some(reader) = self.clauses.last() else {
             return;
         };

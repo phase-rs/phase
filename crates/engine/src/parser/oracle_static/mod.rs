@@ -164,6 +164,7 @@ pub(crate) use grammar::map_keyword;
 pub(crate) use grammar::parse_pt_mod;
 pub(crate) use grammar::promote_nested_ability_quotes;
 pub(crate) use grammar::typed_filter_for_subtype;
+pub(crate) use grammar::{parse_type_retention_clause, split_type_retention_clause};
 pub(crate) use keyword_grant::{
     classify_quoted_inner, find_refused_loyalty_grant_sentence, parse_chosen_qualifier_subject,
     parse_complete_continuous_members, parse_complete_continuous_modifications,

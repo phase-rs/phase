@@ -121,7 +121,10 @@ pub(crate) fn parse_typed_you_control(
                 } else if descriptor_is_negation(descriptor) || descriptor_is_supertype(descriptor)
                 {
                     return None;
-                } else if is_capitalized_words(descriptor) {
+                } else if is_capitalized_words(descriptor)
+                    && parse_subtype(descriptor)
+                        .is_some_and(|(_, consumed)| consumed == descriptor.len())
+                {
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
@@ -191,7 +194,10 @@ pub(crate) fn parse_typed_you_control(
                 // after a combat-status prefix — not a subtype; fall through to
                 // full subject parsing.
                 return None;
-            } else if is_capitalized_words(desc_remaining) {
+            } else if is_capitalized_words(desc_remaining)
+                && parse_subtype(desc_remaining)
+                    .is_some_and(|(_, consumed)| consumed == desc_remaining.len())
+            {
                 // Combat-status prefix found + remaining is a subtype
                 TargetFilter::Typed(
                     typed_filter_for_subtype(desc_remaining)
@@ -1163,7 +1169,7 @@ pub(crate) fn parse_continuous_gets_has(
         }
     }
 
-    let modifications = parse_continuous_modifications(text);
+    let modifications = super::keyword_grant::parse_complete_continuous_modifications(text)?;
 
     if modifications.is_empty() {
         return None;

@@ -7,6 +7,21 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn defining_modifier_full_documents_ir_geometry_and_complete_lowered() {
+    use crate::parser::oracle::tests::defining_modifier_publication::{
+        assert_document, printed_cards,
+    };
+    let cards = printed_cards();
+    assert_eq!(cards.len(), 102);
+    for card in cards {
+        let (document, lowered) = assert_document(&card);
+        let name = card.face_name.as_deref().unwrap_or(&card.name);
+        insta::assert_json_snapshot!(format!("defining_modifier_full_{name}_ir"), document);
+        insta::assert_json_snapshot!(format!("defining_modifier_full_{name}_lowered"), lowered);
+    }
+}
+
+#[test]
 fn population_relations_full_fifteen_ir_geometry_and_complete_lowered() {
     use crate::parser::oracle::tests::population_relation_publication::{
         assert_document, printed_cards,

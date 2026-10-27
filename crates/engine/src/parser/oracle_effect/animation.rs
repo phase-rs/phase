@@ -36,6 +36,17 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
 
     let mut spec = AnimationSpec::default();
     let mut rest = text.trim().trim_end_matches('.');
+    if let Some((descriptor, _)) =
+        crate::parser::oracle_static::split_type_retention_clause(&rest.to_lowercase())
+    {
+        let end = descriptor.trim_end().len();
+        let tail = rest[end..].trim();
+        let lower = tail.to_lowercase();
+        let (remaining, _) =
+            crate::parser::oracle_static::parse_type_retention_clause(&lower).ok()?;
+        eof::<_, OracleError<'_>>.parse(remaining.trim()).ok()?;
+        rest = rest[..end].trim_end();
+    }
 
     // Check for ability-loss suffixes using pre-lowered text
     let rest_lower = rest.to_lowercase();
@@ -123,7 +134,7 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         }
     }
 
-    let (descriptor, keywords) = split_animation_keyword_clause(rest);
+    let (descriptor, keywords) = split_animation_keyword_clause_complete(rest)?;
     spec.keywords.extend(keywords);
     rest = descriptor;
 
@@ -132,6 +143,14 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         rest = after_colors;
     }
 
+    let tokens = parse_complete_animation_types(rest)?;
+    spec.explicit_core_types = tokens
+        .iter()
+        .filter_map(|token| match token {
+            AnimationTypeToken::CoreType(name) => CoreType::from_str(name).ok(),
+            _ => None,
+        })
+        .collect();
     let (parsed_supertypes, types) = parse_animation_type_parts(
         rest,
         spec.power.is_some()
@@ -231,7 +250,9 @@ pub(crate) fn animation_modifications(
     }
     for type_name in &spec.types {
         if let Ok(core_type) = CoreType::from_str(type_name) {
-            modifications.push(ContinuousModification::AddType { core_type });
+            if spec.explicit_core_types.contains(&core_type) {
+                modifications.push(ContinuousModification::AddType { core_type });
+            }
         } else {
             modifications.push(ContinuousModification::AddSubtype {
                 subtype: type_name.clone(),
@@ -254,10 +275,8 @@ pub(crate) fn animation_modifications(
 /// `RemoveAllSubtypes` for each affected subtype set before its first
 /// `AddSubtype`.
 ///
-/// Card TYPES stay additive (`AddType`): an animated permanent keeps its other
-/// card types (e.g. an animated land remains a land, a creature stays a
-/// creature) — only the subtype dimension is replaced. This matches the
-/// behavior the combined pump+become path already produces.
+/// Explicit card types replace the old set under CR 205.1a; inferred creature
+/// vocabulary does not. CR 205.1b keeps artifact-creature instructions additive.
 pub(crate) fn animation_modifications_with_replacement(
     spec: &AnimationSpec,
     is_additive: bool,
@@ -271,8 +290,20 @@ pub(crate) fn animation_modifications_with_replacement(
     }
 
     let mut out = Vec::with_capacity(base.len() + 1);
+    let artifact_creature = spec.explicit_core_types.contains(&CoreType::Artifact)
+        && spec.explicit_core_types.contains(&CoreType::Creature);
+    let mut replaced_core_types = false;
     let mut removed_sets: Vec<SubtypeSet> = Vec::new();
     for modification in base {
+        if matches!(modification, ContinuousModification::AddType { .. }) && !artifact_creature {
+            if !replaced_core_types {
+                out.push(ContinuousModification::SetCardTypes {
+                    core_types: spec.explicit_core_types.clone(),
+                });
+                replaced_core_types = true;
+            }
+            continue;
+        }
         // CR 205.1a: a granted subtype replaces existing subtypes from its set —
         // inject `RemoveAllSubtypes` once per affected set before the AddSubtype.
         if let ContinuousModification::AddSubtype { subtype } = &modification {
@@ -386,8 +417,9 @@ fn parse_cost_x_become_pt_prefix(text: &str) -> Option<&str> {
 /// so later lowering emits Layer 4, Layer 6, and Layer 7 modifications.
 fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32, Vec<Keyword>)> {
     let lower = text.to_lowercase();
-    let (_, (descriptor_lower, power, toughness, keywords)) =
+    let (rest, (descriptor_lower, power, toughness, keywords)) =
         parse_animation_base_pt_clause(&lower).ok()?;
+    eof::<_, OracleError<'_>>.parse(rest.trim()).ok()?;
     let descriptor = text[..descriptor_lower.len()].trim_end_matches(',').trim();
     Some((descriptor, power, toughness, keywords))
 }
@@ -425,8 +457,9 @@ fn parse_base_pt_trailing_keywords(input: &str) -> OracleResult<'_, Vec<Keyword>
     let (rest, raw_clause) = take_till(|c| c == '"' || c == '.').parse(rest)?;
     let keywords = split_token_keyword_list(raw_clause.trim())
         .into_iter()
-        .filter_map(map_token_keyword)
-        .collect();
+        .map(map_token_keyword)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| oracle_err(raw_clause))?;
     Ok((rest, keywords))
 }
 
@@ -676,6 +709,43 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
     None
 }
 
+fn parse_complete_animation_types(input: &str) -> Option<Vec<AnimationTypeToken>> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Some(Vec::new());
+    }
+    if let Ok((rest, tokens)) = parse_animation_type_sequence(input) {
+        if let Ok((rest, _)) =
+            opt(preceded(multispace0, parse_in_addition_other_types_marker)).parse(rest)
+        {
+            if eof::<_, OracleError<'_>>.parse(rest.trim()).is_ok() {
+                return Some(tokens);
+            }
+        }
+    }
+    let (prefix, marker) = split_in_addition_tail(input)?;
+    let (rest, _) = take_until::<_, _, OracleError<'_>>(marker)
+        .parse(input)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(marker).parse(rest).ok()?;
+    eof::<_, OracleError<'_>>.parse(rest.trim()).ok()?;
+    let (rest, tokens) = parse_animation_type_sequence_loose(prefix.trim()).ok()?;
+    eof::<_, OracleError<'_>>.parse(rest).ok()?;
+    Some(tokens)
+}
+
+fn split_animation_keyword_clause_complete(text: &str) -> Option<(&str, Vec<Keyword>)> {
+    let lower = text.to_lowercase();
+    let Some((before, _, tail)) = nom_primitives::scan_preceded(&lower, |input| {
+        tag::<_, _, OracleError<'_>>("with ").parse(input)
+    }) else {
+        return Some((text, Vec::new()));
+    };
+    let prefix = text[..before.len()].trim().trim_end_matches(',').trim();
+    let keywords = parse_animation_conjunct_keywords(tail)?;
+    Some((prefix, keywords))
+}
+
 /// Split `input` on the " in addition to {its/their/his/her} other
 /// [creature ]types" marker, returning the prefix and the matched marker
 /// variant. Returns `None` if the marker is absent. Uses `take_until` to
@@ -752,6 +822,7 @@ pub(crate) fn has_in_addition_to_other_colors(text: &str) -> bool {
 pub(crate) fn has_in_addition_to_other_types(text: &str) -> bool {
     let lower = text.to_lowercase();
     locate_in_addition_other_types_marker(&lower).is_ok()
+        || crate::parser::oracle_static::split_type_retention_clause(&lower).is_some()
 }
 
 /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: Decompose a "becomes a
@@ -881,6 +952,7 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
     (supertypes, types)
 }
 
+#[cfg(test)]
 fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
     const NEEDLE: &str = " with ";
     let lower = text.to_lowercase();
@@ -923,6 +995,7 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
 /// type word, so truncating at the marker covers every "still a <type>" family
 /// ("still a land" — Nissa; "still a planeswalker" — Gideon Blackblade #1155;
 /// "still a creature"; "still an artifact") without enumerating type words.
+#[cfg(test)]
 fn strip_still_a_type_rider(text: &str) -> &str {
     let lower = text.to_lowercase();
     [

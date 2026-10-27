@@ -121,6 +121,7 @@ pub(crate) struct AnimationSpec {
     pub(crate) colors: Option<Vec<ManaColor>>,
     pub(crate) keywords: Vec<Keyword>,
     pub(crate) types: Vec<String>,
+    pub(crate) explicit_core_types: Vec<crate::types::card_type::CoreType>,
     pub(crate) supertypes: Vec<crate::types::card_type::Supertype>,
     pub(crate) remove_all_abilities: bool,
 }

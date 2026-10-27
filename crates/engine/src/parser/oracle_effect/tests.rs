@@ -22,6 +22,202 @@ fn parse_search_library_details(
 }
 
 #[test]
+fn defining_destroy_core_and_definition_keep_strict_tail_boundaries() {
+    // SHAPE companion to the paid Lorwyn and source-sacrifice public tests.
+    let source = "Destroy target non-Elf creature an opponent controls with power X or less, where X is the number of lands you control.";
+    let ir = parse_effect_chain_ir(source, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 1, "{ir:#?}");
+    assert_eq!(
+        ir.clauses[0].source.fragment(),
+        Some(source.trim_end_matches('.'))
+    );
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::Destroy { .. }),
+        "{ir:#?}"
+    );
+    let definition = assembly::assemble_effect_chain(&ir);
+    assert!(!has_unimplemented_ability(&definition), "{definition:#?}");
+    let mut quantities = Vec::new();
+    definition.for_each_own_quantity_ref(&mut |quantity| quantities.push(quantity.clone()));
+    assert!(quantities.iter().any(|quantity| matches!(quantity, QuantityRef::ObjectCount { filter: TargetFilter::Typed(typed) } if typed.type_filters == vec![TypeFilter::Land] && typed.controller == Some(ControllerRef::You))), "{definition:#?}");
+    for source in [
+        "Destroy target creature mysteriously, where X is the number of lands you control.",
+        "Destroy target creature with power X or less, where X is an unknowable thing.",
+        "Destroy target creature and an unowned rider, where X is the number of lands you control.",
+    ] {
+        let definition = parse_effect_chain(source, AbilityKind::Spell);
+        assert!(
+            has_unimplemented_ability(&definition),
+            "{source}: {definition:#?}"
+        );
+    }
+    assert!(!has_unimplemented_ability(&parse_effect_chain(
+        "Destroy target creature.",
+        AbilityKind::Spell
+    )));
+}
+
+#[test]
+fn funeral_two_reads_address_the_same_original_targeted_exile_across_draw() {
+    // SHAPE: full real ETB body; runtime/public/loader tests supply production proof.
+    let source = "Exile up to two target legendary creature cards from your graveyard. You draw X cards and you lose X life, where X is the greatest mana value among cards exiled this way.";
+    let ir = parse_effect_chain_ir(source, AbilityKind::Spell, &mut ParseContext::default());
+    let definition = assembly::assemble_effect_chain(&ir);
+    assert!(
+        !has_unimplemented_ability(&definition),
+        "{ir:#?}\n{definition:#?}"
+    );
+    assert_eq!(
+        definition.declares_return_result,
+        Some(crate::types::ability::ReturnResultId(0))
+    );
+    assert!(matches!(
+        definition.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            ..
+        }
+    ));
+    let expected = QuantityExpr::Ref {
+        qty: QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                result: crate::types::ability::ReturnResultId(0),
+            },
+            from: Some(Zone::Graveyard),
+            to: Some(Zone::Exile),
+            filter: TargetFilter::Typed(TypedFilter::card()),
+            function: crate::types::ability::AggregateFunction::Max,
+            property: crate::types::ability::ObjectProperty::ManaValue,
+        },
+    };
+    let draw = definition.sub_ability.as_deref().expect("independent draw");
+    assert_eq!(
+        draw.effect.as_ref(),
+        &Effect::Draw {
+            count: expected.clone(),
+            target: TargetFilter::Controller
+        }
+    );
+    let lose = draw.sub_ability.as_deref().expect("independent life loss");
+    assert_eq!(
+        lose.effect.as_ref(),
+        &Effect::LoseLife {
+            amount: expected,
+            target: None
+        }
+    );
+    assert!(lose.sub_ability.is_none());
+    assert!(crate::types::ability::validate_instruction_result_definition(&definition).is_ok());
+}
+
+#[test]
+fn exact_defining_atomic_gaps_preserve_following_independent_draw() {
+    // SHAPE: each complete refused instruction owns its source, including quotes.
+    for (prefix, category) in [
+        ("Target opponent gets an emblem with \"Whenever a player draws a card, you lose 2 life.\"", "targeted_emblem_creation"),
+        ("Target land gains \"{T}: Add {U}, {B}, or {R}\" until this card is cast from exile.", "granted_until_source_cast"),
+        ("Create an X/X blue Zombie creature token, where X is the total power of the cards exiled this way.", "contextual_creation_aggregate"),
+        ("As many times as you choose, you may exile the top card of your library. If the total mana value of the cards exiled this way is 13 or less, you may cast any number of spells from among those cards without paying their mana costs.", "repeated_exile_cast_cohort"),
+    ] {
+        let source = format!("{prefix} Draw a card.");
+        let ir = parse_effect_chain_ir(&source, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+        assert_eq!(ir.clauses[0].parsed.effect, Effect::unimplemented(category, prefix));
+        assert_eq!(ir.clauses[0].source.fragment(), Some(prefix));
+        assert_eq!(ir.clauses[1].parsed.effect, Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::Controller });
+        let lowered = assembly::assemble_effect_chain(&ir);
+        assert_eq!(lowered.sub_ability.as_deref().unwrap().effect.as_ref(), &Effect::Draw { count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::Controller });
+    }
+}
+
+#[test]
+fn complete_animation_descriptor_preserves_explicit_types_and_rejects_unowned_tails() {
+    // SHAPE: subtype-only and explicit core types have different layer-4 meaning.
+    use crate::types::card_type::{CoreType, SubtypeSet};
+    for (descriptor, explicit) in [
+        ("a blue Frog with base power and toughness 1/1", vec![]),
+        (
+            "a green Elk creature with base power and toughness 3/3",
+            vec![CoreType::Creature],
+        ),
+    ] {
+        let spec =
+            animation::parse_animation_spec(descriptor, &mut ParseContext::default()).unwrap();
+        assert_eq!(spec.explicit_core_types, explicit);
+        let mods = animation::animation_modifications_with_replacement(&spec, false);
+        assert!(mods.contains(
+            &crate::types::ability::ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature
+            }
+        ));
+        assert_eq!(
+            mods.iter().any(|modification| matches!(
+                modification,
+                crate::types::ability::ContinuousModification::SetCardTypes { .. }
+            )),
+            !explicit.is_empty()
+        );
+        assert!(!mods.iter().any(|modification| matches!(
+            modification,
+            crate::types::ability::ContinuousModification::AddType {
+                core_type: CoreType::Creature
+            }
+        )));
+    }
+    for source in [
+        "a blue Frog with base power and toughness 1/1 and mysteriously",
+        "a 3/3 green Elk creature beyond the moon",
+        "a Frog with flying and unmodelled",
+    ] {
+        assert!(
+            animation::parse_animation_spec(source, &mut ParseContext::default()).is_none(),
+            "{source}"
+        );
+    }
+    assert!(animation::parse_animation_spec(
+        "an artifact creature in addition to its other types",
+        &mut ParseContext::default()
+    )
+    .is_some());
+}
+
+#[test]
+fn explicit_distinct_modifier_subjects_keep_both_populations_and_source_spans() {
+    let source = "Creatures you control get +1/+1 and creatures your opponents control get -1/-1 until end of turn.";
+    let ir = parse_effect_chain_ir(source, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 2, "{ir:#?}");
+    let lowered = assembly::assemble_effect_chain(&ir);
+    assert!(!has_unimplemented_ability(&lowered), "{lowered:#?}");
+    assert!(
+        matches!(
+            lowered.effect.as_ref(),
+            Effect::PumpAll {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                ..
+            }
+        ),
+        "{lowered:#?}"
+    );
+    assert!(matches!(
+        lowered.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::PumpAll {
+            power: PtValue::Fixed(-1),
+            toughness: PtValue::Fixed(-1),
+            ..
+        }
+    ));
+    for clause in &ir.clauses {
+        let span = clause.source.span();
+        assert_eq!(
+            &source[span.start_byte..span.end_byte],
+            clause.source.fragment().unwrap()
+        );
+    }
+}
+
+#[test]
 fn unsupported_relation_units_keep_exact_extent_and_independent_draw_order() {
     // SHAPE: CR 608.2c preserves the independent instruction after the entire
     // dependent unit. These are compositions of full printed prefixes.

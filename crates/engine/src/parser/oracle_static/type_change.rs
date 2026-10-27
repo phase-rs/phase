@@ -520,9 +520,16 @@ fn animated_additive_span_pt_and_keywords(
     {
         return Vec::new();
     }
-    let Some(spec) =
-        super::oracle_effect::animation::parse_animation_spec(span, &mut ParseContext::default())
-    else {
+    // This owner admits the complete additive compound. Bound its leading
+    // animated descriptor before asking the descriptor parser to consume it.
+    let descriptor = nom_primitives::scan_split_at_phrase(span_lower, |input| {
+        tag::<_, _, OracleError<'_>>("and ").parse(input)
+    })
+    .map_or(span, |(prefix, _)| span[..prefix.trim_end().len()].trim());
+    let Some(spec) = super::oracle_effect::animation::parse_animation_spec(
+        descriptor,
+        &mut ParseContext::default(),
+    ) else {
         return Vec::new();
     };
     // Keep ONLY the two axes the word-split cannot produce. Types, subtypes,
@@ -1684,43 +1691,7 @@ pub(crate) fn parse_bare_becomes_type_replacement_modifications(
         return modifications;
     }
 
-    let core_types: Vec<CoreType> = animation_modifications
-        .iter()
-        .filter_map(|modification| match modification {
-            ContinuousModification::AddType { core_type } => Some(*core_type),
-            _ => None,
-        })
-        .collect();
-    let keep_additive_core_types = core_types.len() == 2
-        && core_types.contains(&CoreType::Artifact)
-        && core_types.contains(&CoreType::Creature);
-
-    let mut modifications = Vec::new();
-    let mut set_core_types = false;
-    let mut removed_subtype_sets = Vec::new();
-    for modification in animation_modifications {
-        if matches!(modification, ContinuousModification::AddType { .. }) {
-            if core_types.is_empty() || keep_additive_core_types {
-                modifications.push(modification);
-            } else if !set_core_types {
-                modifications.push(ContinuousModification::SetCardTypes {
-                    core_types: core_types.clone(),
-                });
-                set_core_types = true;
-            }
-            continue;
-        }
-
-        if let ContinuousModification::AddSubtype { subtype } = &modification {
-            let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
-            if !removed_subtype_sets.contains(&set) {
-                modifications.push(ContinuousModification::RemoveAllSubtypes { set });
-                removed_subtype_sets.push(set);
-            }
-        }
-        modifications.push(modification);
-    }
-    modifications
+    super::oracle_effect::animation::animation_modifications_with_replacement(&spec, false)
 }
 
 /// CR 613.1f (Layer 6): resolve an animation conjunct tail to the modifications

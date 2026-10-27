@@ -64421,6 +64421,103 @@ mod departure_process_entry_tests {
     }
 
     #[test]
+    fn targeted_departure_actual_selected_and_resumed_readers_authenticate_the_published_owner() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::game_state::{InstructionResult, RevealedInstructionResult};
+        use crate::types::mana::ManaCost;
+        // Secondary typed composition reaches the same targeted publisher and
+        // exact selected/resumed consumers as the full paid Funeral tests.
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Targeted declaration source", 1, 1)
+            .id();
+        let four = scenario
+            .add_creature_to_graveyard(P0, "Targeted MV four", 2, 3)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 4,
+            })
+            .id();
+        let two = scenario
+            .add_creature_to_graveyard(P0, "Targeted MV two", 3, 4)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            })
+            .id();
+        let mut state = scenario.build().state().clone();
+        let mut effect: Effect = serde_json::from_value(serde_json::json!({
+            "type":"ChangeZone", "origin":"Graveyard", "destination":"Exile"
+        }))
+        .unwrap();
+        *effect.target_filter_mut().unwrap() =
+            TargetFilter::Typed(TypedFilter::card().with_type(TypeFilter::Creature));
+        let mut root = ResolvedAbility::new(
+            effect,
+            vec![TargetRef::Object(four), TargetRef::Object(two)],
+            source,
+            P0,
+        );
+        root.declares_return_result = Some(ReturnResultId(7));
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: ZoneChangeRecordSource::InstructionResult {
+                    result: ReturnResultId(7),
+                },
+                from: Some(Zone::Graveyard),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::Typed(TypedFilter::card()),
+                function: AggregateFunction::Max,
+                property: ObjectProperty::ManaValue,
+            },
+        };
+        root.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: quantity,
+            },
+            vec![],
+            source,
+            P0,
+        )));
+        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable| {
+            let mut events = vec![];
+            change_zone::resolve(state, executable, &mut events)?;
+            assert_eq!(state.objects[&four].zone, Zone::Exile);
+            assert_eq!(state.objects[&two].zone, Zone::Exile);
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            assert!(matches!(&state.return_result_frames[&occurrence].results[&ReturnResultId(7)],
+                InstructionResult::ZoneChanges(records) if records.len() == 2 && records.iter().all(|record| record.from_zone == Zone::Graveyard && record.to_zone == Zone::Exile)));
+            let reader = executable.sub_ability.as_deref().unwrap();
+            type Route = fn(&mut GameState, &ResolvedAbility, &mut Vec<GameEvent>, u32) -> Result<(), EffectError>;
+            for route in [resolve_selected_ability_chain as Route, resolve_resume_owned_ability_chain as Route] {
+                let before_life = state.players[0].life;
+                route(state, reader, &mut events, 0)?;
+                assert_eq!(state.players[0].life, before_life + 4);
+                for hostile in 0..5 {
+                    let mut invalid = state.clone();
+                    match hostile {
+                        0 => { invalid.active_return_result_occurrence = None; }
+                        1 => { invalid.return_result_frames.remove(&occurrence); }
+                        2 => { invalid.return_result_frames.get_mut(&occurrence).unwrap().process = Some(ReturnResultProcessId(999_999)); }
+                        3 => { invalid.return_result_frames.get_mut(&occurrence).unwrap().results.remove(&ReturnResultId(7)); }
+                        _ => { invalid.return_result_frames.get_mut(&occurrence).unwrap().results.insert(ReturnResultId(7), InstructionResult::RevealedCards(RevealedInstructionResult { revealed_cards: vec![] })); }
+                    }
+                    let before = serde_json::to_value(&invalid).unwrap();
+                    let mut hostile_events = vec![];
+                    assert!(route(&mut invalid, reader, &mut hostile_events, 0).is_err(), "hostile {hostile}");
+                    assert_eq!(serde_json::to_value(&invalid).unwrap(), before);
+                    assert!(hostile_events.is_empty());
+                }
+            }
+            Ok(())
+        }).unwrap();
+        assert_eq!(state.players[0].life, 28);
+        assert_eq!(state.active_return_result_occurrence, None);
+        assert!(state.return_result_frames.is_empty());
+    }
+
+    #[test]
     fn departure_dual_allocator_overflow_is_atomic_and_retired_processes_are_never_reused() {
         for (next_o, next_p) in [
             (0, 1),

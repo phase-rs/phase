@@ -1,6 +1,142 @@
 use super::anthem::*;
 
 #[test]
+fn complete_keyword_removal_keeps_parameterized_kinds_and_refuses_unknown_members() {
+    use crate::types::keywords::{ProtectionTarget, WardCost};
+    assert_eq!(
+        super::keyword_grant::parse_complete_continuous_modifications(
+            "loses banding and all \"bands with other\" abilities"
+        ),
+        Some(vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Banding
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::BandsWithOther(String::new())
+            },
+        ])
+    );
+    assert_eq!(
+        super::keyword_grant::parse_complete_continuous_modifications(
+            "lose hexproof, indestructible, protection, shroud, and ward"
+        ),
+        Some(vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Hexproof
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Indestructible
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Everything)
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Shroud
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Ward(WardCost::Mana(ManaCost::zero()))
+            },
+        ])
+    );
+    assert!(
+        super::keyword_grant::parse_complete_continuous_modifications(
+            "loses banding and all unknown abilities"
+        )
+        .is_none()
+    );
+    assert!(parse_static_line("Spooky creatures you control have +1/+1 and menace.").is_none());
+    assert!(
+        parse_static_line("Vampire creatures you control get +1/+1 and have menace.").is_some()
+    );
+}
+
+#[test]
+fn complete_modifier_admission_requires_a_real_modifier_role() {
+    // SHAPE paired with full Explore action publication and public resolution.
+    for source in ["explore", "explores", "draw a card", "flying"] {
+        assert!(
+            super::keyword_grant::parse_complete_continuous_modifications(source).is_none(),
+            "{source}"
+        );
+    }
+    assert_eq!(
+        super::keyword_grant::parse_complete_continuous_modifications("gains flying and vigilance"),
+        Some(vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Vigilance
+            },
+        ])
+    );
+    assert_eq!(
+        super::keyword_grant::parse_complete_continuous_modifications(
+            "loses hexproof and shroud and can't have hexproof or shroud"
+        ),
+        Some(vec![
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Hexproof
+            },
+            ContinuousModification::RemoveKeyword {
+                keyword: Keyword::Shroud
+            },
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantHaveKeyword {
+                    keyword: Keyword::Hexproof
+                }
+            },
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantHaveKeyword {
+                    keyword: Keyword::Shroud
+                }
+            },
+        ])
+    );
+}
+
+#[test]
+fn complete_modifier_color_companion_core_negation_and_quantity_tail_are_retained() {
+    use crate::types::card_type::CoreType;
+    assert_eq!(
+        super::keyword_grant::parse_complete_continuous_modifications(
+            "gains flying and becomes blue"
+        ),
+        Some(vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            },
+            ContinuousModification::SetColor {
+                colors: vec![crate::types::mana::ManaColor::Blue]
+            },
+        ])
+    );
+    assert_eq!(
+        super::keyword_grant::parse_complete_continuous_modifications("isn't a creature"),
+        Some(vec![ContinuousModification::RemoveType {
+            core_type: CoreType::Creature
+        }])
+    );
+    let complete = super::keyword_grant::parse_complete_continuous_modifications(
+        "gets +1/+1 for each charge counter on ~ and has vigilance",
+    )
+    .expect("complete quantity and keyword");
+    assert!(complete.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::AddDynamicPower { .. }
+    )));
+    assert!(complete.contains(&ContinuousModification::AddKeyword {
+        keyword: Keyword::Vigilance
+    }));
+    assert!(
+        super::keyword_grant::parse_complete_continuous_modifications(
+            "gets +1/+1 for each charge counter on ~ and has an unknown ability"
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn nested_comparator_static_has_complete_independent_population_and_defaults() {
     // SHAPE: synthetic grammar controls, CR 109.2 + CR 109.2a + CR 202.3.
     for (source, quantity) in [

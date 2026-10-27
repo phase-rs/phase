@@ -17007,6 +17007,31 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         original_tp
     };
 
+    let source_permission_target = ctx
+        .cost_moved_card_reference
+        .as_ref()
+        .filter(|target| {
+            matches!(
+                target,
+                TargetFilter::CostPaidObject {
+                    reference: crate::types::ability::CostPaidObjectRef::Source
+                }
+            ) && (owns_exile_lifetime
+                || ctx
+                    .stated_clause_duration
+                    .as_ref()
+                    .is_some_and(is_play_from_exile_lifetime_duration))
+                && all_consuming((
+                    opt(tag::<_, _, OracleError<'_>>("you ")),
+                    opt(tag("may ")),
+                    alt((tag("cast "), tag("play "))),
+                    alt((tag("this card"), tag("~"))),
+                ))
+                .parse(tp.lower)
+                .is_ok()
+        })
+        .cloned();
+
     // Try full forms first: "you may play/cast that card/it/those cards ..."
     // Then bare forms (after "you may" has been stripped): "play that card ..."
     // CR 406.6 + CR 400.7i: "you may look at and play those cards for as long as
@@ -17046,16 +17071,17 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         // cards" but phrased relative to the exiling effect rather than a
         // demonstrative. Longer-first so "the cards exiled this way" wins over
         // the bare "cards exiled this way".
-        if alt((
-            tag::<_, _, OracleError<'_>>("that card"),
-            tag("that spell"),
-            tag("those cards"),
-            tag("the cards exiled this way"),
-            tag("cards exiled this way"),
-            tag("it "),
-        ))
-        .parse(rest.lower)
-        .is_err()
+        if source_permission_target.is_none()
+            && alt((
+                tag::<_, _, OracleError<'_>>("that card"),
+                tag("that spell"),
+                tag("those cards"),
+                tag("the cards exiled this way"),
+                tag("cards exiled this way"),
+                tag("it "),
+            ))
+            .parse(rest.lower)
+            .is_err()
             && rest.lower != "it"
         {
             return None;
@@ -17117,7 +17143,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         ))
         .parse(tp.lower)
         .is_ok();
-        if look_at_play_anaphor_form || mass_anaphor_form {
+        if source_permission_target.is_some() || look_at_play_anaphor_form || mass_anaphor_form {
             // fall through to the grant builder.
         } else {
             // Preserve the legacy turn/until disambiguation while admitting an
@@ -17164,7 +17190,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
     // without inspecting clause text (a lexical "that card this turn" guard would
     // misroute the entire impulse class and silently drop its `PlayFromExile`
     // shape).
-    if ctx.parent_target_is_chosen {
+    if ctx.parent_target_is_chosen && source_permission_target.is_none() {
         return None;
     }
 
@@ -17203,7 +17229,7 @@ fn try_parse_play_from_exile(tp: TextPair, ctx: &ParseContext) -> Option<ParsedE
         // source object. `TargetFilter::Any` causes `grant_permission::resolve`
         // to attach the permission to the source itself, which is wrong for
         // impulse-draw chains like Act on Impulse, Light Up the Stage, etc.
-        target: tracked_set_filter(),
+        target: source_permission_target.unwrap_or_else(tracked_set_filter),
         grantee: Default::default(),
     });
 
@@ -42734,6 +42760,76 @@ fn refuse_untargeted_dynamic_graveyard_windows(
 fn unsupported_relation_body(text: &str) -> Option<(&'static str, usize)> {
     let lower = text.to_ascii_lowercase();
     if let Ok((tail, _)) = (
+        tag::<_, _, OracleError<'_>>("target creature "),
+        alt((tag("it's blocking"), tag("it is blocking"))),
+        opt(tag(".")),
+    )
+        .parse(lower.as_str())
+    {
+        return Some(("blocking_target_relation", text.len() - tail.len()));
+    }
+    if let Ok((tail, _)) = (
+        tag::<_, _, OracleError<'_>>("target "),
+        take_until(" gains \""),
+        tag(" gains \""),
+        take_until("\""),
+        tag("\" until "),
+        alt((tag("this card"), tag("~"))),
+        tag(" is cast from exile"),
+        opt(tag(".")),
+    )
+        .parse(lower.as_str())
+    {
+        return Some(("granted_until_source_cast", text.len() - tail.len()));
+    }
+    if let Ok((tail, _)) = (
+        tag::<_, _, OracleError<'_>>("target "),
+        alt((tag("opponent"), tag("player"))),
+        tag(" gets an emblem with "),
+        nom::sequence::delimited(tag("\""), take_until("\""), tag("\"")),
+        opt(tag(".")),
+    )
+        .parse(lower.as_str())
+    {
+        return Some(("targeted_emblem_creation", text.len() - tail.len()));
+    }
+    if let Ok((tail, _)) = (
+        tag::<_, _, OracleError<'_>>("as many times as you choose, "),
+        tag("you may exile the top card of your library. if "),
+        tag("the total mana value of the cards exiled this way is "),
+        nom_primitives::parse_number,
+        tag(" or less, you may cast any number of spells from among those cards "),
+        tag("without paying their mana costs"),
+        opt(tag(".")),
+    )
+        .parse(lower.as_str())
+    {
+        return Some(("repeated_exile_cast_cohort", text.len() - tail.len()));
+    }
+    if let Ok((definition, _)) = (
+        tag::<_, _, OracleError<'_>>("create "),
+        opt(nom_primitives::parse_article),
+        tag("x/x "),
+        take_until(", where x is "),
+        tag(", where x is "),
+    )
+        .parse(lower.as_str())
+    {
+        if let Ok((
+            tail,
+            (
+                _,
+                crate::types::ability::AggregateFunction::Sum,
+                crate::types::ability::ObjectProperty::Power,
+            ),
+        )) = super::oracle_nom::quantity::parse_exiled_card_aggregate(definition)
+        {
+            if let Ok((tail, _)) = opt(tag::<_, _, OracleError<'_>>(".")).parse(tail) {
+                return Some(("contextual_creation_aggregate", text.len() - tail.len()));
+            }
+        }
+    }
+    if let Ok((tail, _)) = (
         tag::<_, _, OracleError<'_>>("choose any number of target "),
         take_until(". for each of them, reveal "),
         tag(". for each of them, reveal "),
@@ -45301,10 +45397,10 @@ fn parse_effect_chain_ir_body(
             if repeat_count.is_some() {
                 (repeat_count, stripped_text)
             } else {
-                (None, text)
+                (None, text_without_where_x)
             }
         } else {
-            (None, text)
+            (None, text_without_where_x)
         };
         let repeat_for = repeat_for
             .or(repeat_count)
@@ -46748,8 +46844,24 @@ fn parse_effect_chain_ir_body(
         // cards" chain), never a single hardcoded card. Any chunk that is not
         // itself such a producer clears it, so the binding never leaks past the
         // immediately-following consumer.
+        if matches!(
+            &clause.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSetFiltered {
+                    caused_by: Some(ThisWayCause::Milled),
+                    ..
+                },
+                ..
+            }
+        ) && !matches!(builder.clauses(), [producer] if matches!(producer.parsed.effect, Effect::Mill { .. })
+                && producer.condition.is_none() && producer.parsed.condition.is_none()
+                && !producer.is_optional && !producer.parsed.optional && producer.repeat_for.is_none())
+        {
+            clause.effect = Effect::unimplemented("milled_cohort_antecedent", normalized_text);
+        }
         chain_pending_tracked_set_origin = match &clause.effect {
             Effect::ChooseFromZone { zone, .. } => Some(*zone),
+            Effect::Mill { .. } => Some(Zone::Graveyard),
             _ => None,
         };
         // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full

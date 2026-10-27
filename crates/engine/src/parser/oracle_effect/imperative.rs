@@ -11757,6 +11757,39 @@ pub(super) fn parse_exile_ast(
     // never touches the anaphor recovery, hand arm, or return-to-battlefield
     // path below.
     let (target_input, pre_lifted_counters) = super::split_counterless_enter_counters(rest_text);
+    // CR 608.2c: cards put into graveyards by the preceding mill are the
+    // candidate cohort; the following choice publishes a separate fresh set.
+    let milled_cards = nom_primitives::scan_preceded(target_input, |input| {
+        (
+            tag::<_, _, OracleError<'_>>("put into "),
+            alt((tag("graveyards"), tag("a graveyard"))),
+            tag(" this way"),
+        )
+            .parse(input)
+    });
+    if let Some((noun, _, tail)) = milled_cards {
+        if terminal_punctuation_only(tail)
+            && ctx.pending_tracked_set_origin == Some(Zone::Graveyard)
+        {
+            let (filter, remainder) = parse_type_phrase_folding(noun.trim());
+            if remainder.trim().is_empty()
+                && !matches!(filter, TargetFilter::Any | TargetFilter::None)
+            {
+                return Some(ZoneCounterImperativeAst::Exile {
+                    origin: Some(Zone::Graveyard),
+                    target: TargetFilter::TrackedSetFiltered {
+                        id: crate::types::identifiers::TrackedSetId(0),
+                        filter: Box::new(filter),
+                        caused_by: Some(crate::types::ability::ThisWayCause::Milled),
+                    },
+                    all: false,
+                    enter_with_counters: vec![],
+                    multi_target: None,
+                });
+            }
+        }
+        return None;
+    }
     let (parsed_target, rem) = parse_target_with_ctx(target_input, ctx);
     let target_phrase = &target_input[..target_input.len() - rem.len()];
     // CR 701.3a + CR 601.2c: "exile [up to one] target Equipment attached to that

@@ -719,6 +719,57 @@ fn try_parse_subject_continuous_clause(
     )
 }
 
+/// CR 608.2c: each distinct printed subject retains its own complete predicate.
+pub(super) fn split_distinct_continuous_subjects<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(&'a str, &'a str, Option<Duration>)> {
+    let lower = text.to_lowercase();
+    let full = TextPair::new(text, &lower);
+    let mut scan = full;
+    while let Some((left, right)) = scan.split_around_outside_quotes(" and ") {
+        let offset = full.len() - scan.len() + left.len();
+        let first = text[..offset].trim();
+        let second = right.original.trim();
+        let left_verb = find_predicate_start(first)?;
+        let right_verb = find_predicate_start(second);
+        if let Some(right_verb) = right_verb.filter(|position| *position > 0) {
+            let mut trial = ctx.clone();
+            let first_subject = parse_subject_application_for(
+                first[..left_verb].trim(),
+                &mut trial,
+                AnaphorConsumer::AffectedObject,
+            );
+            let second_subject = parse_subject_application_for(
+                second[..right_verb].trim(),
+                &mut trial,
+                AnaphorConsumer::AffectedObject,
+            );
+            if let (Some(first_subject), Some(second_subject)) = (first_subject, second_subject) {
+                let (first_predicate, first_duration) =
+                    super::strip_trailing_duration(&first[left_verb..]);
+                let (second_predicate, second_duration) =
+                    super::strip_trailing_duration(&second[right_verb..]);
+                if first_subject.affected != second_subject.affected
+                    && crate::parser::oracle_static::parse_complete_continuous_modifications(
+                        first_predicate,
+                    )
+                    .is_some()
+                    && crate::parser::oracle_static::parse_complete_continuous_modifications(
+                        second_predicate,
+                    )
+                    .is_some()
+                {
+                    return Some((first, second, first_duration.or(second_duration)));
+                }
+            }
+        }
+        let next = full.len() - right.len();
+        scan = full.slice(next, full.len());
+    }
+    None
+}
+
 /// CR 611.3a + CR 702.16: Complete conditional continuous members and the existing protection grant
 /// ("creatures you control gain protection from white if you control a Plains,
 /// from blue if you control an Island, ..., and from green if you control a
@@ -6241,13 +6292,13 @@ fn build_become_clause(
     }
 
     let (become_text, name_override) = strip_become_name_override(become_text);
-    let animation = parse_animation_spec(&become_text, ctx)?;
+    let complete_predicate = format!("become {become_text}");
     // CR 205.1a vs CR 205.1b: a "becomes a [type]" effect REPLACES the creature's
     // subtypes (so e.g. a Human Soldier that becomes a Frog is only a Frog) unless
     // it says "in addition to its other types", which stays additive. Mirrors the
     // static type-change path's suffix detection.
-    let is_additive = has_in_addition_to_other_types(&become_text);
-    let mut modifications = animation_modifications_with_replacement(&animation, is_additive);
+    let mut modifications =
+        crate::parser::oracle_static::parse_complete_continuous_modifications(&complete_predicate)?;
     // CR 105.3: "in addition to its other colors" makes the granted color
     // ADDITIVE — Possessed Goat "becomes a black Demon in addition to its other
     // colors and types". The animation path emits `SetColor` (the CR 105.3
@@ -6264,11 +6315,6 @@ fn build_become_clause(
                 other => vec![other],
             })
             .collect();
-    }
-    for modification in parse_continuous_modifications(predicate) {
-        if !modifications.contains(&modification) {
-            modifications.push(modification);
-        }
     }
     let modifications = if let Some(name) = name_override {
         let mut with_name = Vec::with_capacity(modifications.len() + 1);
