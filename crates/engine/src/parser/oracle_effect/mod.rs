@@ -45840,10 +45840,10 @@ fn parse_effect_chain_ir_body(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
-            // CR 608.2k: likewise the enclosing ability's cost categories, so
-            // "the discarded card" in any effect chunk names the card discarded
-            // for the cost (Hisoka, Minamo Sensei).
-            current_ability_cost_categories: ctx.current_ability_cost_categories.clone(),
+            // CR 608.2k: likewise the enclosing ability's cost payment
+            // components, so "the discarded card" in any effect chunk names the
+            // card discarded for the cost (Hisoka, Minamo Sensei).
+            current_ability_cost_components: ctx.current_ability_cost_components.clone(),
             parent_target_available,
             // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
             // chain already produces an exile, so a later singular "the

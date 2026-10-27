@@ -7841,7 +7841,7 @@ pub(crate) fn parse_cost_paid_object_noun(input: &str) -> OracleResult<'_, ()> {
 /// alone does not prove a cost: the same participles describe an effect's
 /// discard or sacrifice. The same-quality rider (`parse_same_quality_reference`)
 /// verifies the returned category against the enclosing ability's cost
-/// (`ParseContext::current_ability_cost_categories`);
+/// payment components (`ParseContext::current_ability_cost_components`);
 /// `parse_cost_paid_mana_value_reference` binds `ObjectScope::CostPaidObject`
 /// without that check.
 pub(crate) fn parse_cost_paid_participle_object(input: &str) -> OracleResult<'_, CostCategory> {

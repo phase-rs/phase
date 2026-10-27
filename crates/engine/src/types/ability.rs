@@ -16058,6 +16058,60 @@ impl AbilityCost {
         }
     }
 
+    /// CR 118: Classify this cost per payment component — one entry per
+    /// component, each holding that component's `categories()`.
+    ///
+    /// Unlike `categories()`, which yields the deduplicated set of categories
+    /// the whole cost belongs to, this keeps each payment separate: a
+    /// `Composite` concatenates its children's components without
+    /// deduplication, so "Sacrifice a creature, Sacrifice an enchantment" is
+    /// two `[SacrificesPermanent]` components, not one category. `PerCounter`
+    /// delegates to its base (the multiplier changes how much is paid, not
+    /// which payments there are). Every other variant is a single component,
+    /// including `OneOf` (only one of its branches is paid) and
+    /// `Behold`. Exhaustive match with no wildcard arm, so a new compositional
+    /// variant must decide how its payments split.
+    pub fn component_categories(&self) -> Vec<Vec<CostCategory>> {
+        match self {
+            AbilityCost::Composite { costs } => costs
+                .iter()
+                .flat_map(AbilityCost::component_categories)
+                .collect(),
+            AbilityCost::PerCounter { base, .. } => base.component_categories(),
+            AbilityCost::Mana { .. }
+            | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::Tap
+            | AbilityCost::Untap
+            | AbilityCost::Loyalty { .. }
+            | AbilityCost::Sacrifice(_)
+            | AbilityCost::PayLife { .. }
+            | AbilityCost::Discard { .. }
+            | AbilityCost::Exile { .. }
+            | AbilityCost::ExileMaterials { .. }
+            | AbilityCost::CollectEvidence { .. }
+            | AbilityCost::ExileWithAggregate { .. }
+            | AbilityCost::TapCreatures { .. }
+            | AbilityCost::RemoveCounter { .. }
+            | AbilityCost::PayEnergy { .. }
+            | AbilityCost::PaySpeed { .. }
+            | AbilityCost::ReturnToHand { .. }
+            | AbilityCost::Unattach
+            | AbilityCost::UnattachFrom { .. }
+            | AbilityCost::Mill { .. }
+            | AbilityCost::Exert
+            | AbilityCost::Blight { .. }
+            | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::Reveal { .. }
+            | AbilityCost::Behold { .. }
+            | AbilityCost::OneOf { .. }
+            | AbilityCost::Waterbend { .. }
+            | AbilityCost::NinjutsuFamily { .. }
+            | AbilityCost::EffectCost { .. }
+            | AbilityCost::KeywordCostOfCastSpell { .. }
+            | AbilityCost::Unimplemented { .. } => vec![self.categories()],
+        }
+    }
+
     /// CR 118.3 + CR 702.29a: Returns `true` when paying this cost consumes the
     /// ability's *source* card — i.e. the source card is discarded to pay the
     /// cost itself. Used by the UI to decide that a lone legal action must be
@@ -45172,6 +45226,88 @@ mod tests {
             for (label, cost, expected) in cases {
                 assert_eq!(cost.categories(), expected, "{label}");
             }
+        }
+
+        /// `component_categories` keeps one entry per payment component:
+        /// `Composite` concatenates its children without deduplication (two
+        /// sacrifices are two components even though `categories()` collapses
+        /// them to one category), `OneOf` is a single component holding every
+        /// branch's categories, and `PerCounter` delegates to its base.
+        #[test]
+        fn component_categories_keeps_one_entry_per_payment() {
+            let sacrifice = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
+            let discard = || AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            };
+
+            let two_sacrifices = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                    sacrifice(),
+                    sacrifice(),
+                ],
+            };
+            assert_eq!(
+                two_sacrifices.categories(),
+                vec![CostCategory::ManaOnly, CostCategory::SacrificesPermanent],
+                "categories() is the deduplicated set"
+            );
+            assert_eq!(
+                two_sacrifices.component_categories(),
+                vec![
+                    vec![CostCategory::ManaOnly],
+                    vec![CostCategory::SacrificesPermanent],
+                    vec![CostCategory::SacrificesPermanent],
+                ]
+            );
+
+            let nested = AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Composite {
+                        costs: vec![discard(), discard()],
+                    },
+                ],
+            };
+            assert_eq!(
+                nested.component_categories(),
+                vec![
+                    vec![CostCategory::TapsSelf],
+                    vec![CostCategory::Discards],
+                    vec![CostCategory::Discards],
+                ]
+            );
+
+            let one_of = AbilityCost::OneOf {
+                costs: vec![discard(), sacrifice()],
+            };
+            assert_eq!(
+                one_of.component_categories(),
+                vec![vec![
+                    CostCategory::Discards,
+                    CostCategory::SacrificesPermanent
+                ]]
+            );
+
+            let per_counter = AbilityCost::PerCounter {
+                counter: CounterType::Age,
+                target: TargetFilter::SelfRef,
+                base: Box::new(two_sacrifices.clone()),
+            };
+            assert_eq!(
+                per_counter.component_categories(),
+                two_sacrifices.component_categories()
+            );
+
+            assert_eq!(
+                discard().component_categories(),
+                vec![vec![CostCategory::Discards]]
+            );
         }
 
         #[test]

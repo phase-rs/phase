@@ -612,15 +612,17 @@ pub(crate) struct ParseContext {
     /// (`TargetFilter::CostPaidObject`) when the ability has a non-self exile
     /// cost, an effect-exiled tracked-set reference (`TrackedSet`) otherwise.
     pub current_ability_exile_cost_zone: Option<Zone>,
-    /// CR 608.2k: The `AbilityCost::categories` of the current ability's cost.
-    /// Set by `parse_activated_ability_ir` beside
-    /// `current_ability_exile_cost_zone` and restored after the ability; empty
-    /// outside an activated ability. A cost participle ("the discarded card" →
-    /// `CostCategory::Discards`, "the sacrificed creature" →
-    /// `CostCategory::SacrificesPermanent`) names an object paid for the cost
-    /// only when this ability's cost has that category; otherwise the
-    /// participle describes an effect's action, not a cost.
-    pub current_ability_cost_categories: Vec<CostCategory>,
+    /// CR 608.2k: One entry per payment component of the enclosing activated
+    /// ability's cost, each that component's categories
+    /// (`AbilityCost::component_categories`). Set by
+    /// `parse_activated_ability_ir` beside `current_ability_exile_cost_zone`
+    /// and restored after the ability; empty outside an activated ability. A
+    /// cost participle ("the discarded card" → `CostCategory::Discards`, "the
+    /// sacrificed creature" → `CostCategory::SacrificesPermanent`) names an
+    /// object paid for the cost only when exactly one component can write the
+    /// cost-paid object and that component has the participle's category;
+    /// otherwise the participle describes an effect's action or is ambiguous.
+    pub current_ability_cost_components: Vec<Vec<CostCategory>>,
     /// CR 608.2c: The current effect-chain chunk has an earlier typed object
     /// referent that `ParentTarget` can legally bind to. Standalone clause
     /// parsing leaves this false so bare "it" defaults to SelfRef instead of

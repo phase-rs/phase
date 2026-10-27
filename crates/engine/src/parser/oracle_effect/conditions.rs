@@ -4142,11 +4142,11 @@ fn quality_reads_as_the_same(quality: &SharedQuality) -> bool {
 /// paid for this ability's cost (`CostPaidObject`) only when the ability's
 /// cost has that participle's action: "the discarded card" / "the sacrificed
 /// creature" need a discard / sacrifice cost
-/// (`ParseContext::current_ability_cost_categories`), "the exiled card" a
+/// (`ParseContext::current_ability_cost_components`), "the exiled card" a
 /// non-self exile cost. Without such a cost the participle names an effect's
 /// action and is declined; a triggered ability has no cost, so cost
 /// participles are declined there too. A participle is also declined when any
-/// other slot-binding cost could write the cost-paid object (see
+/// other cost payment could write the cost-paid object (see
 /// [`is_sole_slot_binding_cost_kind`]). Any other phrase ("that card", "a
 /// permanent") is not owned.
 fn parse_same_quality_reference<'a>(
@@ -4179,30 +4179,34 @@ fn parse_same_quality_reference<'a>(
     .parse(input)
 }
 
-/// CR 608.2k: whether `kind` is the only slot-binding cost kind of this
-/// ability's cost, so a cost participle naming that kind has exactly one
-/// referent. The slot-binding kinds are the cost categories classified by
-/// [`cost_category_binds_cost_paid_object`], plus a non-self exile cost
-/// (`ParseContext::current_ability_exile_cost_zone`, carried here as
-/// `CostCategory::ExilesCards`). The participle is claimed only when that set
-/// is non-empty and every member is `kind`; with any other slot-binding cost
-/// beside it the reference is ambiguous and is declined (fail closed).
+/// CR 608.2k: whether this ability's cost has exactly one slot-binding payment
+/// component and that component is of kind `kind`, so a cost participle naming
+/// that kind has exactly one referent. Each paid component that references an
+/// object overwrites the single cost-paid slot, so the count is over payment
+/// components (`ParseContext::current_ability_cost_components`), not over the
+/// deduplicated category set: "Sacrifice a creature, Sacrifice an enchantment"
+/// is two sacrifice payments and "the sacrificed creature" is ambiguous. A
+/// component is slot-binding when any of its categories is, as classified by
+/// [`cost_category_binds_cost_paid_object`]; the sole slot-binding component
+/// must have no slot-binding category other than `kind` (a "discard or
+/// sacrifice" `OneOf` is one component whose payment kind is unknown at parse
+/// time). Any other shape is ambiguous and is declined (fail closed).
 fn is_sole_slot_binding_cost_kind(kind: CostCategory, ctx: &ParseContext) -> bool {
-    let mut bound_kinds = slot_binding_cost_kinds(ctx).peekable();
-    bound_kinds.peek().is_some() && bound_kinds.all(|bound| bound == kind)
-}
-
-/// CR 608.2k: the slot-binding cost kinds of the current ability's cost, as
-/// classified by [`cost_category_binds_cost_paid_object`].
-fn slot_binding_cost_kinds(ctx: &ParseContext) -> impl Iterator<Item = CostCategory> + '_ {
-    ctx.current_ability_cost_categories
+    let binds = |category: &CostCategory| cost_category_binds_cost_paid_object(*category);
+    let mut slot_binding_components = ctx
+        .current_ability_cost_components
         .iter()
-        .copied()
-        .filter(|category| cost_category_binds_cost_paid_object(*category))
-        .chain(
-            ctx.current_ability_exile_cost_zone
-                .map(|_| CostCategory::ExilesCards),
-        )
+        .filter(|component| component.iter().any(binds));
+    match (
+        slot_binding_components.next(),
+        slot_binding_components.next(),
+    ) {
+        (Some(component), None) => component
+            .iter()
+            .filter(|category| binds(category))
+            .all(|category| *category == kind),
+        _ => false,
+    }
 }
 
 /// CR 608.2k: whether paying a cost of this category can bind (write) the
@@ -11690,10 +11694,10 @@ mod tests {
     #[test]
     fn strip_same_quality_as_conditional_covers_quality_and_reference_axes() {
         // Each cost participle is read under an activated ability whose only
-        // slot-binding cost is that participle's kind, so the reference is
-        // unambiguous (see the ambiguous-cost test below).
-        let cost_ctx = |categories: Vec<CostCategory>| ParseContext {
-            current_ability_cost_categories: categories,
+        // slot-binding cost payment is that participle's kind, so the
+        // reference is unambiguous (see the ambiguous-cost test below).
+        let cost_ctx = |components: Vec<Vec<CostCategory>>| ParseContext {
+            current_ability_cost_components: components,
             ..Default::default()
         };
         let reference_rows = [
@@ -11705,14 +11709,17 @@ mod tests {
             (
                 "the discarded card",
                 TargetFilter::CostPaidObject,
-                cost_ctx(vec![CostCategory::ManaOnly, CostCategory::Discards]),
+                cost_ctx(vec![
+                    vec![CostCategory::ManaOnly],
+                    vec![CostCategory::Discards],
+                ]),
             ),
             (
                 "the sacrificed creature",
                 TargetFilter::CostPaidObject,
                 cost_ctx(vec![
-                    CostCategory::ManaOnly,
-                    CostCategory::SacrificesPermanent,
+                    vec![CostCategory::ManaOnly],
+                    vec![CostCategory::SacrificesPermanent],
                 ]),
             ),
         ];
@@ -11743,9 +11750,12 @@ mod tests {
 
     /// CR 608.2k: "the exiled card" names the cost-paid object only when the
     /// ability has an exile cost. Reach guard for the no-exile-cost decline.
+    /// The context is a lone non-self exile cost ("Exile a card from your
+    /// graveyard"): one `ExilesCards` payment component plus its source zone.
     #[test]
     fn strip_same_quality_as_conditional_exiled_card_with_exile_cost() {
         let ctx = ParseContext {
+            current_ability_cost_components: vec![vec![CostCategory::ExilesCards]],
             current_ability_exile_cost_zone: Some(Zone::Graveyard),
             ..Default::default()
         };
@@ -11764,20 +11774,24 @@ mod tests {
         );
     }
 
-    /// CR 608.2k: a cost participle is claimed only when its kind is the only
-    /// slot-binding cost kind of the ability's cost. `CostPaidObject` reads one
-    /// cost-paid slot that any object-referencing cost payment (sacrifice,
-    /// exile, reveal, remove counters, ...) can write, so with another
-    /// slot-binding cost beside it the reference is ambiguous and the rider is
-    /// declined, text unchanged. Costs that reference no object (mana, tap
-    /// self, life) do not make it ambiguous. Each decline is paired with the
-    /// same participle claimed under a cost binding only its own kind, and
-    /// "the revealed card" stays claimed under every ambiguous context.
+    /// CR 608.2k: a cost participle is claimed only when the ability's cost has
+    /// exactly one slot-binding payment component and it is the participle's
+    /// kind. `CostPaidObject` reads one cost-paid slot that every
+    /// object-referencing cost payment (sacrifice, exile, reveal, remove
+    /// counters, ...) overwrites, so with another such payment beside it —
+    /// even a second payment of the same kind ("Sacrifice a creature,
+    /// Sacrifice an enchantment") — the reference is ambiguous and the rider is
+    /// declined, text unchanged. A "discard or sacrifice" choice is one
+    /// component whose kind is unknown at parse time, so it is declined too.
+    /// Costs that reference no object (mana, tap self, life) do not make it
+    /// ambiguous. Each decline is paired with the same participle claimed
+    /// under a cost with one payment of its own kind, and "the revealed card"
+    /// stays claimed under every ambiguous context.
     #[test]
     fn strip_same_quality_as_conditional_ambiguous_cost_paid_reference_declines() {
         let cost_ctx =
-            |categories: Vec<CostCategory>, exile_cost_zone: Option<Zone>| ParseContext {
-                current_ability_cost_categories: categories,
+            |components: Vec<Vec<CostCategory>>, exile_cost_zone: Option<Zone>| ParseContext {
+                current_ability_cost_components: components,
                 current_ability_exile_cost_zone: exile_cost_zone,
                 ..Default::default()
             };
@@ -11792,30 +11806,75 @@ mod tests {
 
         let discard_and_sacrifice = cost_ctx(
             vec![
-                CostCategory::ManaOnly,
-                CostCategory::Discards,
-                CostCategory::SacrificesPermanent,
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::Discards],
+                vec![CostCategory::SacrificesPermanent],
             ],
             None,
         );
-        let discard_and_exile = cost_ctx(vec![CostCategory::Discards], Some(Zone::Graveyard));
+        let discard_and_exile = cost_ctx(
+            vec![
+                vec![CostCategory::Discards],
+                vec![CostCategory::ExilesCards],
+            ],
+            Some(Zone::Graveyard),
+        );
         let discard_and_reveal = cost_ctx(
             vec![
-                CostCategory::ManaOnly,
-                CostCategory::Discards,
-                CostCategory::Reveals,
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::Discards],
+                vec![CostCategory::Reveals],
             ],
             None,
         );
         let discard_and_remove_counters = cost_ctx(
-            vec![CostCategory::Discards, CostCategory::RemovesCounters],
+            vec![
+                vec![CostCategory::Discards],
+                vec![CostCategory::RemovesCounters],
+            ],
             None,
         );
         // An exile-self cost is `ExilesCards` with no non-self exile zone: it
         // still binds the slot beside a discard, and it is not an exile cost
         // "the exiled card" can name.
         let discard_and_exile_self = cost_ctx(
-            vec![CostCategory::ExilesCards, CostCategory::Discards],
+            vec![
+                vec![CostCategory::ExilesCards],
+                vec![CostCategory::Discards],
+            ],
+            None,
+        );
+        // Two payments of the same kind: `AbilityCost::categories()` collapses
+        // them to one category, but each payment overwrites the one cost-paid
+        // slot, so the participle has two candidate referents.
+        let two_discards = cost_ctx(
+            vec![vec![CostCategory::Discards], vec![CostCategory::Discards]],
+            None,
+        );
+        let two_sacrifices = cost_ctx(
+            vec![
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::SacrificesPermanent],
+                vec![CostCategory::SacrificesPermanent],
+            ],
+            None,
+        );
+        // Two exile payments, at least one non-self (an exile-self cost beside
+        // "Exile a card from your graveyard", or two graveyard exiles).
+        let two_exiles = cost_ctx(
+            vec![
+                vec![CostCategory::ExilesCards],
+                vec![CostCategory::ExilesCards],
+            ],
+            Some(Zone::Graveyard),
+        );
+        // "Discard a card or sacrifice a creature": one `OneOf` component
+        // whose paid kind is unknown at parse time.
+        let discard_or_sacrifice = cost_ctx(
+            vec![vec![
+                CostCategory::Discards,
+                CostCategory::SacrificesPermanent,
+            ]],
             None,
         );
         let ambiguous = [
@@ -11824,6 +11883,10 @@ mod tests {
             &discard_and_reveal,
             &discard_and_remove_counters,
             &discard_and_exile_self,
+            &two_discards,
+            &two_sacrifices,
+            &two_exiles,
+            &discard_or_sacrifice,
         ];
         let declined = [
             ("the discarded card", &discard_and_sacrifice),
@@ -11834,6 +11897,11 @@ mod tests {
             ("the discarded card", &discard_and_remove_counters),
             ("the discarded card", &discard_and_exile_self),
             ("the exiled card", &discard_and_exile_self),
+            ("the discarded card", &two_discards),
+            ("the sacrificed creature", &two_sacrifices),
+            ("the exiled card", &two_exiles),
+            ("the discarded card", &discard_or_sacrifice),
+            ("the sacrificed creature", &discard_or_sacrifice),
         ];
         for (reference_text, ctx) in declined {
             let text = rider(reference_text);
@@ -11858,27 +11926,42 @@ mod tests {
             );
         }
 
-        // Paired positives: each participle under a cost binding only its kind.
+        // Paired positives: each participle under a cost with exactly one
+        // slot-binding payment, of its own kind. Each differs from a
+        // same-kind decline above only in the number of such payments.
         let unambiguous = [
             (
                 "the discarded card",
-                cost_ctx(vec![CostCategory::ManaOnly, CostCategory::Discards], None),
+                cost_ctx(
+                    vec![vec![CostCategory::ManaOnly], vec![CostCategory::Discards]],
+                    None,
+                ),
+            ),
+            (
+                "the discarded card",
+                cost_ctx(vec![vec![CostCategory::Discards]], None),
             ),
             (
                 "the sacrificed creature",
                 cost_ctx(
-                    vec![CostCategory::ManaOnly, CostCategory::SacrificesPermanent],
+                    vec![
+                        vec![CostCategory::ManaOnly],
+                        vec![CostCategory::SacrificesPermanent],
+                    ],
                     None,
                 ),
             ),
-            ("the exiled card", cost_ctx(vec![], Some(Zone::Graveyard))),
+            (
+                "the exiled card",
+                cost_ctx(vec![vec![CostCategory::ExilesCards]], Some(Zone::Graveyard)),
+            ),
             (
                 "the discarded card",
                 cost_ctx(
                     vec![
-                        CostCategory::TapsSelf,
-                        CostCategory::PaysLife,
-                        CostCategory::Discards,
+                        vec![CostCategory::TapsSelf],
+                        vec![CostCategory::PaysLife],
+                        vec![CostCategory::Discards],
                     ],
                     None,
                 ),
@@ -11916,14 +11999,14 @@ mod tests {
         ] {
             let text =
                 format!("Counter target spell if it has the same mana value as {reference_text}.");
-            let cost_ctx = |categories: Vec<CostCategory>| ParseContext {
-                current_ability_cost_categories: categories,
+            let cost_ctx = |components: Vec<Vec<CostCategory>>| ParseContext {
+                current_ability_cost_components: components,
                 ..Default::default()
             };
 
             let (condition, body) = strip_same_quality_as_conditional(
                 &text,
-                &cost_ctx(vec![CostCategory::ManaOnly, category]),
+                &cost_ctx(vec![vec![CostCategory::ManaOnly], vec![category]]),
             );
             assert_eq!(body, "Counter target spell", "{text}");
             assert_eq!(
@@ -11938,14 +12021,14 @@ mod tests {
 
             for declining_ctx in [
                 ParseContext::default(),
-                cost_ctx(vec![CostCategory::ManaOnly]),
-                cost_ctx(vec![CostCategory::ManaOnly, other_category]),
+                cost_ctx(vec![vec![CostCategory::ManaOnly]]),
+                cost_ctx(vec![vec![CostCategory::ManaOnly], vec![other_category]]),
             ] {
                 let (condition, body) = strip_same_quality_as_conditional(&text, &declining_ctx);
                 assert_eq!(
                     condition, None,
                     "{text} under {:?}",
-                    declining_ctx.current_ability_cost_categories
+                    declining_ctx.current_ability_cost_components
                 );
                 assert_eq!(body, text);
             }
@@ -11962,7 +12045,7 @@ mod tests {
         // discarded card" a cost participle: `in_trigger` alone declines it.
         let trigger_ctx = ParseContext {
             in_trigger: true,
-            current_ability_cost_categories: vec![CostCategory::Discards],
+            current_ability_cost_components: vec![vec![CostCategory::Discards]],
             ..Default::default()
         };
         let declined: [(&str, &ParseContext); 6] = [
