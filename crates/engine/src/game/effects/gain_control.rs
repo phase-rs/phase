@@ -12,8 +12,9 @@ use crate::types::player::PlayerId;
 use std::sync::Arc;
 
 /// CR 603.10 + CR 603.10d + CR 608.2e: the single writer of control-change
-/// evidence. Latches every look-back control-change watcher and snapshots
-/// every candidate subject, as the board stands NOW.
+/// evidence. Latches every look-back control-change watcher and every
+/// functioning trigger doubler, and snapshots every candidate subject, as the
+/// board stands NOW.
 ///
 /// Callers own the boundary: they settle layers once at the instruction's
 /// entrance, determine the instruction's whole population, call this, and
@@ -26,6 +27,7 @@ pub(crate) fn capture_control_change_instruction(
 ) -> Arc<ControlChangeInstructionCapture> {
     Arc::new(ControlChangeInstructionCapture {
         watchers: Arc::new(crate::game::triggers::latch_control_change_watchers(state)),
+        doublers: Arc::new(crate::game::triggers::active_trigger_doublers(state)),
         subjects: population
             .into_iter()
             .filter_map(|object_id| state.capture_event_object_snapshot(object_id))
@@ -130,14 +132,15 @@ pub(crate) fn instruction_member(
     let live_identity = ObjectIncarnationRef::from_object(live);
     let (capture, link) = match boundary {
         InstructionBoundary::Own(capture) => (Some(capture), None),
-        InstructionBoundary::Carried(id) => {
-            let entry = &state.control_change_captures[id];
-            if entry.published.contains(&object_id) {
-                (None, Some(*id))
-            } else {
+        InstructionBoundary::Carried(id) => match state.control_change_captures.get(id) {
+            Some(entry) if !entry.published.contains(&object_id) => {
                 (Some(&entry.capture), Some(*id))
             }
-        }
+            Some(_) => (None, Some(*id)),
+            // A carried id whose capture is gone publishes `Unrecorded`
+            // (`InstructionBoundary::Unobservable`'s contract).
+            None => (None, None),
+        },
         InstructionBoundary::Unobservable => (None, None),
     };
     let observation = capture

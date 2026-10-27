@@ -11610,71 +11610,163 @@ fn trigger_source_matches_doubler_filter(
     }
 }
 
-fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
-    // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating so a
-    // phased-out doubler no longer doubles triggers.
-    let doublers: Vec<(PlayerId, ObjectId, TriggerCause, Option<TargetFilter>)> = state
+/// CR 603.2d: every functioning trigger-doubling static on the battlefield, as
+/// the board stands now. CR 702.26b + CR 604.1: `active_static_definitions`
+/// owns the gating, so a phased-out doubler doubles nothing. Also latched by
+/// each control-change instruction's capture
+/// (`gain_control::capture_control_change_instruction`).
+pub(crate) fn active_trigger_doublers(
+    state: &GameState,
+) -> Vec<crate::types::events::LatchedTriggerDoubler> {
+    state
         .battlefield
         .iter()
         .filter_map(|&obj_id| {
             let obj = state.objects.get(&obj_id)?;
             let doubler = super::functioning_abilities::active_static_definitions(state, obj)
                 .find(|sd| matches!(sd.mode, StaticMode::DoubleTriggers { .. }))?;
-            let cause = match &doubler.mode {
-                StaticMode::DoubleTriggers { cause } => cause.clone(),
-                _ => unreachable!("filter above guarantees DoubleTriggers"),
+            let StaticMode::DoubleTriggers { cause } = &doubler.mode else {
+                unreachable!("filter above guarantees DoubleTriggers");
             };
-            Some((obj.controller, obj_id, cause, doubler.affected.clone()))
+            Some(crate::types::events::LatchedTriggerDoubler {
+                source_id: obj_id,
+                controller: obj.controller,
+                cause: cause.clone(),
+                affected: doubler.affected.clone(),
+            })
         })
-        .collect();
+        .collect()
+}
 
-    if doublers.is_empty() {
-        return;
+/// CR 603.10d + CR 603.2d: a look-back control-change trigger triggers, and is
+/// counted, as of immediately before its change. When `trigger` was collected
+/// from one of its event's latched watchers, returns the doublers that
+/// instruction latched with it and that watcher's source context; the trigger
+/// is qualified against those, not against the post-resolution board (where
+/// its source or a doubler may have changed hands or left).
+fn control_change_doubling_authority<'a>(
+    state: &'a GameState,
+    trigger: &'a PendingTrigger,
+) -> Option<(
+    &'a [crate::types::events::LatchedTriggerDoubler],
+    &'a TriggerSourceContext,
+)> {
+    let Some(GameEvent::ControllerChanged { evidence, .. }) = trigger.trigger_event.as_ref() else {
+        return None;
+    };
+    let observation = state.control_change_observation(*evidence)?;
+    let source = trigger.ability.trigger_source.as_ref()?;
+    observation
+        .watchers
+        .iter()
+        .any(|watcher| watcher.identity == source.identity)
+        .then_some((observation.doublers.as_slice(), source))
+}
+
+/// CR 603.2d + CR 603.10d: match a look-back trigger's latched source against
+/// a latched doubler's scope: the source's snapshot from immediately before the
+/// change, with "you" the doubler's controller then.
+fn latched_source_matches_doubler_filter(
+    state: &GameState,
+    source: &TriggerSourceContext,
+    filter: &TargetFilter,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    if doubler_filter_requires_battlefield_permanent(filter)
+        && source.identity.expected_zone != Zone::Battlefield
+    {
+        return false;
     }
+    matches_target_filter_on_lki_snapshot(
+        state,
+        source.identity.reference.object_id,
+        &source.lki,
+        filter,
+        &FilterContext::from_source_with_controller(doubler.source_id, doubler.controller),
+    )
+}
 
+/// CR 603.2d: whether `doubler` makes `trigger` trigger an additional time.
+/// `latched_source` is the trigger's event-time source authority
+/// (`control_change_doubling_authority`), when it has one.
+fn doubler_applies(
+    state: &GameState,
+    trigger_context: &PendingTriggerContext,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+    latched_source: Option<&TriggerSourceContext>,
+) -> bool {
+    let trigger = &trigger_context.pending;
+    // CR 603.2d: A delayed trigger is already the exact ability that
+    // was created by its originating effect. Trigger doublers apply to
+    // the event that creates a delayed trigger, not again when that
+    // delayed ability later fires.
+    if trigger_context.firing().is_delayed() {
+        return false;
+    }
+    // Controller match: trigger source must be controlled by the doubler's controller
+    if trigger.controller != doubler.controller {
+        return false;
+    }
+    // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
+    // triggered abilities ? Panharmonicon/Yarok/Isshin/Wayta all scope to
+    // OTHER permanents. The carve-out: when the doubler's `affected` filter
+    // references the source itself (`~`, e.g. Cloud's "a triggered ability
+    // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
+    // triggered abilities eligible, so skip the exclusion and let the
+    // `affected` match below decide.
+    let affected_references_self = doubler
+        .affected
+        .as_ref()
+        .is_some_and(filter_references_self);
+    if !affected_references_self && trigger.source_id == doubler.source_id {
+        return false;
+    }
+    // CR 603.2d: Check the cause predicate against the spawning event.
+    if !trigger_cause_matches(
+        state,
+        &doubler.cause,
+        trigger.trigger_event.as_ref(),
+        doubler.controller,
+    ) {
+        return false;
+    }
+    // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
+    // control of the chosen type"), only double triggers from matching sources.
+    doubler
+        .affected
+        .as_ref()
+        .is_none_or(|filter| match latched_source {
+            Some(source) => latched_source_matches_doubler_filter(state, source, filter, doubler),
+            None => {
+                trigger_source_matches_doubler_filter(state, trigger, filter, doubler.source_id)
+            }
+        })
+}
+
+fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
+    let live = active_trigger_doublers(state);
     let mut extra: Vec<PendingTriggerContext> = Vec::new();
-    for (doubler_controller, doubler_id, cause, ref affected) in &doublers {
+    for doubler in &live {
         for trigger_context in pending.iter() {
-            let trigger = &trigger_context.pending;
-            // CR 603.2d: A delayed trigger is already the exact ability that
-            // was created by its originating effect. Trigger doublers apply to
-            // the event that creates a delayed trigger, not again when that
-            // delayed ability later fires.
-            if trigger_context.firing().is_delayed() {
-                continue;
+            if control_change_doubling_authority(state, &trigger_context.pending).is_none()
+                && doubler_applies(state, trigger_context, doubler, None)
+            {
+                extra.push(trigger_context.clone());
             }
-            // Controller match: trigger source must be controlled by the doubler's controller
-            if trigger.controller != *doubler_controller {
-                continue;
+        }
+    }
+    // CR 603.10d: a look-back control-change trigger is counted against the
+    // doublers its instruction latched, judged on its latched source.
+    for trigger_context in pending.iter() {
+        let Some((doublers, source)) =
+            control_change_doubling_authority(state, &trigger_context.pending)
+        else {
+            continue;
+        };
+        for doubler in doublers {
+            if doubler_applies(state, trigger_context, doubler, Some(source)) {
+                extra.push(trigger_context.clone());
             }
-            // CR 603.2d: Self-exclusion. A doubler normally never doubles its own
-            // triggered abilities — Panharmonicon/Yarok/Isshin/Wayta all scope to
-            // OTHER permanents. The carve-out: when the doubler's `affected` filter
-            // references the source itself (`~`, e.g. Cloud's "a triggered ability
-            // of Cloud or an Equipment attached to it"), CR 603.2d makes its own
-            // triggered abilities eligible, so skip the exclusion and let the
-            // `affected` match below decide.
-            let affected_references_self = affected.as_ref().is_some_and(filter_references_self);
-            if !affected_references_self && trigger.source_id == *doubler_id {
-                continue;
-            }
-            // CR 603.2d: Check the cause predicate against the spawning event.
-            if !trigger_cause_matches(
-                state,
-                cause,
-                trigger.trigger_event.as_ref(),
-                *doubler_controller,
-            ) {
-                continue;
-            }
-            // CR 603.2d: If the doubler specifies an affected filter (e.g. "creature you
-            // control of the chosen type"), only double triggers from matching sources.
-            if let Some(filter) = affected {
-                if !trigger_source_matches_doubler_filter(state, trigger, filter, *doubler_id) {
-                    continue;
-                }
-            }
-            extra.push(trigger_context.clone());
         }
     }
     pending.extend(extra);

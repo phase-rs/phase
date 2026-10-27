@@ -548,6 +548,29 @@ pub struct ControlChangeObservation {
     /// controller, immediately before the instruction. One list is shared by
     /// every event the instruction publishes.
     pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
+    /// CR 603.2d + CR 603.10d: every functioning trigger-doubling static, with
+    /// its controller, immediately before the instruction. A look-back
+    /// watcher's trigger counts its additional triggers against these, not
+    /// against a doubler the instruction itself moved or removed.
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+}
+
+/// CR 603.2d: one functioning "triggers an additional time" static ability
+/// (`StaticMode::DoubleTriggers`) as it stood when latched: its source, that
+/// source's controller ("you"), the spawning-event predicate and the
+/// trigger-source scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatchedTriggerDoubler {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub cause: super::statics::TriggerCause,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected: Option<super::ability::TargetFilter>,
+}
+
+fn latched_doublers_are_empty(doublers: &std::sync::Arc<Vec<LatchedTriggerDoubler>>) -> bool {
+    doublers.is_empty()
 }
 
 /// CR 608.2e + CR 603.10d: one control-change instruction's immediately-before
@@ -562,6 +585,8 @@ pub struct ControlChangeObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlChangeInstructionCapture {
     pub watchers: std::sync::Arc<Vec<TriggerSourceContext>>,
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
     pub subjects: Vec<EventObjectSnapshot>,
 }
 
@@ -574,6 +599,7 @@ impl ControlChangeInstructionCapture {
             .map(|subject| ControlChangeObservation {
                 subject: subject.clone(),
                 watchers: self.watchers.clone(),
+                doublers: self.doublers.clone(),
             })
     }
 }

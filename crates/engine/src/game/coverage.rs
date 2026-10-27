@@ -14373,16 +14373,6 @@ mod tests {
                  of your end step, each player gains control of all creatures they own.",
             ),
             (
-                "Aminatou, the Fateshifter",
-                "Planeswalker",
-                "+1: Draw a card, then put a card from your hand on top of your library.\n\
-                 \u{2212}1: Exile another target permanent you own, then return it to the \
-                 battlefield under your control.\n\u{2212}6: Choose left or right. Each player \
-                 gains control of all nonland permanents other than Aminatou controlled by the \
-                 next player in the chosen direction.\nAminatou, the Fateshifter can be your \
-                 commander.",
-            ),
-            (
                 "Herald of Leshrac",
                 "Creature",
                 "Flying\nCumulative upkeep\u{2014}Gain control of a land you don't control. (At \
@@ -14391,12 +14381,6 @@ mod tests {
                  creature gets +1/+1 for each land you control but don't own.\nWhen this \
                  creature leaves the battlefield, each player gains control of each land they \
                  own that you control.",
-            ),
-            (
-                "Scrambleverse",
-                "Sorcery",
-                "For each nonland permanent, choose a player at random. Then each player gains \
-                 control of each permanent for which they were chosen. Untap those permanents.",
             ),
         ] {
             // "Enchantment Saga": the card type, then its subtypes.
@@ -14470,8 +14454,10 @@ mod tests {
 
     /// CR 611.2c + CR 608.2e: the printed scoped producers whose seat template
     /// isn't an allowlisted shape (a per-seat choice, a retained following
-    /// node, a single-object control head) fail closed: coverage marks them
-    /// unsupported, and Zidane doesn't trigger on their changes.
+    /// node, a single-object control head, or a population that drops the
+    /// selected recipient: Aminatou's chosen direction, Scrambleverse's random
+    /// choice) fail closed: coverage marks them unsupported, and Zidane doesn't
+    /// trigger on their changes.
     #[test]
     fn printed_scoped_producers_off_the_allowlist_are_unsupported() {
         for (name, types, text) in [
@@ -14500,6 +14486,22 @@ mod tests {
                  the rest of the game. For each of those permanents, choose a different \
                  opponent. Each opponent gains control of the permanent for which they were \
                  chosen.",
+            ),
+            (
+                "Aminatou, the Fateshifter",
+                "Planeswalker",
+                "+1: Draw a card, then put a card from your hand on top of your library.\n\
+                 \u{2212}1: Exile another target permanent you own, then return it to the \
+                 battlefield under your control.\n\u{2212}6: Choose left or right. Each player \
+                 gains control of all nonland permanents other than Aminatou controlled by the \
+                 next player in the chosen direction.\nAminatou, the Fateshifter can be your \
+                 commander.",
+            ),
+            (
+                "Scrambleverse",
+                "Sorcery",
+                "For each nonland permanent, choose a player at random. Then each player gains \
+                 control of each permanent for which they were chosen. Untap those permanents.",
             ),
         ] {
             let parsed =
@@ -14683,9 +14685,8 @@ mod tests {
     /// CR 118.12a + CR 608.2e: an unless-payment is a per-seat pause, read from
     /// the exhaustive field authority (`resolution_prompt::node_modifiers_offer_choice`)
     /// (R6-1). Homeward Path's mandatory head stays exact; the same head with an
-    /// unless-payment is unsupported. Scrambleverse's untap is detached, so a
-    /// rider there leaves it exact; any node retained inside the seat template,
-    /// even a plain untap, is unsupported.
+    /// unless-payment is unsupported, and so is any node retained inside the
+    /// seat template, even a plain untap.
     #[test]
     fn an_unless_payment_on_the_head_or_a_retained_node_settles_seats() {
         use crate::game::effects::FanOutControlBoundary;
@@ -14730,32 +14731,21 @@ mod tests {
         assert_eq!(boundary(&paying), Some(FanOutControlBoundary::Unobservable));
         assert!(super::fan_out_control_boundary_is_unobservable(&paying));
 
-        // Scrambleverse's untap is a following sentence, detached from the seat
-        // template (it runs once, after every seat), so a rider there leaves the
-        // link exact.
-        let scramble = scoped(
-            "For each nonland permanent, choose a player at random. Then each player gains \
-             control of each permanent for which they were chosen. Untap those permanents.",
-            "Scrambleverse",
-            "Sorcery",
-        );
-        let mut detached = scramble.clone();
-        detached
-            .sub_ability
-            .as_mut()
-            .expect("REACH: Scrambleverse has an untap")
-            .unless_pay = Some(rider());
-        assert_eq!(boundary(&detached), Some(FanOutControlBoundary::Head));
-
         // A node retained inside the seat template runs between seats: even a
         // plain untap is not admitted.
         use crate::types::ability::{
             Effect, EffectScope, ResolvedAbility, TapStateChange, TypedFilter,
         };
         let template = |retained: Option<bool>| {
+            // Brooding Saurian's allowlisted population.
             let mut head = ResolvedAbility::new(
                 Effect::GainControlAll {
-                    target: TargetFilter::Typed(TypedFilter::permanent()),
+                    target: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                        crate::types::ability::FilterProp::NonToken,
+                        crate::types::ability::FilterProp::Owned {
+                            controller: crate::types::ability::ControllerRef::ScopedPlayer,
+                        },
+                    ])),
                 },
                 vec![],
                 crate::types::identifiers::ObjectId(1),
@@ -14825,7 +14815,14 @@ mod tests {
         let accepted = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::GainControlAll {
-                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::permanent().properties(vec![
+                        crate::types::ability::FilterProp::NonToken,
+                        crate::types::ability::FilterProp::Owned {
+                            controller: crate::types::ability::ControllerRef::ScopedPlayer,
+                        },
+                    ]),
+                ),
             },
         )
         .player_scope(PlayerFilter::All);

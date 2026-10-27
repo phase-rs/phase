@@ -66,10 +66,13 @@ fn zidane_cost() -> ManaCost {
     }
 }
 
+/// Zidane as printed: Legendary Creature ? Human Mutant Scout, 3/3.
 fn add_zidane(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
     scenario
         .add_creature_from_oracle(player, "Zidane, Tantalus Thief", 3, 3, ZIDANE)
         .with_mana_cost(zidane_cost())
+        .with_subtypes(vec!["Human", "Mutant", "Scout"])
+        .as_legendary()
         .id()
 }
 
@@ -1279,7 +1282,23 @@ fn a_restored_legacy_controller_changed_decodes_unrecorded() {
         let steal = add_free_spell(&mut scenario, P1, "Act of Treason", ACT_OF_TREASON);
         let mut runner = scenario.build();
         give_priority(&mut runner, P1);
-        runner.cast(steal).target_object(bear).resolve();
+        runner.cast(steal).target_object(bear).commit();
+        for _ in 0..2 {
+            if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                && runner
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == steal)
+            {
+                let _ = runner.act(GameAction::PassPriority);
+            }
+        }
+        assert_eq!(controller(&runner, bear), P1, "REACH: P1 stole the bear");
+        assert!(
+            runner.state().stack.len() == 1 && treasures(&runner, P0) == 0,
+            "REACH: Zidane's trigger is on the stack, unresolved"
+        );
 
         runner.state_mut().capture_rng_word_pos();
         let mut saved = serde_json::to_value(runner.state()).expect("state serializes");
@@ -1292,6 +1311,29 @@ fn a_restored_legacy_controller_changed_decodes_unrecorded() {
         let mut restored: engine::types::game_state::GameState =
             serde_json::from_value(saved).expect("the saved state restores");
         restored.rehydrate_rng();
+        // CodeRabbit 4266584501: every restored carrier's evidence, decoded.
+        // A stripped (legacy) event is `Unrecorded`, never rebuilt from the
+        // restored board; a current one still resolves to its observation.
+        let decoded = restored_controller_changed_evidence(&restored);
+        assert_eq!(
+            decoded.len(),
+            stripped,
+            "REACH (legacy {legacy}): every saved event is restored"
+        );
+        for evidence in decoded {
+            if legacy {
+                assert_eq!(
+                    evidence,
+                    ControlChangeEvidence::Unrecorded,
+                    "a legacy event decodes Unrecorded"
+                );
+            } else {
+                assert!(
+                    restored.control_change_observation(evidence).is_some(),
+                    "a current event resolves to its observation: {evidence:?}"
+                );
+            }
+        }
         *runner.state_mut() = restored;
 
         runner.advance_until_stack_empty();
@@ -1301,6 +1343,41 @@ fn a_restored_legacy_controller_changed_decodes_unrecorded() {
             "legacy {legacy}: the already-fired trigger resolves"
         );
     }
+}
+
+/// The decoded evidence of every `ControllerChanged` the restored state carries,
+/// read by decoding each serialized carrier back into a typed `GameEvent`.
+fn restored_controller_changed_evidence(
+    state: &engine::types::game_state::GameState,
+) -> Vec<ControlChangeEvidence> {
+    fn walk(value: &serde_json::Value, out: &mut Vec<ControlChangeEvidence>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("type").and_then(|t| t.as_str()) == Some("ControllerChanged") {
+                    if let Ok(GameEvent::ControllerChanged { evidence, .. }) =
+                        serde_json::from_value::<GameEvent>(value.clone())
+                    {
+                        out.push(evidence);
+                    }
+                }
+                for child in map.values() {
+                    walk(child, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    walk(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(
+        &serde_json::to_value(state).expect("state serializes"),
+        &mut out,
+    );
+    out
 }
 
 /// Counts every saved `ControllerChanged` with evidence and, when `strip`,
@@ -2239,5 +2316,283 @@ fn a_non_allowlisted_fan_out_does_not_fire() {
         treasures(&runner, P1) - before,
         0,
         "a non-allowlisted fan-out fires for no player"
+    );
+}
+
+/// Verbatim Oracle text (Scryfall), Annie Joins Up (Legendary Enchantment).
+const ANNIE_JOINS_UP: &str = "When Annie Joins Up enters, it deals 5 damage to target \
+    creature or planeswalker an opponent controls.\nIf a triggered ability of a legendary \
+    creature you control triggers, that ability triggers an additional time.";
+
+fn add_annie(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_enchantment_from_oracle(player, "Annie Joins Up", ANNIE_JOINS_UP)
+        .as_legendary()
+        .id()
+}
+
+/// F1 (maintainer round 2; CR 603.10d + CR 603.2d + CR 603.3a): an additional
+/// trigger is counted as of immediately before the control change. P0 controls
+/// Annie Joins Up and legendary Zidane; P1 casts Act of Treason.
+/// - On Zidane: Zidane's loss trigger is P0's (the watcher latched under P0),
+///   and Annie judged Zidane then: a legendary creature P0 controlled. P0 gets
+///   exactly 2, though Zidane is P1's afterwards.
+/// - Paired, same board, on P0's bear: Zidane never moves, so P0 gets 2 by the
+///   ordinary path too.
+#[test]
+fn annie_doubles_zidanes_trigger_when_zidane_itself_is_stolen() {
+    for steal_zidane in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let zidane = add_zidane(&mut scenario, P0);
+        let annie = add_annie(&mut scenario, P0);
+        let bear = scenario.add_vanilla(P0, 2, 2);
+        let steal = add_free_spell(&mut scenario, P1, "Act of Treason", ACT_OF_TREASON);
+        let mut runner = scenario.build();
+        let stolen = if steal_zidane { zidane } else { bear };
+
+        give_priority(&mut runner, P1);
+        runner.cast(steal).target_object(stolen).resolve();
+        runner.advance_until_stack_empty();
+        assert_eq!(controller(&runner, stolen), P1, "REACH: P1 stole it");
+        assert_eq!(controller(&runner, annie), P0, "REACH: Annie stayed");
+        assert_eq!(
+            (treasures(&runner, P0), treasures(&runner, P1)),
+            (2, 0),
+            "steal_zidane {steal_zidane}: Zidane's trigger and its additional trigger"
+        );
+    }
+}
+
+/// Labelled synthetic: one instruction that takes Annie and Zidane together.
+const STEAL_ALL_PERMANENTS: &str = "Gain control of all permanents target opponent controls.";
+
+/// F1, the doubler's side (CR 603.2d + CR 603.10d): Annie is stolen by the same
+/// instruction as the permanents whose losses trigger Zidane. Immediately
+/// before it, P0 controlled Annie, so each of Zidane's two triggers (Annie's
+/// loss, Zidane's loss) triggers an additional time: P0 gets exactly 4. A
+/// doubler read after the change (P1's Annie) adds nothing, for 2.
+#[test]
+fn a_doubler_stolen_with_the_watcher_keeps_its_event_time_eligibility() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let zidane = add_zidane(&mut scenario, P0);
+    let annie = add_annie(&mut scenario, P0);
+    let steal = add_free_spell(&mut scenario, P1, "Steal Everything", STEAL_ALL_PERMANENTS);
+    let mut runner = scenario.build();
+    let p0_permanents = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[*id].controller == P0)
+        .count();
+    assert_eq!(
+        p0_permanents, 2,
+        "REACH: P0 controls exactly Annie and Zidane"
+    );
+
+    give_priority(&mut runner, P1);
+    runner.cast(steal).target_player(P0).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        (controller(&runner, annie), controller(&runner, zidane)),
+        (P1, P1),
+        "REACH: one instruction took both"
+    );
+    assert_eq!(
+        (treasures(&runner, P0), treasures(&runner, P1)),
+        (4, 0),
+        "two losses, each triggering twice"
+    );
+}
+
+/// Verbatim Oracle text (Scryfall), Scrambleverse.
+const SCRAMBLEVERSE: &str = "For each nonland permanent, choose a player at random. Then each \
+    player gains control of each permanent for which they were chosen. Untap those permanents.";
+
+fn controller_changes(events: &[GameEvent]) -> Vec<(ObjectId, ControlChangeEvidence)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ControllerChanged {
+                object_id,
+                evidence,
+                ..
+            } => Some((*object_id, *evidence)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// F2 (maintainer round 2; CR 608.2c + CR 608.2e): Scrambleverse's parsed
+/// population drops "for which they were chosen", so it doesn't partition the
+/// permanents by their randomly chosen recipient, and a land (never a
+/// Scrambleverse member: "for each nonland permanent") can be handed to a
+/// seat. Not an allowlisted shape: every change it publishes is `Unrecorded`,
+/// so no land loss is observed and P1's Zidane creates nothing.
+///
+/// Paired positive on the same board: Brooding Saurian's allowlisted action
+/// ("each player gains control of all nontoken permanents they own") hands
+/// P0's land back from P1, an opponent gaining a permanent from P1: P1 +1.
+#[test]
+fn scrambleverse_publishes_no_observed_land_loss() {
+    for scramble in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let zidane = add_zidane(&mut scenario, P1);
+        let p1_land = scenario.add_basic_land(P1, engine::types::mana::ManaColor::Red);
+        let p0_land = scenario.add_basic_land(P0, engine::types::mana::ManaColor::White);
+        scenario.add_vanilla(P0, 2, 2);
+        let steal = add_free_spell(&mut scenario, P1, "Steal", STEAL_ANY_PERMANENT);
+        let spell = if scramble {
+            add_free_spell(&mut scenario, P0, "Scrambleverse", SCRAMBLEVERSE)
+        } else {
+            add_free_spell(
+                &mut scenario,
+                P0,
+                "Mandatory Return",
+                MANDATORY_RETURN_INSTANT,
+            )
+        };
+        let mut runner = scenario.build();
+        give_priority(&mut runner, P1);
+        runner.cast(steal).target_object(p0_land).resolve();
+        runner.advance_until_stack_empty();
+        assert_eq!(controller(&runner, p0_land), P1, "REACH: P1 took P0's land");
+        let before = treasures(&runner, P1);
+
+        give_priority(&mut runner, P0);
+        let outcome = runner.cast(spell).resolve();
+        let changes = controller_changes(outcome.events());
+        runner.advance_until_stack_empty();
+        assert!(!changes.is_empty(), "REACH: the spell changed control");
+        if scramble {
+            assert!(
+                changes.iter().all(|(_, evidence)| evidence.is_unrecorded()),
+                "Scrambleverse publishes no observed change: {changes:?}"
+            );
+            assert!(
+                changes
+                    .iter()
+                    .filter(|(id, _)| *id == p1_land || *id == p0_land)
+                    .all(|(_, evidence)| evidence.is_unrecorded()),
+                "no land loss is observed"
+            );
+            assert_eq!(treasures(&runner, P1) - before, 0, "P1 creates nothing");
+        } else {
+            assert_eq!(
+                controller(&runner, p0_land),
+                P0,
+                "REACH: P0's land went home"
+            );
+            assert_eq!(controller(&runner, zidane), P1, "REACH: Zidane stayed");
+            assert_eq!(
+                treasures(&runner, P1) - before,
+                1,
+                "an opponent gained P0's land from P1"
+            );
+        }
+    }
+}
+
+/// Verbatim Oracle text (Scryfall), Aminatou, the Fateshifter (loyalty 3).
+const AMINATOU: &str = "+1: Draw a card, then put a card from your hand on top of your \
+    library.\n\u{2212}1: Exile another target permanent you own, then return it to the \
+    battlefield under your control.\n\u{2212}6: Choose left or right. Each player gains control \
+    of all nonland permanents other than Aminatou controlled by the next player in the chosen \
+    direction.\nAminatou, the Fateshifter can be your commander.";
+
+/// F2 (maintainer round 2; CR 102.3 + CR 608.2c + CR 608.2e): Two-Headed
+/// Giant, P0/P1 against P2/P3. Aminatou's parsed ?6 population drops "the
+/// next player in the chosen direction", so a seat's population isn't the
+/// permanents the printed text hands it, and a P1?P0 handoff (teammates, never
+/// an opponent's gain) can't be told from an opponent's gain. Not an
+/// allowlisted shape: every change it publishes is `Unrecorded`, and P1's
+/// Zidane creates nothing, in either direction.
+///
+/// Paired positive in the same topology: P1 controls a P2-owned creature
+/// (an opponent's) and a P0-owned creature (a teammate's); Brooding Saurian's
+/// allowlisted action hands both back. Only the opponent's gain counts: P1 +1.
+#[test]
+fn aminatous_unpartitioned_team_handoff_does_not_fire() {
+    for direction in ["Left", "Right"] {
+        let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let zidane = add_zidane(&mut scenario, P1);
+        let aminatou = scenario
+            .add_planeswalker_from_oracle(P2, "Aminatou, the Fateshifter", "Aminatou", 7, AMINATOU)
+            .as_legendary()
+            .id();
+        scenario.add_vanilla(P0, 2, 2);
+        let mut runner = scenario.build();
+        give_priority(&mut runner, P2);
+        let before = treasures(&runner, P1);
+
+        let outcome = runner
+            .activate(aminatou, 2)
+            .choose_option(direction)
+            .resolve();
+        let events = outcome.events().to_vec();
+        runner.advance_until_stack_empty();
+        let changes = controller_changes(&events);
+        assert!(
+            changes.iter().any(|(id, _)| *id == zidane),
+            "REACH ({direction}): the ?6 moved P1's Zidane: {changes:?}"
+        );
+        assert!(
+            changes.iter().all(|(_, evidence)| evidence.is_unrecorded()),
+            "{direction}: Aminatou's ?6 publishes no observed change: {changes:?}"
+        );
+        assert_eq!(
+            treasures(&runner, P1) - before,
+            0,
+            "{direction}: P1 creates nothing"
+        );
+    }
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let zidane = add_zidane(&mut scenario, P1);
+    let opponents = scenario.add_vanilla(P2, 2, 2);
+    let teammates = scenario.add_vanilla(P0, 2, 2);
+    let steal_a = add_free_spell(&mut scenario, P1, "Act of Treason", ACT_OF_TREASON);
+    let steal_b = add_free_spell(&mut scenario, P1, "Act of Treason", ACT_OF_TREASON);
+    let returns = add_free_spell(
+        &mut scenario,
+        P2,
+        "Mandatory Return",
+        MANDATORY_RETURN_INSTANT,
+    );
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P1);
+    runner.cast(steal_a).target_object(opponents).resolve();
+    runner.advance_until_stack_empty();
+    runner.cast(steal_b).target_object(teammates).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        (
+            controller(&runner, opponents),
+            controller(&runner, teammates)
+        ),
+        (P1, P1),
+        "REACH: P1 holds both"
+    );
+    let before = treasures(&runner, P1);
+    give_priority(&mut runner, P2);
+    runner.cast(returns).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        (
+            controller(&runner, opponents),
+            controller(&runner, teammates)
+        ),
+        (P2, P0),
+        "REACH: both went home"
+    );
+    assert_eq!(controller(&runner, zidane), P1, "REACH: Zidane stayed");
+    assert_eq!(
+        treasures(&runner, P1) - before,
+        1,
+        "only the opponent's gain counts (CR 102.3)"
     );
 }

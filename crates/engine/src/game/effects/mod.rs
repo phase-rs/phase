@@ -11963,8 +11963,16 @@ pub(crate) fn fan_out_control_boundary(template: &ResolvedAbility) -> FanOutCont
 /// reprint or another card with the identical shape shares the entry, and a
 /// new shape stays unsupported until it's added here with its receipt
 /// (`coverage::tests::printed_scoped_control_producers_have_a_head_boundary`).
-pub(crate) fn allowlisted_fan_out_control_populations() -> [TargetFilter; 6] {
-    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
+///
+/// Each entry partitions the action's members by recipient on its own (each
+/// seat takes what that seat owns), so a seat's population is exactly what the
+/// printed text hands that seat. A population that drops the selected
+/// recipient (Aminatou's ?6 "controlled by the next player in the chosen
+/// direction", Scrambleverse's "for which they were chosen") would publish
+/// changes no printed instruction makes, so those producers stay unsupported
+/// (CR 608.2c, CR 608.2e).
+pub(crate) fn allowlisted_fan_out_control_populations() -> [TargetFilter; 4] {
+    use crate::types::ability::{ControllerRef, FilterProp, TypedFilter};
     let owned_by_seat = || FilterProp::Owned {
         controller: ControllerRef::ScopedPlayer,
     };
@@ -11978,20 +11986,12 @@ pub(crate) fn allowlisted_fan_out_control_populations() -> [TargetFilter; 6] {
         ),
         // The Fall of Lord Konda, chapter II: "all permanents they own".
         TargetFilter::Typed(TypedFilter::permanent().properties(vec![owned_by_seat()])),
-        // Aminatou, the Fateshifter's -6, as parsed.
-        TargetFilter::Typed(
-            TypedFilter::permanent()
-                .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
-                .properties(vec![FilterProp::Another]),
-        ),
         // Herald of Leshrac: "each land they own that you control".
         TargetFilter::Typed(
             TypedFilter::land()
                 .controller(ControllerRef::You)
                 .properties(vec![owned_by_seat()]),
         ),
-        // Scrambleverse, as parsed.
-        TargetFilter::Typed(TypedFilter::permanent()),
     ]
 }
 
