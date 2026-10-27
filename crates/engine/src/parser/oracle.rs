@@ -51,8 +51,8 @@ use super::oracle_nom::primitives::{
 use super::oracle_attraction::parse_attraction_visit_triggers;
 use super::oracle_casting::{
     additional_cost_line_text, extract_spend_only_on_x_prefix, is_cast_this_spell_only_line,
-    parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
-    split_additional_cost_trailing_spell_reduction,
+    is_self_alternative_cost_line, parse_additional_cost_line, parse_casting_restriction_line,
+    parse_spell_casting_option_line, split_additional_cost_trailing_spell_reduction,
 };
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_classifier::{
@@ -4122,6 +4122,7 @@ fn is_spell_resolution_instruction_line(
     // condition is unrecognized; it ends the spell body and is recorded on its own.
     if parse_casting_restriction_line(line).is_some()
         || parse_spell_casting_option_line(line, card_name).is_some()
+        || is_self_alternative_cost_line(line)
         || is_cast_this_spell_only_line(line)
     {
         return false;
@@ -8295,7 +8296,7 @@ fn parse_normalized_oracle_ir(
         // represented is still a casting restriction, not a spell instruction. Record it as
         // an `Effect::unimplemented` gap rather than let the spell-imperative route read it
         // as a conditional self-recast (`CastFromZone`) that drops the restriction.
-        if is_cast_this_spell_only_line(&line) {
+        if is_cast_this_spell_only_line(&line) || is_self_alternative_cost_line(&line) {
             emitter.ability_at(
                 item_line,
                 AbilityDefinition::new(
@@ -13622,7 +13623,7 @@ pub(crate) fn normalize_activated_mana_instead_delta(def: &mut AbilityDefinition
 
 #[cfg(test)]
 #[path = "oracle_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 #[path = "oracle_pipeline_snapshot_tests.rs"]

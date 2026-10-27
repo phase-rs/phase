@@ -1755,6 +1755,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let pending_mana_symbol_count_color =
         extract_colored_mana_symbol_spell_qualifier(condition_text);
     let if_pronoun_ref = trigger_object_pronoun_ref_for_intervening_if(&if_condition);
+    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
     let mut effect_ctx = ParseContext {
         subject: Some(trigger_subject.clone()),
         card_name: Some(card_name.to_string()),
@@ -1821,7 +1822,11 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // `"that player"` resolution inside the trigger effect body. Delegated to the
     // single-authority `relative_player_scope_for_condition` so the delayed-trigger
     // split path derives the identical scope from the same condition.
-    if let Some(scope) = relative_player_scope_for_condition(&cond_lower) {
+    if is_spell_cast_trigger_mode(&partial_def.mode) {
+        // CR 608.2c: later player references name this captured cast event's
+        // caster, including when an Aura has acquired a different host.
+        effect_ctx.relative_player_scope = Some(ControllerRef::TriggeringPlayer);
+    } else if let Some(scope) = relative_player_scope_for_condition(&cond_lower) {
         effect_ctx.relative_player_scope = Some(scope);
     } else if effect_body_introduces_defending_player(&effect_lower) {
         // CR 506.2 + CR 508.5: the head condition names no relative player
@@ -2044,9 +2049,6 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     };
     // Transfer diagnostics from the per-trigger effect context to the outer ctx.
     ctx.diagnostics.append(&mut effect_ctx.diagnostics);
-
-    // Parse the condition to get TriggerMode + partial TriggerDefinition
-    let (condition, partial_def) = parse_trigger_condition(condition_text, ctx);
 
     TriggerIr {
         condition,

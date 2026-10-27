@@ -106,7 +106,9 @@ pub fn resolve(
     let bindings = ability_utils::chain_retarget_slots(&stack_ability);
     let exposed: &[RetargetSlotBinding] = match scope {
         RetargetScope::All => &bindings[..],
-        RetargetScope::Single | RetargetScope::ForcedTo(_) => base_exposed_prefix(&bindings),
+        RetargetScope::Single | RetargetScope::ForcedTo(_) => {
+            base_exposed_prefix(&stack_ability, &bindings)
+        }
     };
     let current_targets: Vec<TargetRef> = exposed.iter().map(|b| b.current.clone()).collect();
     let slots: Vec<RetargetSlotAddress> = exposed.iter().map(|b| b.address.clone()).collect();
@@ -139,9 +141,9 @@ pub fn resolve(
     let mut slot_pools: Vec<Vec<TargetRef>> = exposed
         .iter()
         .map(|b| {
-            let node =
-                ability_utils::node_at(&stack_ability, &b.address.path).unwrap_or(&stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            ability_utils::node_at(&stack_ability, &b.address.path)
+                .map(|node| slot_pool(state, node, &b.enforcement, pool_controller, &base))
+                .unwrap_or_default()
         })
         .collect();
     ability_utils::widen_dependent_retarget_pools(
@@ -360,13 +362,15 @@ pub(crate) fn retarget_prompt_is_dischargeable(
 /// (descent strictly grows paths); and a node with non-empty `targets` always
 /// emits >=1 binding, so `bindings[0]` is always a BASE-exposed binding at
 /// this seam.
-fn base_exposed_prefix(bindings: &[RetargetSlotBinding]) -> &[RetargetSlotBinding] {
-    let n = bindings.first().map_or(0, |first| {
-        bindings
-            .iter()
-            .take_while(|b| b.address.path == first.address.path)
-            .count()
-    });
+fn base_exposed_prefix<'a>(
+    ability: &ResolvedAbility,
+    bindings: &'a [RetargetSlotBinding],
+) -> &'a [RetargetSlotBinding] {
+    let path = ability_utils::base_exposed_target_path(ability);
+    let n = bindings
+        .iter()
+        .take_while(|binding| binding.address.path == path)
+        .count();
     &bindings[..n]
 }
 
@@ -518,9 +522,9 @@ pub(crate) fn derive_slot_pools(
     let mut pools: Vec<Vec<TargetRef>> = bindings
         .iter()
         .map(|b| {
-            let node =
-                ability_utils::node_at(stack_ability, &b.address.path).unwrap_or(stack_ability);
-            slot_pool(state, node, &b.enforcement, pool_controller, &base)
+            ability_utils::node_at(stack_ability, &b.address.path)
+                .map(|node| slot_pool(state, node, &b.enforcement, pool_controller, &base))
+                .unwrap_or_default()
         })
         .collect();
     ability_utils::widen_dependent_retarget_pools(

@@ -44763,3 +44763,758 @@ fn duration_repair_same_is_true_keeps_each_keyword_condition_and_recipient() {
         }
     }
 }
+
+// Full English MTGJSON pin: 2026-10-04 / 5.3.0+20261004.
+// Self-contained ordinary inputs; native assets are not required.
+pub(crate) mod population_relation_publication {
+    use super::*;
+    use crate::types::ability::*;
+    use crate::types::card::{CardFace, CardMetadata};
+    use crate::types::card_type::{CardType, Supertype};
+    use crate::types::mana::ManaColor;
+    use serde_json::json;
+
+    pub(crate) fn printed_cards() -> Vec<crate::database::mtgjson::AtomicCard> {
+        [
+            r###"{"name":"Balthor the Defiled","text":"Minion creatures get +1/+1.\n{B}{B}{B}, Exile Balthor: Each player returns all black and all red creature cards from their graveyard to the battlefield.","manaCost":"{2}{B}{B}","manaValue":4.0,"type":"Legendary Creature — Zombie Dwarf","types":["Creature"],"subtypes":["Zombie","Dwarf"],"supertypes":["Legendary"],"colors":["B"],"colorIdentity":["B"],"power":"2","toughness":"2","layout":"normal","identifiers":{"scryfallOracleId":"dfd8e6c2-e425-41fa-af55-985271f771b3"},"rulings":[{"date":"2013-07-01","text":"You can only activate this ability if Balthor the Defiled is on the battlefield."}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"leadershipSkills":{"brawl":false,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":true},"printings":["JUD","SLD"]}"###,
+            r###"{"name":"Magma Burst","text":"Kicker—Sacrifice two lands. (You may sacrifice two lands in addition to any other costs as you cast this spell.)\nMagma Burst deals 3 damage to any target. If this spell was kicked, it deals 3 damage to another target.","manaCost":"{3}{R}","manaValue":4.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"keywords":["Kicker"],"layout":"normal","identifiers":{"scryfallOracleId":"f5af6d60-decd-4e04-8841-da2d3000a405"},"rulings":[{"date":"2004-10-04","text":"The second target must be different from the first one."},{"date":"2004-10-04","text":"You choose a second target only if you choose to pay the Kicker cost."},{"date":"2024-11-08","text":"If a card or token enters as a copy of a permanent, the new permanent isn't kicked, even if the original was."},{"date":"2024-11-08","text":"If a spell's kicker cost was paid, the spell is \"kicked.\""},{"date":"2024-11-08","text":"If you copy a kicked spell on the stack, the copy is also kicked. If the copied spell is a permanent spell, the token the copy of that spell becomes when it enters is also kicked."},{"date":"2024-11-08","text":"If you put a permanent with a kicker ability onto the battlefield without casting it, you can't kick it."},{"date":"2024-11-08","text":"The kicker ability doesn't let you pay a kicker cost more than once."},{"date":"2024-11-08","text":"To determine a spell's total cost, start with the mana cost (or an alternative cost if another card's effect allows you to pay one instead), add any cost increases (such as kicker), then apply any cost reductions. The spell's mana value remains unchanged, no matter what the total cost to cast it was."}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","pauper":"Legal","paupercommander":"Legal","penny":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"printings":["PLS"]}"###,
+            r###"{"name":"Maddening Hex","text":"Enchant player\nWhenever enchanted player casts a noncreature spell, roll a d6. This Aura deals damage to that player equal to the result. Then attach this Aura to another one of your opponents chosen at random.","manaCost":"{1}{R}{R}","manaValue":3.0,"type":"Enchantment — Aura Curse","types":["Enchantment"],"subtypes":["Aura","Curse"],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"keywords":["Enchant"],"layout":"normal","identifiers":{"scryfallOracleId":"5d96170f-14dd-496e-a485-bd3b9eedfe02"},"rulings":[{"date":"2021-07-23","text":"An ability that tells you to roll a die will also specify what to do with the result of that roll. Most often, this is in the form of a \"results table\" in the card text."},{"date":"2021-07-23","text":"An effect that says \"choose a target, then roll a d20\" or similar still uses the normal process of putting an ability on the stack and resolving it. Choosing targets is part of putting the ability on the stack and rolling the d20 happens later, as the ability resolves."},{"date":"2021-07-23","text":"Dice are identified by the number of faces each one has. For example, a d20 is a twenty-sided die."},{"date":"2021-07-23","text":"Dice used must have equally likely outcomes and the roll must be fair. Although physical dice are recommended, digital substitutes are allowed, provided they have the same number of equally likely outcomes as specified in the original roll instruction."},{"date":"2021-07-23","text":"If Maddening Hex is attached to your only opponent, it stays attached to that player as the ability resolves."},{"date":"2021-07-23","text":"Some abilities, like that of Pixie Guide and Barbarian Class, replace rolling a die with rolling extra dice and ignoring the lowest roll. The ignored rolls are not considered for the effect that instructed you to roll a die, and do not cause abilities to trigger. For all intents and purposes, once you determine which dice count, any extra dice were never rolled."},{"date":"2021-07-23","text":"Some effects instruct you to roll again. This uses the same number and type of dice as the original roll, and that roll will use the same set of possible outcomes."},{"date":"2021-07-23","text":"Some effects may modify the result of a die roll. This may be part of the instruction to roll a die or it may come from other cards. Anything that references the \"result\" of a die roll is looking for the result after these modifications. Anything that is looking for the \"natural result\" is looking for the number shown on the face of the die before these modifications."},{"date":"2021-07-23","text":"The instruction to roll a die and the effect that occurs because of the result are all part of the same ability. Players do not get the chance to respond to the ability after knowing the result of the roll."},{"date":"2021-07-23","text":"Tournament events have more specific rules regarding dice and die-rolling. For more information, please see the most recent version of the Magic Tournament Rules at https://wpn.wizards.com/en/document/magic-gathering-tournament-rules."},{"date":"2021-07-23","text":"While playing Planechase, rolling the planar die will cause any ability that triggers whenever a player rolls one or more dice to trigger. However, any effect that refers to a numerical result will ignore the rolling of the planar die."}],"legalities":{"brawl":"Legal","commander":"Legal","duel":"Banned","gladiator":"Legal","historic":"Legal","legacy":"Legal","oathbreaker":"Legal","timeless":"Legal","vintage":"Legal"},"printings":["AFC","MB2","SLD","SPG"]}"###,
+            r###"{"name":"Mogg Assassin","text":"{T}: You choose target creature an opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip, destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose.","manaCost":"{2}{R}","manaValue":3.0,"type":"Creature — Goblin Assassin","types":["Creature"],"subtypes":["Goblin","Assassin"],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"power":"2","toughness":"1","layout":"normal","identifiers":{"scryfallOracleId":"36a6925a-621e-47d6-8cb3-1b2886e1986e"},"rulings":[{"date":"2004-10-04","text":"You and your opponent both pick the target creatures on announcing, which is before the coin is flipped. You pick first."}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"leadershipSkills":{"brawl":false,"commander":false,"oathbreaker":false,"pauper_commander":true,"predh":false},"printings":["EXO","PLST","SLD"]}"###,
+            r###"{"name":"Kamachal, Ship's Mascot","text":"Menace\n{R}: Kamachal, Ship's Mascot gets +1/+0 until end of turn.\nWhenever Kamachal deals combat damage to a player, create a Treasure token. Then exile from that player's library a random card with mana value equal to the damage dealt. You may cast that card this turn.","manaCost":"{2}{R}","manaValue":3.0,"type":"Legendary Creature — Dinosaur Pirate","types":["Creature"],"subtypes":["Dinosaur","Pirate"],"supertypes":["Legendary"],"colors":["R"],"colorIdentity":["R"],"keywords":["Menace","Treasure"],"power":"2","toughness":"2","layout":"normal","identifiers":{"scryfallOracleId":"fd9328c4-6f8f-4c26-b71a-d9954c2d64bb"},"legalities":{"brawl":"Legal","gladiator":"Legal","historic":"Legal","timeless":"Legal"},"leadershipSkills":{"brawl":false,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":false},"relatedCards":{"tokens":["f7e12dcc-910d-5b82-b637-0b972542ead5"]},"printings":["YLCI"]}"###,
+            r###"{"name":"Comet Storm","text":"Multikicker {1} (You may pay an additional {1} any number of times as you cast this spell.)\nChoose any target, then choose another target for each time this spell was kicked. Comet Storm deals X damage to each of them.","manaCost":"{X}{R}{R}","manaValue":2.0,"type":"Instant","types":["Instant"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"keywords":["Multikicker"],"layout":"normal","identifiers":{"scryfallOracleId":"9c2b262b-53c0-41a1-8f1a-0c336453d4bf"},"rulings":[{"date":"2010-03-01","text":"As long as any of its targets are legal at the time Comet Storm resolves, Comet Storm will deal X damage to each of those legal targets."},{"date":"2010-03-01","text":"Each target you choose must be different."},{"date":"2010-03-01","text":"For example, if you want Comet Storm to deal 4 damage to each of three different targets, that means X is 4 and you're kicking the spell twice. You'll pay a mana cost of {4}{R}{R}, plus a kicker cost of {1}, plus another kicker cost of {1}, for a total of {6}{R}{R}."},{"date":"2010-03-01","text":"The number of targets you choose for Comet Storm is one more than the number of times it's kicked. First you declare how many times you're going to kick the spell (at the same time you declare the value of X), then you choose the targets accordingly, then you pay the costs. No player can respond between the time you declare how many times you'll kick the spell and the time you choose the targets."},{"date":"2024-11-08","text":"If a card or token enters as a copy of a permanent, the new permanent isn't kicked, even if the original was."},{"date":"2024-11-08","text":"If a spell's kicker cost was paid, the spell is \"kicked.\""},{"date":"2024-11-08","text":"If you copy a kicked spell on the stack, the copy is also kicked. If the copied spell is a permanent spell, the token the copy of that spell becomes when it enters is also kicked."},{"date":"2024-11-08","text":"If you put a permanent with a kicker ability onto the battlefield without casting it, you can't kick it."},{"date":"2024-11-08","text":"The kicker ability doesn't let you pay a kicker cost more than once."},{"date":"2024-11-08","text":"To determine a spell's total cost, start with the mana cost (or an alternative cost if another card's effect allows you to pay one instead), add any cost increases (such as kicker), then apply any cost reductions. The spell's mana value remains unchanged, no matter what the total cost to cast it was."}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","penny":"Legal","predh":"Legal","vintage":"Legal"},"printings":["C15","C17","C20","CMA","CMD","CMR","MM2","P10","PRM","PWWK","WWK"]}"###,
+            r###"{"name":"Cone of Flame","text":"Cone of Flame deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target.","manaCost":"{3}{R}{R}","manaValue":5.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"62879f3d-ed6d-4004-8196-f3fd7f614695"},"rulings":[{"date":"2014-07-18","text":"Each of the three targets must be different. If there aren’t three different legal targets available, you can’t cast the spell."},{"date":"2014-07-18","text":"If one or two of Cone of Flame’s targets are illegal when it resolves, you can’t change how much damage will be dealt to the remaining legal targets."}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","penny":"Legal","pioneer":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"printings":["10E","DD2","DDG","HOP","J22","JVC","M15","PLST","W16","WTH"]}"###,
+            r###"{"name":"The Lord of Pain","text":"Menace\nYour opponents can't gain life.\nWhenever a player casts their first spell each turn, choose another target player. The Lord of Pain deals damage equal to that spell's mana value to the chosen player.","manaCost":"{3}{B}{R}","manaValue":5.0,"type":"Legendary Creature — Human Assassin","types":["Creature"],"subtypes":["Human","Assassin"],"supertypes":["Legendary"],"colors":["B","R"],"colorIdentity":["B","R"],"keywords":["Menace"],"power":"5","toughness":"5","layout":"normal","identifiers":{"scryfallOracleId":"b194f277-5045-4391-8b48-d555a6d657a7"},"rulings":[{"date":"2024-09-20","text":"If a spell has {X} in its mana cost, use the value chosen for X when determining that spell's mana value."},{"date":"2024-09-20","text":"If an effect says to set an opponent's life total to a number that's higher than their current life total, that player's life total won't change."},{"date":"2024-09-20","text":"Spells and abilities that cause opponents to gain life still resolve while The Lord of Pain is on the battlefield. They won't gain life, but any other effects of that spell or ability will still happen."},{"date":"2024-09-20","text":"The Lord of Pain's last ability must target a player other than the one who cast the spell that caused the ability to trigger. That means that if it's just you and one other player in the game, you'll have to target yourself when that player casts their first spell each turn. (What did you expect? You summoned The Lord of Pain!)"}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","vintage":"Legal"},"leadershipSkills":{"brawl":false,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":false},"printings":["DSC"]}"###,
+            r###"{"name":"Haunted Angel","text":"Flying\nWhen this creature dies, exile it and each other player creates a 3/3 black Angel creature token with flying.","manaCost":"{2}{W}","manaValue":3.0,"type":"Creature — Angel","types":["Creature"],"subtypes":["Angel"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"keywords":["Flying"],"power":"3","toughness":"3","layout":"normal","identifiers":{"scryfallOracleId":"437be0ad-2dd1-42c8-bf62-5af95228b2f8"},"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"leadershipSkills":{"brawl":false,"commander":false,"oathbreaker":false,"pauper_commander":true,"predh":false},"printings":["APC"]}"###,
+            r###"{"name":"Archon of the Wild Rose","text":"Flying\nOther creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.","manaCost":"{2}{W}{W}","manaValue":4.0,"type":"Creature — Archon","types":["Creature"],"subtypes":["Archon"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"keywords":["Flying"],"power":"4","toughness":"4","layout":"normal","identifiers":{"scryfallOracleId":"180efbd4-0f77-41cc-8ae2-2e6ccf853d10"},"rulings":[{"date":"2023-09-01","text":"Archon of the Wild Rose's ability overwrites all previous effects that set the affected creatures' power and/or toughness to specific values. Other effects that set these characteristics to specific values that start to apply after Archon of the Wild Rose enters the battlefield will overwrite this effect."},{"date":"2023-09-01","text":"Effects that modify a creature's power and/or toughness without setting it will apply to the affected creatures no matter when they started to take effect. The same is true for counters that change a creature's power and/or toughness."}],"legalities":{"brawl":"Legal","commander":"Legal","duel":"Legal","future":"Legal","gladiator":"Legal","historic":"Legal","legacy":"Legal","modern":"Legal","oathbreaker":"Legal","penny":"Legal","pioneer":"Legal","standard":"Legal","standardbrawl":"Legal","timeless":"Legal","vintage":"Legal"},"printings":["PWOE","WOE"]}"###,
+            r###"{"name":"Kaboom!","text":"Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, Kaboom! deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.","manaCost":"{4}{R}","manaValue":5.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["R"],"colorIdentity":["R"],"layout":"normal","identifiers":{"scryfallOracleId":"c92802ff-484c-4d55-aba4-c3a000264113"},"rulings":[{"date":"2004-10-04","text":"If all the cards in your library are lands, this card deals zero damage."},{"date":"2022-09-09","text":"As Kaboom! resolves, if you have chosen multiple targets, those targets will be handled one at a time in turn order. Start with targets that are either the player whose turn it is (probably you) or permanents that player controls. You choose the relative order of targets within that group. For whichever target you select first, exile the top card of your library, then Soulfire Eruption deals damage to that target. Repeat this process for each subsequent target in the group. After that group is done, move on to targets that are either the next player in turn order or permanents they control. Again, you choose the relative order of targets in that group. Repeat the whole process for each other player."}],"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","penny":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"printings":["ONS"]}"###,
+            r###"{"name":"The Unknown Wizard","text":"Eminence — As long as The Unknown Wizard is in the command zone or on the battlefield, other playtest cards you cast cost {1} less to cast.\nWhenever The Unknown Wizard enters or attacks, look at the top ten cards of your library. You may put a legendary playtest card from among them onto the battlefield. Put the rest on the bottom in a random order.","manaCost":"{2}{W}{U}{B}{R}{G}","manaValue":7.0,"type":"Legendary Creature — Human Wizard","types":["Creature"],"subtypes":["Human","Wizard"],"supertypes":["Legendary"],"colors":["B","G","R","U","W"],"colorIdentity":["B","G","R","U","W"],"keywords":["Eminence"],"power":"6","toughness":"6","layout":"normal","identifiers":{"scryfallOracleId":"29ef75e2-e3c9-4491-8345-b40ff39caadd"},"legalities":{},"leadershipSkills":{"brawl":false,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":false},"printings":["UNK"]}"###,
+            r###"{"name":"Hero's Uncle","text":"When Hero's Uncle dies, you may search your library for a legendary team-up creature, reveal it, put it into your hand, then shuffle. (A legendary team-up creature is two or more legendary characters teamed up on the same legendary creature card, such as Drana and Linvala.)","manaCost":"{1}{W}","manaValue":2.0,"type":"Creature — Human","types":["Creature"],"subtypes":["Human"],"supertypes":[],"colors":["W"],"colorIdentity":["W"],"power":"2","toughness":"2","layout":"normal","identifiers":{"scryfallOracleId":"88c519b1-a935-45fd-a404-b22569530e72"},"legalities":{},"leadershipSkills":{"brawl":false,"commander":false,"oathbreaker":false,"pauper_commander":true,"predh":false},"printings":["UNK"]}"###,
+            r###"{"name":"You, Iterative Playtester","text":"{T}: Choose another target playtest card. Increase or decrease a number of your choice on it by 1 for as long as it remains on the stack or battlefield. (You can change numerals or number words.)\n{W}{U}{B}{R}{G}: Reveal the top eight cards of your library. Put each playtest card among them into your hand. Put the rest on the bottom of your library in a random order.","manaCost":"{1}{W}","manaValue":2.0,"type":"Legendary Creature — Human Gamer","types":["Creature"],"subtypes":["Human","Gamer"],"supertypes":["Legendary"],"colors":["W"],"colorIdentity":["B","G","R","U","W"],"power":"1","toughness":"3","layout":"normal","identifiers":{"scryfallOracleId":"978dd38e-a015-4f1f-9cca-8705f6fd33ce"},"legalities":{},"leadershipSkills":{"brawl":false,"commander":true,"oathbreaker":false,"pauper_commander":false,"predh":false},"printings":["UNK"]}"###,
+            r###"{"name":"Reverent Silence","text":"If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.\nDestroy all enchantments.","manaCost":"{3}{G}","manaValue":4.0,"type":"Sorcery","types":["Sorcery"],"subtypes":[],"supertypes":[],"colors":["G"],"colorIdentity":["G"],"layout":"normal","identifiers":{"scryfallOracleId":"e670d1c9-5e28-4df8-aad9-d08d19dc74e9"},"legalities":{"commander":"Legal","duel":"Legal","legacy":"Legal","oathbreaker":"Legal","pauper":"Legal","paupercommander":"Legal","predh":"Legal","premodern":"Legal","vintage":"Legal"},"printings":["NEM"]}"###,
+        ].into_iter().map(|source| serde_json::from_str(source).unwrap()).collect()
+    }
+
+    fn effect(value: serde_json::Value) -> Effect {
+        serde_json::from_value(value).expect("independently authored typed effect")
+    }
+
+    fn spell(value: serde_json::Value) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, effect(value))
+    }
+
+    fn chain(mut instructions: Vec<AbilityDefinition>) -> AbilityDefinition {
+        let mut tail = instructions.pop().expect("nonempty printed body");
+        while let Some(mut head) = instructions.pop() {
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            head.sub_ability = Some(Box::new(tail));
+            tail = head;
+        }
+        tail
+    }
+
+    fn damage(amount: QuantityExpr, target: TargetFilter) -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source: None,
+                excess: None,
+            },
+        )
+    }
+
+    fn fixed(value: i32) -> QuantityExpr {
+        QuantityExpr::Fixed { value }
+    }
+
+    fn gap(name: &str, fragment: &str) -> AbilityDefinition {
+        AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented(name, fragment))
+    }
+
+    fn described(mut body: AbilityDefinition, description: &str) -> AbilityDefinition {
+        body.description = Some(description.into());
+        body
+    }
+
+    fn activated(
+        mut body: AbilityDefinition,
+        cost: AbilityCost,
+        description: &str,
+    ) -> AbilityDefinition {
+        body.kind = AbilityKind::Activated;
+        body.cost = Some(cost);
+        described(body, description)
+    }
+
+    fn trigger(mode: TriggerMode, description: &str, body: AbilityDefinition) -> TriggerDefinition {
+        TriggerDefinition::new(mode)
+            .trigger_zones(vec![Zone::Battlefield])
+            .description(description.into())
+            .execute(body)
+    }
+
+    fn typed(types: serde_json::Value, properties: serde_json::Value) -> TargetFilter {
+        serde_json::from_value(json!({"type":"Typed", "type_filters":types,
+            "properties":properties}))
+        .unwrap()
+    }
+
+    fn another() -> TargetFilter {
+        typed(json!([]), json!([{"type":"Another"}]))
+    }
+
+    fn mana(text: &str) -> AbilityCost {
+        AbilityCost::Mana {
+            cost: parse_mana_symbols(text).unwrap().0,
+        }
+    }
+
+    /// CR 608.2c: independent expected programs preserve every printed instruction
+    /// in order, including the boundaries of dependent unsupported operations.
+    /// Neither parser output nor a generated export supplies an expected node.
+    pub(crate) fn expected_program(name: &str) -> ParsedAbilities {
+        let mut out = ParsedAbilities::default();
+        match name {
+            "Balthor the Defiled" => {
+                out.statics.push(
+                    StaticDefinition::continuous()
+                        .affected(typed(json!(["Creature", {"Subtype":"Minion"}]), json!([])))
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 1 },
+                            ContinuousModification::AddToughness { value: 1 },
+                        ])
+                        .description("Minion creatures get +1/+1.".into()),
+                );
+                let mut body = spell(json!({"type":"ChangeZoneAll", "origin":"Graveyard",
+                    "destination":"Battlefield", "target":{"type":"Typed", "type_filters":["Creature"],
+                        "properties":[{"type":"AnyOf","props":[{"type":"HasColor","color":"Black"},
+                            {"type":"HasColor","color":"Red"}]}, {"type":"Owned","controller":"ScopedPlayer"},
+                            {"type":"InZone","zone":"Graveyard"}]}}));
+                body.player_scope = Some(PlayerFilter::All);
+                out.abilities.push(activated(body, AbilityCost::Composite { costs: vec![mana("{B}{B}{B}"),
+                    AbilityCost::Exile { count: 1, zone: None, filter: Some(TargetFilter::SelfRef) }] },
+                    "{B}{B}{B}, Exile ~: Each player returns all black and all red creature cards from their graveyard to the battlefield."));
+            }
+            "Magma Burst" => {
+                out.additional_cost = Some(AdditionalCost::Kicker {
+                    costs: vec![AbilityCost::Sacrifice(SacrificeCost::new(
+                        TargetFilter::Typed(TypedFilter::land()),
+                        SacrificeRequirement::Count { count: 2 },
+                    ))],
+                    repeatability: AdditionalCostRepeatability::Once,
+                });
+                let mut second = damage(fixed(3), another());
+                // CR 702.33a + CR 601.2c: the kicker payment controls the second
+                // announced occurrence; it does not replace the first occurrence.
+                second.condition = Some(
+                    serde_json::from_value(json!({"type":"AdditionalCostPaid","source":"Kicker"}))
+                        .unwrap(),
+                );
+                out.abilities.push(described(chain(vec![damage(fixed(3), TargetFilter::Any), second]),
+                    "~ deals 3 damage to any target. If this spell was kicked, it deals 3 damage to another target."));
+            }
+            "Comet Storm" => {
+                out.additional_cost = Some(AdditionalCost::Kicker {
+                    costs: vec![mana("{1}")],
+                    repeatability: AdditionalCostRepeatability::Repeatable,
+                });
+                let mut declaration = spell(json!({"type":"TargetOnly", "target":{"type":"Any"}}));
+                declaration.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Sum {
+                    exprs: vec![
+                        fixed(1),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::KickerCount,
+                        },
+                    ],
+                }));
+                declaration.declares_chosen_group = Some(ChosenGroupId(0));
+                let mut payoff = damage(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".into() },
+                    },
+                    TargetFilter::ParentTarget,
+                );
+                payoff.reads_chosen_group = Some(ChosenGroupId(0));
+                out.abilities.push(described(chain(vec![declaration, payoff]),
+                    "Choose any target, then choose another target for each time this spell was kicked. ~ deals X damage to each of them."));
+            }
+            "Cone of Flame" => {
+                let third = damage(fixed(3), another());
+                let mut second = damage(fixed(2), another());
+                second.sub_ability = Some(Box::new(third));
+                let mut first = damage(fixed(1), TargetFilter::Any);
+                first.sub_ability = Some(Box::new(second));
+                out.abilities.push(described(first,
+                    "~ deals 1 damage to any target, 2 damage to another target, and 3 damage to a third target."));
+            }
+            "Mogg Assassin" => {
+                let mut first = spell(json!({"type":"TargetOnly","target":{"type":"Typed",
+                    "type_filters":["Creature"],"controller":"Opponent","properties":[]}}));
+                first.declares_chosen_group = Some(ChosenGroupId(0));
+                let mut second = spell(json!({"type":"TargetOnly","target":{"type":"Typed",
+                    "type_filters":["Creature"],"properties":[]}}));
+                second.declares_chosen_group = Some(ChosenGroupId(1));
+                second.target_chooser = Some(ControllerRef::ParentTargetController);
+                let mut win = spell(json!({"type":"Destroy","target":{"type":"ParentTarget"}}));
+                win.reads_chosen_group = Some(ChosenGroupId(0));
+                let mut lose = spell(json!({"type":"Destroy","target":{"type":"ParentTarget"}}));
+                lose.reads_chosen_group = Some(ChosenGroupId(1));
+                let flip = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::FlipCoins {
+                        flips: CoinFlipRun::single(),
+                        win_effect: Some(Box::new(win)),
+                        lose_effect: Some(Box::new(lose)),
+                        flipper: TargetFilter::Controller,
+                    },
+                );
+                let mut body = chain(vec![first, second, flip]);
+                body.sub_ability.as_mut().unwrap().sub_link = SubAbilityLink::ContinuationStep;
+                out.abilities.push(activated(body, AbilityCost::Tap,
+                    "{T}: You choose target creature an opponent controls, and that opponent chooses target creature. Flip a coin. If you win the flip, destroy the creature you chose. If you lose the flip, destroy the creature your opponent chose."));
+            }
+            "Maddening Hex" => {
+                out.extracted_keywords = vec![Keyword::Enchant(TargetFilter::Player)];
+                let die = spell(
+                    json!({"type":"RollDie","count":{"type":"Fixed","value":1},"sides":6,"results":[]}),
+                );
+                let hit = damage(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    TargetFilter::TriggeringPlayer,
+                );
+                let mut attach = spell(json!({"type":"Attach","attachment":{"type":"SelfRef"},
+                    "target":{"type":"And","filters":[{"type":"Opponent"},
+                        {"type":"PlayerMatching","player":{"type":"AllExcept","exclude":{"type":"TriggeringPlayer"}}}]}}));
+                attach.target_choice_timing = TargetChoiceTiming::Resolution;
+                attach.target_selection_mode = TargetSelectionMode::Random;
+                let mut cast = trigger(TriggerMode::SpellCast,
+                    "Whenever enchanted player casts a noncreature spell, roll a d6. This Aura deals damage to that player equal to the result. Then attach this Aura to another one of your opponents chosen at random.", chain(vec![die, hit, attach]));
+                cast.valid_card = Some(typed(json!([{"Non":"Creature"}]), json!([])));
+                cast.valid_target = Some(TargetFilter::AttachedTo);
+                out.triggers.push(cast);
+            }
+            "The Lord of Pain" => {
+                out.extracted_keywords = vec![Keyword::Menace];
+                out.statics.push(
+                    StaticDefinition::new(StaticMode::CantGainLife)
+                        .affected(TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::Opponent),
+                        ))
+                        .description("Your opponents can't gain life.".into()),
+                );
+                let group = ChosenGroupId::declared_player(0);
+                let mut choose = spell(
+                    json!({"type":"TargetOnly","target":{"type":"PlayerMatching",
+                    "player":{"type":"AllExcept","exclude":{"type":"TriggeringPlayer"}}}}),
+                );
+                choose.declares_chosen_group = Some(group);
+                let hit = damage(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
+                    },
+                    TargetFilter::DeclaredPlayer { group },
+                );
+                let mut cast = trigger(TriggerMode::SpellCast,
+                    "Whenever a player casts their first spell each turn, choose another target player. ~ deals damage equal to that spell's mana value to the chosen player.", chain(vec![choose, hit]));
+                cast.constraint = Some(TriggerConstraint::NthSpellThisTurn {
+                    n: 1,
+                    comparator: Comparator::EQ,
+                    filter: None,
+                });
+                out.triggers.push(cast);
+            }
+            "Haunted Angel" => {
+                out.extracted_keywords = vec![Keyword::Flying];
+                let exile = spell(
+                    json!({"type":"ChangeZone","origin":"Graveyard","destination":"Exile","target":{"type":"SelfRef"}}),
+                );
+                let mut token = spell(
+                    json!({"type":"Token","name":"Angel","power":{"type":"Fixed","value":3},
+                    "toughness":{"type":"Fixed","value":3},"types":["Creature","Angel"],"colors":["Black"],
+                    "keywords":["Flying"],"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"}}),
+                );
+                token.player_scope = Some(PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::Controller),
+                });
+                let mut body = exile;
+                body.sub_ability = Some(Box::new(token));
+                out.triggers.push(trigger(TriggerMode::ChangesZone,
+                    "When this creature dies, exile it and each other player creates a 3/3 black Angel creature token with flying.", body)
+                    .valid_card(TargetFilter::SelfRef).origin(Zone::Battlefield).destination(Zone::Graveyard));
+            }
+            "Archon of the Wild Rose" => {
+                // CR 613.4b + CR 613.4c: base 4/4 is distinct from later pumps
+                // and counters; the live controlled-Aura predicate is retained.
+                out.extracted_keywords = vec![Keyword::Flying];
+                out.statics.push(StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![
+                        FilterProp::Another, FilterProp::HasAttachment { kind: AttachmentKind::Aura,
+                            controller: Some(ControllerRef::You), exclude_source: SourceExclusion::Include }])))
+                    .modifications(vec![ContinuousModification::SetPower { value: 4 }, ContinuousModification::SetToughness { value: 4 },
+                        ContinuousModification::AddKeyword { keyword: Keyword::Flying }])
+                    .description("Other creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.".into()));
+            }
+            _ => expected_atomic_program(name, &mut out),
+        }
+        out
+    }
+
+    fn private_look(count: i32, source: &str, rest: bool) -> AbilityDefinition {
+        spell(
+            json!({"type":"Dig","player":{"type":"Controller"},"count":{"type":"Fixed","value":count},
+            "destination":null,"keep_count":0,"up_to":false,"filter":{"type":"Any"},
+            "rest_destination":if rest {json!("Library")} else {json!(null)},
+            "rest_order":if rest {"Random"} else {"Preserve"},"reveal":false,
+            "enter_tapped":false,"enters_attacking":false,"source":source}),
+        )
+    }
+
+    fn expected_atomic_program(name: &str, out: &mut ParsedAbilities) {
+        match name {
+            "Kamachal, Ship's Mascot" => {
+                out.extracted_keywords = vec![Keyword::Menace];
+                let mut pump = spell(json!({"type":"Pump","power":{"type":"Fixed","value":1},
+                    "toughness":{"type":"Fixed","value":0},"target":{"type":"SelfRef"}}));
+                pump.duration = Some(Duration::UntilEndOfTurn);
+                out.abilities.push(activated(
+                    pump,
+                    mana("{R}"),
+                    "{R}: ~ gets +1/+0 until end of turn.",
+                ));
+                let treasure = spell(
+                    json!({"type":"Token","name":"Treasure","types":["Artifact","Treasure"],
+                    "power":{"type":"Fixed","value":0},"toughness":{"type":"Fixed","value":0},
+                    "colors":[],"keywords":[],"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"}}),
+                );
+                let unsupported = gap("qualified_random_library_exile_and_cast",
+                    "Then exile from that player's library a random card with mana value equal to the damage dealt. You may cast that card this turn.");
+                let mut combat = trigger(TriggerMode::DamageDone,
+                    "Whenever ~ deals combat damage to a player, create a Treasure token. Then exile from that player's library a random card with mana value equal to the damage dealt. You may cast that card this turn.", chain(vec![treasure, unsupported]));
+                combat.valid_source = Some(TargetFilter::SelfRef);
+                combat.valid_target = Some(TargetFilter::Player);
+                combat.damage_kind = DamageKindFilter::CombatOnly;
+                out.triggers.push(combat);
+            }
+            "Kaboom!" => {
+                let text = "Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, ~ deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.";
+                out.abilities
+                    .push(described(gap("per_recipient_reveal_loop", text), text));
+            }
+            "The Unknown Wizard" => {
+                let reducer = "Eminence — As long as ~ is in the command zone or on the battlefield, other playtest cards you cast cost {1} less to cast.";
+                out.abilities
+                    .push(described(gap("unknown", reducer), reducer));
+                let selection = gap(
+                    "qualified_cohort_selection",
+                    "You may put a legendary playtest card from among them onto the battlefield.",
+                );
+                out.triggers.push(trigger(TriggerMode::EntersOrAttacks,
+                    "Whenever ~ enters or attacks, look at the top ten cards of your library. You may put a legendary playtest card from among them onto the battlefield. Put the rest on the bottom in a random order.",
+                    chain(vec![private_look(10, "Library", false), selection, private_look(0, "PriorLook", true)]))
+                    .valid_card(TargetFilter::SelfRef));
+            }
+            "Hero's Uncle" => {
+                let mut search = gap("search_filter", "you may search your library for a legendary team-up creature, reveal it, put it into your hand");
+                search.optional = true;
+                let mut body = search;
+                body.sub_ability = Some(Box::new(spell(
+                    json!({"type":"Shuffle","target":{"type":"Controller"}}),
+                )));
+                let mut dies = trigger(TriggerMode::ChangesZone,
+                    "When ~ dies, you may search your library for a legendary team-up creature, reveal it, put it into your hand, then shuffle.",
+                    body)
+                    .valid_card(TargetFilter::SelfRef).origin(Zone::Battlefield).destination(Zone::Graveyard);
+                dies.optional = true;
+                out.triggers.push(dies);
+            }
+            "You, Iterative Playtester" => {
+                let body = "Choose another target playtest card. Increase or decrease a number of your choice on it by 1 for as long as it remains on the stack or battlefield.";
+                out.abilities.push(activated(gap("chosen_object_number_change", body), AbilityCost::Tap,
+                    "{T}: Choose another target playtest card. Increase or decrease a number of your choice on it by 1 for as long as it remains on the stack or battlefield."));
+                let reveal =
+                    spell(json!({"type":"RevealTop","player":{"type":"Controller"},"count":8}));
+                let selection = gap(
+                    "qualified_cohort_selection",
+                    "Put each playtest card among them into your hand.",
+                );
+                let rest = spell(
+                    json!({"type":"ChangeZoneAll","destination":"Library","target":{"type":"LastRevealed"},
+                    "library_position":"Bottom","random_order":true}),
+                );
+                out.abilities.push(activated(chain(vec![reveal, selection, rest]), mana("{W}{U}{B}{R}{G}"),
+                    "{W}{U}{B}{R}{G}: Reveal the top eight cards of your library. Put each playtest card among them into your hand. Put the rest on the bottom of your library in a random order."));
+            }
+            "Reverent Silence" => {
+                let alternative = "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.";
+                out.abilities.push(described(
+                    gap("casting_restriction", alternative),
+                    alternative,
+                ));
+                out.abilities.push(described(spell(json!({"type":"DestroyAll","target":{"type":"Typed", "type_filters":["Enchantment"],"properties":[]}})),
+                    "Destroy all enchantments."));
+            }
+            _ => panic!("unlisted full printed face: {name}"),
+        }
+    }
+
+    fn color(code: &str) -> ManaColor {
+        match code {
+            "W" => ManaColor::White,
+            "U" => ManaColor::Blue,
+            "B" => ManaColor::Black,
+            "R" => ManaColor::Red,
+            "G" => ManaColor::Green,
+            other => panic!("unexpected printed color {other}"),
+        }
+    }
+
+    pub(crate) fn expected_face(card: &crate::database::mtgjson::AtomicCard) -> CardFace {
+        let program = expected_program(&card.name);
+        let legendary = matches!(
+            card.name.as_str(),
+            "Balthor the Defiled"
+                | "Kamachal, Ship's Mascot"
+                | "The Lord of Pain"
+                | "The Unknown Wizard"
+                | "You, Iterative Playtester"
+        );
+        CardFace {
+            name: card.name.clone(),
+            mana_cost: parse_mana_symbols(card.mana_cost.as_deref().unwrap())
+                .unwrap()
+                .0,
+            card_type: CardType {
+                core_types: card
+                    .types
+                    .iter()
+                    .map(|name| name.parse().unwrap())
+                    .collect(),
+                supertypes: if legendary {
+                    vec![Supertype::Legendary]
+                } else {
+                    vec![]
+                },
+                subtypes: card.subtypes.clone(),
+            },
+            power: card
+                .power
+                .as_ref()
+                .map(|value| PtValue::Fixed(value.parse().unwrap())),
+            toughness: card
+                .toughness
+                .as_ref()
+                .map(|value| PtValue::Fixed(value.parse().unwrap())),
+            oracle_text: card.text.clone(),
+            keywords: program.extracted_keywords,
+            abilities: program.abilities,
+            triggers: program.triggers,
+            static_abilities: program.statics,
+            replacements: program.replacements,
+            additional_cost: program.additional_cost,
+            color_identity: card.color_identity.iter().map(|code| color(code)).collect(),
+            color_override: (card.name == "The Unknown Wizard").then(|| {
+                vec![
+                    ManaColor::Black,
+                    ManaColor::Green,
+                    ManaColor::Red,
+                    ManaColor::Blue,
+                    ManaColor::White,
+                ]
+            }),
+            scryfall_oracle_id: card.identifiers.scryfall_oracle_id.clone(),
+            brawl_commander: legendary,
+            is_commander: legendary,
+            metadata: CardMetadata::default(),
+            ..CardFace::default()
+        }
+    }
+
+    fn normalized_printed(card: &crate::database::mtgjson::AtomicCard) -> String {
+        // Independent expected source transformation for these named inputs.
+        // No parser result, generated node or native export supplies these bytes.
+        let full = card.text.as_deref().unwrap().replace(&card.name, "~");
+        match card.name.as_str() {
+            "Balthor the Defiled" => full.replace("Exile Balthor:", "Exile ~:"),
+            "Kamachal, Ship's Mascot" => full.replace("Whenever Kamachal ", "Whenever ~ "),
+            _ => full,
+        }
+    }
+
+    fn expected_categories(name: &str) -> Vec<(usize, &'static str)> {
+        match name {
+            "Balthor the Defiled" => vec![(0, "Static"), (1, "Spell")],
+            "Magma Burst" | "Comet Storm" => vec![(0, "AdditionalCost"), (1, "Spell")],
+            "Maddening Hex" | "Haunted Angel" => vec![(0, "Keyword"), (1, "Trigger")],
+            "Mogg Assassin" | "Kaboom!" => vec![(0, "Spell")],
+            "Kamachal, Ship's Mascot" => vec![(0, "Keyword"), (1, "Spell"), (2, "Trigger")],
+            "The Lord of Pain" => vec![(0, "Keyword"), (1, "Static"), (2, "Trigger")],
+            "Archon of the Wild Rose" => vec![(0, "Keyword"), (1, "Static")],
+            "The Unknown Wizard" => vec![(0, "Unsupported"), (1, "Trigger")],
+            "Hero's Uncle" => vec![(0, "Trigger")],
+            "You, Iterative Playtester" => vec![(0, "Spell"), (1, "Spell")],
+            "Reverent Silence" => vec![(0, "Unsupported"), (1, "Spell")],
+            _ => panic!("unlisted source category contract {name}"),
+        }
+    }
+
+    fn category(node: &crate::parser::oracle_ir::doc::OracleNodeIr) -> &'static str {
+        use crate::parser::oracle_ir::doc::OracleNodeIr;
+        match node {
+            OracleNodeIr::Spell(_) => "Spell",
+            OracleNodeIr::Trigger(_) => "Trigger",
+            OracleNodeIr::Static(_) => "Static",
+            OracleNodeIr::Keyword(_) => "Keyword",
+            OracleNodeIr::AdditionalCost(_) => "AdditionalCost",
+            OracleNodeIr::Unsupported { .. } => "Unsupported",
+            other => panic!("unexpected independent printed category: {other:?}"),
+        }
+    }
+
+    fn assert_chain_geometry(
+        chain: &crate::parser::oracle_ir::effect_chain::EffectChainIr,
+        buffer: &str,
+    ) {
+        use crate::parser::oracle_ir::doc::SpanPrecision;
+        use crate::parser::oracle_ir::effect_chain::ClauseId;
+        assert!(!chain.clauses.is_empty(), "a printed body cannot vanish");
+        let mut previous = 0;
+        let mut units = std::collections::BTreeSet::new();
+        for (ordinal, clause) in chain.clauses.iter().enumerate() {
+            assert_eq!(clause.id, ClauseId(ordinal as u32));
+            assert!(
+                units.insert(clause.source.id()),
+                "one source identity per clause"
+            );
+            let fragment = clause
+                .source
+                .fragment()
+                .expect("honest owned clause fragment");
+            assert!(!fragment.is_empty());
+            let span = clause.source.span();
+            assert_eq!(span.precision, SpanPrecision::ChainRelative);
+            assert!(span.start_byte <= span.end_byte && span.end_byte <= buffer.len());
+            assert!(
+                buffer.is_char_boundary(span.start_byte) && buffer.is_char_boundary(span.end_byte)
+            );
+            assert!(span.start_byte >= previous, "printed clause order");
+            assert_eq!(
+                span.first_line,
+                buffer[..span.start_byte]
+                    .bytes()
+                    .filter(|b| *b == b'\n')
+                    .count()
+            );
+            assert_eq!(
+                span.last_line,
+                buffer[..span.end_byte]
+                    .bytes()
+                    .filter(|b| *b == b'\n')
+                    .count()
+            );
+            if span.start_byte != span.end_byte {
+                assert_eq!(
+                    &buffer[span.start_byte..span.end_byte],
+                    fragment,
+                    "an exact local fragment must index its actual owning buffer"
+                );
+            } else {
+                // A derived fragment may use an honest zero-width local anchor;
+                // its semantic meaning is still checked by the full expected program.
+                assert_eq!(span.precision, SpanPrecision::ChainRelative);
+            }
+            previous = span.start_byte;
+            if let Some(group) = clause.declares_chosen_group {
+                assert!(group.0 < ChosenGroupId::DECLARED_PLAYER_BASE);
+            }
+        }
+    }
+
+    /// Shared full semantic/source guard, called in BOTH ordinary snapshot owners.
+    pub(crate) fn assert_document(
+        card: &crate::database::mtgjson::AtomicCard,
+    ) -> (crate::parser::oracle_ir::doc::OracleDocIr, ParsedAbilities) {
+        use crate::parser::oracle_ir::doc::{OracleItemId, OracleNodeIr, OracleSourceSpan};
+        use crate::parser::oracle_ir::trigger::{TriggerBody, TriggerNodeIr};
+        let prepared = crate::database::synthesis::prepare_oracle_parser_input(card, true);
+        assert_eq!(prepared.oracle_text, card.text.as_deref().unwrap());
+        assert_eq!(prepared.card_name, card.name);
+        assert_eq!(prepared.types, card.types);
+        assert_eq!(prepared.subtypes, card.subtypes);
+        let expected = expected_program(&card.name);
+        let mut doc = parse_oracle_ir(
+            &prepared.oracle_text,
+            &prepared.card_name,
+            &prepared.keyword_names,
+            &prepared.types,
+            &prepared.subtypes,
+        );
+        assert_eq!(doc.source_text, card.text.as_deref().unwrap());
+        let normalized = normalized_printed(card);
+        let lines: Vec<_> = normalized.lines().collect();
+        let expected_items = expected_categories(&card.name);
+        assert_eq!(
+            doc.items.len(),
+            expected_items.len(),
+            "all independent source units: {}",
+            card.name
+        );
+        let mut ids = std::collections::BTreeSet::new();
+        let mut line_ordinals = std::collections::BTreeMap::<usize, u32>::new();
+        for (item, (line, expected_category)) in doc.items.iter().zip(expected_items) {
+            assert_eq!(
+                category(&item.node),
+                expected_category,
+                "{} line {line}",
+                card.name
+            );
+            assert!(ids.insert(item.id));
+            assert_eq!(item.source.id().item, item.id);
+            assert_eq!(item.source.id().ordinal, 0);
+            let ordinal = line_ordinals.entry(line).or_default();
+            let start = lines.iter().take(line).map(|text| text.len() + 1).sum();
+            assert_eq!(item.source.fragment(), Some(lines[line]));
+            assert_eq!(
+                item.source.span(),
+                &OracleSourceSpan::exact(line, line, start, start + lines[line].len(), *ordinal)
+            );
+            *ordinal += 1;
+            match &item.node {
+                OracleNodeIr::Spell(ability) => {
+                    assert!(!ability.source_text.is_empty());
+                    let stripped = crate::parser::oracle_util::strip_reminder_text(lines[line]);
+                    let body = stripped
+                        .split_once(": ")
+                        .map_or(stripped.as_str(), |(_, body)| body);
+                    assert_eq!(
+                        ability.source_text, body,
+                        "whole body before assembly: {}",
+                        card.name
+                    );
+                    assert_chain_geometry(&ability.body, &ability.source_text);
+                }
+                OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) => {
+                    assert_eq!(
+                        trigger.source_text,
+                        crate::parser::oracle_util::strip_reminder_text(lines[line])
+                    );
+                    let body = trigger.source_text.split_once(", ").unwrap().1;
+                    match trigger.body.as_ref().expect("complete printed trigger body") {
+                        TriggerBody::EffectChain(chain) => assert_chain_geometry(chain, body),
+                        other => panic!("ordinary printed relation body must remain source-addressed: {other:?}"),
+                    }
+                }
+                OracleNodeIr::Trigger(TriggerNodeIr::Assembled { .. }) => {
+                    panic!("these relation triggers require native source IR")
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            ids,
+            (0..doc.items.len())
+                .map(|id| OracleItemId(id as u32))
+                .collect()
+        );
+        let lowered = lower_oracle_ir(&mut doc);
+        assert_eq!(serde_json::to_value(&lowered).unwrap(), serde_json::to_value(&expected).unwrap(),
+            "complete independently derived lower, including all defaults/costs/conditions/targets/modes: {}",card.name);
+        (doc, lowered)
+    }
+
+    #[test]
+    fn full_fifteen_relation_faces_source_synthesis_and_both_normal_loaders() {
+        use crate::database::CardDatabase;
+        let cards = printed_cards();
+        assert_eq!(cards.len(), 15);
+        let mut exports = serde_json::Map::new();
+        let mut expected_faces = Vec::new();
+        for card in &cards {
+            let (_, parsed) = assert_document(card);
+            let expected = expected_face(card);
+            let actual = crate::database::synthesis::build_oracle_face_multi(
+                card,
+                card.identifiers.scryfall_oracle_id.clone(),
+            );
+            assert_eq!(
+                actual, expected,
+                "entire independently expected face: {}",
+                card.name
+            );
+            assert_eq!(actual.abilities, parsed.abilities);
+            assert_eq!(actual.triggers, parsed.triggers);
+            assert_eq!(actual.static_abilities, parsed.statics);
+            assert_eq!(actual.replacements, parsed.replacements);
+            let expected_gap_count = match card.name.as_str() {
+                "Kamachal, Ship's Mascot" | "Kaboom!" | "Hero's Uncle" | "Reverent Silence" => 1,
+                "The Unknown Wizard" | "You, Iterative Playtester" => 2,
+                _ => 0,
+            };
+            let mut gaps = Vec::new();
+            complete_publication_gap_payloads(&serde_json::to_value(&actual).unwrap(), &mut gaps);
+            assert_eq!(
+                gaps.len(),
+                expected_gap_count,
+                "exact complete atomic gaps: {}",
+                card.name
+            );
+            assert_eq!(
+                crate::game::coverage::card_face_has_unimplemented_parts(&actual),
+                expected_gap_count != 0
+            );
+            let mut entry = serde_json::to_value(actual).unwrap();
+            entry["layout"] = json!("normal");
+            entry["face_index"] = json!(0);
+            entry["legalities"] = serde_json::to_value(&card.legalities).unwrap();
+            entry["printings"] = serde_json::to_value(&card.printings).unwrap();
+            entry["rulings"] = serde_json::to_value(&card.rulings).unwrap();
+            exports.insert(card.name.to_lowercase(), entry);
+            expected_faces.push(expected);
+        }
+        // One complete String and exactly its bytes cross BOTH real product loaders.
+        let whole = serde_json::to_string(&exports).unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), whole.as_bytes()).unwrap();
+        assert_eq!(std::fs::read(file.path()).unwrap(), whole.as_bytes());
+        for db in [
+            CardDatabase::from_json_str(&whole).unwrap(),
+            CardDatabase::from_export(file.path()).unwrap(),
+        ] {
+            assert_eq!(db.card_count(), 15);
+            for (card, expected) in cards.iter().zip(&expected_faces) {
+                assert_eq!(db.get_face_by_name(&card.name), Some(expected));
+                assert_eq!(
+                    db.get_layout_kind(expected.scryfall_oracle_id.as_ref().unwrap()),
+                    Some(crate::types::card::LayoutKind::Single)
+                );
+                assert!(db.is_front_face_key(&card.name.to_lowercase()));
+                assert_eq!(
+                    db.printings_for(&card.name),
+                    Some(card.printings.as_slice())
+                );
+                assert_eq!(db.rulings_for(&card.name), card.rulings.as_slice());
+                let legalities = crate::database::legality::normalize_legalities(&card.legalities);
+                assert_eq!(
+                    db.get_legalities(&card.name),
+                    (!legalities.is_empty()).then_some(&legalities)
+                );
+            }
+            let wanted = cards.iter().map(|card| card.name.clone()).collect();
+            let reexport: serde_json::Value =
+                serde_json::from_str(&db.export_subset_json(&wanted)).unwrap();
+            for card in &cards {
+                let entry = &reexport[card.name.to_lowercase()];
+                assert_eq!(
+                    serde_json::from_value::<CardFace>(entry.clone()).unwrap(),
+                    expected_face(card)
+                );
+                assert_eq!(entry["layout"], "normal");
+                assert_eq!(entry["face_index"], 0);
+            }
+        }
+    }
+}

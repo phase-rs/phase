@@ -83,6 +83,9 @@ fn curse_co_departed_with_enchanted_players_creature_still_triggers() {
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
         builder.from_oracle_text(CURSE_DIES_ORACLE);
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -187,6 +190,9 @@ fn curse_co_departed_does_not_trigger_for_non_enchanted_players_creature() {
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
         builder.from_oracle_text(CURSE_DIES_ORACLE);
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 

@@ -46,6 +46,8 @@ fn make_aura(
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Enchantment);
     obj.card_types.subtypes.push("Aura".to_string());
+    obj.keywords.push(Keyword::Enchant(TargetFilter::Player));
+    obj.base_keywords = obj.keywords.clone();
     id
 }
 
@@ -169,7 +171,8 @@ fn aura_falls_off_when_enchanted_player_leaves_multiplayer_cr_704_5m() {
 #[test]
 fn aura_flicker_preserves_attach_target_variant() {
     let mut state = setup();
-    let curse = make_aura(&mut state, "Curse of Bounty", P0);
+    // Constructed host-transition witness, not a printed Curse.
+    let curse = make_aura(&mut state, "Synthetic Changing Enchant Aura", P0);
     let creature = make_creature(&mut state, "Bear", P1);
 
     // First attach to a player.
@@ -181,6 +184,10 @@ fn aura_flicker_preserves_attach_target_variant() {
 
     // Simulate a flicker: clear, then attach to a creature.
     state.objects.get_mut(&curse).unwrap().attached_to = None;
+    state.objects.get_mut(&curse).unwrap().keywords = vec![Keyword::Enchant(TargetFilter::Typed(
+        TypedFilter::creature(),
+    ))];
+    state.objects.get_mut(&curse).unwrap().base_keywords = state.objects[&curse].keywords.clone();
     attach_to(&mut state, curse, creature);
     assert_eq!(
         state.objects.get(&curse).unwrap().attached_to,
@@ -190,6 +197,8 @@ fn aura_flicker_preserves_attach_target_variant() {
 
     // Reverse flicker: clear, then attach to a player again.
     state.objects.get_mut(&curse).unwrap().attached_to = None;
+    state.objects.get_mut(&curse).unwrap().keywords = vec![Keyword::Enchant(TargetFilter::Player)];
+    state.objects.get_mut(&curse).unwrap().base_keywords = state.objects[&curse].keywords.clone();
     attach_to_player(&mut state, curse, P1);
     assert_eq!(
         state.objects.get(&curse).unwrap().attached_to,

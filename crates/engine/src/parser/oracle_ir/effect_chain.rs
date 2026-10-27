@@ -213,6 +213,40 @@ impl EffectChainIr {
             injected_color_choice: InjectedColorChoice::Permitted,
         }
     }
+    pub(crate) fn single_clause_with_context(
+        source_text: &str,
+        kind: AbilityKind,
+        parsed: ParsedEffectClause,
+        player_scope: Option<PlayerFilter>,
+        actor: Option<ControllerRef>,
+        in_trigger: bool,
+        ctx: &mut super::context::ParseContext,
+    ) -> Self {
+        let mut builder = ClauseIrBuilder::with_context(source_text, ctx);
+        builder
+            .clause(
+                source_text,
+                parsed,
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .player_scope(player_scope)
+            .push();
+        Self {
+            clauses: builder.finish_with_context(ctx),
+            kind,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor,
+            in_trigger,
+            repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
+        }
+    }
 }
 
 impl AbilityIr {
@@ -953,6 +987,10 @@ pub(crate) struct ClauseIr {
     /// The exact choose instruction named by this selected-group consumer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_chosen_clause: Option<ClauseId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) declares_chosen_group: Option<ChosenGroupId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reads_chosen_group: Option<ChosenGroupId>,
     /// CR 115.1 + CR 608.2c: where this clause's `ObjectScope::Target` reads take
     /// their object from. Comparative gates and token definitions write it
     /// after proving the immediately preceding clause announced the object.
@@ -1324,6 +1362,8 @@ impl ClauseIr {
             && self.declared_player_group.is_none()
             && self.declares_chosen_clause.is_none()
             && self.reads_chosen_clause.is_none()
+            && self.declares_chosen_group.is_none()
+            && self.reads_chosen_group.is_none()
             && self.token_definition_owner.is_none()
             && self.target_reads == TargetReadOrigin::OwnAnnouncement
     }
@@ -1358,6 +1398,8 @@ impl ClauseIr {
             declares_instruction_result,
             declares_chosen_clause,
             reads_chosen_clause,
+            declares_chosen_group,
+            reads_chosen_group,
             target_reads,
             token_definition_owner,
             reads_return_result,
@@ -1389,6 +1431,8 @@ impl ClauseIr {
         *declares_instruction_result = None;
         *declares_chosen_clause = None;
         *reads_chosen_clause = None;
+        *declares_chosen_group = None;
+        *reads_chosen_group = None;
         *target_reads = TargetReadOrigin::OwnAnnouncement;
         *token_definition_owner = None;
         *reads_return_result = None;
@@ -1584,6 +1628,8 @@ pub(crate) struct ClauseIrBuilder {
     cursor: usize,
     /// Next `ClauseId` to assign (source order within this chain).
     next_clause_id: u32,
+    next_chosen_object_group: u32,
+    enclosing_chosen_objects: Vec<super::context::ChosenObjectDeclaration>,
     /// First clause after the most recent printed back-reference repeat.
     /// A later reader cannot treat a return before this boundary as one
     /// instruction-local result: that return executed once per iteration.
@@ -1618,10 +1664,79 @@ impl ClauseIrBuilder {
             chain_text: chain_text.to_string(),
             cursor: 0,
             next_clause_id: 0,
+            next_chosen_object_group: 0,
+            enclosing_chosen_objects: Vec::new(),
             repeated_process_end: None,
             clauses: Vec::new(),
             pending_leading_duration: None,
         }
+    }
+
+    pub(crate) fn seed_chosen_objects(&mut self, ctx: &super::context::ParseContext) {
+        self.next_chosen_object_group = ctx.next_chosen_object_group;
+        self.enclosing_chosen_objects = ctx.enclosing_chosen_objects.clone();
+    }
+
+    pub(crate) fn with_context(chain_text: &str, ctx: &super::context::ParseContext) -> Self {
+        let mut builder = Self::new(chain_text);
+        builder.seed_chosen_objects(ctx);
+        builder
+    }
+
+    pub(crate) fn finish_with_context(
+        self,
+        ctx: &mut super::context::ParseContext,
+    ) -> Vec<ClauseIr> {
+        ctx.next_chosen_object_group = ctx
+            .next_chosen_object_group
+            .max(self.next_chosen_object_group);
+        self.finish()
+    }
+
+    pub(crate) fn synchronize_chosen_objects(&self, ctx: &mut super::context::ParseContext) {
+        ctx.next_chosen_object_group = ctx
+            .next_chosen_object_group
+            .max(self.next_chosen_object_group);
+        ctx.enclosing_chosen_objects = self.enclosing_chosen_objects.clone();
+        let lexical_depth = self
+            .enclosing_chosen_objects
+            .iter()
+            .map(|declaration| declaration.lexical_depth)
+            .max()
+            .map_or(0, |depth| {
+                depth
+                    .checked_add(1)
+                    .expect("chosen declaration nesting exhausted")
+            });
+        let mut previous = None;
+        for clause in &self.clauses {
+            if let (Some(group), Effect::TargetOnly { target }) =
+                (clause.declares_chosen_group, &clause.parsed.effect)
+            {
+                if ctx
+                    .enclosing_chosen_objects
+                    .iter()
+                    .any(|declaration| declaration.group == group)
+                {
+                    continue;
+                }
+                ctx.enclosing_chosen_objects
+                    .push(super::context::ChosenObjectDeclaration {
+                        group,
+                        lexical_depth,
+                        noun: target.clone(),
+                        chooser: clause.target_chooser.clone(),
+                        preceding_group: previous,
+                    });
+                previous = Some(group);
+            }
+        }
+    }
+
+    pub(crate) fn resume_chosen_object_cursor(&mut self, ctx: &super::context::ParseContext) {
+        self.next_chosen_object_group = self
+            .next_chosen_object_group
+            .max(ctx.next_chosen_object_group);
     }
 
     /// Resolve `fragment`'s honest chain-relative byte span, advancing the cursor.
@@ -2355,31 +2470,116 @@ impl ClauseDraft<'_> {
             &self.source_text,
             &self.source_text.to_ascii_lowercase(),
         );
-        let reads_chosen_clause = chosen_return.as_ref().and_then(|spec| {
+        let chosen_reference = chosen_return
+            .as_ref()
+            .map(|spec| (spec.noun.clone(), spec.chooser.clone()))
+            .or_else(|| {
+                crate::parser::oracle_effect::imperative::parse_chosen_destroy_spec(
+                    &self.source_text,
+                )
+            });
+        let role_matches = |wanted: &Option<TargetFilter>,
+                            actual: &Option<TargetFilter>,
+                            has_preceding_group: bool| match wanted {
+            None => true,
+            Some(TargetFilter::Controller) => {
+                actual.is_none() || actual.as_ref() == Some(&TargetFilter::Controller)
+            }
+            Some(TargetFilter::Opponent) => {
+                actual.as_ref() == Some(&TargetFilter::Opponent)
+                    || (has_preceding_group
+                        && actual.as_ref() == Some(&TargetFilter::ParentTargetController))
+            }
+            Some(role) => actual.as_ref() == Some(role),
+        };
+        let mut local_chosen_candidates_present = false;
+        let reads_chosen_clause = chosen_reference.as_ref().and_then(|(noun, chooser)| {
             let mut candidates = self
                 .builder
                 .clauses
                 .iter()
-                .filter(|clause| {
+                .enumerate()
+                .filter(|(index, clause)| {
                     let Effect::TargetOnly { target } = &clause.parsed.effect else {
                         return false;
                     };
-                    let role_matches = match &spec.chooser {
-                        None => true,
-                        Some(TargetFilter::Controller) => clause.target_chooser.is_none(),
-                        Some(role) => clause.target_chooser.as_ref() == Some(role),
-                    };
-                    role_matches && chosen_noun_compatible(target, &spec.noun)
+                    let has_preceding_group = self.builder.clauses[..*index]
+                        .iter()
+                        .any(|prior| prior.declares_chosen_group.is_some());
+                    let compatible =
+                        role_matches(chooser, &clause.target_chooser, has_preceding_group)
+                            && chosen_noun_compatible(target, noun);
+                    local_chosen_candidates_present |= compatible;
+                    compatible
                 })
-                .filter_map(|clause| clause.declares_chosen_clause)
+                .filter_map(|(_, clause)| clause.declares_chosen_clause)
                 .collect::<Vec<_>>();
             candidates.sort_unstable();
             candidates.dedup();
             (candidates.len() == 1).then(|| candidates[0])
         });
-        if chosen_return.is_some() && reads_chosen_clause.is_none() {
-            self.parsed.effect = Effect::unimplemented("return", &self.source_text);
+        let reads_chosen_group = reads_chosen_clause
+            .and_then(|id| {
+                self.builder
+                    .clauses
+                    .iter()
+                    .find(|clause| clause.declares_chosen_clause == Some(id))
+                    .and_then(|clause| clause.declares_chosen_group)
+            })
+            .or_else(|| {
+                chosen_reference
+                    .as_ref()
+                    .filter(|_| !local_chosen_candidates_present)
+                    .and_then(|(noun, chooser)| {
+                        let candidates: Vec<_> = self
+                            .builder
+                            .enclosing_chosen_objects
+                            .iter()
+                            .filter(|declaration| {
+                                role_matches(
+                                    chooser,
+                                    &declaration.chooser,
+                                    declaration.preceding_group.is_some(),
+                                ) && chosen_noun_compatible(&declaration.noun, noun)
+                            })
+                            .collect();
+                        let depth = candidates
+                            .iter()
+                            .map(|declaration| declaration.lexical_depth)
+                            .max()?;
+                        let candidates: Vec<_> = candidates
+                            .into_iter()
+                            .filter(|declaration| declaration.lexical_depth == depth)
+                            .collect();
+                        (candidates.len() == 1).then(|| candidates[0].group)
+                    })
+            });
+        if chosen_reference.is_some() && reads_chosen_group.is_none() {
+            self.parsed.effect = Effect::unimplemented(
+                if chosen_return.is_some() {
+                    "return"
+                } else {
+                    "destroy"
+                },
+                &self.source_text,
+            );
         }
+        let declares_chosen_group = declares_chosen_clause.map(|local| {
+            self.builder
+                .clauses
+                .iter()
+                .find(|clause| clause.declares_chosen_clause == Some(local))
+                .and_then(|clause| clause.declares_chosen_group)
+                .unwrap_or_else(|| {
+                    let group = ChosenGroupId(self.builder.next_chosen_object_group);
+                    self.builder.next_chosen_object_group = self
+                        .builder
+                        .next_chosen_object_group
+                        .checked_add(1)
+                        .expect("chosen group namespace exhausted");
+                    group
+                })
+        });
         let mut reads_return_result = None;
         let delayed_result_reader = self.delayed_condition.is_some()
             || self.prefix_delayed_condition.is_some()
@@ -2484,6 +2684,8 @@ impl ClauseDraft<'_> {
             declares_instruction_result: None,
             declares_chosen_clause,
             reads_chosen_clause,
+            declares_chosen_group,
+            reads_chosen_group,
             target_reads: TargetReadOrigin::OwnAnnouncement,
             token_definition_owner: self.token_definition_owner,
             reads_return_result,
@@ -3315,6 +3517,360 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::types::ability::{Duration, Effect};
+
+    #[test]
+    fn nested_chosen_namespace_keeps_local_clause_ids_and_exact_enclosing_roles() {
+        use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+        use crate::types::ability::ChosenGroupId;
+        let mut context = ParseContext::default();
+        let outer_text = "You choose target creature an opponent controls, and that opponent chooses target creature.";
+        let outer = parse_effect_chain_ir(outer_text, AbilityKind::Spell, &mut context);
+        assert!(
+            context.enclosing_chosen_objects.is_empty(),
+            "a completed body does not publish its local names"
+        );
+        // Enter the actual parsed outer declarations as an enclosing lexical
+        // scope, as the common builder does before parsing a coin outcome.
+        let mut enclosing = ClauseIrBuilder::new(outer_text);
+        enclosing.clauses = outer.clauses.clone();
+        enclosing.resume_chosen_object_cursor(&context);
+        enclosing.synchronize_chosen_objects(&mut context);
+        assert_eq!(
+            outer.clauses.len(),
+            2,
+            "actual coordinated declarations: {outer:#?}"
+        );
+        assert_eq!(outer.clauses[0].id, ClauseId(0));
+        assert_eq!(outer.clauses[1].id, ClauseId(1));
+        assert_eq!(
+            outer.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(0))
+        );
+        assert_eq!(
+            outer.clauses[1].declares_chosen_group,
+            Some(ChosenGroupId(1))
+        );
+        assert_eq!(
+            outer.clauses[1].target_chooser,
+            Some(TargetFilter::ParentTargetController)
+        );
+        assert_eq!(context.next_chosen_object_group, 2);
+        assert_eq!(context.enclosing_chosen_objects.len(), 2);
+        assert_eq!(
+            context.enclosing_chosen_objects[1].preceding_group,
+            Some(ChosenGroupId(0))
+        );
+        let nested_text = "Choose target artifact you control. Destroy the creature your opponent chose. Flip a coin. If you win the flip, destroy the artifact you chose. If you lose the flip, destroy the creature you chose.";
+        let nested = parse_effect_chain_ir(nested_text, AbilityKind::Spell, &mut context);
+        assert_eq!(
+            context.enclosing_chosen_objects.len(),
+            2,
+            "nested local names do not escape"
+        );
+        assert_eq!(
+            nested.clauses[0].id,
+            ClauseId(0),
+            "source ClauseIds remain local"
+        );
+        assert_eq!(
+            nested.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(2)),
+            "runtime IDs do not alias outer ClauseId(0)"
+        );
+        assert_eq!(nested.clauses[1].reads_chosen_group, Some(ChosenGroupId(1)));
+        let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&nested);
+        let flip = std::iter::successors(Some(&lowered), |node| node.sub_ability.as_deref())
+            .find_map(|node| match &*node.effect {
+                Effect::FlipCoins {
+                    win_effect,
+                    lose_effect,
+                    ..
+                } => Some((
+                    win_effect.as_deref().unwrap(),
+                    lose_effect.as_deref().unwrap(),
+                )),
+                _ => None,
+            })
+            .expect("nested real coin conditional");
+        assert_eq!(
+            flip.0.reads_chosen_group,
+            Some(ChosenGroupId(2)),
+            "local compatible declaration shadows enclosing roles"
+        );
+        assert_eq!(
+            flip.1.reads_chosen_group,
+            Some(ChosenGroupId(0)),
+            "different noun reads exact enclosing producer"
+        );
+        assert_eq!(context.next_chosen_object_group, 3);
+        let next = parse_effect_chain_ir("Choose target enchantment you control. Flip a coin. If you win the flip, destroy the enchantment you chose. If you lose the flip, destroy the creature your opponent chose.", AbilityKind::Spell, &mut context);
+        assert_eq!(next.clauses[0].id, ClauseId(0));
+        assert_eq!(
+            next.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(3))
+        );
+        assert_eq!(context.next_chosen_object_group, 4);
+        assert_eq!(
+            context.enclosing_chosen_objects.len(),
+            2,
+            "sequential nested bodies retain only their outer scope"
+        );
+        for (source, ir) in [(outer_text, &outer), (nested_text, &nested)] {
+            for (index, clause) in ir.clauses.iter().enumerate() {
+                assert_eq!(clause.id, ClauseId(index as u32));
+                let fragment = clause.source.fragment().expect("honest source fragment");
+                assert!(
+                    source.contains(fragment),
+                    "source fragment remains in its owning body"
+                );
+                assert!(
+                    !matches!(clause.parsed.effect, Effect::Unimplemented { .. }),
+                    "positive parser reach: {clause:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_chosen_builders_publish_cursor_without_lexical_names() {
+        use crate::parser::oracle_effect::ParseContext;
+        let mut context = ParseContext {
+            next_chosen_object_group: 11,
+            ..ParseContext::default()
+        };
+        let text = "Choose target artifact you control.";
+        let parsed = parsed_clause(Effect::TargetOnly {
+            target: TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+                crate::types::ability::TypeFilter::Artifact,
+            )),
+        });
+        let mut builder = ClauseIrBuilder::with_context(text, &context);
+        builder
+            .clause(
+                text,
+                parsed.clone(),
+                None,
+                ClauseDisposition::Emit {
+                    followup: None,
+                    intrinsic: None,
+                },
+            )
+            .push();
+        let clauses = builder.finish_with_context(&mut context);
+        assert_eq!(clauses[0].id, ClauseId(0));
+        assert_eq!(clauses[0].declares_chosen_group, Some(ChosenGroupId(11)));
+        assert_eq!(context.next_chosen_object_group, 12);
+        assert!(context.enclosing_chosen_objects.is_empty());
+        let same_body = EffectChainIr::single_clause_with_context(
+            text,
+            AbilityKind::Spell,
+            parsed.clone(),
+            None,
+            None,
+            false,
+            &mut context,
+        );
+        assert_eq!(same_body.clauses[0].id, ClauseId(0));
+        assert_eq!(
+            same_body.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(12))
+        );
+        assert_eq!(context.next_chosen_object_group, 13);
+        assert!(context.enclosing_chosen_objects.is_empty());
+        let independent =
+            EffectChainIr::single_clause(text, AbilityKind::Spell, parsed, None, None, false);
+        assert_eq!(
+            independent.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(0))
+        );
+        assert_eq!(context.next_chosen_object_group, 13);
+    }
+
+    #[test]
+    fn sequential_coin_outcomes_do_not_publish_sibling_declarations() {
+        use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+        let mut context = ParseContext {
+            next_chosen_object_group: 7,
+            ..ParseContext::default()
+        };
+        for (noun, group) in [("artifact", 7), ("enchantment", 8)] {
+            // Constructed grammar composition: the losing outcome has no
+            // producer of its own and cannot borrow the winning declaration.
+            let text = format!("Flip a coin. If you win the flip, choose target {noun} you control. If you lose the flip, destroy the {noun} you chose.");
+            let ir = parse_effect_chain_ir(&text, AbilityKind::Spell, &mut context);
+            let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&ir);
+            let Effect::FlipCoins {
+                win_effect,
+                lose_effect,
+                ..
+            } = &*lowered.effect
+            else {
+                panic!("real coin route: {lowered:#?}")
+            };
+            let win = win_effect.as_deref().expect("winning declaration reached");
+            assert!(matches!(&*win.effect, Effect::TargetOnly { .. }));
+            assert_eq!(win.declares_chosen_group, Some(ChosenGroupId(group)));
+            let lose = lose_effect.as_deref().expect("losing reader reached");
+            assert!(
+                matches!(&*lose.effect, Effect::Unimplemented { .. }),
+                "missing producer remains an honest gap: {lose:#?}"
+            );
+            assert_eq!(lose.reads_chosen_group, None);
+            assert_eq!(context.next_chosen_object_group, group + 1);
+            assert!(context.enclosing_chosen_objects.is_empty());
+            for (index, clause) in ir.clauses.iter().enumerate() {
+                assert_eq!(clause.id, ClauseId(index as u32));
+                let span = clause.source.span();
+                assert_eq!(
+                    text.get(span.start_byte..span.end_byte),
+                    clause.source.fragment()
+                );
+            }
+        }
+        let independent = parse_effect_chain_ir(
+            "Choose target creature.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        assert_eq!(
+            independent.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(0))
+        );
+    }
+
+    #[test]
+    fn specialized_and_no_producer_returns_preserve_chosen_namespace() {
+        use crate::parser::oracle_effect::{
+            parse_ability_ir_with_context, parse_effect_chain_ir, ParseContext,
+        };
+        let mut context = ParseContext {
+            next_chosen_object_group: 19,
+            ..ParseContext::default()
+        };
+        let declaration = super::super::context::ChosenObjectDeclaration {
+            group: ChosenGroupId(18),
+            lexical_depth: 0,
+            noun: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            chooser: None,
+            preceding_group: None,
+        };
+        context.enclosing_chosen_objects.push(declaration.clone());
+        for text in [
+            "Open a sealed Magic booster pack, reveal the cards, and put one of them into your hand.",
+            "For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature.",
+            "For each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.",
+            "Exile any number of face-up creatures you control with disguise in a face-down pile, shuffle that pile, then cloak them.",
+            "Exile the top card of each player's library with a collection counter on it.",
+            "Draw a card.",
+        ] {
+            let ir = parse_ability_ir_with_context(text, AbilityKind::Spell, &mut context).body;
+            assert!(!ir.clauses.is_empty(), "positive specialized/body reach: {text}");
+            assert!(ir.clauses.iter().all(|clause| !matches!(&clause.parsed.effect, Effect::Unimplemented { .. })), "{text}: {ir:#?}");
+            assert!(ir.clauses.iter().all(|clause| clause.declares_chosen_group.is_none()));
+            assert_eq!(context.next_chosen_object_group, 19, "resolution choices/tracked sets do not declare target groups: {text}");
+            assert_eq!(context.enclosing_chosen_objects, vec![declaration.clone()]);
+        }
+        let gap_text = "Choose any number of target players or planeswalkers. For each of them, reveal cards from the top of your library until you reveal a nonland card, Kaboom! deals damage equal to that card's mana value to that player or planeswalker, then you put the revealed cards on the bottom of your library in any order.";
+        let gap = parse_effect_chain_ir(gap_text, AbilityKind::Spell, &mut context);
+        assert_eq!(gap.clauses.len(), 1);
+        assert!(
+            // allow-noncombinator: test assertion compares a typed gap category, not Oracle text.
+            matches!(&gap.clauses[0].parsed.effect, Effect::Unimplemented { name, .. } if name == "per_recipient_reveal_loop")
+        );
+        assert_eq!(gap.clauses[0].source.fragment(), Some(gap_text));
+        assert_eq!(context.next_chosen_object_group, 19);
+        assert_eq!(context.enclosing_chosen_objects, vec![declaration.clone()]);
+        // Constructed meld grammar exercises the direct early return without
+        // introducing any chosen-object declaration.
+        context.card_name = Some("Source".into());
+        context.pending_meld_partner = Some("Partner".into());
+        let meld = parse_effect_chain_ir(
+            "Exile them, then meld them into Result.",
+            AbilityKind::Spell,
+            &mut context,
+        );
+        assert!(
+            matches!(&meld.clauses[0].parsed.effect, Effect::Meld { .. }),
+            "positive meld reach: {meld:#?}"
+        );
+        assert_eq!(context.next_chosen_object_group, 19);
+        assert_eq!(context.enclosing_chosen_objects, vec![declaration]);
+        let producer = parse_effect_chain_ir(
+            "Choose target artifact you control.",
+            AbilityKind::Spell,
+            &mut context,
+        );
+        assert_eq!(
+            producer.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(19))
+        );
+        assert_eq!(context.next_chosen_object_group, 20);
+        assert_eq!(context.enclosing_chosen_objects.len(), 1);
+    }
+
+    #[test]
+    fn nested_same_noun_shadows_outer_scope_but_not_local_ambiguity() {
+        use crate::parser::oracle_effect::{parse_effect_chain_ir, ParseContext};
+        let mut context = ParseContext::default();
+        let outer_text = "Choose target artifact you control.";
+        let outer = parse_effect_chain_ir(outer_text, AbilityKind::Spell, &mut context);
+        assert_eq!(
+            outer.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(0))
+        );
+        let mut enclosing = ClauseIrBuilder::new(outer_text);
+        enclosing.clauses = outer.clauses;
+        enclosing.resume_chosen_object_cursor(&context);
+        enclosing.synchronize_chosen_objects(&mut context);
+        let outer_scope = context.enclosing_chosen_objects.clone();
+        let local = parse_effect_chain_ir("Choose target artifact you control. Flip a coin. If you win the flip, destroy the artifact you chose.", AbilityKind::Spell, &mut context);
+        assert_eq!(
+            local.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(1))
+        );
+        let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&local);
+        let Effect::FlipCoins { win_effect, .. } = &*lowered
+            .sub_ability
+            .as_deref()
+            .expect("coin follows local declaration")
+            .effect
+        else {
+            panic!("positive nested coin reach: {lowered:#?}")
+        };
+        let win = win_effect.as_deref().expect("winning reader");
+        assert!(matches!(&*win.effect, Effect::Destroy { .. }));
+        assert_eq!(
+            win.reads_chosen_group,
+            Some(ChosenGroupId(1)),
+            "nearest compatible lexical scope shadows outer group0"
+        );
+        assert_eq!(context.enclosing_chosen_objects, outer_scope);
+        assert_eq!(context.next_chosen_object_group, 2);
+
+        let ambiguous = parse_effect_chain_ir("Choose target artifact you control. Choose target artifact you control. Flip a coin. If you win the flip, destroy the artifact you chose.", AbilityKind::Spell, &mut context);
+        assert_eq!(
+            ambiguous.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(2))
+        );
+        assert_eq!(
+            ambiguous.clauses[1].declares_chosen_group,
+            Some(ChosenGroupId(3))
+        );
+        let lowered = crate::parser::oracle_effect::assembly::assemble_effect_chain(&ambiguous);
+        let flip = std::iter::successors(Some(&lowered), |node| node.sub_ability.as_deref())
+            .find_map(|node| match &*node.effect {
+                Effect::FlipCoins { win_effect, .. } => win_effect.as_deref(),
+                _ => None,
+            })
+            .expect("ambiguous reader reached its real coin body");
+        assert!(
+            matches!(&*flip.effect, Effect::Unimplemented { .. }),
+            "two local producers cannot fall back to a unique outer producer: {flip:#?}"
+        );
+        assert_eq!(flip.reads_chosen_group, None);
+        assert_eq!(context.next_chosen_object_group, 4);
+        assert_eq!(context.enclosing_chosen_objects, outer_scope);
+    }
 
     #[test]
     fn all_revealed_relation_remints_and_stops_at_boundaries() {

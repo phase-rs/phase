@@ -50,6 +50,10 @@ fn curse_of_deaths_hold_debuffs_enchanted_players_creatures() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -95,6 +99,10 @@ fn curse_of_deaths_hold_debuff_turns_off_when_source_leaves() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 

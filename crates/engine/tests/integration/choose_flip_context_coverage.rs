@@ -293,6 +293,8 @@ fn round_trip_isolated_context(empty_result_only: bool) {
         // Isolate the other half of the serde predicate on a real parked frame.
         // This is a wire fixture, not a claim that changing the live choice is legal.
         FlipBranchContext {
+            coin_branch_target_abilities: Vec::new(),
+            chosen_group_targets: Vec::new(),
             damage_source_choice: None,
             chosen_players: vec![],
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(

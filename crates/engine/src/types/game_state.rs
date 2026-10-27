@@ -14086,6 +14086,7 @@ fn validate_retained_result_readers(
     occurrence: Option<ReturnResultOccurrenceId>,
     mut future: HashSet<ReturnResultId>,
 ) -> Result<(), String> {
+    crate::game::ability_utils::validate_coin_target_authority(root)?;
     if let Some(id) = root.declares_return_result {
         future.insert(id);
     }
@@ -14390,6 +14391,14 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
+    for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
+        if let Some(ability) = entry.ability() {
+            crate::game::ability_utils::validate_coin_target_authority(ability)?;
+        }
+    }
+    if let Some(pending) = &state.pending_cast {
+        crate::game::ability_utils::validate_coin_target_authority(&pending.ability)?;
+    }
     validate_retained_zone_result_owners(state)?;
     for waiting in retained_result_waits(state) {
         crate::game::effects::validate_definition_waiting_for_result_owner(state, waiting)
@@ -14697,6 +14706,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             return Err("retained quantity owner names a missing occurrence".into());
         }
         if let Some(ability) = ability {
+            crate::game::ability_utils::validate_coin_target_authority(ability)?;
             if occurrence.is_some() && has_return_result_metadata(ability) {
                 checked_return_result_frame(
                     state,
@@ -14916,6 +14926,7 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             ResolutionFrame::OptionalEffect(optional) => validate_optional_frame(optional)?,
             ResolutionFrame::AbilityContinuation(frame) => {
                 let pending = &frame.pending;
+                crate::game::ability_utils::validate_coin_target_authority(&pending.chain)?;
                 validate_retained_result_readers(
                     state,
                     &pending.chain,
@@ -20748,17 +20759,13 @@ pub enum RetargetScope {
 /// CR 601.2c: one descent step from a stack entry's root `ResolvedAbility`
 /// toward a node that owns declared targets.
 ///
-/// Two variants because `ResolvedAbility` has exactly two child links. The
-/// enumerator (`ability_utils::chain_retarget_slots`) emits only `SubAbility`
-/// today, because `assign_targets_recursive` never descends into
-/// `else_ability` — read-verified; only `stamp_other_batch_source_targets`
-/// visits that branch, and its writes are synthesized rather than declared.
-/// `ElseAbility` exists so that a future else-branch owner is addressed
-/// correctly instead of being silently mis-addressed as a sub-branch one.
+/// Coin branches address their canonical announcement-owned target custody;
+/// they do not turn definition templates into executable continuations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChainStep {
     SubAbility,
     ElseAbility,
+    CoinBranch(crate::types::ability::CoinFlipResult),
 }
 
 /// CR 115.7d: the address of ONE declared-target slot inside a resolved chain.

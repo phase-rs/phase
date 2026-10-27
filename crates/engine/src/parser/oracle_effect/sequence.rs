@@ -789,7 +789,7 @@ fn parse_reveal_until_rest_zone(lower: &str) -> Option<Zone> {
 }
 
 /// CR 401.4 + CR 608.2c: Detect both rest-pile zone and rest ordering for RevealUntil.
-fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRestOrder) {
+pub(super) fn parse_reveal_until_rest_zone_and_order(lower: &str) -> (Option<Zone>, DigRestOrder) {
     let rest_zone = parse_reveal_until_rest_zone(lower);
     let rest_order = if nom_primitives::scan_contains(lower, "in a random order")
         || nom_primitives::scan_contains(lower, "shuffle ")
@@ -2377,6 +2377,17 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         // `PutRest` continuation to set `rest_destination`; suppressing that
         // split would drop the "rest on the bottom" routing. Unrelated trailers
         // ("…, then shuffle") also still split.
+        if let Ok((first_target, _)) =
+            tag::<_, _, OracleError<'_>>("choose ").parse(current_lower.as_str())
+        {
+            let (target, remainder) = parse_target(first_target);
+            if remainder.trim().is_empty()
+                && !matches!(target, TargetFilter::None)
+                && super::imperative::parse_additional_kicker_target(after_then_lower).is_ok()
+            {
+                return None;
+            }
+        }
         let put_kept_card_tail = preceded(
             tag::<_, _, OracleError<'_>>("put "),
             alt((
@@ -2469,6 +2480,23 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     // Strip "and " connector before checking clause start
     // Handles patterns like ", and get {E}{E}" or ", and draw a card"
     if let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed_lower.as_str()) {
+        // CR 601.2c + CR 608.2c: a new choosing subject owns its own
+        // declaration, rather than an unaddressed second target sub-node.
+        if (
+            alt((
+                tag::<_, _, OracleError<'_>>("you "),
+                tag("that opponent "),
+                tag("an opponent "),
+                tag("your opponent "),
+            )),
+            alt((tag("choose "), tag("chooses "))),
+            tag("target "),
+        )
+            .parse(after_and)
+            .is_ok()
+        {
+            return Some((ClauseBoundary::Comma, whitespace_len));
+        }
         // Multi-target damage chain final segment — same gate as the leading
         // "and" form but for ", and B damage to T2".
         if current_ends_with_damage_recipient(&current_lower)
@@ -3519,6 +3547,19 @@ fn starts_up_to_target_combat_clause_lower(s: &str) -> OracleResult<'_, ()> {
 
 /// Inner implementation operating on pre-lowercased input.
 fn starts_bare_and_clause_lower(s: &str) -> bool {
+    // CR 608.2c: an explicit distributed player subject opens its own
+    // instruction, including after an unrelated self-exile instruction.
+    if (
+        tag::<_, _, OracleError<'_>>("each "),
+        opt(tag("other ")),
+        tag("player "),
+        alt((tag("creates "), tag("create "))),
+    )
+        .parse(s)
+        .is_ok()
+    {
+        return true;
+    }
     // CR 118.14 + CR 609.4b: "<cast grant> and they may spend mana as though it
     // were mana of any color to cast that spell" (Curse of Hospitality) — the
     // mana rider joined without a comma is the same conjunct the comma path cuts

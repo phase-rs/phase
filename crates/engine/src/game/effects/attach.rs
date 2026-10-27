@@ -18,6 +18,7 @@ use crate::types::resolved_commands::{
     ResolvedAttachmentCommand, ResolvedAttachmentReplayInvariantError,
 };
 use crate::types::zones::Zone;
+use rand::prelude::IndexedRandom;
 
 /// An engine-authored Equip announcement for the Priority preflight. The
 /// Equipment identity remains provider-owned until the Priority facade rebuilds
@@ -95,7 +96,7 @@ enum AttachPromptOutcome {
 /// every dynamic candidate is also an attachment role in this operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttachHostTargetResolution {
-    Found(ObjectId),
+    Found(AttachTarget),
     DynamicCandidatesExhausted,
     Missing,
 }
@@ -118,6 +119,9 @@ fn resolve_with_prompt(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<AttachResolutionOutcome, EffectError> {
+    if matches!(&ability.effect, Effect::Attach { target, .. } if target.denotes_player_target()) {
+        return resolve_bound_attachment_operation(state, ability, events);
+    }
     let attachment_filter = match &ability.effect {
         Effect::Attach { attachment, .. } => attachment,
         _ => &TargetFilter::SelfRef,
@@ -260,7 +264,9 @@ fn resolve_bound_attachment_operation(
     // Reached by `gift of immortality` and `next of kin`: their ROOT is
     // `ChangeZone{SelfRef}`, but `ability_pins_object_anaphor` walks the whole
     // chain, so the `Attach` sub-ability's `ParentTarget` earns the pins.
-    if ability.pinned_object_targets_all_stale(state) {
+    if ability.pinned_object_targets_all_stale(state)
+        || (matches!(attachment_filter, TargetFilter::SelfRef) && !ability.source_is_current(state))
+    {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id,
@@ -354,6 +360,20 @@ fn resolve_bound_attachment_operation(
     };
 
     for (index, attachment_id) in attachment_ids.iter().copied().enumerate() {
+        // CR 701.3b + CR 614.7: no transition occurs on the current host,
+        // so this attempt cannot newly earn an Attached replacement.
+        if state
+            .objects
+            .get(&attachment_id)
+            .is_some_and(|object| object.attached_to == Some(target_id))
+        {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                source_id,
+                subject: None,
+            });
+            continue;
+        }
         // CR 303.4j: If an effect attempts to attach an Aura on the battlefield to an
         // object it can't legally enchant, the Aura doesn't move. Delegate to the single
         // COMPLETE legality authority (sba::is_valid_attachment_target) — attachment_illegality
@@ -365,7 +385,12 @@ fn resolve_bound_attachment_operation(
             .get(&attachment_id)
             .is_some_and(|obj| obj.card_types.subtypes.iter().any(|s| s == "Aura"));
         if attacher_is_aura
-            && !crate::game::sba::is_valid_attachment_target(state, attachment_id, target_id)
+            && !match target_id {
+                AttachTarget::Object(id) => {
+                    crate::game::sba::is_valid_attachment_target(state, attachment_id, id)
+                }
+                AttachTarget::Player(player) => can_attach_to_player(state, attachment_id, player),
+            }
         {
             // CR 303.4j: the aura doesn't move.
             events.push(GameEvent::EffectResolved {
@@ -383,14 +408,32 @@ fn resolve_bound_attachment_operation(
         let child_stack_start = state.resolution_stack.capture_child_boundary();
         let proposed = crate::types::proposed_event::ProposedEvent::Attach {
             attachment_id,
-            target_id,
+            target: target_id,
+            attachment_incarnation: state
+                .objects
+                .get(&attachment_id)
+                .map(|object| ObjectIncarnationRef::from_object(object).incarnation),
+            source_id: Some(source_id),
             applied: Default::default(),
         };
         match crate::game::replacement::replace_event(state, proposed, events) {
-            crate::game::replacement::ReplacementResult::Execute(_) => {
-                if let Some(waiting_for) =
-                    deliver_attach(state, attachment_id, target_id, source_id, events)
-                {
+            crate::game::replacement::ReplacementResult::Execute(
+                crate::types::proposed_event::ProposedEvent::Attach {
+                    attachment_id,
+                    target,
+                    attachment_incarnation,
+                    source_id,
+                    ..
+                },
+            ) => {
+                if let Some(waiting_for) = deliver_attach(
+                    state,
+                    attachment_id,
+                    target,
+                    attachment_incarnation,
+                    source_id.unwrap_or(attachment_id),
+                    events,
+                ) {
                     if !ability.attach_attachment_targets().is_empty() {
                         defer_remaining_selected_attachments(
                             state,
@@ -403,7 +446,8 @@ fn resolve_bound_attachment_operation(
                     return Ok(AttachResolutionOutcome::Paused);
                 }
             }
-            crate::game::replacement::ReplacementResult::Prevented => {
+            crate::game::replacement::ReplacementResult::Prevented
+            | crate::game::replacement::ReplacementResult::Execute(_) => {
                 events.push(GameEvent::EffectResolved {
                     kind: EffectKind::from(&ability.effect),
                     source_id,
@@ -509,20 +553,37 @@ fn defer_remaining_selected_attachments(
 pub(crate) fn deliver_attach(
     state: &mut GameState,
     attachment_id: ObjectId,
-    target_id: ObjectId,
+    target: AttachTarget,
+    attachment_incarnation: Option<u64>,
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
     let host_of = |state: &GameState| state.objects.get(&attachment_id)?.attached_to;
-    let already_on_host = host_of(state) == Some(AttachTarget::Object(target_id));
-    if let Some(old_target) = attach_to(state, attachment_id, target_id) {
+    let already_on_host = host_of(state) == Some(target);
+    let current = attachment_incarnation.is_none_or(|incarnation| {
+        ObjectIncarnationRef::of(attachment_id, incarnation).is_current(state)
+    });
+    let old_target = if current {
+        match target {
+            AttachTarget::Object(id) => attach_to(state, attachment_id, id),
+            AttachTarget::Player(player) => attach_to_player_with_authority(
+                state,
+                attachment_id,
+                player,
+                AttachmentAuthority::Stored,
+            ),
+        }
+    } else {
+        None
+    };
+    if let Some(old_target) = old_target {
         events.push(GameEvent::Unattached {
             attachment_id,
             old_target,
         });
     }
     // CR 701.3b: a refused or same-host attach did nothing, so it carries no subject.
-    let attached = !already_on_host && host_of(state) == Some(AttachTarget::Object(target_id));
+    let attached = current && !already_on_host && host_of(state) == Some(target);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
@@ -1478,27 +1539,72 @@ fn resolve_bound_attachment_targets(
 /// event as the final event-context fallback. This keeps an event host and a
 /// resolution-time selected Equipment from swapping roles.
 fn resolve_attach_target<'a>(
-    state: &GameState,
+    state: &mut GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
     attachment_ids: &[ObjectId],
     target_slots: &mut impl Iterator<Item = &'a TargetRef>,
 ) -> AttachHostTargetResolution {
+    if filter.denotes_player_target() {
+        let eligible: Vec<_> = state
+            .players
+            .iter()
+            .map(|player| player.id)
+            .filter(|player| {
+                crate::game::players::player_exists_for_choice(state, *player)
+                    && crate::game::filter::player_matches_target_filter_in_state(
+                        state,
+                        filter,
+                        *player,
+                        Some(ability.controller),
+                        Some(ability.source_id),
+                    )
+                    && attachment_ids.iter().all(|id| {
+                        can_attach_to_player_with_authority(
+                            state,
+                            *id,
+                            *player,
+                            AttachmentAuthority::Stored,
+                        )
+                    })
+            })
+            .collect();
+        if eligible.is_empty() {
+            return AttachHostTargetResolution::DynamicCandidatesExhausted;
+        }
+        let selected = if ability.target_selection_mode
+            == crate::types::ability::TargetSelectionMode::Random
+        {
+            eligible
+                .choose(
+                    &mut state
+                        .rng
+                        .draw(crate::types::game_state::RandomDraw::Outcome),
+                )
+                .copied()
+        } else {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, filter)
+                .filter(|player| eligible.contains(player))
+        };
+        return selected.map_or(
+            AttachHostTargetResolution::DynamicCandidatesExhausted,
+            |player| AttachHostTargetResolution::Found(AttachTarget::Player(player)),
+        );
+    }
     if let Some(host) = ability.attach_host_target() {
         if !host.is_current(state) {
             return AttachHostTargetResolution::Missing;
         }
         if matches!(filter, TargetFilter::ParentTarget) {
-            return AttachHostTargetResolution::Found(host.object_id);
+            return AttachHostTargetResolution::Found(AttachTarget::Object(host.object_id));
         }
         let ctx = FilterContext::from_ability(ability);
         let effective = crate::game::effects::resolved_object_filter(state, ability, filter);
         return matches_target_filter(state, host.object_id, &effective, &ctx)
             .then_some(host.object_id)
-            .map_or(
-                AttachHostTargetResolution::Missing,
-                AttachHostTargetResolution::Found,
-            );
+            .map_or(AttachHostTargetResolution::Missing, |id| {
+                AttachHostTargetResolution::Found(AttachTarget::Object(id))
+            });
     }
 
     let target = match filter {
@@ -1524,10 +1630,9 @@ fn resolve_attach_target<'a>(
         }
         _ => resolve_object_filter(state, ability, filter, target_slots),
     };
-    target.map_or(
-        AttachHostTargetResolution::Missing,
-        AttachHostTargetResolution::Found,
-    )
+    target.map_or(AttachHostTargetResolution::Missing, |id| {
+        AttachHostTargetResolution::Found(AttachTarget::Object(id))
+    })
 }
 
 /// CR 400.7: Return attachment role ids only while their pinned incarnations
@@ -1580,14 +1685,14 @@ fn resolve_dynamic_attach_host_target<'a>(
         }
         saw_dynamic_candidate = true;
         if !is_attachment(*id) {
-            return AttachHostTargetResolution::Found(*id);
+            return AttachHostTargetResolution::Found(AttachTarget::Object(*id));
         }
     }
 
     for &id in dynamic_ids {
         saw_dynamic_candidate = true;
         if !is_attachment(id) {
-            return AttachHostTargetResolution::Found(id);
+            return AttachHostTargetResolution::Found(AttachTarget::Object(id));
         }
     }
 
@@ -2666,17 +2771,45 @@ pub(crate) fn can_attach_to_player_projected(
     attachment: Option<&crate::game::game_object::GameObject>,
     target_player: PlayerId,
 ) -> bool {
-    // CR 303.4c: A player who has left the game is an illegal Aura host.
-    if !state
-        .players
-        .get(target_player.0 as usize)
-        .is_some_and(|p| !p.is_eliminated)
+    let Some(attachment) = attachment else {
+        return false;
+    };
+    // CR 303.4c + CR 701.3a: only a live player can host an Aura.
+    if !attachment
+        .card_types
+        .subtypes
+        .iter()
+        .any(|kind| kind == "Aura")
+        || !crate::game::players::player_exists_for_choice(state, target_player)
+    {
+        return false;
+    }
+    // CR 702.5a + CR 702.5c: all current Enchant restrictions apply. An
+    // absent Enchant ability supplies no permission to enchant a player.
+    let mut restrictions = attachment
+        .keywords
+        .iter()
+        .filter_map(|keyword| match keyword {
+            crate::types::keywords::Keyword::Enchant(filter) => Some(filter),
+            _ => None,
+        })
+        .peekable();
+    if restrictions.peek().is_none()
+        || !restrictions.all(|filter| {
+            crate::game::filter::player_matches_target_filter_in_state(
+                state,
+                filter,
+                target_player,
+                Some(attachment.controller),
+                Some(attachment.id),
+            )
+        })
     {
         return false;
     }
     // CR 702.16c: Protection from a quality prevents Auras of that quality from
     // being attached to the protected player.
-    player_attachment_illegality(state, attachment, target_player).is_none()
+    player_attachment_illegality(state, Some(attachment), target_player).is_none()
 }
 
 /// CR 303.4: Attach an Aura to a player (Curse cycle, Faith's Fetters-class).
@@ -5894,6 +6027,7 @@ mod retirement_ownership_tests {
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{ContinuousModification, Duration, ObjectScope, StaticCondition};
     use crate::types::game_state::{LayersDirty, TransientContinuousEffectBindings};
+    use crate::types::keywords::Keyword;
     use crate::types::phase::Phase;
     use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
 
@@ -5906,11 +6040,14 @@ mod retirement_ownership_tests {
                 let first = scenario.add_vanilla(P0, 2, 2);
                 let second = scenario.add_vanilla(P0, 2, 2);
                 let subject = scenario.add_vanilla(P0, 2, 2);
-                // A typed unrestricted Aura isolates graph ownership from
-                // printed enchant restrictions in these authority-level tests.
+                // A synthetic Aura explicitly admits both host domains so
+                // these authority-level tests isolate graph ownership.
                 let aura = scenario
                     .add_enchantment_from_oracle(P0, "Typed Aura", "")
                     .with_subtypes(vec!["Aura"])
+                    .with_keyword(Keyword::Enchant(TargetFilter::Or {
+                        filters: vec![TargetFilter::Player, TypedFilter::creature().into()],
+                    }))
                     .id();
                 let mut runner = scenario.build();
                 let state = runner.state_mut();
@@ -6080,5 +6217,429 @@ mod retirement_ownership_tests {
             .transient_continuous_effects
             .iter()
             .any(|e| e.id == id));
+    }
+}
+
+#[cfg(test)]
+mod player_enchant_legality_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::keywords::Keyword;
+
+    #[test]
+    fn actual_pending_object_attachment_preserves_current_and_authentic_old_events_in_both_readers()
+    {
+        use crate::game::scenario::GameRunner;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, AttachSelection, QuantityExpr, ReplacementDefinition,
+            ReplacementMode,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::replacements::ReplacementEvent;
+        use crate::types::resolution::ResolutionStateWire;
+        let mut scenario = GameScenario::new();
+        let aura = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Synthetic creature Aura with Attached rider",
+                "Enchant creature",
+            )
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let host = scenario.add_creature(P0, "Actual object host", 2, 2).id();
+        let mut runner = scenario.build();
+        let rider = ReplacementDefinition::new(ReplacementEvent::Attached)
+            .valid_card(TargetFilter::SelfRef)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(AbilityDefinition::new(
+                AbilityKind::Triggered,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&aura)
+            .unwrap()
+            .replacement_definitions = vec![rider].into();
+        let ability = ResolvedAbility::new(
+            Effect::Attach {
+                attachment: TargetFilter::SelfRef,
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                selection: AttachSelection::Targeted,
+            },
+            vec![TargetRef::Object(host)],
+            aura,
+            P0,
+        );
+        resolve(runner.state_mut(), &ability, &mut Vec::new()).unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert_eq!(runner.state().objects[&aura].attached_to, None);
+        runner.state_mut().capture_rng_word_pos();
+        let raw = serde_json::to_value(runner.state()).unwrap();
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        for (wire_reader, saved) in [(false, raw), (true, wire)] {
+            for legacy in [false, true] {
+                let mut value = saved.clone();
+                if legacy {
+                    // Exact original bare-object event schema, without new
+                    // capture/source fields: its object meaning is retained.
+                    value["pending_replacement"]["proposed"] = serde_json::json!({"Attach": {
+                        "attachment_id": aura.0, "target_id": host.0, "applied": []
+                    }});
+                }
+                let mut malformed = value.clone();
+                let event = malformed["pending_replacement"]["proposed"]["Attach"]
+                    .as_object_mut()
+                    .unwrap();
+                event.insert("target".into(), serde_json::json!({"Player": 1}));
+                event.insert("target_id".into(), serde_json::json!(host.0));
+                if wire_reader {
+                    assert!(serde_json::from_value::<ResolutionStateWire>(malformed).is_err());
+                } else {
+                    assert!(serde_json::from_value::<GameState>(malformed).is_err());
+                }
+                let restored = if wire_reader {
+                    serde_json::from_value::<ResolutionStateWire>(value)
+                        .unwrap()
+                        .into_game_state()
+                } else {
+                    serde_json::from_value::<GameState>(value).unwrap()
+                };
+                let mut resumed = GameRunner::from_state(restored);
+                resumed
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+                resumed.advance_until_stack_empty();
+                assert_eq!(
+                    resumed.state().objects[&aura].attached_to,
+                    Some(AttachTarget::Object(host))
+                );
+                assert_eq!(
+                    resumed.state().players[0].life,
+                    runner.state().players[0].life + 1
+                );
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(resumed.state().pending_replacement.is_none());
+                assert!(!resumed.state().has_post_replacement_drain());
+                assert!(
+                    resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn impossible_attach_earns_no_new_rider_but_late_impossibility_keeps_an_earned_rider_once() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, AttachSelection, QuantityExpr, ReplacementDefinition,
+        };
+        use crate::types::proposed_event::ProposedEvent;
+        use crate::types::replacements::ReplacementEvent;
+        for late_stale in [false, true] {
+            let mut scenario = GameScenario::new();
+            let aura = scenario
+                .add_enchantment_from_oracle(
+                    P0,
+                    "Synthetic player Aura with independent Attached rider",
+                    "Enchant player",
+                )
+                .with_subtypes(vec!["Aura"])
+                .id();
+            let mut runner = scenario.build();
+            let rider = ReplacementDefinition::new(ReplacementEvent::Attached)
+                .valid_card(TargetFilter::SelfRef)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Triggered,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&aura)
+                .unwrap()
+                .replacement_definitions = vec![rider].into();
+            attach_to_player(runner.state_mut(), aura, P1);
+            let ability = ResolvedAbility::new(
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Player,
+                    selection: AttachSelection::Targeted,
+                },
+                vec![TargetRef::Player(P1)],
+                aura,
+                P0,
+            );
+            let before = runner.state().clone();
+            resolve(runner.state_mut(), &ability, &mut Vec::new()).unwrap();
+            assert_eq!(runner.state().players[0].life, before.players[0].life);
+            assert!(!runner.state().has_post_replacement_drain());
+            assert_eq!(
+                runner.state().resolved_rules_journal,
+                before.resolved_rules_journal
+            );
+            // Offer a different typed host while it is lawful. The selected
+            // replacement has earned its independent instruction at this point.
+            let birth = runner.state().objects[&aura].incarnation;
+            let proposed = ProposedEvent::Attach {
+                attachment_id: aura,
+                target: AttachTarget::Player(P0),
+                attachment_incarnation: Some(birth),
+                source_id: Some(aura),
+                applied: Default::default(),
+            };
+            let selected = crate::game::replacement::replace_event(
+                runner.state_mut(),
+                proposed,
+                &mut Vec::new(),
+            );
+            assert!(
+                runner.state().has_post_replacement_drain(),
+                "actual replacement earns its independent rider"
+            );
+            let crate::game::replacement::ReplacementResult::Execute(ProposedEvent::Attach {
+                attachment_id,
+                target,
+                attachment_incarnation,
+                source_id,
+                ..
+            }) = selected
+            else {
+                panic!("single Attached replacement completes proposal");
+            };
+            if late_stale {
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&aura)
+                    .unwrap()
+                    .incarnation += 1;
+            } else {
+                runner.state_mut().objects.get_mut(&aura).unwrap().keywords =
+                    vec![Keyword::Enchant(TargetFilter::Typed(
+                        TypedFilter::creature(),
+                    ))];
+            }
+            let journal = runner.state().resolved_rules_journal.clone();
+            let timestamp = runner.state().objects[&aura].timestamp;
+            let mut events = Vec::new();
+            assert!(deliver_attach(
+                runner.state_mut(),
+                attachment_id,
+                target,
+                attachment_incarnation,
+                source_id.unwrap(),
+                &mut events
+            )
+            .is_none());
+            assert_eq!(
+                runner.state().objects[&aura].attached_to,
+                Some(AttachTarget::Player(P1))
+            );
+            assert_eq!(runner.state().objects[&aura].timestamp, timestamp);
+            assert_eq!(
+                runner
+                    .state()
+                    .resolved_rules_journal
+                    .entries()
+                    .iter()
+                    .filter(|entry| matches!(
+                        entry.command.as_ref(),
+                        Some(crate::types::resolved_commands::ResolvedRulesCommand::Attachment(_))
+                    ))
+                    .count(),
+                journal
+                    .entries()
+                    .iter()
+                    .filter(|entry| matches!(
+                        entry.command.as_ref(),
+                        Some(crate::types::resolved_commands::ResolvedRulesCommand::Attachment(_))
+                    ))
+                    .count()
+            );
+            assert_eq!(runner.state().players[0].life, before.players[0].life + 1);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::GainLife,
+                            ..
+                        }
+                    ))
+                    .count(),
+                1
+            );
+            assert!(!events.iter().any(|event| matches!(
+                event,
+                GameEvent::Unattached { .. }
+                    | GameEvent::EffectResolved {
+                        kind: EffectKind::Attach,
+                        subject: Some(_),
+                        ..
+                    }
+            )));
+            assert!(!runner.state().has_post_replacement_drain());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(
+                crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    runner.state_mut(),
+                    Some(aura),
+                    None,
+                    Some(ReplacementEvent::Attached),
+                    &mut Vec::new()
+                )
+                .is_none()
+            );
+            assert_eq!(runner.state().players[0].life, before.players[0].life + 1);
+        }
+    }
+
+    #[test]
+    fn typed_player_delivery_replays_exact_host_timestamp_and_rejects_stale_birth() {
+        use crate::types::resolved_commands::ResolvedRulesCommand;
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Synthetic lawful player Aura", "Enchant player")
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let source = scenario
+            .add_creature(P0, "Distinct effect source", 1, 1)
+            .id();
+        let mut runner = scenario.build();
+        attach_to_player(runner.state_mut(), aura, P1);
+        let before = runner.state().clone();
+        let birth = before.objects[&aura].incarnation;
+        let mut events = Vec::new();
+        assert!(deliver_attach(
+            runner.state_mut(),
+            aura,
+            AttachTarget::Player(PlayerId(2)),
+            Some(birth),
+            source,
+            &mut events
+        )
+        .is_none());
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(AttachTarget::Player(PlayerId(2)))
+        );
+        assert!(events.iter().any(|event| matches!(event, GameEvent::EffectResolved { source_id, kind: EffectKind::Attach, subject: Some(_), .. } if *source_id == source)));
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::Unattached { attachment_id, old_target: TargetRef::Player(player) } if *attachment_id == aura && *player == P1)).count(), 1);
+        let command = runner
+            .state()
+            .resolved_rules_journal
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry.command.as_ref() {
+                Some(ResolvedRulesCommand::Attachment(command))
+                    if command.attachment.object_id == aura
+                        && command.resulting_host == Some(AttachTarget::Player(PlayerId(2))) =>
+                {
+                    Some(command.clone())
+                }
+                _ => None,
+            })
+            .last()
+            .expect("the real delivery journals its selected player host");
+        let mut replay = before.clone();
+        let replay_rng = replay.rng_word_pos;
+        apply_resolved_attachment(&mut replay, &command).unwrap();
+        assert_eq!(
+            replay.objects[&aura].attached_to,
+            runner.state().objects[&aura].attached_to
+        );
+        assert_eq!(
+            replay.objects[&aura].timestamp,
+            runner.state().objects[&aura].timestamp
+        );
+        assert_eq!(replay.rng_word_pos, replay_rng);
+        assert_eq!(replay.resolved_rules_journal, before.resolved_rules_journal);
+        let settled = runner.state().clone();
+        let mut no_op_events = Vec::new();
+        assert!(deliver_attach(
+            runner.state_mut(),
+            aura,
+            AttachTarget::Player(PlayerId(2)),
+            Some(birth),
+            source,
+            &mut no_op_events
+        )
+        .is_none());
+        assert_eq!(
+            runner.state().resolved_rules_journal,
+            settled.resolved_rules_journal
+        );
+        assert_eq!(runner.state().next_timestamp, settled.next_timestamp);
+        assert!(matches!(
+            no_op_events.as_slice(),
+            [GameEvent::EffectResolved { subject: None, .. }]
+        ));
+        let mut stale = before;
+        stale.objects.get_mut(&aura).unwrap().incarnation += 1;
+        let journal = stale.resolved_rules_journal.clone();
+        assert!(deliver_attach(
+            &mut stale,
+            aura,
+            AttachTarget::Player(PlayerId(2)),
+            Some(birth),
+            source,
+            &mut Vec::new()
+        )
+        .is_none());
+        assert_eq!(
+            stale.objects[&aura].attached_to,
+            Some(AttachTarget::Player(P1))
+        );
+        assert_eq!(stale.resolved_rules_journal, journal);
+        assert!(apply_resolved_attachment(&mut stale, &command).is_err());
+    }
+
+    #[test]
+    fn player_attachment_requires_every_current_enchant_restriction() {
+        let mut scenario = GameScenario::new();
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Synthetic Aura", "")
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        assert!(!can_attach_to_player(state, aura, P1));
+        assert_eq!(attach_to_player(state, aura, P1), None);
+        assert_eq!(state.objects[&aura].attached_to, None);
+        state.objects.get_mut(&aura).unwrap().keywords =
+            vec![Keyword::Enchant(TargetFilter::Player)];
+        state.objects.get_mut(&aura).unwrap().base_keywords = state.objects[&aura].keywords.clone();
+        attach_to_player(state, aura, P1);
+        assert_eq!(
+            state.objects[&aura].attached_to,
+            Some(AttachTarget::Player(P1))
+        );
+        let mut projected = state.objects[&aura].clone();
+        projected
+            .keywords
+            .push(Keyword::Enchant(TypedFilter::creature().into()));
+        assert!(!can_attach_to_player_projected(state, Some(&projected), P1));
+        assert!(can_attach_to_player(state, aura, P1));
+        projected.keywords = vec![Keyword::Enchant(TargetFilter::Opponent)];
+        assert!(can_attach_to_player_projected(state, Some(&projected), P1));
+        projected.controller = P1;
+        assert!(!can_attach_to_player_projected(state, Some(&projected), P1));
+        state.players[1].is_eliminated = true;
+        assert!(!can_attach_to_player(state, aura, P1));
     }
 }

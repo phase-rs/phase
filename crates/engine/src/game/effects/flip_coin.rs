@@ -186,6 +186,7 @@ fn flip_through_replacement(
 fn run_flip_branch(
     state: &mut GameState,
     branch: Option<&AbilityDefinition>,
+    outcome: CoinFlipResult,
     source_id: ObjectId,
     controller: PlayerId,
     targets: &[TargetRef],
@@ -195,20 +196,64 @@ fn run_flip_branch(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     if let Some(def) = branch {
+        // The complete outcome set was validated before the flip started or resumed.
         // CR 608.2h: propagate so a counter-gated "that many" nested in the
         // branch still resolves against the live chain-root target (see
         // `build_resolved_from_def_with_chain_root`'s doc).
+        let custody = branch_context
+            .coin_branch_target_abilities
+            .iter()
+            .find(|(candidate, _)| *candidate == outcome)
+            .map(|(_, child)| child.as_ref())
+            .filter(|child| !crate::game::ability_utils::coin_target_custody_is_empty(child));
         let mut sub =
             crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
                 def,
                 source_id,
                 controller,
-                targets.to_vec(),
+                if custody.is_some() {
+                    Vec::new()
+                } else {
+                    targets.to_vec()
+                },
                 chain_root_targets.to_vec(),
             );
+        if let Some(custody) = custody {
+            sub.inherit_coin_target_inputs(&custody.coin_target_input_projection());
+            crate::game::ability_utils::transfer_coin_target_custody(&mut sub, custody)
+                .map_err(EffectError::InvalidParam)?;
+        } else if sub.declares_chosen_group.is_some() {
+            // The authentic flat encoded local producer owns exactly these old
+            // occurrences. Preserve retained pins only when that original root
+            // holds the identical occurrence vector; never capture a live birth.
+            if let Some(occurrences) = legacy_local_target_occurrences(state, def, targets) {
+                sub.replace_target_occurrences(occurrences);
+            }
+            sub.chosen_target_slots =
+                crate::types::ability::ChosenTargetSlots::Recorded(Vec::new());
+        }
+        if branch_context.coin_branch_target_abilities.is_empty() {
+            // The original flat program did not announce template-local slots.
+            // Keep that exact inherited program through further nested flips;
+            // conversion cannot manufacture a later announcement or pin.
+            fn inherited_program(node: &mut ResolvedAbility) {
+                node.coin_branch_target_abilities.clear();
+                node.chosen_target_slots =
+                    crate::types::ability::ChosenTargetSlots::Recorded(Vec::new());
+                if let Some(child) = node.sub_ability.as_deref_mut() {
+                    inherited_program(child);
+                }
+                if let Some(child) = node.else_ability.as_deref_mut() {
+                    inherited_program(child);
+                }
+            }
+            inherited_program(&mut sub);
+        }
         if !sub.effect.is_fresh_damage_source_producer() {
             sub.context.damage_source_choice = branch_context.damage_source_choice.clone();
         }
+        sub.context.chosen_group_targets = branch_context.chosen_group_targets.clone();
+        crate::game::ability_utils::restamp_chosen_group_targets(&mut sub);
         sub.bind_return_result_process(expected_return_result_process);
         // CR 608.2d + CR 115.10: the flip's targets reach the branch root, since
         // they include the branch's OWN announced targets ("if you win the flip,
@@ -217,7 +262,7 @@ fn run_flip_branch(
         // its own pick ("choose a creature you control and an opponent"), and
         // handing it an object chosen before the flip would answer that choice
         // with the wrong object.
-        if !targets.is_empty() {
+        if custody.is_none() && !targets.is_empty() {
             let mut probe = sub.clone();
             probe.clear_targets();
             if super::awaits_resolution_object_choice(&probe) {
@@ -262,6 +307,52 @@ fn run_flip_branch(
         super::resolve_flip_branch_chain(state, &sub, events)?;
     }
     Ok(())
+}
+
+type TargetOccurrences = Vec<(
+    TargetRef,
+    Option<crate::types::identifiers::ObjectIncarnationRef>,
+)>;
+
+fn legacy_local_target_occurrences(
+    state: &GameState,
+    definition: &AbilityDefinition,
+    targets: &[TargetRef],
+) -> Option<TargetOccurrences> {
+    if definition.declares_chosen_group.is_none() || targets.is_empty() {
+        return None;
+    }
+    let filter = definition.effect.target_filter()?;
+    let root = state
+        .resolving_stack_entry
+        .as_ref()
+        .and_then(|entry| entry.ability())?;
+    fn matching(
+        node: &ResolvedAbility,
+        filter: &crate::types::ability::TargetFilter,
+        targets: &[TargetRef],
+        found: &mut Vec<TargetOccurrences>,
+    ) {
+        if node.targets == targets
+            && node.effect.target_filter() == Some(filter)
+            && crate::game::ability_utils::node_has_stack_target_declaration(node)
+        {
+            found.push(node.target_occurrences());
+        }
+        if let Some(child) = node.sub_ability.as_deref() {
+            matching(child, filter, targets, found);
+        }
+        if let Some(child) = node.else_ability.as_deref() {
+            matching(child, filter, targets, found);
+        }
+    }
+    let mut found = Vec::new();
+    matching(root, filter, targets, &mut found);
+    let first = found.first()?;
+    if found.iter().any(|candidate| candidate != first) {
+        return None;
+    }
+    Some(first.clone())
 }
 
 // Safety cap prevents infinite loops with pathological RNG seeds.
@@ -321,6 +412,7 @@ impl FlipRun<'_> {
         run_flip_branch(
             state,
             branch,
+            CoinFlipResult::from_won(won),
             self.source_id,
             self.controller,
             self.targets,
@@ -538,6 +630,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    crate::game::ability_utils::validate_coin_target_authority(ability)
+        .map_err(EffectError::InvalidParam)?;
     let Effect::FlipCoins {
         flips,
         win_effect,
@@ -547,6 +641,9 @@ pub fn resolve(
     else {
         return Err(EffectError::MissingParam("FlipCoins".to_string()));
     };
+    FlipBranchContext::from_ability(ability)
+        .validate_branches(&[win_effect.as_deref(), lose_effect.as_deref()])
+        .map_err(EffectError::InvalidParam)?;
 
     // CR 705.2: "only the player who flips a coin wins or loses the flip." The
     // `flipper` names that player ("that player flips a coin" → the triggering
@@ -630,6 +727,53 @@ pub(crate) fn validate_pending_coin_flip(
     state: &GameState,
     pending: &PendingCoinFlip,
 ) -> Result<(), EffectError> {
+    if !pending
+        .branch_context
+        .coin_branch_target_abilities
+        .is_empty()
+    {
+        fn matches_owner(node: &ResolvedAbility, pending: &PendingCoinFlip) -> bool {
+            let matches = node.source_id == pending.source_id
+                && node.controller == pending.controller
+                && matches!(&node.effect, Effect::FlipCoins { win_effect, lose_effect, .. }
+                    if win_effect == &pending.win_effect && lose_effect == &pending.lose_effect);
+            (matches
+                && crate::game::ability_utils::validate_retained_coin_target_custody(
+                    node,
+                    &pending.branch_context,
+                )
+                .is_ok())
+                || node
+                    .target_children()
+                    .any(|(_, child)| matches_owner(child, pending))
+        }
+        // This is the sole installed stack-resolution carrier. Unrelated
+        // stack copies or buried continuation invocations cannot supply inputs.
+        let retained_owner = state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|owner| matches_owner(owner, pending));
+        if !retained_owner {
+            return Err(EffectError::InvalidParam(
+                "parked coin target custody has no coherent original owner".into(),
+            ));
+        }
+    }
+    for (_, child) in &pending.branch_context.coin_branch_target_abilities {
+        if child.source_id != pending.source_id || child.controller != pending.controller {
+            return Err(EffectError::InvalidParam(
+                "parked coin target custody has a different owner".into(),
+            ));
+        }
+    }
+    pending
+        .branch_context
+        .validate_branches(&[
+            pending.win_effect.as_deref(),
+            pending.lose_effect.as_deref(),
+        ])
+        .map_err(EffectError::InvalidParam)?;
     retained_flip_occurrence(
         state,
         pending.win_effect.as_deref(),

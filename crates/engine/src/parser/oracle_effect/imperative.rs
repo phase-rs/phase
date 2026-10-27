@@ -1598,6 +1598,56 @@ pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
 /// (for compound action splitting like "tap target creature and put a counter on it").
 /// Parse a return of the targets named by an earlier choose instruction.
 /// The destination and noun use the same helpers as ordinary return clauses.
+pub(crate) fn parse_chosen_object_reference(
+    phrase: &str,
+) -> Option<(TargetFilter, Option<TargetFilter>)> {
+    let lower = phrase.trim().trim_end_matches('.').to_ascii_lowercase();
+    let phrase = opt(alt((tag::<_, _, OracleError<'_>>("the "), tag("each "))))
+        .parse(lower.as_str())
+        .ok()?
+        .0;
+    let (noun, chooser) = if let Ok((_, noun)) = all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("chosen "),
+        nom::combinator::rest,
+    ))
+    .parse(phrase)
+    {
+        (noun, None)
+    } else {
+        let (noun, role, _) = nom_primitives::scan_preceded(phrase, |input| {
+            let (rest, role) = alt((
+                value(
+                    TargetFilter::Controller,
+                    tag::<_, _, OracleError<'_>>("you chose"),
+                ),
+                value(TargetFilter::Opponent, tag("your opponent chose")),
+                value(TargetFilter::Opponent, tag("that opponent chose")),
+            ))
+            .parse(input)?;
+            let (rest, _) = eof.parse(rest)?;
+            Ok((rest, role))
+        })?;
+        // The scanner's prefix is the complete noun; the matched value is
+        // its chooser role. Neither accepts a partial noun qualification.
+        (noun, Some(role))
+    };
+    let (noun, remainder) = parse_target(noun.trim());
+    if !remainder.trim().is_empty() || matches!(noun, TargetFilter::None | TargetFilter::Any) {
+        return None;
+    }
+    Some((noun, chooser))
+}
+
+pub(crate) fn parse_chosen_destroy_spec(
+    text: &str,
+) -> Option<(TargetFilter, Option<TargetFilter>)> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, _) = tag::<_, _, OracleError<'_>>("destroy ")
+        .parse(lower.as_str())
+        .ok()?;
+    parse_chosen_object_reference(rest)
+}
+
 pub(crate) fn parse_chosen_return_spec(text: &str, lower: &str) -> Option<ChosenReturnSpec> {
     let (_, rest) = nom_on_lower(text, lower, |input| {
         value((), tag("return each ")).parse(input)
@@ -1613,35 +1663,7 @@ pub(crate) fn parse_chosen_return_spec(text: &str, lower: &str) -> Option<Chosen
         .parse(printed_destination.as_str())
         .ok()
         .map(|_| ControllerRef::You);
-    let phrase_lower = phrase.trim().trim_end_matches('.').to_ascii_lowercase();
-    let (noun, chooser) = if let Ok((_, noun)) = all_consuming(preceded(
-        tag::<_, _, OracleError<'_>>("chosen "),
-        nom::combinator::rest,
-    ))
-    .parse(phrase_lower.as_str())
-    {
-        (noun, None)
-    } else if let Ok((_, noun)) = all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>(" you chose"),
-        tag(" you chose"),
-    ))
-    .parse(phrase_lower.as_str())
-    {
-        (noun, Some(TargetFilter::Controller))
-    } else if let Ok((_, noun)) = all_consuming(terminated(
-        take_until::<_, _, OracleError<'_>>(" that opponent chose"),
-        tag(" that opponent chose"),
-    ))
-    .parse(phrase_lower.as_str())
-    {
-        (noun, Some(TargetFilter::Opponent))
-    } else {
-        return None;
-    };
-    let (noun, remainder) = parse_target(noun);
-    if !remainder.trim().is_empty() || matches!(noun, TargetFilter::None | TargetFilter::Any) {
-        return None;
-    }
+    let (noun, chooser) = parse_chosen_object_reference(phrase)?;
     Some(ChosenReturnSpec {
         noun,
         chooser,
@@ -3503,7 +3525,15 @@ pub(super) fn parse_search_and_creation_ast(
         })
         .is_some()
     {
-        let details = super::parse_search_library_details(lower, ctx);
+        let details = match super::parse_search_library_details(lower, ctx) {
+            Ok(details) => details,
+            Err(_) => {
+                return Some(SearchCreationImperativeAst::Unimplemented {
+                    gap: "search_filter",
+                    fragment: text.to_owned(),
+                })
+            }
+        };
         let source_zones = match details.source_zones {
             SearchZoneList::Unlisted => vec![Zone::Library],
             SearchZoneList::Zones(zones) => zones,
@@ -3834,7 +3864,7 @@ fn parse_search_outside_game_ast(
     }
 
     let (_, (filter_text, destination, source_pool, reveal)) = parse_clause(lower).ok()?;
-    let filter = super::search::parse_search_filter(filter_text, ctx);
+    let filter = super::search::parse_search_filter(filter_text, ctx).ok()?;
     Some(SearchCreationImperativeAst::SearchOutsideGame {
         filter,
         count: QuantityExpr::Fixed { value: 1 },
@@ -4495,7 +4525,10 @@ fn try_parse_choose_counter_on_target(rest: &str) -> Option<ChooseImperativeAst>
     {
         return None;
     }
-    Some(ChooseImperativeAst::TargetOnly { target })
+    Some(ChooseImperativeAst::TargetOnly {
+        target,
+        multi_target: None,
+    })
 }
 
 /// CR 701.9a + CR 107.1b: "[Target player] chooses a card in their hand and
@@ -4817,6 +4850,19 @@ pub(super) fn parse_choose_ast<'a>(
         return Ok(Some(ChooseImperativeAst::DamageSource { source_filter }));
     }
     let mut trial = ctx.clone();
+    let zone_choice = match try_parse_choose_from_zone(lower, &mut trial) {
+        Ok(choice) => choice,
+        Err(_) => {
+            for diagnostic in trial.diagnostics {
+                ctx.push_diagnostic(diagnostic);
+            }
+            return Err(OracleError::new(text, nom::error::ErrorKind::Verify));
+        }
+    };
+    if let Some(ast) = zone_choice {
+        *ctx = trial;
+        return Ok(Some(ast));
+    }
     let selected = if super::parse_hand_choice_command(lower).is_ok() {
         super::parse_hand_choice_filter(lower, &mut trial)
             .map_err(|_| OracleError::new(text, nom::error::ErrorKind::Verify))?
@@ -4836,11 +4882,74 @@ pub(super) fn parse_choose_ast<'a>(
     Ok(ast)
 }
 
+pub(super) fn parse_additional_kicker_target(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = (
+        tag::<_, _, OracleError<'_>>("choose "),
+        tag("another "),
+        tag("target "),
+        tag("for each "),
+    )
+        .parse(input)?;
+    crate::parser::oracle_nom::quantity::parse_kicker_count_time_clause(rest.trim_end_matches('.'))
+}
+
 fn parse_choose_ast_inner(
     text: &str,
     lower: &str,
     ctx: &mut ParseContext,
 ) -> Option<ChooseImperativeAst> {
+    let mut tentative = ctx.clone();
+    if let Some((_, after_choose)) =
+        nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input))
+    {
+        let (target, remainder, syntax) =
+            crate::parser::oracle_target::parse_target_with_syntax(after_choose, &mut tentative);
+        if matches!(target, TargetFilter::Any)
+            && syntax == crate::parser::oracle_target::TargetSyntax::TargetKeyword
+        {
+            if let Ok((extension, _)) =
+                alt((tag::<_, _, OracleError<'_>>(", then "), tag(" then "))).parse(remainder)
+            {
+                if let Ok((_, qty)) =
+                    parse_additional_kicker_target(&extension.to_ascii_lowercase())
+                {
+                    *ctx = tentative;
+                    return Some(ChooseImperativeAst::TargetOnly {
+                        target,
+                        multi_target: Some(MultiTargetSpec::exact(QuantityExpr::Sum {
+                            exprs: vec![
+                                QuantityExpr::Fixed { value: 1 },
+                                QuantityExpr::Ref { qty },
+                            ],
+                        })),
+                    });
+                }
+            }
+        }
+    }
+    if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
+        value(
+            (),
+            alt((
+                tag::<_, _, OracleError<'_>>("that opponent chooses "),
+                tag("its controller chooses "),
+            )),
+        )
+        .parse(input)
+    }) {
+        let mut tentative = ctx.clone();
+        let (target, remaining) = parse_target_with_ctx(rest, &mut tentative);
+        if remaining.trim_end_matches('.').trim().is_empty()
+            && !matches!(target, TargetFilter::Any | TargetFilter::None)
+        {
+            tentative.target_chooser = Some(TargetFilter::ParentTargetController);
+            *ctx = tentative;
+            return Some(ChooseImperativeAst::TargetOnly {
+                target,
+                multi_target: None,
+            });
+        }
+    }
     // CR 105.1 + CR 106.5: "choose a color of a permanent you control" / "of a
     // card in your graveyard" (Meteor Crater, Corrupted Grafstone) restricts the
     // color domain to game state that no `ChoiceType` expresses. It is neither a
@@ -4852,10 +4961,6 @@ fn parse_choose_ast_inner(
         .is_ok()
     {
         return None;
-    }
-
-    if let Some(ast) = try_parse_choose_from_zone(lower, ctx) {
-        return Some(ast);
     }
 
     // CR 702.62b + CR 608.2c: "choose a suspended card you own" (Amy Pond) — a
@@ -4995,7 +5100,10 @@ fn parse_choose_ast_inner(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, _) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
-            return Some(ChooseImperativeAst::TargetOnly { target });
+            return Some(ChooseImperativeAst::TargetOnly {
+                target,
+                multi_target: None,
+            });
         }
     }
 
@@ -5285,7 +5393,7 @@ fn try_parse_choose_owned_by_voter(
     let (filter_text, _, _suffix) =
         nom_primitives::scan_preceded(lower, tag::<_, _, E>("owned by the voter"))?;
     let filter_text = filter_text.trim_end();
-    let filter = super::search::parse_search_filter(filter_text, ctx);
+    let filter = super::search::parse_search_filter(filter_text, ctx).ok()?;
     // CR 108.3: Inject ownership filter so choose_from_zone restricts
     // candidates to permanents owned by the scoped player (voter).
     let filter = match filter {
@@ -5687,15 +5795,19 @@ fn parse_choose_card_type_qualifier(input: &str) -> OracleResult<'_, Option<Type
     .parse(input)
 }
 
-fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<ChooseImperativeAst> {
+fn try_parse_choose_from_zone(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Result<Option<ChooseImperativeAst>, String> {
     type E<'a> = OracleError<'a>;
 
-    let (_, choice_text) = alt((
+    let Ok((_, choice_text)) = alt((
         preceded(tag::<_, _, E>("choose "), rest),
         preceded(tag("you choose "), rest),
     ))
-    .parse(lower)
-    .ok()?;
+    .parse(lower) else {
+        return Ok(None);
+    };
 
     // CR 608.2d (override) + CR 701.9b (analogous): "choose ... at random" — the
     // game selects the card(s), not the controller. Captured as a typed
@@ -5716,43 +5828,30 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
     let choice_text_owned = choice_text.replace(" at random", "");
     let choice_text = choice_text_owned.as_str();
 
-    let (filter_prefix, (zone_owner, zones), zone_suffix) =
-        nom_primitives::scan_preceded(choice_text, parse_choose_zone_connector)?;
+    let Some((filter_prefix, (zone_owner, zones), zone_suffix)) =
+        nom_primitives::scan_preceded(choice_text, parse_choose_zone_connector)
+    else {
+        return Ok(None);
+    };
     if filter_prefix.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    // The post-zone suffix ("with mana value 3 or greater") is an optional
-    // search-filter restriction. `parse_search_filter`'s suffix dispatch is
-    // strict: an unmodeled clause ("without blitz", "that hasn't been chosen")
-    // emits a `search-filter-suffix unmatched` TargetFallback diagnostic. Probe
-    // the prefix+suffix on a throwaway context first; only fold the suffix into
-    // the real parse when it classifies cleanly. An unmodeled suffix is dropped
-    // (the type filter still parses) rather than surfacing a false regression.
-    let bare_filter_text = strip_choose_article(filter_prefix.trim())?.to_string();
+    // The complete post-zone restriction belongs to this selection. An
+    // unmodeled suffix cannot grant a broader zone choice.
+    let Some(bare_filter_text) = strip_choose_article(filter_prefix.trim()) else {
+        return Ok(None);
+    };
+    let bare_filter_text = bare_filter_text.to_string();
     let suffix = zone_suffix.trim();
     let filter_text = if suffix.is_empty() {
         bare_filter_text
     } else {
-        let with_suffix = format!("{bare_filter_text} {suffix}");
-        let mut probe = ParseContext::default();
-        super::search::parse_search_filter(&with_suffix, &mut probe);
-        let suffix_classified = !probe.diagnostics.iter().any(|d| {
-            matches!(
-                d,
-                OracleDiagnostic::TargetFallback { context, .. }
-                    if context == "search-filter-suffix unmatched"
-            )
-        });
-        if suffix_classified {
-            with_suffix
-        } else {
-            bare_filter_text
-        }
+        format!("{bare_filter_text} {suffix}")
     };
 
-    let filter = super::search::parse_search_filter(&filter_text, ctx);
-    Some(ChooseImperativeAst::FromZone {
+    let filter = super::search::parse_search_filter(&filter_text, ctx)?;
+    Ok(Some(ChooseImperativeAst::FromZone {
         count: 1,
         zones,
         zone_owner,
@@ -5761,7 +5860,7 @@ fn try_parse_choose_from_zone(lower: &str, ctx: &mut ParseContext) -> Option<Cho
         up_to: false,
         selection,
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
-    })
+    }))
 }
 
 /// CR 101.4 + CR 608.2c: "For each player, choose a `<filter>` card in that
@@ -5798,7 +5897,7 @@ pub(super) fn parse_for_each_player_choose_from_zone(
         up_to,
         selection,
         candidate_source,
-    }) = try_parse_choose_from_zone(body, ctx)
+    }) = try_parse_choose_from_zone(body, ctx).ok()?
     {
         return Some(ChooseImperativeAst::FromZone {
             count,
@@ -5893,7 +5992,7 @@ fn parse_controlled_battlefield_body(
         return None;
     }
 
-    let mut filter = super::search::parse_search_filter(type_phrase, ctx);
+    let mut filter = super::search::parse_search_filter(type_phrase, ctx).ok()?;
     if matches!(filter, TargetFilter::Any) {
         return None;
     }
@@ -6076,7 +6175,10 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         {
             return qualifier_gap();
         }
-        Some(super::search::parse_search_filter(type_phrase, ctx))
+        match super::search::parse_search_filter(type_phrase, ctx) {
+            Ok(filter) => Some(filter),
+            Err(_) => return qualifier_gap(),
+        }
     };
 
     let choose = Effect::ChooseFromZone {
@@ -6712,7 +6814,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
         ChooseImperativeAst::DamageSource { source_filter } => {
             Effect::ChooseDamageSource { source_filter }
         }
-        ChooseImperativeAst::TargetOnly { target } => Effect::TargetOnly { target },
+        ChooseImperativeAst::TargetOnly { target, .. } => Effect::TargetOnly { target },
         // A bare `Effect` cannot hold both choices, so this entry point fails
         // closed with the printed clause; the chain lowering emits both.
         ChooseImperativeAst::ObjectAndPlayer { clause, .. } => {
@@ -10554,6 +10656,16 @@ pub(super) fn parse_destroy_target_core<'a>(
         .parse(&lower[lower.len() - rest.len()..])
         .is_ok();
     let mut tentative = ctx.clone();
+    if let Some((_, _)) = parse_chosen_destroy_spec(text) {
+        return Some((
+            ZoneCounterImperativeAst::Destroy {
+                target: TargetFilter::ParentTarget,
+                all: false,
+            },
+            &text[text.len()..],
+            tentative,
+        ));
+    }
     // CR 608.2k: preserve the typed trigger/pronoun binding supplied by the caller.
     let (target, rem) = parse_target_with_ctx(rest, &mut tentative);
     let phrase = &rest[..rest.len() - rem.len()];
@@ -15854,6 +15966,16 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
         // instructions are followed in order; later text may modify earlier
         // text).
         ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::TargetOnly {
+                target,
+                multi_target,
+            },
+        )) => {
+            let mut clause = parsed_clause(Effect::TargetOnly { target });
+            clause.multi_target = multi_target;
+            clause
+        }
+        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
             ChooseImperativeAst::TwoTargets {
                 target_a,
                 target_a_multi_target,
@@ -18553,7 +18675,7 @@ mod tests {
         let ast =
             try_parse_choose_counter_on_target("a counter on target permanent or suspended card.")
                 .expect("counter-on-target designation must parse");
-        let ChooseImperativeAst::TargetOnly { target } = ast else {
+        let ChooseImperativeAst::TargetOnly { target, .. } = ast else {
             panic!("expected TargetOnly, got {ast:?}");
         };
         let TargetFilter::Or { filters } = target else {
@@ -24807,7 +24929,7 @@ mod tests {
         let result = parse_choose_ast(text, &lower, &mut ParseContext::default())
             .expect("checked parser admission");
         match result {
-            Some(ChooseImperativeAst::TargetOnly { target }) => {
+            Some(ChooseImperativeAst::TargetOnly { target, .. }) => {
                 // Should extract creature filter with controller
                 assert!(
                     matches!(target, TargetFilter::Typed { .. }),

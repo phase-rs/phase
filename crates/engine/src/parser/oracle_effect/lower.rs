@@ -2429,7 +2429,7 @@ pub(super) fn target_choice_timing_for_parsed(
             selection: _,
         } if attachment.is_context_ref()
             && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
-            && target.denotes_battlefield_objects()
+            && (target.denotes_battlefield_objects() || target.denotes_player_target())
             && nom_primitives::scan_contains(&lower, "attach ") =>
         {
             true
@@ -10304,7 +10304,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
                     return Some((
                         Effect::DealDamage {
                             amount: qty,
-                            target: TargetFilter::SourceChosenPlayer,
+                            target: local_declared_player_damage_target(ctx)
+                                .unwrap_or(TargetFilter::SourceChosenPlayer),
                             damage_source: None,
                             excess: None,
                         },
@@ -10582,7 +10583,8 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
         return Some((
             Effect::DealDamage {
                 amount: amount.clone(),
-                target: TargetFilter::SourceChosenPlayer,
+                target: local_declared_player_damage_target(ctx)
+                    .unwrap_or(TargetFilter::SourceChosenPlayer),
                 damage_source: None,
                 excess: None,
             },
@@ -10661,7 +10663,6 @@ pub(super) fn try_parse_damage_with_remainder<'a>(
     }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
-    let rem = trim_dangling_target_word(rem);
     Some((
         Effect::DealDamage {
             amount,
@@ -10750,7 +10751,6 @@ fn try_parse_each_source_power_damage<'a>(
             let (target, rem) = parse_target_with_ctx(recipient_text, ctx);
             refine_damage_target_remainder(target, rem)
         };
-    let rem = trim_dangling_target_word(rem);
 
     Some((
         Effect::DealDamage {
@@ -10844,10 +10844,19 @@ fn resolve_player_anaphor_damage_recipient(
     }
 }
 
-/// CR 607.2d + CR 608.2c + CR 120.1: In damage-recipient grammar, singular
-/// "the chosen player" refers to the source object's linked persisted choice
-/// (Stuffy Doll class). Kept local to damage parsing so generic target parsing
-/// preserves selected-set and resolution-scoped chosen-player meanings.
+/// Prefer an actual local player declaration in this resolving body.
+fn local_declared_player_damage_target(ctx: &ParseContext) -> Option<TargetFilter> {
+    match ctx.declared_player_scope.as_ref() {
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            Some(TargetFilter::DeclaredPlayer { group: *group })
+        }
+        _ => ctx.enclosing_declared_player.clone(),
+    }
+}
+
+/// CR 607.2d + CR 608.2c + CR 120.1: without a local declaration, singular
+/// "the chosen player" can read the source's linked persisted choice
+/// (Stuffy Doll class). Keep that fallback local to damage grammar.
 fn parse_source_chosen_player_damage_target(input: &str) -> bool {
     let lower = input.trim().trim_end_matches('.').to_lowercase();
     let parsed = nom::combinator::all_consuming(value(
@@ -10857,28 +10866,6 @@ fn parse_source_chosen_player_damage_target(input: &str) -> bool {
     .parse(lower.as_str())
     .is_ok();
     parsed
-}
-
-/// CR 115.1: `parse_target_with_ctx` consumes "another " but leaves the bare
-/// noun "target" in the remainder when no type word follows ("another target,"
-/// — Cone of Flame's continuation segments). The trailing word is structural
-/// punctuation between the target phrase and the next clause boundary; strip
-/// it so downstream chain detection lines up the comma boundary cleanly.
-pub(super) fn trim_dangling_target_word(rem: &str) -> &str {
-    let trimmed = rem.trim_start_matches([' ']);
-    let lower = trimmed.to_lowercase();
-    if let Ok((rest_lower, _)) = tag::<_, _, OracleError<'_>>("target").parse(lower.as_str()) {
-        // Boundary check: the "target" must be a complete word (followed by
-        // EOF, comma, period, or whitespace). Otherwise we'd corrupt phrases
-        // like "targeted" / "targets" that legitimately start the remainder.
-        if rest_lower.is_empty()
-            || rest_lower.starts_with([',', '.'])
-            || rest_lower.starts_with(char::is_whitespace)
-        {
-            return &trimmed["target".len()..];
-        }
-    }
-    rem
 }
 
 /// CR 107.1a: A `, rounded up` / `, rounded down` qualifier may appear

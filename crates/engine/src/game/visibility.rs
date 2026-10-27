@@ -20,6 +20,10 @@ const HIDDEN_CARD_NAME: &str = "Hidden Card";
 /// The engine retains it for the active loop, while clients need only the
 /// public prompt and the card identities they are otherwise allowed to see.
 fn redact_parent_target_iteration_members(ability: &mut crate::types::ability::ResolvedAbility) {
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        redact_parent_target_iteration_members(child);
+    }
+    ability.context.chosen_group_targets.clear();
     ability.context.damage_source_choice = None;
     ability.context.damage_opportunity = None;
     ability.context.counter_removal_result = None;
@@ -4502,7 +4506,11 @@ fn redact_ability_payment(
     ability: &mut crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) {
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        redact_ability_payment(child, hidden_ids);
+    }
     ability.clear_return_result_process_recursive();
+    ability.context.chosen_group_targets.clear();
     ability.context.counter_removal_result = None;
     if let Some(context) = ability.trigger_source.as_mut() {
         redact_source_context_hidden_members(context, hidden_ids);
@@ -4533,10 +4541,15 @@ fn ability_payment_names_hidden_source(
     ability: &crate::types::ability::ResolvedAbility,
     hidden_ids: &HashSet<ObjectId>,
 ) -> bool {
-    ability
-        .trigger_source
-        .as_ref()
-        .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
+    !ability.context.chosen_group_targets.is_empty()
+        || ability
+            .coin_branch_target_abilities
+            .iter()
+            .any(|(_, child)| ability_payment_names_hidden_source(child, hidden_ids))
+        || ability
+            .trigger_source
+            .as_ref()
+            .is_some_and(|context| source_context_names_hidden_member(context, hidden_ids))
         || ability
             .sub_ability
             .as_deref()
@@ -4764,8 +4777,14 @@ fn redact_raw_result_static(definition: &mut crate::types::ability::StaticDefini
     definition.clear_embedded_return_result_processes();
 }
 
-fn redact_raw_result_replacement(definition: &mut crate::types::ability::ReplacementDefinition) {
+fn redact_raw_result_replacement(
+    definition: &mut crate::types::ability::ReplacementDefinition,
+    hidden_ids: &HashSet<ObjectId>,
+) {
     definition.clear_embedded_return_result_processes();
+    if let Some(rider) = definition.runtime_execute.as_deref_mut() {
+        redact_ability_payment(rider, hidden_ids);
+    }
 }
 
 fn redact_raw_result_copiable(values: &mut crate::types::ability::CopiableValues) {
@@ -4831,11 +4850,11 @@ fn redact_object_result_payloads(
     }
     for index in 0..object.replacement_definitions.len() {
         if let Some(definition) = object.replacement_definitions.get_mut(index) {
-            redact_raw_result_replacement(definition);
+            redact_raw_result_replacement(definition, hidden_ids);
         }
     }
     for definition in Arc::make_mut(&mut object.base_replacement_definitions) {
-        redact_raw_result_replacement(definition);
+        redact_raw_result_replacement(definition, hidden_ids);
     }
     if let Some(face) = &mut object.back_face {
         face.clear_embedded_return_result_processes();
@@ -4873,11 +4892,11 @@ fn redact_object_result_payloads(
         }
         for index in 0..cleave.replacements.len() {
             if let Some(definition) = cleave.replacements.get_mut(index) {
-                redact_raw_result_replacement(definition);
+                redact_raw_result_replacement(definition, hidden_ids);
             }
         }
         for definition in Arc::make_mut(&mut cleave.base_replacements) {
-            redact_raw_result_replacement(definition);
+            redact_raw_result_replacement(definition, hidden_ids);
         }
     }
     if let Some(cleave) = &mut object.cleave_variant {
@@ -4891,7 +4910,7 @@ fn redact_object_result_payloads(
             redact_raw_result_static(definition);
         }
         for definition in &mut cleave.replacements {
-            redact_raw_result_replacement(definition);
+            redact_raw_result_replacement(definition, hidden_ids);
         }
     }
 }
@@ -5013,6 +5032,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     for (_, departed) in state.departed_stack_spells.iter_mut() {
         for (_, departed) in departed.iter_mut() {
             redact_object_result_payloads(&mut departed.object, hidden_ids);
+            if let Some(ability) = departed.entry.ability_mut() {
+                redact_ability_payment(ability, hidden_ids);
+            }
         }
     }
     if let Some(authority) = state.entering_aura_authority.as_mut() {
@@ -5055,7 +5077,7 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
         redact_ability_payment(&mut epic.spell, hidden_ids);
     }
     for replacement in &mut state.pending_damage_replacements {
-        redact_raw_result_replacement(replacement);
+        redact_raw_result_replacement(replacement, hidden_ids);
         if let Some(rider) = replacement.runtime_execute.as_deref_mut() {
             redact_ability_payment(rider, hidden_ids);
         }
@@ -16036,5 +16058,146 @@ mod sought_result_privacy_tests {
         let mut runner =
             crate::game::scenario::GameRunner::from_state(loaded.into_game_state().unwrap());
         crate::game::effects::seek::tests::finish_sought_pause(&mut runner, &cards);
+    }
+}
+
+#[cfg(test)]
+mod chosen_group_privacy_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{
+        ChosenGroupId, Effect, ReplacementDefinition, ResolvedAbility, TargetRef,
+    };
+    use crate::types::game_state::{DepartedStackSpell, StackEntry, StackEntryKind};
+    use crate::types::identifiers::ObjectIncarnationRef;
+    use crate::types::replacements::ReplacementEvent;
+
+    #[test]
+    fn map_only_retained_riders_and_departed_entries_clear_in_every_display_envelope() {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        let source = scenario.add_creature(P0, "Public source", 2, 2).id();
+        let mut state = scenario.build().state().clone();
+        let private_id = ObjectId(9_991_991);
+        let mut ability =
+            ResolvedAbility::new(Effect::NoOp, vec![TargetRef::Player(P1)], source, P0);
+        ability.context.chosen_group_targets = vec![
+            (
+                ChosenGroupId(17),
+                vec![(
+                    TargetRef::Object(private_id),
+                    Some(ObjectIncarnationRef::of(private_id, 811)),
+                )],
+            ),
+            (ChosenGroupId(18), Vec::new()),
+        ];
+        let custody = ability.clone();
+        ability.effect = Effect::FlipCoins {
+            flips: crate::types::ability::CoinFlipRun::single(),
+            win_effect: Some(Box::new(crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::NoOp,
+            ))),
+            lose_effect: None,
+            flipper: crate::types::ability::TargetFilter::Controller,
+        };
+        ability.coin_branch_target_abilities = vec![(
+            crate::types::ability::CoinFlipResult::Won,
+            Box::new(custody),
+        )];
+        ability.sub_ability = Some(Box::new(ability.clone()));
+        let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .runtime_execute(ability.clone());
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions = vec![replacement.clone()].into();
+        state.pending_damage_replacements.push(replacement);
+        let entry = StackEntry {
+            id: ObjectId(81),
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability.clone()),
+            },
+        };
+        state.stack.push_back(entry.clone());
+        state
+            .departed_stack_spells
+            .entry(source)
+            .or_default()
+            .insert(
+                0,
+                DepartedStackSpell {
+                    entry,
+                    object: Box::new(state.objects[&source].clone()),
+                },
+            );
+        let original = serde_json::to_value(&state).unwrap();
+        assert!(original.to_string().contains("chosen_group_targets"));
+        for viewer in [Some(P0), Some(P1), Some(PlayerId(2)), None] {
+            let filtered = viewer.map_or_else(
+                || filter_state_for_unseated_viewer(&state),
+                |viewer| filter_state_for_viewer(&state, viewer),
+            );
+            assert_eq!(
+                filtered.stack.front().unwrap().ability().unwrap().targets,
+                ability.targets
+            );
+            assert_eq!(filtered.waiting_for, state.waiting_for);
+            for value in [
+                serde_json::to_value(&filtered).unwrap(),
+                serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+                    &state, viewer,
+                ))
+                .unwrap(),
+                serde_json::to_value(
+                    crate::game::derived_views::ClientGameStateRef::wrap_filtered(
+                        &state, &filtered, viewer,
+                    ),
+                )
+                .unwrap(),
+            ] {
+                assert!(
+                    !value.to_string().contains("chosen_group_targets"),
+                    "map-only selector reach for {viewer:?}"
+                );
+                assert!(!value.to_string().contains("9991991"));
+            }
+        }
+        for loaded in [
+            serde_json::from_value::<GameState>(original.clone()).unwrap(),
+            serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        ] {
+            assert_eq!(
+                loaded
+                    .stack
+                    .front()
+                    .unwrap()
+                    .ability()
+                    .unwrap()
+                    .context
+                    .chosen_group_targets,
+                ability.context.chosen_group_targets
+            );
+            assert_eq!(
+                loaded.departed_stack_spells[&source][&0]
+                    .entry
+                    .ability()
+                    .unwrap()
+                    .context
+                    .chosen_group_targets,
+                ability.context.chosen_group_targets
+            );
+        }
+        assert_eq!(serde_json::to_value(state).unwrap(), original);
     }
 }

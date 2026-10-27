@@ -1,4 +1,5 @@
-//! Integration tests for curse cards with miscellaneous trigger patterns.
+//! Constructed Curse trigger fixtures with miscellaneous trigger patterns.
+//! The isolated historical bodies below are not complete current Oracle faces.
 //!
 //! Covers 4 curses with varied trigger conditions:
 //!   - Curse of Clinging Webs (creature enchanted player controls dies → exile + Spider)
@@ -24,7 +25,7 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 // ---------------------------------------------------------------------------
-// Oracle texts
+// Constructed trigger bodies; preserve these isolated payoff assertions.
 // ---------------------------------------------------------------------------
 
 const CURSE_OF_CLINGING_WEBS: &str =
@@ -75,6 +76,10 @@ fn curse_of_clinging_webs_fires_when_enchanted_players_creature_dies() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -120,6 +125,10 @@ fn curse_of_clinging_webs_does_not_fire_for_non_enchanted_player() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -167,6 +176,10 @@ fn curse_of_fools_wisdom_fires_when_enchanted_player_draws() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -212,6 +225,10 @@ fn curse_of_obsession_fires_at_draw_step() {
             scenario.add_creature_from_oracle(P0, "Curse of Obsession", 0, 0, CURSE_OF_OBSESSION);
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -276,6 +293,10 @@ fn fraying_sanity_mills_cards_put_into_graveyard_this_turn() {
             scenario.add_creature_from_oracle(P0, "Fraying Sanity", 0, 0, FRAYING_SANITY);
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 

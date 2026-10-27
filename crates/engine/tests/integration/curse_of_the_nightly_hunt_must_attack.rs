@@ -54,6 +54,10 @@ fn curse_of_the_nightly_hunt_forces_enchanted_players_creatures_to_attack() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -101,6 +105,10 @@ fn curse_of_the_nightly_hunt_requirement_ends_when_source_leaves() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -151,6 +159,10 @@ fn curse_of_the_nightly_hunt_controller_not_forced_during_own_combat() {
         );
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 

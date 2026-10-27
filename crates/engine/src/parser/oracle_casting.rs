@@ -261,6 +261,34 @@ pub(crate) fn parse_spell_casting_option_line(
         })
 }
 
+/// CR 118.9: an alternative-cost instruction stays a casting instruction
+/// even when its payment cannot be represented by the cost parser.
+pub(crate) fn is_self_alternative_cost_line(text: &str) -> bool {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, body) = split_leading_if_clause(&lower);
+    alt((
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("rather than pay this spell's mana cost, "),
+                tag("you may "),
+                nom::combinator::rest,
+            ),
+        ),
+        value(
+            (),
+            (
+                tag("you may "),
+                take_until(" rather than pay this spell's mana cost"),
+                tag(" rather than pay this spell's mana cost"),
+                nom::combinator::rest,
+            ),
+        ),
+    ))
+    .parse(body)
+    .is_ok()
+}
+
 fn split_leading_if_clause(text: &str) -> (Option<&str>, &str) {
     let trimmed = text.trim();
     let lower = trimmed.to_lowercase();
@@ -1030,6 +1058,27 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::zones::Zone;
+
+    #[test]
+    fn reordered_alternative_cost_is_owned_as_a_whole_casting_instruction() {
+        let text = "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.";
+        assert!(is_self_alternative_cost_line(text));
+        assert!(
+            parse_spell_casting_option_line(text, "Reverent Silence").is_none(),
+            "unsupported payment cannot become a free option"
+        );
+        assert!(!is_self_alternative_cost_line(
+            "If you control a Forest, each other player gains 6 life."
+        ));
+        assert!(!is_self_alternative_cost_line("Destroy all enchantments."));
+        let ordinary = "You may pay {1} rather than pay this spell's mana cost.";
+        assert!(is_self_alternative_cost_line(ordinary));
+        assert!(parse_spell_casting_option_line(
+            ordinary,
+            "Constructed paid alternate-cost witness"
+        )
+        .is_some());
+    }
 
     #[test]
     fn cant_spend_mana_to_cast_this_spell_parses() {

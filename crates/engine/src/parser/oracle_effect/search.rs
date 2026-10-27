@@ -71,7 +71,23 @@ fn scan_preceded<'a, T>(
 pub(super) fn parse_search_library_details(
     lower: &str,
     ctx: &mut ParseContext,
-) -> SearchLibraryDetails {
+) -> Result<SearchLibraryDetails, String> {
+    let mut tentative = ctx.clone();
+    let result = parse_search_library_details_inner(lower, &mut tentative);
+    if result.is_ok() {
+        *ctx = tentative;
+    } else {
+        for diagnostic in tentative.diagnostics {
+            ctx.push_diagnostic(diagnostic);
+        }
+    }
+    result
+}
+
+fn parse_search_library_details_inner(
+    lower: &str,
+    ctx: &mut ParseContext,
+) -> Result<SearchLibraryDetails, String> {
     let reveal = scan_contains_phrase(lower, "reveal");
 
     // CR 701.23a: Detect "search target opponent's/player's library" patterns.
@@ -145,10 +161,9 @@ pub(super) fn parse_search_library_details(
         match (any_number_tail, up_to_match, for_match, for_that_many_match) {
             (Some(off), _, _, _) => (QuantityExpr::Fixed { value: i32::MAX }, Some(off), true),
             (None, Some((expr, off)), _, _) => (expr, Some(off), true),
-            (None, None, Some((expr, _)), _) => (expr, None, false),
-            // CR 608.2c: exact anaphoric count — keep the offset so the trailing type
-            // phrase is parsed into the filter (unlike the numeric `for` path, whose
-            // pre-existing filter handling is intentionally left unchanged here).
+            (None, None, Some((expr, off)), _) => (expr, Some(off), false),
+            // Exact anaphoric counts retain the descriptor offset, like the
+            // numeric count path above.
             (None, None, None, Some((expr, off))) => (expr, Some(off), false),
             (None, None, None, None) => (QuantityExpr::Fixed { value: 1 }, None, false),
         };
@@ -164,11 +179,11 @@ pub(super) fn parse_search_library_details(
         // "for up to five creature cards" or "for any number of dragon creature cards"
         // — type text starts after the number / quantity phrase. Multi-filter is
         // not supported for explicit-count searches (grammar always uses "a X and a Y").
-        (parse_search_filter(&lower[type_start..], ctx), Vec::new())
+        (parse_search_filter(&lower[type_start..], ctx)?, Vec::new())
     } else if let Some(after_for) = strip_after(lower, "for a ") {
-        parse_search_filter_with_extras(after_for, ctx)
+        parse_search_filter_with_extras(after_for, ctx)?
     } else if let Some(after_for) = strip_after(lower, "for an ") {
-        parse_search_filter_with_extras(after_for, ctx)
+        parse_search_filter_with_extras(after_for, ctx)?
     } else {
         (TargetFilter::Any, Vec::new())
     };
@@ -211,7 +226,7 @@ pub(super) fn parse_search_library_details(
         None
     };
 
-    SearchLibraryDetails {
+    Ok(SearchLibraryDetails {
         filter,
         count,
         reveal,
@@ -226,7 +241,7 @@ pub(super) fn parse_search_library_details(
         // CR 701.23a: Library-only unless the text names a multi-zone set
         // ("graveyard, hand, and/or library").
         source_zones: classify_search_zone_list(lower),
-    }
+    })
 }
 
 fn scan_total_mana_value_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
@@ -438,7 +453,7 @@ fn parse_search_selection_quality(
 fn parse_search_filter_with_extras(
     tail: &str,
     ctx: &mut ParseContext,
-) -> (TargetFilter, Vec<TargetFilter>) {
+) -> Result<(TargetFilter, Vec<TargetFilter>), String> {
     // structural: not dispatch — bound the filter region at the first action
     // clause or sentence terminator before running the conjunction combinator,
     // so `" and "` inside e.g. `"put it onto the battlefield, then ..."` can't
@@ -446,7 +461,7 @@ fn parse_search_filter_with_extras(
     let filter_region = search_filter_region(tail);
 
     if let Some(filters) = parse_each_basic_land_type_search_filters(filter_region) {
-        return filters;
+        return Ok(filters);
     }
 
     // CR 701.23a: A disjunctive series ("a X card, a Y card, or a Z card")
@@ -456,7 +471,7 @@ fn parse_search_filter_with_extras(
     // None for <2 disjunction segments, so "and"-lists and single filters fall
     // through to the conjunction path unchanged.
     if let Some(or_filter) = parse_search_filter_disjunction(tail, ctx) {
-        return (or_filter, Vec::new());
+        return Ok((or_filter, Vec::new()));
     }
 
     // Split on `" and a "` / `" and an "` / `" and basic "` at filter-region
@@ -464,15 +479,15 @@ fn parse_search_filter_with_extras(
     // the downstream filter parser sees e.g. `"basic plains card"` intact.
     let segments = split_filter_conjunctions(filter_region);
     if segments.len() < 2 {
-        return (parse_search_filter(tail, ctx), Vec::new());
+        return Ok((parse_search_filter(tail, ctx)?, Vec::new()));
     }
 
-    let primary = parse_search_filter(segments[0], ctx);
+    let primary = parse_search_filter(segments[0], ctx)?;
     let extras: Vec<TargetFilter> = segments[1..]
         .iter()
         .map(|segment| parse_search_filter(segment, ctx))
-        .collect();
-    (primary, extras)
+        .collect::<Result<_, _>>()?;
+    Ok((primary, extras))
 }
 
 fn parse_each_basic_land_type_search_filters(
@@ -729,13 +744,13 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> Option<
     // an unresolved restriction through diagnostic deduplication.
     let mut tentative = ctx.clone();
     let prior_diagnostics = std::mem::take(&mut tentative.diagnostics);
-    let (filter, extra_filters) = parse_search_filter_with_extras(remaining, &mut tentative);
+    let parsed = parse_search_filter_with_extras(remaining, &mut tentative);
     let unresolved = tentative
         .diagnostics
         .iter()
         .any(|diagnostic| matches!(diagnostic, OracleDiagnostic::TargetFallback { .. }));
     let diagnostics = std::mem::replace(&mut tentative.diagnostics, prior_diagnostics);
-    if unresolved {
+    if unresolved || parsed.is_err() {
         for diagnostic in diagnostics {
             ctx.push_diagnostic(diagnostic);
         }
@@ -745,6 +760,7 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> Option<
         tentative.push_diagnostic(diagnostic);
     }
     *ctx = tentative;
+    let (filter, extra_filters) = parsed.ok()?;
 
     Some(SeekDetails {
         filter,
@@ -795,24 +811,51 @@ fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
 
 /// Parse the card type filter from search text like "basic land card, ..."
 /// or "creature card with ..." into a TargetFilter.
-pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+pub(crate) fn parse_search_filter(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> Result<TargetFilter, String> {
+    let mut tentative = ctx.clone();
+    let parsed = parse_search_filter_inner(text, &mut tentative);
+    if parsed.is_ok() {
+        *ctx = tentative;
+    } else {
+        for diagnostic in tentative.diagnostics {
+            ctx.push_diagnostic(diagnostic);
+        }
+    }
+    parsed
+}
+
+fn parse_search_filter_inner(text: &str, ctx: &mut ParseContext) -> Result<TargetFilter, String> {
     let type_text = search_filter_region(text).trim();
+    // A committed named-list connective cannot become part of a made-up
+    // literal name when one of its operands is absent.
+    if let Ok((name, _)) = tag::<_, _, OracleError<'_>>("card named ").parse(type_text) {
+        let dangling = nom_primitives::scan_preceded(name, |input| {
+            all_consuming(alt((tag::<_, _, OracleError<'_>>("or"), tag("or ")))).parse(input)
+        })
+        .is_some();
+        if name.is_empty() || dangling || tag::<_, _, OracleError<'_>>("or ").parse(name).is_ok() {
+            return Err(type_text.to_string());
+        }
+    }
 
     if let Some(filter) = parse_search_filter_color_disjunction(type_text, ctx) {
-        return filter;
+        return Ok(filter);
     }
 
     if let Some(filter) = parse_search_filter_disjunction(type_text, ctx) {
-        return filter;
+        return Ok(filter);
     }
 
     if let Some(filter) = parse_search_filter_leading_property_stack(type_text, ctx) {
-        return filter;
+        return Ok(filter);
     }
 
     if let Ok((rest, filter)) = parse_card_with_highest_mana_value_library_filter(type_text) {
         if rest.trim().is_empty() {
-            return filter;
+            return Ok(filter);
         }
     }
 
@@ -821,7 +864,7 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     // before the type-phrase attempt so "card" isn't mistaken for a type word
     // and the name isn't dropped by the fallback path.
     if let Some(filter) = parse_search_named_filter(type_text) {
-        return filter;
+        return Ok(filter);
     }
 
     let (parsed_filter, remainder) =
@@ -829,15 +872,18 @@ pub(crate) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
         let linked_reference = last_shared_quality_reference_in_filter(&parsed_filter);
-        parse_search_filter_suffixes(remainder, &mut suffix, ctx, linked_reference);
-        return apply_search_suffix_constraints(normalize_search_filter(parsed_filter), &suffix);
+        parse_search_filter_suffixes(remainder, &mut suffix, ctx, linked_reference)?;
+        return Ok(apply_search_suffix_constraints(
+            normalize_search_filter(parsed_filter),
+            &suffix,
+        ));
     }
 
     let type_text = strip_search_card_suffix(type_text);
 
     // Intentional: "a card" means any card type — no warning needed.
     if type_text == "card" || type_text.is_empty() {
-        return TargetFilter::Any;
+        return Ok(TargetFilter::Any);
     }
 
     let (is_basic, clean) = if let Some(rest) = type_text.strip_prefix("basic ") {
@@ -1032,7 +1078,7 @@ fn parse_search_filter_color_disjunction(
     let (rest, second_color) = nom_primitives::parse_color.parse(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
-    let base_filter = parse_search_filter(rest, ctx);
+    let base_filter = parse_search_filter(rest, ctx).ok()?;
     if !search_filter_has_meaningful_content(&base_filter) {
         return None;
     }
@@ -1067,7 +1113,7 @@ fn parse_search_filter_leading_property_stack(
         return None;
     }
 
-    let filter = parse_search_filter(remaining, ctx);
+    let filter = parse_search_filter(remaining, ctx).ok()?;
     search_filter_has_meaningful_content(&filter).then(|| {
         apply_search_suffix_constraints(
             filter,
@@ -1123,7 +1169,11 @@ fn parse_search_filter_disjunction(text: &str, ctx: &mut ParseContext) -> Option
     let filters = if segments.len() >= 2 {
         segments
             .into_iter()
-            .flat_map(|s| match parse_search_filter(s, ctx) {
+            .map(|s| parse_search_filter(s, ctx))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?
+            .into_iter()
+            .flat_map(|filter| match filter {
                 TargetFilter::Or { filters } => filters,
                 filter => vec![filter],
             })
@@ -1534,11 +1584,12 @@ fn parse_search_filter_fallback(
     suffix_text: &str,
     is_basic: bool,
     ctx: &mut ParseContext,
-) -> TargetFilter {
-    let suffix = build_search_suffix_constraints(suffix_text, is_basic, ctx);
+) -> Result<TargetFilter, String> {
+    let suffix = build_search_suffix_constraints(suffix_text, is_basic, ctx)?;
     let filter = parse_search_builtin_type_word(type_word)
-        .unwrap_or_else(|| parse_search_specialized_type_word(type_word, ctx));
-    apply_search_suffix_constraints(filter, &suffix)
+        .map(Ok)
+        .unwrap_or_else(|| parse_search_specialized_type_word(type_word, ctx))?;
+    Ok(apply_search_suffix_constraints(filter, &suffix))
 }
 
 fn parse_search_builtin_type_word(type_word: &str) -> Option<TargetFilter> {
@@ -1586,7 +1637,10 @@ fn parse_search_builtin_type_word(type_word: &str) -> Option<TargetFilter> {
     rest.is_empty().then_some(filter)
 }
 
-fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -> TargetFilter {
+fn parse_search_specialized_type_word(
+    type_word: &str,
+    ctx: &mut ParseContext,
+) -> Result<TargetFilter, String> {
     let negated_types: &[(&str, TypeFilter)] = &[
         ("noncreature", TypeFilter::Creature),
         ("nonland", TypeFilter::Land),
@@ -1595,39 +1649,41 @@ fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -
     ];
     for &(prefix, ref inner) in negated_types {
         if type_word == prefix {
-            return TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(inner.clone()))));
+            return Ok(TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(
+                Box::new(inner.clone()),
+            ))));
         }
     }
 
     let land_subtypes = ["plains", "island", "swamp", "mountain", "forest"];
     if land_subtypes.contains(&type_word) {
-        return TargetFilter::Typed(TypedFilter::land().subtype(capitalize(type_word)));
+        return Ok(TargetFilter::Typed(
+            TypedFilter::land().subtype(capitalize(type_word)),
+        ));
     }
     if type_word == "equipment" {
-        return TargetFilter::Typed(
+        return Ok(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()),
-        );
+        ));
     }
     if type_word == "aura" {
-        return TargetFilter::Typed(
+        return Ok(TargetFilter::Typed(
             TypedFilter::new(TypeFilter::Enchantment).subtype("Aura".to_string()),
-        );
+        ));
     }
     if type_word == "card" {
-        return TargetFilter::Typed(TypedFilter::default());
+        return Ok(TargetFilter::Typed(TypedFilter::default()));
     }
-    if !type_word.is_empty()
-        && type_word != "card"
-        && type_word != "permanent"
-        && type_word.chars().all(|c| c.is_alphabetic())
-    {
-        return TargetFilter::Typed(TypedFilter::default().subtype(capitalize(type_word)));
+    if let Some((subtype, consumed)) = crate::parser::oracle_util::parse_subtype(type_word) {
+        if consumed == type_word.len() {
+            return Ok(TargetFilter::Typed(TypedFilter::default().subtype(subtype)));
+        }
     }
 
-    let (filter, _) =
+    let (filter, remaining) =
         parse_type_phrase_folding_with_ctx(type_word, &mut ctx.clone_player_antecedents());
-    if !matches!(filter, TargetFilter::Any) {
-        return filter;
+    if !matches!(filter, TargetFilter::Any) && remaining.trim().is_empty() {
+        return Ok(filter);
     }
 
     ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
@@ -1635,7 +1691,7 @@ fn parse_search_specialized_type_word(type_word: &str, ctx: &mut ParseContext) -
         text: type_word.into(),
         line_index: 0,
     });
-    TargetFilter::Any
+    Err(type_word.to_string())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1667,15 +1723,15 @@ fn build_search_suffix_constraints(
     suffix_text: &str,
     is_basic: bool,
     ctx: &mut ParseContext,
-) -> SearchSuffixConstraints {
+) -> Result<SearchSuffixConstraints, String> {
     let mut suffix = SearchSuffixConstraints::default();
     if is_basic {
         suffix.properties.push(FilterProp::HasSupertype {
             value: crate::types::card_type::Supertype::Basic,
         });
     }
-    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx, None);
-    suffix
+    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx, None)?;
+    Ok(suffix)
 }
 
 fn normalize_search_filter(filter: TargetFilter) -> TargetFilter {
@@ -2350,7 +2406,7 @@ fn parse_search_filter_suffixes(
     suffix: &mut SearchSuffixConstraints,
     ctx: &mut ParseContext,
     initial_shared_quality_reference: Option<TargetFilter>,
-) {
+) -> Result<(), String> {
     let lower = text.to_lowercase();
     let mut remaining = lower.as_str();
     let mut last_shared_quality_reference = initial_shared_quality_reference;
@@ -2420,13 +2476,10 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        // Draft-note search filters (Aether Searcher / Smuggler Captain) are
-        // already unsupported by their draft-note abilities. Consume the suffix
-        // here so the search filter does not add a misleading target-fallback
-        // warning on top of the real unsupported draft mechanic.
-        if let Ok((rest, _)) = parse_noted_name_search_suffix(remaining) {
-            remaining = rest.trim_start();
-            continue;
+        // A recognized but unrepresented draft-note restriction cannot grant
+        // an unrestricted search, even when another card item is already red.
+        if parse_noted_name_search_suffix(remaining).is_ok() {
+            return Err(remaining.to_string());
         }
 
         // CR 201.2 + CR 608.2c: "with the same name as that {creature,card,…}" binds to
@@ -2658,7 +2711,7 @@ fn parse_search_filter_suffixes(
                         text: inner_type.into(),
                         line_index: 0,
                     });
-                    TargetFilter::Any
+                    return Err(remaining.to_string());
                 }
             };
             suffix.properties.push(FilterProp::DifferentNameFrom {
@@ -2679,8 +2732,9 @@ fn parse_search_filter_suffixes(
             text: remaining.into(),
             line_index: 0,
         });
-        break;
+        return Err(remaining.to_string());
     }
+    Ok(())
 }
 
 fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
@@ -2827,6 +2881,83 @@ mod tests {
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::{ManaColor, ManaCost};
+
+    #[test]
+    fn complete_qualified_descriptor_failure_is_explicit_and_transactional() {
+        for text in [
+            "legendary team-up creature",
+            "legendary playtest card",
+            "playtest card",
+            "creature card with an unrecognized restriction",
+            "creature card or a mystery card",
+            "card named alpha or",
+            "card named or beta",
+        ] {
+            let mut ctx = ParseContext::default();
+            let before = ctx.clone();
+            assert!(
+                super::parse_search_filter(text, &mut ctx).is_err(),
+                "{text}"
+            );
+            ctx.diagnostics = before.diagnostics.clone();
+            assert_eq!(
+                ctx, before,
+                "failed ownership commits no semantic state: {text}"
+            );
+        }
+        for text in [
+            "card",
+            "creature card",
+            "legendary creature card",
+            "elf card",
+            "card with augment, reveal it",
+        ] {
+            let mut ctx = ParseContext::default();
+            assert!(
+                super::parse_search_filter(text, &mut ctx).is_ok(),
+                "positive complete reach: {text}"
+            );
+            assert!(ctx.diagnostics.is_empty(), "{text}: {:?}", ctx.diagnostics);
+        }
+        let mut ctx = ParseContext::default();
+        let before = ctx.clone();
+        assert!(super::parse_search_library_details("search your library for a creature card and a legendary team-up creature, reveal them, put them into your hand, then shuffle", &mut ctx).is_err());
+        ctx.diagnostics = before.diagnostics.clone();
+        assert_eq!(ctx, before);
+        let complete = super::parse_search_library_details("search your library for two creature cards, reveal them, put them into your hand, then shuffle", &mut ctx).unwrap();
+        assert_eq!(complete.count, QuantityExpr::Fixed { value: 2 });
+        assert!(
+            matches!(complete.filter, TargetFilter::Typed(ref typed) if typed.type_filters.contains(&TypeFilter::Creature))
+        );
+    }
+
+    // Existing positive shape fixtures must remain successful after admission
+    // became fallible. Failure fixtures call the production functions directly.
+    fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+        super::parse_search_filter(text, ctx).expect("complete supported search descriptor")
+    }
+    fn parse_search_library_details(text: &str, ctx: &mut ParseContext) -> SearchLibraryDetails {
+        super::parse_search_library_details(text, ctx).expect("complete supported search")
+    }
+    fn build_search_suffix_constraints(
+        text: &str,
+        basic: bool,
+        ctx: &mut ParseContext,
+    ) -> SearchSuffixConstraints {
+        super::build_search_suffix_constraints(text, basic, ctx).expect("complete supported suffix")
+    }
+    fn parse_search_filter_fallback(
+        text: &str,
+        suffix: &str,
+        basic: bool,
+        ctx: &mut ParseContext,
+    ) -> TargetFilter {
+        super::parse_search_filter_fallback(text, suffix, basic, ctx)
+            .expect("complete supported fallback descriptor")
+    }
+    fn parse_search_specialized_type_word(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+        super::parse_search_specialized_type_word(text, ctx).expect("known complete subtype")
+    }
 
     #[test]
     fn jev_seek_admission_is_transactional_and_preserves_all_axes() {
@@ -3102,15 +3233,15 @@ mod tests {
                 None,
                 "empty members must make the dedicated union parser decline: {malformed:?}"
             );
-            let parsed = parse_search_filter(malformed, &mut ParseContext::default());
+            let parsed = super::parse_search_filter(malformed, &mut ParseContext::default());
             assert!(
-                !matches!(parsed, TargetFilter::Or { .. } | TargetFilter::Any),
+                !matches!(parsed, Ok(TargetFilter::Or { .. } | TargetFilter::Any)),
                 "malformed named list must not broaden into Or/Any: {parsed:?}"
             );
             assert!(
                 !matches!(
                     parsed,
-                    TargetFilter::Typed(TypedFilter { ref properties, .. })
+                    Ok(TargetFilter::Typed(TypedFilter { ref properties, .. }))
                         if properties.iter().any(|property| matches!(property, FilterProp::Named { name } if name.is_empty()))
                 ),
                 "malformed named list must not emit an empty Named branch: {parsed:?}"
@@ -3769,19 +3900,14 @@ mod tests {
         use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 
         let mut ctx = ParseContext::default();
-        let filter = parse_search_filter(
+        let filter = super::parse_search_filter(
             "card with augment and combine it with target host you control",
             &mut ctx,
         );
-        let TargetFilter::Typed(typed) = filter else {
-            panic!("expected Typed filter, got {filter:?}");
-        };
-        assert!(typed.properties.iter().any(|property| matches!(
-            property,
-            FilterProp::HasKeywordKind {
-                value: KeywordKind::Augment
-            }
-        )));
+        assert_eq!(
+            filter,
+            Err("combine it with target host you control".into())
+        );
         assert!(
             ctx.diagnostics
                 .iter()

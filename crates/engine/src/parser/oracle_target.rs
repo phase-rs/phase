@@ -1015,6 +1015,42 @@ pub fn parse_target_with_syntax<'a>(
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
+    // CR 115.4 + CR 601.2c: complete bare target nouns own their word and
+    // explicit distinctness. A following type noun belongs to the typed
+    // production below, so this recognizer never accepts its prefix.
+    if let Some((distinct, rest)) = nom_on_lower(text, &lower, |input| {
+        let (rest, distinct) = alt((
+            value(false, tag::<_, _, OracleError<'_>>("any target")),
+            value(true, tag("another target")),
+            value(
+                true,
+                preceded(
+                    pair(
+                        tag("a "),
+                        alt((tag("second "), tag("third "), tag("fourth "), tag("fifth "))),
+                    ),
+                    tag("target"),
+                ),
+            ),
+            value(false, tag("target")),
+        ))
+        .parse(input)?;
+        let (rest, _) = peek(alt((
+            value((), eof),
+            value((), nom::character::complete::one_of(",.;")),
+            value((), tag(" for each ")),
+        )))
+        .parse(rest)?;
+        Ok((rest, distinct))
+    }) {
+        let filter = if distinct {
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another]))
+        } else {
+            TargetFilter::Any
+        };
+        return (filter, rest, TargetSyntax::TargetKeyword);
+    }
+
     // CR 115.1 + CR 701.9b: Trailing " chosen at random" suffix on a noun-phrase
     // target (e.g. Zaffai, Thunder Conductor — "an opponent chosen at random").
     // This is the noun-phrase analogue of the leading "random target X"
@@ -1035,12 +1071,15 @@ pub fn parse_target_with_syntax<'a>(
         for suffix in [" chosen at random", " at random"] {
             // allow-noncombinator: TextPair::strip_suffix is the dual-string structural API for postnominal qualifier stripping (PATTERNS.md §9).
             if let Some(prefix) = trimmed.strip_suffix(suffix) {
-                ctx.target_selection_mode = TargetSelectionMode::Random;
-                let (filter, _, _) = parse_target_with_syntax(prefix.original, ctx);
-                let filter = use_owner_for_random_non_battlefield_zone(filter);
-                // Return empty remainder — the entire input has been consumed
-                // (prefix + stripped suffix + any trailing punctuation).
-                return (filter, &text[text.len()..], syntax);
+                let mut tentative = ctx.clone();
+                let (filter, remainder, parsed_syntax) =
+                    parse_target_with_syntax(prefix.original, &mut tentative);
+                if remainder.trim().is_empty() {
+                    tentative.target_selection_mode = TargetSelectionMode::Random;
+                    *ctx = tentative;
+                    let filter = use_owner_for_random_non_battlefield_zone(filter);
+                    return (filter, &text[text.len()..], parsed_syntax);
+                }
             }
         }
     }
@@ -1055,14 +1094,70 @@ pub fn parse_target_with_syntax<'a>(
         .parse(after_random)
         .is_ok()
         {
-            ctx.target_selection_mode = TargetSelectionMode::Random;
             let before_original = &text[..before_random.len()];
             let after_original = &text[lower.len() - after_random.len()..];
             let rewritten = format!("{before_original} {after_original}");
-            let (filter, _, _) = parse_target_with_syntax(&rewritten, ctx);
-            let filter = use_owner_for_random_non_battlefield_zone(filter);
-            return (filter, &text[text.len()..], syntax);
+            let mut tentative = ctx.clone();
+            let (filter, remainder, parsed_syntax) =
+                parse_target_with_syntax(&rewritten, &mut tentative);
+            if remainder.trim().is_empty() {
+                tentative.target_selection_mode = TargetSelectionMode::Random;
+                *ctx = tentative;
+                let filter = use_owner_for_random_non_battlefield_zone(filter);
+                return (filter, &text[text.len()..], parsed_syntax);
+            }
         }
+    }
+
+    if ctx.in_trigger && ctx.relative_player_scope == Some(ControllerRef::TriggeringPlayer) {
+        if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+            value(
+                (),
+                (
+                    tag::<_, _, OracleError<'_>>("another "),
+                    tag("target "),
+                    tag("player"),
+                ),
+            )
+            .parse(input)
+        }) {
+            return (
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::TriggeringPlayer),
+                    }),
+                },
+                rest,
+                TargetSyntax::TargetKeyword,
+            );
+        }
+    }
+
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            (
+                tag::<_, _, OracleError<'_>>("another "),
+                opt(tag("one of ")),
+                tag("your opponents"),
+            ),
+        )
+        .parse(input)
+    }) {
+        return (
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Opponent,
+                    TargetFilter::PlayerMatching {
+                        player: Box::new(PlayerFilter::AllExcept {
+                            exclude: Box::new(PlayerFilter::TriggeringPlayer),
+                        }),
+                    },
+                ],
+            },
+            rest,
+            TargetSyntax::Descriptor,
+        );
     }
 
     // Strip leading article ("a "/"an ") before "target" to handle "a target creature".
@@ -3229,6 +3324,31 @@ fn parse_type_phrase_folding_core<'a>(
         if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("target ").parse(&lower[pos..]) {
             pos += "target ".len();
         }
+    }
+
+    // CR 105.2 + CR 608.2c: repeated universal color legs share the following
+    // noun and restrictions. This is one population, including multicolored
+    // objects once, rather than two separate instructions.
+    if let Ok((rest, (first, tail))) = pair(
+        nom_primitives::parse_color,
+        nom::multi::many1(preceded(
+            pair(tag::<_, _, OracleError<'_>>(" and "), tag("all ")),
+            nom_primitives::parse_color,
+        )),
+    )
+    .parse(&lower[pos..])
+    {
+        properties.push(FilterProp::AnyOf {
+            props: std::iter::once(first)
+                .chain(tail)
+                .map(|color| FilterProp::HasColor { color })
+                .collect(),
+        });
+        pos = lower.len() - rest.len();
+        let (rest, _) = space1::<_, OracleError<'_>>
+            .parse(&lower[pos..])
+            .unwrap_or((&lower[pos..], ""));
+        pos = lower.len() - rest.len();
     }
 
     // Adjectives compose independently of their printed order. Commit their
@@ -9488,7 +9608,28 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
     if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
-        if let Ok((rest, kinds)) = parse_attachment_kind_disjunction(after_intro) {
+        if let Ok((mut rest, mut kinds)) = parse_attachment_kind_disjunction(after_intro) {
+            let mut controller = None;
+            if let Ok((after_by, _)) = tag::<_, _, OracleError<'_>>(" by ").parse(rest) {
+                let (after_kinds, specified_kinds) = nom::multi::separated_list1(
+                    tag::<_, _, OracleError<'_>>(" or "),
+                    alt((
+                        value(AttachmentKind::Aura, tag("auras")),
+                        value(AttachmentKind::Equipment, tag("equipment")),
+                    )),
+                )
+                .parse(after_by)
+                .ok()?;
+                if specified_kinds.iter().any(|kind| !kinds.contains(kind)) {
+                    return None;
+                }
+                kinds = specified_kinds;
+                rest = after_kinds;
+                if let Some((selected_controller, consumed)) = parse_controller_suffix(rest, ctx) {
+                    controller = Some(selected_controller);
+                    rest = &rest[consumed..];
+                }
+            }
             // Word-boundary check: the next char must terminate the adjective so
             // we don't false-match e.g. "that's enchanted by something else".
             // Accept end-of-string or any non-alphanumeric terminator.
@@ -9498,7 +9639,7 @@ pub(crate) fn parse_that_clause_suffix<'a>(
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if next_char_is_boundary {
                 let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
-                let prop = attachment_kinds_filter_prop(kinds, None);
+                let prop = attachment_kinds_filter_prop(kinds, controller);
                 let prop = if negated {
                     FilterProp::Not {
                         prop: Box::new(prop),
@@ -24431,5 +24572,95 @@ mod casting_name_reference_preservation_tests {
             FilterProp::SameNameAsParentTarget
         );
         assert!(parse_same_name_suffix("with the same name as that spell").is_none());
+    }
+}
+
+#[cfg(test)]
+mod complete_population_relation_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_all_colors_share_the_complete_creature_noun_and_zone() {
+        let mut ctx = ParseContext::default();
+        let (filter, rest) = parse_type_phrase_folding_with_ctx(
+            "all black and all red creature cards from their graveyard",
+            &mut ctx,
+        );
+        assert!(rest.trim().is_empty(), "{rest:?}: {filter:#?}");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("coordinated colors must preserve their shared noun");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.contains(&FilterProp::AnyOf {
+            props: vec![
+                FilterProp::HasColor {
+                    color: ManaColor::Black
+                },
+                FilterProp::HasColor {
+                    color: ManaColor::Red
+                }
+            ],
+        }));
+        assert!(typed.properties.contains(&FilterProp::InZone {
+            zone: Zone::Graveyard
+        }));
+        for malformed in [
+            "all black and all mystery creature cards",
+            "all black and all red",
+            "all black and all red nonsense",
+        ] {
+            let (_, remaining) = parse_type_phrase_folding(malformed);
+            assert!(!remaining.trim().is_empty(), "a missing coordinated noun cannot publish a complete color-only population: {malformed}");
+        }
+    }
+
+    #[test]
+    fn enchanted_by_auras_retains_the_attachment_controller() {
+        let text = "that are enchanted by Auras you control".to_lowercase();
+        let (props, consumed) = parse_that_clause_suffix(&text, None).expect("complete qualifier");
+        assert_eq!(consumed, text.len());
+        assert_eq!(
+            props,
+            vec![attachment_kinds_filter_prop(
+                vec![AttachmentKind::Aura],
+                Some(ControllerRef::You),
+            )]
+        );
+        assert!(parse_that_clause_suffix("that are enchanted by unknown things", None).is_none());
+    }
+
+    #[test]
+    fn complete_bare_target_instances_retain_syntax_and_explicit_distinctness() {
+        for (text, distinct) in [
+            ("any target", false),
+            ("another target", true),
+            ("a third target", true),
+        ] {
+            let (filter, rest, syntax) =
+                parse_target_with_syntax(text, &mut ParseContext::default());
+            assert!(rest.is_empty(), "{text}: {rest:?}");
+            assert_eq!(syntax, TargetSyntax::TargetKeyword);
+            assert_eq!(
+                filter,
+                if distinct {
+                    TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::Another]),
+                    )
+                } else {
+                    TargetFilter::Any
+                }
+            );
+        }
+        let (filter, rest, _) =
+            parse_target_with_syntax("another target creature", &mut ParseContext::default());
+        assert!(rest.is_empty());
+        assert!(
+            matches!(filter, TargetFilter::Typed(typed) if typed.type_filters.contains(&TypeFilter::Creature))
+        );
+        let mut ctx = ParseContext::default();
+        let (_, rest, _) =
+            parse_target_with_syntax("a creature with nonsense chosen at random", &mut ctx);
+        assert!(!rest.trim().is_empty());
+        assert_eq!(ctx.target_selection_mode, TargetSelectionMode::Chosen);
     }
 }

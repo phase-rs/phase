@@ -63,8 +63,8 @@ use lower::{
     strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
     strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    try_parse_damage, try_parse_damage_with_remainder, try_parse_distribute_counters,
+    try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -17440,7 +17440,7 @@ fn clause_is_pay_to_end_effect_termination(source_text: &str) -> bool {
 pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((), _) = nom_on_lower(text, &lower, |input| {
@@ -17501,13 +17501,14 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
         actor: crate::types::ability::LibraryInstructionActor::Controller,
     });
     clause.sub_ability = Some(Box::new(put_counter));
-    Some(EffectChainIr::single_clause(
+    Some(EffectChainIr::single_clause_with_context(
         text,
         kind,
         clause,
         Some(PlayerFilter::All),
         ctx.actor.clone(),
         ctx.in_trigger,
+        ctx,
     ))
 }
 
@@ -17544,7 +17545,7 @@ pub(crate) fn parse_exile_top_each_library_with_collection_counter_ir(
 pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let stripped = super::oracle_util::strip_reminder_text(text);
     let lower = stripped.to_lowercase();
@@ -17622,13 +17623,14 @@ pub(crate) fn parse_grant_graveyard_keyword_to_target_ir(
         target: Some(target_filter),
         end_cost: None,
     };
-    Some(EffectChainIr::single_clause(
+    Some(EffectChainIr::single_clause_with_context(
         text,
         kind,
         parsed_clause(effect),
         None,
         ctx.actor.clone(),
         ctx.in_trigger,
+        ctx,
     ))
 }
 
@@ -18556,7 +18558,7 @@ fn parse_keeper_dispose_rest_ir(
         None => None,
     };
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
 
     match head.scope {
         KeeperChooserScope::Controller => match &head.head {
@@ -18726,7 +18728,7 @@ fn parse_keeper_dispose_rest_ir(
     }
 
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -18760,7 +18762,7 @@ fn parse_keeper_dispose_rest_ir(
 fn parse_open_booster_pack_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
@@ -18820,7 +18822,7 @@ fn parse_open_booster_pack_ir(
         count
     };
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             text,
@@ -18842,7 +18844,7 @@ fn parse_open_booster_pack_ir(
         .push();
 
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -18871,7 +18873,7 @@ fn parse_open_booster_pack_ir(
 fn parse_windowed_graveyard_redirect_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     // No pre-check here: the nom grammar's own mandatory opening `tag("if ")` is
     // the single recognition authority, and a second hand-rolled one — however
@@ -18880,7 +18882,7 @@ fn parse_windowed_graveyard_redirect_ir(
     // against a full card-data run and never happens during gameplay.
     let effect = super::oracle_replacement::parse_windowed_graveyard_redirect_install(text)?;
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             text,
@@ -18894,7 +18896,7 @@ fn parse_windowed_graveyard_redirect_ir(
         .push();
 
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -18917,8 +18919,11 @@ fn parse_windowed_graveyard_redirect_ir(
 /// with no route at all, and the honest-failure residual would swallow a clause
 /// the parser can fully represent.
 pub(crate) fn parse_windowed_replacement_install_ir(text: &str) -> Option<AbilityIr> {
-    let body =
-        parse_windowed_graveyard_redirect_ir(text, AbilityKind::Spell, &ParseContext::default())?;
+    let body = parse_windowed_graveyard_redirect_ir(
+        text,
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    )?;
     Some(AbilityIr {
         source_text: text.to_string(),
         body,
@@ -18955,7 +18960,7 @@ fn parse_booster_take_destination(input: &str) -> OracleResult<'_, Zone> {
 fn parse_balance_equalization_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
@@ -18995,7 +19000,7 @@ fn parse_balance_equalization_ir(
         return None;
     }
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     let clause_count = clauses.len();
     for (index, (verb, filter)) in clauses.into_iter().enumerate() {
         let source_text = if index == 0 {
@@ -19025,7 +19030,7 @@ fn parse_balance_equalization_ir(
     }
 
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Preserve,
@@ -19048,7 +19053,7 @@ fn parse_balance_equalization_ir(
 fn parse_threshold_land_balance_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((sacrifice_threshold, keep_count, search_threshold, x_base), _) = nom_on_lower(
@@ -19178,7 +19183,7 @@ fn parse_threshold_land_balance_ir(
     // allow-noncombinator: source-span slicing after nom validated the sentence separator
     let shuffle_source = remainder_source.get(search_source.len() + 2..)?;
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             sacrifice_source,
@@ -19239,7 +19244,7 @@ fn parse_threshold_land_balance_ir(
         .push();
 
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -19271,7 +19276,7 @@ enum UnevenLandSearchDelivery {
 fn parse_uneven_land_search_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
     let ((extremum, delivery), _) = nom_on_lower(text, &lower, |input| {
@@ -19393,7 +19398,7 @@ fn parse_uneven_land_search_ir(
     });
     search.sub_ability = Some(Box::new(delivery));
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             text,
@@ -19413,7 +19418,7 @@ fn parse_uneven_land_search_ir(
         .push();
 
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         // This is an `each player who ...` instruction, not an already-local
@@ -19449,7 +19454,7 @@ fn parse_uneven_land_search_ir(
 pub(crate) fn parse_catch_up_draw_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_lowercase();
 
@@ -19494,7 +19499,7 @@ pub(crate) fn parse_catch_up_draw_ir(
             },
         }),
     };
-    Some(EffectChainIr::single_clause(
+    Some(EffectChainIr::single_clause_with_context(
         text,
         kind,
         parsed_clause(Effect::Draw {
@@ -19505,6 +19510,7 @@ pub(crate) fn parse_catch_up_draw_ir(
         Some(PlayerFilter::All),
         ctx.actor.clone(),
         ctx.in_trigger,
+        ctx,
     ))
 }
 
@@ -24145,7 +24151,6 @@ fn parse_bare_damage_continuation<'a>(
         // `player_filter`, mirroring the primary each-branch classification.
         let (target, rem) = parse_target_with_ctx(after_to, ctx);
         let (target, rem) = refine_damage_target_remainder(target, rem);
-        let rem = trim_dangling_target_word(rem);
         let trimmed_rem = rem.trim_start_matches([',', ' ']);
         let trimmed_rem_lower = trimmed_rem.to_lowercase();
         let player_filter = tag::<_, _, OracleError<'_>>("and ")
@@ -24179,12 +24184,11 @@ fn parse_bare_damage_continuation<'a>(
                 damage_source: None,
                 excess: None,
             },
-            trim_dangling_target_word(rem),
+            rem,
         ));
     }
     let (target, rem) = parse_target_with_ctx(after_to, ctx);
     let (target, rem) = refine_damage_target_remainder(target, rem);
-    let rem = trim_dangling_target_word(rem);
     Some((
         Effect::DealDamage {
             amount,
@@ -27886,7 +27890,9 @@ fn declared_player_reference(
     };
     if let Some(id) = clauses[index].declares_chosen_clause {
         return Some(TargetFilter::DeclaredPlayer {
-            group: ChosenGroupId(id.0),
+            group: clauses[index]
+                .declares_chosen_group
+                .unwrap_or(ChosenGroupId(id.0)),
         });
     }
     Some(reference_to_declaration(declarations, groups, index))
@@ -40364,7 +40370,7 @@ fn parse_conditional_protection_grant_ir(
 pub(crate) fn parse_each_player_copy_chosen_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let i = lower.as_str();
@@ -40463,7 +40469,7 @@ pub(crate) fn parse_each_player_copy_chosen_ir(
         return None;
     }
 
-    Some(EffectChainIr::single_clause(
+    Some(EffectChainIr::single_clause_with_context(
         text,
         kind,
         parsed_clause(Effect::EachPlayerCopyChosen {
@@ -40479,6 +40485,7 @@ pub(crate) fn parse_each_player_copy_chosen_ir(
         Some(PlayerFilter::All),
         ctx.actor.clone(),
         ctx.in_trigger,
+        ctx,
     ))
 }
 
@@ -41090,7 +41097,9 @@ pub(crate) fn parse_ability_ir(
     // commas would otherwise split it into a head the parser cannot model and
     // two orphaned steps. Recognized in BOTH lowering modes: the sentence is a
     // whole printed spell ability, so it must win wherever a card body enters.
-    if let Some(body) = parse_open_booster_pack_ir(text, kind, ctx) {
+    if let Some(body) =
+        try_contextual_ir(ctx, |trial| parse_open_booster_pack_ir(text, kind, trial))
+    {
         return AbilityIr {
             source_text: text.to_string(),
             body,
@@ -41104,7 +41113,9 @@ pub(crate) fn parse_ability_ir(
     // its own window is created by THIS body's resolution, and its consequent
     // sentence belongs to the replacement — both facts are only visible on the
     // whole body, so the recognizer runs here rather than in clause dispatch.
-    if let Some(body) = parse_windowed_graveyard_redirect_ir(text, kind, ctx) {
+    if let Some(body) = try_contextual_ir(ctx, |trial| {
+        parse_windowed_graveyard_redirect_ir(text, kind, trial)
+    }) {
         return AbilityIr {
             source_text: text.to_string(),
             body,
@@ -41114,7 +41125,9 @@ pub(crate) fn parse_ability_ir(
             modal: None,
         };
     }
-    if let Some(body) = parse_for_each_attacker_copy_blocker_ir(text, kind, ctx) {
+    if let Some(body) = try_contextual_ir(ctx, |trial| {
+        parse_for_each_attacker_copy_blocker_ir(text, kind, trial)
+    }) {
         return AbilityIr {
             source_text: text.to_string(),
             body,
@@ -41125,7 +41138,9 @@ pub(crate) fn parse_ability_ir(
         };
     }
     if let ChainLoweringMode::WithContext = mode {
-        if let Some(body) = parse_face_down_pile_ir(text, kind, ctx) {
+        if let Some(body) =
+            try_contextual_ir(ctx, |trial| parse_face_down_pile_ir(text, kind, trial))
+        {
             return AbilityIr {
                 source_text: text.to_string(),
                 body,
@@ -41136,7 +41151,9 @@ pub(crate) fn parse_ability_ir(
             };
         }
     }
-    if let Some(body) = parse_balance_equalization_ir(text, kind, ctx) {
+    if let Some(body) = try_contextual_ir(ctx, |trial| {
+        parse_balance_equalization_ir(text, kind, trial)
+    }) {
         return AbilityIr {
             source_text: text.to_string(),
             body,
@@ -41264,16 +41281,22 @@ pub(crate) fn parse_effect_chain_with_context(
 fn parse_face_down_pile_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
-    parse_exile_pile_shuffle_cloak_ir(text, kind, ctx)
-        .or_else(|| parse_exile_object_and_top_face_down_pile_ir(text, kind, ctx))
+    try_contextual_ir(ctx, |trial| {
+        parse_exile_pile_shuffle_cloak_ir(text, kind, trial)
+    })
+    .or_else(|| {
+        try_contextual_ir(ctx, |trial| {
+            parse_exile_object_and_top_face_down_pile_ir(text, kind, trial)
+        })
+    })
 }
 
 fn parse_exile_pile_shuffle_cloak_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
 
@@ -41326,7 +41349,7 @@ fn parse_exile_pile_shuffle_cloak_ir(
     let cloak_end = cloak_start.checked_add("cloak them".len())?;
     let cloak_source = text.get(cloak_start..cloak_end)?;
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     // CR 608.2c: head — interactive selection of the eligible creatures into the
     // chain's tracked set (the "face-down pile").
     builder
@@ -41383,7 +41406,7 @@ fn parse_exile_pile_shuffle_cloak_ir(
         )
         .push();
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -41403,7 +41426,7 @@ fn parse_exile_pile_shuffle_cloak_ir(
 fn parse_exile_object_and_top_face_down_pile_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let (rest, _) = tag::<_, _, OracleError<'_>>("exile it and the top ")
@@ -41419,7 +41442,7 @@ fn parse_exile_object_and_top_face_down_pile_ir(
     .parse(rest)
     .ok()?;
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             text,
@@ -41438,7 +41461,7 @@ fn parse_exile_object_and_top_face_down_pile_ir(
         )
         .push();
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -41523,7 +41546,7 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
 fn parse_for_each_attacker_copy_blocker_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     // Optional leading casting-restriction sentence, if not pre-stripped.
@@ -41590,13 +41613,14 @@ fn parse_for_each_attacker_copy_blocker_ir(
         owner: TargetFilter::Controller,
     };
     if !exiles_tokens {
-        return Some(EffectChainIr::single_clause(
+        return Some(EffectChainIr::single_clause_with_context(
             text,
             kind,
             parsed_clause(copy),
             None,
             ctx.actor.clone(),
             ctx.in_trigger,
+            ctx,
         ));
     }
 
@@ -41629,7 +41653,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
     };
     let copy_source = text.get(..text.len().checked_sub(i.len())?)?;
     let delayed_source = text.get(copy_source.len()..)?.trim_start();
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             copy_source,
@@ -41653,7 +41677,7 @@ fn parse_for_each_attacker_copy_blocker_ir(
         )
         .push();
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -41725,7 +41749,7 @@ fn parse_same_name_return_destination(
 fn parse_return_target_and_same_name_from_your_graveyard_ir(
     text: &str,
     kind: AbilityKind,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
 ) -> Option<EffectChainIr> {
     let lower = text.to_ascii_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |input| value((), tag("return ")).parse(input))?;
@@ -41752,7 +41776,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
     let first_source = text.get(..first_source_len)?;
     let second_source = text.get(first_source_len..)?;
 
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             first_source,
@@ -41810,7 +41834,7 @@ fn parse_return_target_and_same_name_from_your_graveyard_ir(
         )
         .push();
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: Some(kind),
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -42184,7 +42208,11 @@ fn parse_reciprocal_optional_return(input: &str) -> OracleResult<'_, ReciprocalR
 /// splitting. Lowering accepts the graveyard return class only when the parsed
 /// descriptor, owner, zone, and control components form that typed shape.
 /// A malformed or unsupported component therefore falls through honestly.
-fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option<EffectChainIr> {
+fn parse_reciprocal_graveyard_choice_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &mut ParseContext,
+) -> Option<EffectChainIr> {
     type E<'a> = OracleError<'a>;
     let lower = text.to_ascii_lowercase();
     let parsed = nom_on_lower(text, &lower, |input| {
@@ -42285,7 +42313,7 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
         constraint: None,
     });
     produce.sub_ability = Some(Box::new(consume));
-    let mut builder = ClauseIrBuilder::new(text);
+    let mut builder = ClauseIrBuilder::with_context(text, ctx);
     builder
         .clause(
             text,
@@ -42298,7 +42326,7 @@ fn parse_reciprocal_graveyard_choice_ir(text: &str, kind: AbilityKind) -> Option
         )
         .push();
     Some(EffectChainIr {
-        clauses: builder.finish(),
+        clauses: builder.finish_with_context(ctx),
         kind,
         continuation_kind: None,
         player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -42513,7 +42541,9 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
     ctx: &mut ParseContext,
     already_chosen: u8,
 ) -> EffectChainIr {
+    let enclosing_chosen_objects = ctx.enclosing_chosen_objects.clone();
     let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen);
+    ctx.enclosing_chosen_objects = enclosing_chosen_objects;
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -42699,6 +42729,145 @@ fn refuse_untargeted_dynamic_graveyard_windows(
     (result, owned_result)
 }
 
+// These are complete dependent instruction units. Refusal belongs to the
+// unit's source span; an independent later sentence remains executable.
+fn unsupported_relation_body(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if (
+        tag::<_, _, OracleError<'_>>("choose any number of target "),
+        take_until(". for each of them, reveal "),
+        tag(". for each of them, reveal "),
+    )
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some("per_recipient_reveal_loop");
+    }
+    if (
+        tag::<_, _, OracleError<'_>>("choose "),
+        take_until(". "),
+        tag(". "),
+        alt((tag("increase or decrease "), tag("decrease or increase "))),
+        tag("a number "),
+    )
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some("chosen_object_number_change");
+    }
+    None
+}
+
+fn refuse_unrepresentable_relation_units(
+    full_text: &str,
+    chunks: Vec<ClauseChunk>,
+    prior_refusals: Vec<bool>,
+) -> (Vec<ClauseChunk>, Vec<Option<&'static str>>) {
+    let mut result = Vec::new();
+    let mut refusals = Vec::new();
+    let mut cursor = 0;
+    let mut skip_until = 0;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let start = take_until::<_, _, OracleError<'_>>(chunk.text.as_str())
+            .parse(&full_text[cursor..])
+            .ok()
+            .map(|(_, before)| cursor + before.len());
+        if let Some(start) = start {
+            cursor = start + chunk.text.len();
+        }
+        if start.is_some_and(|start| start < skip_until) {
+            continue;
+        }
+        let mut chunk = chunk.clone();
+        let mut gap =
+            prior_refusals[index].then_some("untargeted_dynamic_graveyard_cast_with_rider");
+        let normalized = strip_leading_sequence_connector(&chunk.text).trim();
+        let lower = normalized.to_ascii_lowercase();
+        if let Some(start) = start {
+            let remaining = &full_text[start..];
+            let remaining_lower = remaining.to_ascii_lowercase();
+            // A random library exile whose qualification reads this damage
+            // and whose following permission reads that card is one operation.
+            if let Ok((tail, _)) = (
+                opt(tag::<_, _, OracleError<'_>>("then ")),
+                tag("exile from "),
+                take_until(" library "),
+                tag(" library a random card with mana value equal to "),
+                take_until(". "),
+                tag(". "),
+                tag("you may cast that card "),
+                take_until("."),
+                tag("."),
+            )
+                .parse(remaining_lower.as_str())
+            {
+                let end = start + remaining_lower.len() - tail.len();
+                chunk.text = full_text[start..end].to_owned();
+                chunk.boundary_after = Some(ClauseBoundary::Sentence);
+                skip_until = end;
+                gap = Some("qualified_random_library_exile_and_cast");
+            } else if (
+                opt(tag::<_, _, OracleError<'_>>("you may ")),
+                tag("search "),
+            )
+                .parse(lower.as_str())
+                .is_ok()
+                && search::parse_search_library_details(&lower, &mut ParseContext::default())
+                    .is_err()
+            {
+                if let Ok((_, before_shuffle)) =
+                    take_until::<_, _, OracleError<'_>>(", then shuffle")
+                        .parse(remaining_lower.as_str())
+                {
+                    let end = start + before_shuffle.len();
+                    chunk.text = full_text[start..end].to_owned();
+                    chunk.boundary_after = Some(ClauseBoundary::Comma);
+                    skip_until = end;
+                }
+                gap = Some("search_filter");
+            }
+        }
+        // Selecting a qualified subset of a produced cohort uses the same
+        // complete descriptor authority as search. A rejected selection moves
+        // nothing, so a subsequent rest instruction still sees that cohort.
+        if gap.is_none() {
+            if let Ok((noun, _)) = (
+                opt(tag::<_, _, OracleError<'_>>("you may ")),
+                tag("put "),
+                opt(alt((tag("a "), tag("an "), tag("each "), tag("all ")))),
+            )
+                .parse(lower.as_str())
+            {
+                if let Ok((_, descriptor)) = alt((
+                    take_until::<_, _, OracleError<'_>>(" from among "),
+                    take_until(" among "),
+                ))
+                .parse(noun)
+                {
+                    if search::parse_search_filter(descriptor, &mut ParseContext::default())
+                        .is_err()
+                    {
+                        gap = Some("qualified_cohort_selection");
+                    }
+                }
+            }
+        }
+        result.push(chunk);
+        refusals.push(gap);
+    }
+    (result, refusals)
+}
+
+fn try_contextual_ir(
+    ctx: &mut ParseContext,
+    parse: impl FnOnce(&mut ParseContext) -> Option<EffectChainIr>,
+) -> Option<EffectChainIr> {
+    let mut trial = ctx.clone();
+    let ir = parse(&mut trial)?;
+    trial.enclosing_chosen_objects = ctx.enclosing_chosen_objects.clone();
+    *ctx = trial;
+    Some(ir)
+}
 fn parse_effect_chain_ir_body(
     text: &str,
     kind: AbilityKind,
@@ -42708,37 +42877,69 @@ fn parse_effect_chain_ir_body(
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
-    if let Some(ir) = parse_reciprocal_graveyard_choice_ir(text, kind) {
+    if let Some(gap) = unsupported_relation_body(text) {
+        let mut builder = ClauseIrBuilder::with_context(text, ctx);
+        unimplemented_clause(&mut builder, gap, text, None);
+        return EffectChainIr {
+            clauses: builder.finish_with_context(ctx),
+            kind,
+            continuation_kind: None,
+            player_scope_rewrite: PlayerScopeRewrite::Apply,
+            chain_rounding: None,
+            actor: ctx.actor.clone(),
+            in_trigger: ctx.in_trigger,
+            repeat_until: None,
+            injected_color_choice: InjectedColorChoice::Permitted,
+        };
+    }
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_reciprocal_graveyard_choice_ir(text, kind, trial)
+    }) {
         return ir;
     }
-    if let Some(ir) = parse_keeper_dispose_rest_ir(text, kind, ctx) {
+    if let Some(ir) =
+        try_contextual_ir(ctx, |trial| parse_keeper_dispose_rest_ir(text, kind, trial))
+    {
         return ir;
     }
-    if let Some(ir) = parse_grant_graveyard_keyword_to_target_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_grant_graveyard_keyword_to_target_ir(text, kind, trial)
+    }) {
         return ir;
     }
-    if let Some(ir) = parse_catch_up_draw_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| parse_catch_up_draw_ir(text, kind, trial)) {
         return ir;
     }
-    if let Some(ir) = parse_each_player_copy_chosen_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_each_player_copy_chosen_ir(text, kind, trial)
+    }) {
         return ir;
     }
-    if let Some(ir) = parse_exile_top_each_library_with_collection_counter_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_exile_top_each_library_with_collection_counter_ir(text, kind, trial)
+    }) {
         return ir;
     }
     if let Some(ir) = top_card_contest::parse_exile_top_card_contest_ir(text, kind, ctx) {
         return ir;
     }
-    if let Some(ir) = parse_balance_equalization_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_balance_equalization_ir(text, kind, trial)
+    }) {
         return ir;
     }
-    if let Some(ir) = parse_threshold_land_balance_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_threshold_land_balance_ir(text, kind, trial)
+    }) {
         return ir;
     }
-    if let Some(ir) = parse_uneven_land_search_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| parse_uneven_land_search_ir(text, kind, trial))
+    {
         return ir;
     }
-    if let Some(ir) = parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, ctx) {
+    if let Some(ir) = try_contextual_ir(ctx, |trial| {
+        parse_return_target_and_same_name_from_your_graveyard_ir(text, kind, trial)
+    }) {
         return ir;
     }
     let text = strip_trailing_activation_restriction_sentence(text);
@@ -42810,10 +43011,10 @@ fn parse_effect_chain_ir_body(
         .is_some_and(|lower| lower.contains(meld::MELD_EFFECT_MARKER))
     {
         if let Some(effect) = meld::parse_meld_effect_clause(full_text.trim(), ctx) {
-            let mut meld_builder = ClauseIrBuilder::new(full_text);
+            let mut meld_builder = ClauseIrBuilder::with_context(full_text, ctx);
             meld_clause(&mut meld_builder, effect, full_text);
             return EffectChainIr {
-                clauses: meld_builder.finish(),
+                clauses: meld_builder.finish_with_context(ctx),
                 kind,
                 continuation_kind: None,
                 player_scope_rewrite: PlayerScopeRewrite::Apply,
@@ -42851,6 +43052,8 @@ fn parse_effect_chain_ir_body(
     let chunks = sequence::expand_leading_duration_chunks(chunks, ctx);
     let (chunks, refused_graveyard_windows) =
         refuse_untargeted_dynamic_graveyard_windows(full_text, chunks);
+    let (chunks, refused_relations) =
+        refuse_unrepresentable_relation_units(full_text, chunks, refused_graveyard_windows);
     // CR 107.3i: "Normally, all instances of X on an object have the same value."
     // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
     // one clause in a sentence binds X ("... and you gain X life, where X is <expr>"),
@@ -42860,7 +43063,7 @@ fn parse_effect_chain_ir_body(
     // CR 611.2a: sibling of `sentence_where_x` on the same sentence grouping —
     // the leading duration a later coordinated chunk of the sentence cannot see.
     let sentence_leading_duration = compute_sentence_leading_duration(&chunks);
-    let mut builder = ClauseIrBuilder::new(full_text);
+    let mut builder = ClauseIrBuilder::with_context(full_text, ctx);
 
     // CR 608.2c + CR 117.3a: "Anchor subject" for chain-level anaphoric
     // inheritance. When a clause in the chain declares an explicit player-scope
@@ -42987,13 +43190,8 @@ fn parse_effect_chain_ir_body(
         PtValue,
     )> = None;
     'chunks: for (chunk_idx, chunk) in chunks.iter().enumerate() {
-        if refused_graveyard_windows[chunk_idx] {
-            unimplemented_clause(
-                &mut builder,
-                "untargeted_dynamic_graveyard_cast_with_rider",
-                &chunk.text,
-                chunk.boundary_after,
-            );
+        if let Some(gap) = refused_relations[chunk_idx] {
+            unimplemented_clause(&mut builder, gap, &chunk.text, chunk.boundary_after);
             continue;
         }
         // CR 601.2c + CR 608.2c: FIRST statement of the body, so the antecedent
@@ -43022,6 +43220,73 @@ fn parse_effect_chain_ir_body(
             .map(|_| (builder.clauses().len(), chunk.text.clone()));
         builder.set_pending_leading_duration(chunk.leading_duration.clone());
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
+        // A refused qualified selection did not remove any member of its
+        // immediately preceding produced cohort. Keep the actual look/reveal
+        // authority across that no-op; never fall back to another zone's set.
+        if builder.clauses().last().is_some_and(|clause| {
+            matches!(
+                &clause.parsed.effect,
+                // allow-noncombinator: typed gap-category comparison on parsed clause IR, not Oracle-text dispatch.
+                Effect::Unimplemented { name, .. } if name == "qualified_cohort_selection"
+            )
+        }) {
+            let lower = normalized_text.to_ascii_lowercase();
+            let rest_placement = sequence::parse_reveal_until_rest_zone_and_order(&lower);
+            if let (Some(Zone::Library), order) = rest_placement {
+                let producer = builder
+                    .clauses()
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .map(|clause| &clause.parsed.effect);
+                if let Some(Effect::Dig { player, reveal, .. }) = producer {
+                    let effect = if *reveal {
+                        Effect::ChangeZoneAll {
+                            origin: Some(Zone::Library),
+                            destination: Zone::Library,
+                            target: TargetFilter::LastRevealed,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            enter_with_counters: Vec::new(),
+                            face_down_profile: None,
+                            library_position: Some(LibraryPosition::Bottom),
+                            library_shuffle: Default::default(),
+                            random_order: matches!(order, DigRestOrder::Random),
+                        }
+                    } else {
+                        Effect::Dig {
+                            player: player.clone(),
+                            count: QuantityExpr::Fixed { value: 0 },
+                            destination: None,
+                            keep_count: Some(0),
+                            keep_count_expr: None,
+                            up_to: false,
+                            filter: TargetFilter::Any,
+                            rest_destination: Some(Zone::Library),
+                            rest_split_top_count: None,
+                            rest_order: order,
+                            reveal: false,
+                            enter_tapped: false,
+                            enters_attacking: false,
+                            source: DigSource::PriorLook,
+                        }
+                    };
+                    builder
+                        .clause(
+                            normalized_text,
+                            parsed_clause(effect),
+                            chunk.boundary_after,
+                            ClauseDisposition::Emit {
+                                followup: None,
+                                intrinsic: None,
+                            },
+                        )
+                        .push();
+                    continue;
+                }
+            }
+        }
         // CR 608.2c + CR 611.2c: own all conditional members before suffix
         // peeling, after the declared-target registry above has been published.
         let mut complete_member_ctx = ctx.clone();
@@ -44197,6 +44462,8 @@ fn parse_effect_chain_ir_body(
 
         if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(normalized_text)
         {
+            let mut branch_ctx = ctx.clone();
+            builder.synchronize_chosen_objects(&mut branch_ctx);
             let branch_def = {
                 // CR 608.2c: this fold precedes chunk_ctx's chosen-player
                 // seeding. Carry the enclosing choice into the nested parse,
@@ -44206,7 +44473,7 @@ fn parse_effect_chain_ir_body(
                 // branch is appended after the enclosing choices at runtime, so
                 // its `ChosenPlayer` index must start after them.
                 let ir = match chain_chosen_player_scope.as_ref() {
-                    Some(scope) => ctx.with_player_scope(scope.clone(), |ctx| {
+                    Some(scope) => branch_ctx.with_player_scope(scope.clone(), |ctx| {
                         parse_effect_chain_ir_after_player_choices(
                             effect_text,
                             kind,
@@ -44217,12 +44484,13 @@ fn parse_effect_chain_ir_body(
                     None => parse_effect_chain_ir_after_player_choices(
                         effect_text,
                         kind,
-                        ctx,
+                        &mut branch_ctx,
                         chain_chosen_player_count,
                     ),
                 };
                 lower_effect_chain_ir(&ir)
             };
+            builder.resume_chosen_object_cursor(&branch_ctx);
             // CR 705.2: branch-only flip stub; the flipper rides the preceding
             // bare flip and is preserved by `consolidate_die_and_coin_defs`.
             let flip_effect = if is_win {
@@ -48184,7 +48452,7 @@ fn parse_effect_chain_ir_body(
     ctx.next_declared_player_group = chain_declared_groups;
 
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
-    // Must stay ABOVE `builder.finish()`: `try_fold_loses_other_sibling` removes a clause and the
+    // Must stay ABOVE `builder.finish_with_context(ctx)`: `try_fold_loses_other_sibling` removes a clause and the
     // leading-host-lifetime pass rewrites every `parsed`, so a later position would fold a different
     // sequence than the chunk loop built.
     resolve_delayed_payload_placements(builder.clauses_mut(), kind);
@@ -48203,7 +48471,7 @@ fn parse_effect_chain_ir_body(
     // default to `Duration::UntilEndOfTurn` (engine convention for
     // `GenericEffect` whose duration field is `None`; the CR baseline per
     // CR 611.2a is "until end of the game", which is not what we want either).
-    let mut clauses = builder.finish();
+    let mut clauses = builder.finish_with_context(ctx);
     try_fold_loses_other_sibling(&mut clauses);
 
     EffectChainIr {
@@ -53170,6 +53438,67 @@ mod structural_marker_tests {
     use super::*;
 
     #[test]
+    fn contextual_ir_recognizer_rolls_back_failed_namespace_and_diagnostics() {
+        let mut context = ParseContext {
+            next_chosen_object_group: 5,
+            ..ParseContext::default()
+        };
+        let before = context.clone();
+        let declined = try_contextual_ir(&mut context, |trial| {
+            let parsed = parse_effect_chain_ir(
+                "Choose target artifact you control.",
+                AbilityKind::Spell,
+                trial,
+            );
+            assert_eq!(
+                parsed.clauses[0].declares_chosen_group,
+                Some(ChosenGroupId(5)),
+                "failed speculative recognizer really allocated a producer"
+            );
+            trial.enclosing_chosen_objects.push(
+                crate::parser::oracle_ir::context::ChosenObjectDeclaration {
+                    group: ChosenGroupId(5),
+                    lexical_depth: 0,
+                    noun: TargetFilter::Any,
+                    chooser: None,
+                    preceding_group: None,
+                },
+            );
+            trial.push_diagnostic(
+                crate::parser::oracle_ir::diagnostic::OracleDiagnostic::TargetFallback {
+                    context: "speculative namespace".into(),
+                    text: "declined".into(),
+                    line_index: 0,
+                },
+            );
+            None
+        });
+        assert!(declined.is_none());
+        assert_eq!(
+            context, before,
+            "failed recognition returns the entire original context"
+        );
+        let committed = try_contextual_ir(&mut context, |trial| {
+            Some(parse_effect_chain_ir(
+                "Choose target enchantment you control.",
+                AbilityKind::Spell,
+                trial,
+            ))
+        })
+        .expect("successful recognizer commits the allocated cursor");
+        assert_eq!(
+            committed.clauses[0].declares_chosen_group,
+            Some(ChosenGroupId(5))
+        );
+        assert_eq!(context.next_chosen_object_group, 6);
+        assert_eq!(
+            context.enclosing_chosen_objects,
+            before.enclosing_chosen_objects
+        );
+        assert_eq!(context.diagnostics, before.diagnostics);
+    }
+
+    #[test]
     fn that_player_or_their_permanent_marker() {
         let tail = ", ~ deals double that damage instead";
         for admitted in ["that player controls", "controlled by that player"] {
@@ -53296,7 +53625,7 @@ mod structural_marker_tests {
                      player who searched their library this way shuffles."
                 ),
                 AbilityKind::Spell,
-                &ParseContext::default(),
+                &mut ParseContext::default(),
             )
         };
         assert!(parse("they control", "they control").is_some());
@@ -53349,7 +53678,7 @@ mod structural_marker_tests {
                      that's a copy of the creature they chose."
                 ),
                 AbilityKind::Spell,
-                &ParseContext::default(),
+                &mut ParseContext::default(),
             )
         };
         let ir = parse("they control").expect("copy-chosen chain");

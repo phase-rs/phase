@@ -965,15 +965,34 @@ pub enum ProposedEvent {
     /// pipeline so "as it becomes attached, choose …" replacements
     /// (`ReplacementEvent::Attached`, Psychic Paper) can bind their choice as
     /// the attachment resolves, mirroring the "as ~ enters, choose" ETB
-    /// analogue. Auras attaching to a PLAYER host use `attach_to_player`
-    /// directly and never propose this event — only object hosts route
-    /// through `Effect::Attach::resolve`.
+    /// analogue, for both object and player hosts.
     Attach {
         attachment_id: ObjectId,
-        target_id: ObjectId,
+        #[serde(alias = "target_id", deserialize_with = "deserialize_attach_host")]
+        target: AttachTarget,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attachment_incarnation: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_id: Option<ObjectId>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
+}
+
+fn deserialize_attach_host<'de, D>(deserializer: D) -> Result<AttachTarget, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Host {
+        Current(AttachTarget),
+        LegacyObject(ObjectId),
+    }
+    Ok(match Host::deserialize(deserializer)? {
+        Host::Current(host) => host,
+        Host::LegacyObject(id) => AttachTarget::Object(id),
+    })
 }
 
 fn default_produce_mana_count() -> u32 {
@@ -1356,6 +1375,44 @@ impl ProposedEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_typed_host_capture_and_authentic_old_object_event_serde() {
+        for target in [
+            AttachTarget::Object(ObjectId(41)),
+            AttachTarget::Player(crate::types::player::PlayerId(1)),
+        ] {
+            let event = ProposedEvent::Attach {
+                attachment_id: ObjectId(7),
+                target,
+                attachment_incarnation: Some(19),
+                source_id: Some(ObjectId(99)),
+                applied: HashSet::new(),
+            };
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(
+                serde_json::from_value::<ProposedEvent>(value).unwrap(),
+                event
+            );
+        }
+        let old = serde_json::json!({"Attach":{"attachment_id":7,"target_id":41,"applied":[]}});
+        assert!(matches!(
+            serde_json::from_value::<ProposedEvent>(old).unwrap(),
+            ProposedEvent::Attach {
+                attachment_id: ObjectId(7),
+                target: AttachTarget::Object(ObjectId(41)),
+                attachment_incarnation: None,
+                source_id: None,
+                ..
+            }
+        ));
+        for malformed in [
+            serde_json::json!({"Attach":{"attachment_id":7,"target_id":41,"target":{"Player":1},"applied":[]}}),
+            serde_json::json!({"Attach":{"attachment_id":7,"target":{"Player":"not a seat"},"applied":[]}}),
+        ] {
+            assert!(serde_json::from_value::<ProposedEvent>(malformed).is_err());
+        }
+    }
 
     #[test]
     fn replacement_id_equality_and_hash() {

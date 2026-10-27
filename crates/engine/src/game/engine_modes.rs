@@ -862,25 +862,19 @@ fn handle_triggered_mode_choice(
             // with the non-modal path in `begin_pending_trigger_target_selection`.
             // Snapshot all `pending_trigger` reads into locals here so the trigger
             // event context can be restored (needs `&mut state`) before returning.
-            let player = pending_trigger
-                .ability
-                .target_chooser
-                .as_ref()
-                .and_then(|f| {
-                    crate::game::targeting::resolve_effect_player_ref(
-                        state,
-                        &pending_trigger.ability,
-                        f,
-                    )
-                })
-                .unwrap_or(player);
+            let announcer = super::ability_utils::target_announcer_for_selected_slot(
+                state,
+                &pending_trigger.ability,
+                &target_slots,
+                &selection,
+            );
             let trigger_controller = pending_trigger.controller;
             let trigger_event = pending_trigger.trigger_event.clone();
             // Slot legality computed; the pending `TriggerTargetSelection` carries
             // `trigger_event` so the per-slot prompt re-establishes the context.
             triggers::restore_trigger_event_context(state, mode_context_snapshot);
             return Ok(WaitingFor::TriggerTargetSelection {
-                player,
+                player: announcer?,
                 trigger_controller: Some(trigger_controller),
                 trigger_event,
                 trigger_events: state.pending_trigger_event_batch.clone(),

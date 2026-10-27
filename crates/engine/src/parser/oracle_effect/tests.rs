@@ -10,6 +10,17 @@ use crate::parser::oracle_ir::ast::{
 };
 use crate::parser::oracle_ir::context::ChosenColorQualifierScope;
 
+fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetFilter {
+    super::search::parse_search_filter(text, ctx).expect("complete supported search descriptor")
+}
+
+fn parse_search_library_details(
+    text: &str,
+    ctx: &mut ParseContext,
+) -> crate::parser::oracle_ir::ast::SearchLibraryDetails {
+    super::search::parse_search_library_details(text, ctx).expect("complete supported search")
+}
+
 #[test]
 fn contextual_hand_complete_nouns_and_post_link_restrictions() {
     // SHAPE: the actual Card noun owns every adjective (CR 109.2a).
@@ -8960,11 +8971,11 @@ fn try_split_damage_compound_cone_of_flame_three_targets() {
             *sub_sub.effect,
             Effect::DealDamage {
                 amount: QuantityExpr::Fixed { value: 3 },
-                target: TargetFilter::Any,
+                target: TargetFilter::Typed(ref typed),
                 ..
-            }
+            } if typed.properties.contains(&FilterProp::Another)
         ),
-        "third damage event should be DealDamage(3, Any), got: {:?}",
+        "third damage event must retain its distinct-from-prior target restriction, got: {:?}",
         sub_sub.effect
     );
 }
@@ -22005,7 +22016,7 @@ fn grant_graveyard_keyword_ir_declines_self_mana_cost_siblings() {
             parse_grant_graveyard_keyword_to_target_ir(
                 "target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.",
                 AbilityKind::Spell,
-                &ParseContext::default(),
+                &mut ParseContext::default(),
             )
             .is_none(),
             "flashback (self-mana-cost) must not be claimed by the compound-cost front door"
@@ -22014,7 +22025,7 @@ fn grant_graveyard_keyword_ir_declines_self_mana_cost_siblings() {
             parse_grant_graveyard_keyword_to_target_ir(
                 "target creature card in your graveyard gains embalm until end of turn. The embalm cost is equal to its mana cost.",
                 AbilityKind::Spell,
-                &ParseContext::default(),
+                &mut ParseContext::default(),
             )
             .is_none(),
             "embalm (self-mana-cost) must not be claimed by the compound-cost front door"
@@ -60742,18 +60753,17 @@ fn attach_selection_determined_and_up_to_rows() {
 }
 
 /// CR 115.4 + CR 608.2d: Maddening Hex's "attach this Aura to another one of
-/// your opponents chosen at random" names a PLAYER population ("any other" is
-/// player-or-object), which the battlefield-object capability refuses ⇒ Stack.
+/// your opponents chosen at random" describes a player host chosen on resolution.
 #[test]
-fn attach_host_timing_maddening_hex_stays_stack() {
+fn attach_host_timing_maddening_hex_is_resolution() {
     let def = parse_effect_chain(
         "Then attach this Aura to another one of your opponents chosen at random.",
         AbilityKind::Spell,
     );
     assert_eq!(
         attach_node(&def).target_choice_timing,
-        TargetChoiceTiming::Stack,
-        "a player-valued described host cannot be served by a battlefield-object prompt"
+        TargetChoiceTiming::Resolution,
+        "the described player host is chosen while Attach resolves"
     );
 }
 

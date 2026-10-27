@@ -1,5 +1,24 @@
 // CR 604 / CR 613 - cross-category static parser helpers.
 
+#[cfg(test)]
+mod complete_cost_subject_tests {
+    #[test]
+    fn unknown_qualified_card_subject_cannot_become_a_generic_reducer() {
+        for source in [
+            "other playtest cards you cast cost {1} less to cast.",
+            "Eminence — As long as The Unknown Wizard is in the command zone or on the battlefield, other playtest cards you cast cost {1} less to cast.",
+        ] {
+            assert!(super::try_parse_cost_modification(source, &source.to_ascii_lowercase(), None).is_none());
+        }
+        let source = "Legendary creature spells you cast cost {1} less to cast.";
+        assert!(
+            super::try_parse_cost_modification(source, &source.to_ascii_lowercase(), None)
+                .is_some(),
+            "complete qualified reducer still reaches its ordinary owner"
+        );
+    }
+}
+
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]

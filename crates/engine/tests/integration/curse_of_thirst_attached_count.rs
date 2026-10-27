@@ -52,6 +52,9 @@ fn add_bare_curse(scenario: &mut GameScenario, controller: PlayerId, name: &str)
     let mut builder = scenario.add_creature(controller, name, 0, 0);
     builder.as_enchantment();
     builder.with_subtypes(vec!["Aura", "Curse"]);
+    builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+        engine::types::ability::TargetFilter::Player,
+    ));
     builder.id()
 }
 

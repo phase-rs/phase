@@ -177,6 +177,14 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         &pending_trigger_events,
         pending_match_count,
     );
+    if target_slots.iter().any(|slot| slot.chooser.is_some())
+        || super::ability_utils::ability_has_deferred_target_announcer(state, &ability)
+    {
+        super::triggers::restore_trigger_event_context(state, context_snapshot);
+        return Err(EngineError::InvalidAction(
+            "Mixed-chooser trigger targets must be announced one slot at a time".into(),
+        ));
+    }
     let select_result = match validate_selected_targets_for_ability(
         state,
         &ability,
@@ -299,13 +307,25 @@ pub(super) fn handle_trigger_target_selection_choose_target(
         &selection,
         target,
     );
+    let next_player = match &advance {
+        Ok(TargetSelectionAdvance::InProgress(selection)) => {
+            super::ability_utils::target_announcer_for_selected_slot(
+                state,
+                &walk_ability,
+                &target_slots,
+                selection,
+            )
+        }
+        _ => Ok(player),
+    };
     super::triggers::restore_trigger_event_context(state, context_snapshot);
+    let next_player = next_player?;
 
     match advance? {
         // CR 700.2b: preserve the inbound mode labels unchanged across the
         // step-by-step walk — the slot→mode mapping does not change.
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TriggerTargetSelection {
-            player,
+            player: next_player,
             trigger_controller,
             trigger_event,
             trigger_events,

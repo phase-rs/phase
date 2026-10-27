@@ -398,10 +398,12 @@ pub fn handle_activate_loyalty_with_payment_mode(
         });
         // CR 601.2c + CR 606.3: first slot's announcer (controller unless the slot
         // is "of an opponent's choice").
-        let initial_player = target_slots
-            .first()
-            .and_then(|slot| slot.chooser)
-            .unwrap_or(player);
+        let initial_player = super::ability_utils::target_announcer_for_selected_slot(
+            state,
+            &pending.ability,
+            &target_slots,
+            &selection,
+        )?;
         return Ok(WaitingFor::TargetSelection {
             player: initial_player,
             pending_cast: Box::new(pending),

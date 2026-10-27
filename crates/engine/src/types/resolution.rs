@@ -16,7 +16,7 @@ use frame_vec::{FrameSlot, FrameVec};
 
 use crate::types::ability::{
     AbilityDefinition, DieResultBranch, DieRollIgnoreRule, DieRollModifier, DiscardedCardResult,
-    EffectKind, ForwardedResultContext, ResolvedAbility, TargetRef,
+    Effect, EffectKind, ForwardedResultContext, ResolvedAbility, TargetRef,
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
@@ -134,6 +134,15 @@ pub enum PendingCoinFlipKind {
 /// representation.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlipBranchContext {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coin_branch_target_abilities:
+        Vec<(crate::types::ability::CoinFlipResult, Box<ResolvedAbility>)>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::ability::deserialize_chosen_group_targets"
+    )]
+    pub chosen_group_targets: crate::types::ability::ChosenGroupTargets,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_source_choice: Option<crate::types::game_state::ChosenDamageSource>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -143,11 +152,100 @@ pub struct FlipBranchContext {
 }
 
 impl FlipBranchContext {
+    pub(crate) fn validate_branches(
+        &self,
+        branches: &[Option<&AbilityDefinition>],
+    ) -> Result<(), String> {
+        if !self.coin_branch_target_abilities.is_empty() {
+            let mut owner = ResolvedAbility::new(
+                crate::types::ability::Effect::FlipCoins {
+                    flips: crate::types::ability::CoinFlipRun::single(),
+                    win_effect: branches.first().copied().flatten().cloned().map(Box::new),
+                    lose_effect: branches.get(1).copied().flatten().cloned().map(Box::new),
+                    flipper: crate::types::ability::TargetFilter::Controller,
+                },
+                Vec::new(),
+                crate::types::identifiers::ObjectId(0),
+                PlayerId(0),
+            );
+            let input = self.coin_branch_target_abilities[0]
+                .1
+                .coin_target_input_projection();
+            owner.inherit_coin_target_inputs(&input);
+            owner.context.chosen_group_targets = self.chosen_group_targets.clone();
+            owner.coin_branch_target_abilities = self.coin_branch_target_abilities.clone();
+            crate::game::ability_utils::validate_coin_target_authority(&owner)?;
+        }
+        fn validate_branch(
+            definition: &AbilityDefinition,
+            inherited: &std::collections::HashSet<crate::types::ability::ChosenGroupId>,
+        ) -> Result<(), String> {
+            fn declarations(
+                node: &AbilityDefinition,
+                groups: &mut std::collections::HashSet<crate::types::ability::ChosenGroupId>,
+            ) {
+                groups.extend(node.declares_chosen_group);
+                if let Some(sub) = node.sub_ability.as_deref() {
+                    declarations(sub, groups);
+                }
+                if let Some(other) = node.else_ability.as_deref() {
+                    declarations(other, groups);
+                }
+            }
+            fn readers(
+                node: &AbilityDefinition,
+                groups: &std::collections::HashSet<crate::types::ability::ChosenGroupId>,
+            ) -> Result<(), String> {
+                if node
+                    .reads_chosen_group
+                    .is_some_and(|group| !groups.contains(&group))
+                {
+                    return Err("coin branch is missing its external chosen target group".into());
+                }
+                if let Effect::FlipCoins {
+                    win_effect,
+                    lose_effect,
+                    ..
+                } = &*node.effect
+                {
+                    for branch in [win_effect.as_deref(), lose_effect.as_deref()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        validate_branch(branch, groups)?;
+                    }
+                }
+                if let Some(sub) = node.sub_ability.as_deref() {
+                    readers(sub, groups)?;
+                }
+                if let Some(other) = node.else_ability.as_deref() {
+                    readers(other, groups)?;
+                }
+                Ok(())
+            }
+            let mut groups = inherited.clone();
+            declarations(definition, &mut groups);
+            readers(definition, &groups)
+        }
+        crate::types::ability::validate_chosen_group_targets(&self.chosen_group_targets)?;
+        let groups = self
+            .chosen_group_targets
+            .iter()
+            .map(|(group, _)| *group)
+            .collect();
+        for branch in branches.iter().flatten() {
+            validate_branch(branch, &groups)?;
+        }
+        Ok(())
+    }
+
     /// Capture what the flipping `ability` hands to its branches. A non-empty
     /// forwarded result is deliberately not captured: it already reaches the
     /// branch through its `targets`.
     pub fn from_ability(ability: &ResolvedAbility) -> Self {
         Self {
+            coin_branch_target_abilities: ability.coin_branch_target_abilities.clone(),
+            chosen_group_targets: ability.context.chosen_group_targets.clone(),
             damage_source_choice: ability.context.damage_source_choice.clone(),
             chosen_players: ability.chosen_players.clone(),
             forwarded_result_context: ability
@@ -163,6 +261,16 @@ impl FlipBranchContext {
     /// `true` when the branch inherits nothing (the serialized default).
     pub fn is_empty(&self) -> bool {
         self.chosen_players.is_empty()
+            && self.coin_branch_target_abilities.len() <= 2
+            && !self.coin_branch_target_abilities.windows(2).any(|pair| {
+                pair[0].0 != crate::types::ability::CoinFlipResult::Won
+                    || pair[1].0 != crate::types::ability::CoinFlipResult::Lost
+            })
+            && self
+                .coin_branch_target_abilities
+                .iter()
+                .all(|(_, child)| crate::game::ability_utils::coin_target_custody_is_empty(child))
+            && self.chosen_group_targets.is_empty()
             && self.forwarded_result_context.is_none()
             && self.damage_source_choice.is_none()
     }
@@ -10554,6 +10662,8 @@ mod tests {
 
     fn non_empty_branch_context(state: &GameState) -> FlipBranchContext {
         FlipBranchContext {
+            coin_branch_target_abilities: Vec::new(),
+            chosen_group_targets: Vec::new(),
             damage_source_choice: None,
             chosen_players: vec![PlayerId(1)],
             forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
@@ -10561,6 +10671,150 @@ mod tests {
                 &[],
             ))),
         }
+    }
+
+    #[test]
+    fn chosen_object_groups_keep_exact_occurrences_and_empty_bindings_in_both_readers() {
+        use crate::types::ability::{ChosenGroupId, TargetFilter};
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let mut context = FlipBranchContext::default();
+        context.chosen_group_targets = vec![
+            (
+                ChosenGroupId(7),
+                vec![(
+                    TargetRef::Object(ObjectId(44)),
+                    Some(ObjectIncarnationRef::of(ObjectId(44), 991)),
+                )],
+            ),
+            (ChosenGroupId(8), Vec::new()),
+        ];
+        let mut state = state_with_parked_coin_flip(context.clone());
+        let mut branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        );
+        branch.reads_chosen_group = Some(ChosenGroupId(7));
+        state.active_coin_flip_frame_mut().unwrap().win_effect = Some(Box::new(branch));
+        let plain = serde_json::to_value(&state).unwrap();
+        let restored: GameState =
+            serde_json::from_value(plain.clone()).expect("current raw reader keeps exact captures");
+        assert_eq!(
+            restored.active_coin_flip_frame().unwrap().branch_context,
+            context
+        );
+        let wire =
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire.clone())
+            .unwrap()
+            .into_game_state();
+        assert_eq!(
+            restored.active_coin_flip_frame().unwrap().branch_context,
+            context
+        );
+        for fault in 0..4 {
+            let mut malformed = state.clone();
+            let groups = &mut malformed
+                .active_coin_flip_frame_mut()
+                .unwrap()
+                .branch_context
+                .chosen_group_targets;
+            match fault {
+                0 => groups.clear(),
+                1 => groups.push(groups[0].clone()),
+                2 => groups[0].1[0].1 = Some(ObjectIncarnationRef::of(ObjectId(45), 991)),
+                _ => groups[0].1[0].0 = TargetRef::Player(PlayerId(1)),
+            }
+            assert!(
+                serde_json::from_value::<GameState>(serde_json::to_value(&malformed).unwrap())
+                    .is_err(),
+                "raw fault {fault}"
+            );
+            assert!(
+                serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(malformed)).unwrap()
+                )
+                .is_err(),
+                "wire fault {fault}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            plain,
+            "fault fixtures do not mutate trusted authority"
+        );
+    }
+
+    #[test]
+    fn authentic_encoded_coin_branches_need_only_their_actual_local_authority() {
+        use crate::types::ability::{ChosenGroupId, TargetFilter};
+        for kind in [
+            serde_json::json!("Single"),
+            serde_json::json!({"FlipN":{"remaining":2}}),
+            serde_json::json!({"UntilLose":{"wins_so_far":3}}),
+        ] {
+            let mut state = state_with_parked_coin_flip(FlipBranchContext::default());
+            // The old encoded Mogg payload was a plain Destroy and carried no
+            // external-group reader. Its own saved targets retain their meaning.
+            let old = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::ParentTarget,
+                    cant_regenerate: false,
+                },
+            );
+            state.active_coin_flip_frame_mut().unwrap().win_effect = Some(Box::new(old));
+            let mut wire =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+            let data = wire["resolution_frames"]["frames"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|frame| frame["type"] == "CoinFlip")
+                .unwrap()["data"]
+                .as_object_mut()
+                .unwrap();
+            data.insert("kind".into(), kind);
+            data.remove("branch_context");
+            let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                .expect("authentic encoded program is preserved")
+                .into_game_state();
+            assert!(restored
+                .active_coin_flip_frame()
+                .unwrap()
+                .branch_context
+                .chosen_group_targets
+                .is_empty());
+            assert!(restored
+                .active_coin_flip_frame()
+                .unwrap()
+                .win_effect
+                .as_ref()
+                .unwrap()
+                .reads_chosen_group
+                .is_none());
+        }
+        let mut local = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+            },
+        );
+        local.declares_chosen_group = Some(ChosenGroupId(0));
+        let mut reader = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        );
+        reader.reads_chosen_group = Some(ChosenGroupId(0));
+        local.sub_ability = Some(Box::new(reader));
+        assert!(FlipBranchContext::default()
+            .validate_branches(&[Some(&local)])
+            .is_ok());
     }
 
     /// U-E2b: a parked coin flip whose branch inherits something writes the

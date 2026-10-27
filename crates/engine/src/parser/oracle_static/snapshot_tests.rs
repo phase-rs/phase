@@ -7,6 +7,36 @@ use super::type_change::*;
 use super::*;
 
 #[test]
+fn population_relations_full_fifteen_static_route_ir_geometry_and_complete_lowered() {
+    use crate::parser::oracle::tests::population_relation_publication::{
+        assert_document, expected_program, printed_cards,
+    };
+    let cards = printed_cards();
+    assert_eq!(cards.len(), 15);
+    for card in cards {
+        // Includes independent Flying/Minion/life-gain-ban/controlled-Aura
+        // statics and every complete nonstatic body and exact atomic gap.
+        let (document, lowered) = assert_document(&card);
+        for expected in expected_program(&card.name).statics {
+            let source = expected
+                .description
+                .as_deref()
+                .expect("complete static source");
+            assert_eq!(parse_static_line_multi(source), vec![expected]);
+        }
+        let key = card.name.replace([':', '!', ','], "");
+        insta::assert_json_snapshot!(
+            format!("population_relations_full_static_route_{key}_ir"),
+            document
+        );
+        insta::assert_json_snapshot!(
+            format!("population_relations_full_static_route_{key}_lowered"),
+            lowered
+        );
+    }
+}
+
+#[test]
 fn contextual_hand_addle_static_routing_full_semantics_and_geometry() {
     const SOURCE: &str = "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
     let filter = crate::types::ability::TargetFilter::Typed(

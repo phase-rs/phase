@@ -20585,6 +20585,12 @@ fn continue_with_prepared(
             &target_slots,
             &target_constraints,
         )?;
+        let announcer = super::ability_utils::target_announcer_for_selected_slot(
+            state,
+            &resolved,
+            &target_slots,
+            &selection,
+        )?;
         let mut pending_targets = PendingCast::new(
             prepared.object_id,
             prepared.card_id,
@@ -20603,7 +20609,7 @@ fn continue_with_prepared(
         pending_targets.origin_zone = prepared.origin_zone;
         pending_targets.payment_mode = prepared.payment_mode;
         return Ok(WaitingFor::TargetSelection {
-            player,
+            player: announcer,
             pending_cast: Box::new(pending_targets),
             target_slots,
             mode_labels: Vec::new(),
@@ -20675,14 +20681,60 @@ fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::Mod
 pub(crate) fn requires_additional_cost_declaration_before_targets(
     ability: &ResolvedAbility,
 ) -> bool {
-    // Walk the full sub_ability chain (GiftDelivery nesting) for
-    // AdditionalCostPaidInstead with a real target filter (CR 601.2c / 702.174m).
+    fn reads_own_additional_cost(condition: &AbilityCondition) -> bool {
+        match condition {
+            AbilityCondition::AdditionalCostPaidInstead => true,
+            AbilityCondition::AdditionalCostPaid {
+                subject: ObjectScope::Source,
+                origin: None,
+                origin_ordinal: None,
+                ..
+            } => true,
+            AbilityCondition::ConditionInstead { inner } => reads_own_additional_cost(inner),
+            _ => false,
+        }
+    }
+    if ability
+        .target_children()
+        .any(|(_, child)| requires_additional_cost_declaration_before_targets(child))
+    {
+        return true;
+    }
+    if ability
+        .condition
+        .as_ref()
+        .is_some_and(reads_own_additional_cost)
+        && crate::game::ability_utils::find_first_target_filter_in_chain(ability).is_some()
+    {
+        return true;
+    }
+    // Walk the full sub_ability chain (including GiftDelivery nesting) for
+    // source-cost-dependent announced targets (CR 601.2b/c).
     let mut node = Some(ability);
     while let Some(current) = node {
+        // CR 601.2b/c: announce kicker intentions before a target count that
+        // reads them, independently of the damage amount's chosen X.
+        if current.multi_target.as_ref().is_some_and(|spec| {
+            let mut reads_kicker =
+                |reference: &QuantityRef| matches!(reference, QuantityRef::KickerCount);
+            spec.min.any_ref(&mut reads_kicker)
+                || spec
+                    .max
+                    .as_ref()
+                    .is_some_and(|max| max.any_ref(&mut reads_kicker))
+        }) {
+            return true;
+        }
         if let Some(sub_ability) = current.sub_ability.as_deref() {
             if matches!(
                 sub_ability.condition,
                 Some(AbilityCondition::AdditionalCostPaidInstead)
+                    | Some(AbilityCondition::AdditionalCostPaid {
+                        subject: ObjectScope::Source,
+                        origin: None,
+                        origin_ordinal: None,
+                        ..
+                    })
             ) && crate::game::triggers::extract_target_filter_from_effect(&sub_ability.effect)
                 .is_some()
             {

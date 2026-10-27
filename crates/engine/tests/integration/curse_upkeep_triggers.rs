@@ -94,6 +94,10 @@ fn setup_upkeep_curse(oracle: &str, name: &str) -> (GameRunner, ObjectId) {
         let mut builder = scenario.add_creature_from_oracle(P0, name, 0, 0, oracle);
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -179,6 +183,10 @@ fn curse_of_oblivion_fires_at_upkeep() {
             scenario.add_creature_from_oracle(P0, "Curse of Oblivion", 0, 0, CURSE_OF_OBLIVION);
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 

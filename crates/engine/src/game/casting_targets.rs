@@ -39,7 +39,7 @@ use super::restrictions;
 /// accidentally moving ahead of target selection.
 pub(crate) fn begin_activated_target_selection(
     state: &GameState,
-    player: PlayerId,
+    _player: PlayerId,
     mut pending_cast: PendingCast,
     target_slots: Vec<TargetSelectionSlot>,
     mode_labels: Vec<Option<String>>,
@@ -51,10 +51,12 @@ pub(crate) fn begin_activated_target_selection(
         &target_slots,
         &pending_cast.target_constraints,
     )?;
-    let initial_player = target_slots
-        .first()
-        .and_then(|slot| slot.chooser)
-        .unwrap_or(player);
+    let initial_player = super::ability_utils::target_announcer_for_selected_slot(
+        state,
+        &pending_cast.ability,
+        &target_slots,
+        &selection,
+    )?;
     Ok(WaitingFor::TargetSelection {
         player: initial_player,
         pending_cast: Box::new(pending_cast),
@@ -280,10 +282,12 @@ pub(crate) fn handle_select_modes(
         // ("of an opponent's choice"). For this card class slot 0 is the
         // controller; the general `chooser.unwrap_or(controller)` keeps the path
         // correct for any future card whose first slot is opponent-chosen.
-        let initial_player = target_slots
-            .first()
-            .and_then(|slot| slot.chooser)
-            .unwrap_or(controller);
+        let initial_player = super::ability_utils::target_announcer_for_selected_slot(
+            state,
+            &pending_sel.ability,
+            &target_slots,
+            &selection,
+        )?;
         pending_sel.activation_cost = pending.activation_cost;
         pending_sel.activation_ability_index = pending.activation_ability_index;
         pending_sel.activation_cost_snapshot = pending.activation_cost_snapshot;
@@ -356,7 +360,12 @@ pub(crate) fn handle_select_targets(
             // action (which submits every slot at once on the controller's behalf)
             // is not valid — each slot must be announced one at a time via
             // ChooseTarget so the correct player declares each target.
-            if target_slots.iter().any(|slot| slot.chooser.is_some()) {
+            if target_slots.iter().any(|slot| slot.chooser.is_some())
+                || super::ability_utils::ability_has_deferred_target_announcer(
+                    state,
+                    &pending_cast.ability,
+                )
+            {
                 return Err(EngineError::InvalidAction(
                     "Mixed-chooser targets must be announced one slot at a time".to_string(),
                 ));
@@ -464,10 +473,12 @@ pub(crate) fn handle_choose_target(
             // this slot's announcer ("of an opponent's choice"). Route the prompt to
             // that slot's `chooser`, defaulting to the spell/ability's controller.
             // This is the ONLY place the announcing player flips mid-walk.
-            let next_player = target_slots
-                .get(selection.current_slot)
-                .and_then(|slot| slot.chooser)
-                .unwrap_or(pending.ability.controller);
+            let next_player = super::ability_utils::target_announcer_for_selected_slot(
+                state,
+                &pending.ability,
+                &target_slots,
+                &selection,
+            )?;
             Ok(WaitingFor::TargetSelection {
                 player: next_player,
                 pending_cast: Box::new(pending),

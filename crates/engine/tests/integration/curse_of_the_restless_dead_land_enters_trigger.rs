@@ -78,6 +78,9 @@ fn setup_curse_on_p1() -> (engine::game::scenario::GameRunner, ObjectId) {
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
         builder.from_oracle_text(CURSE_ORACLE);
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
     // Add library padding so advance_until_stack_empty doesn't deck anyone.

@@ -348,6 +348,7 @@ pub fn build_resolved_from_def_with_targets(
     // unconditionally.
     resolved.modal = def.modal.clone();
     resolved.mode_abilities = def.mode_abilities.clone();
+    ensure_coin_target_custody(&mut resolved);
     // CR 608.2c: The whole chain is one printed ability, but the parser records
     // its text only on the head. Push that text down so a prompt raised by a
     // chained link can say what it is asking (see
@@ -355,6 +356,368 @@ pub fn build_resolved_from_def_with_targets(
     // chain will ever have is built by this point.
     resolved.backfill_chain_description();
     resolved
+}
+
+/// Materialize definition-derived target storage at the existing conversion funnel.
+pub(crate) fn ensure_coin_target_custody(ability: &mut ResolvedAbility) {
+    if ability.coin_branch_target_abilities.is_empty() {
+        if let Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } = &ability.effect
+        {
+            ability.coin_branch_target_abilities = [
+                (
+                    crate::types::ability::CoinFlipResult::Won,
+                    win_effect.as_deref(),
+                ),
+                (
+                    crate::types::ability::CoinFlipResult::Lost,
+                    lose_effect.as_deref(),
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(outcome, definition)| {
+                definition.map(|definition| {
+                    (
+                        outcome,
+                        Box::new(build_resolved_from_def(
+                            definition,
+                            ability.source_id,
+                            ability.controller,
+                        )),
+                    )
+                })
+            })
+            .collect();
+        }
+    }
+    ability.refresh_coin_target_inputs();
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        ensure_coin_target_custody(sub);
+    }
+    if let Some(other) = ability.else_ability.as_deref_mut() {
+        ensure_coin_target_custody(other);
+    }
+}
+
+fn missing_coin_target_custody(ability: &ResolvedAbility) -> bool {
+    (matches!(&ability.effect, Effect::FlipCoins { win_effect, lose_effect, .. } if win_effect.is_some() || lose_effect.is_some())
+        && ability.coin_branch_target_abilities.is_empty())
+        || ability
+            .target_children()
+            .any(|(_, child)| missing_coin_target_custody(child))
+}
+
+/// Canonical targetless scaffolding owes no additional captured target authority.
+/// Local declarations remain meaningful even when they selected nothing.
+pub(crate) fn coin_target_custody_is_empty(node: &ResolvedAbility) -> bool {
+    canonical_custody_shape(node).is_ok()
+        && !node.effect.is_fresh_damage_source_producer()
+        && !node_has_stack_target_declaration(node)
+        && node.declares_chosen_group.is_none()
+        && node.reads_chosen_group.is_none()
+        && node.targets.is_empty()
+        && node.target_pins.is_empty()
+        && node.legacy_selected_target_incarnations.is_empty()
+        && node.target_incarnations.is_empty()
+        && node.chosen_target_slots.slots().is_empty()
+        && node.illegal_target_slots.is_empty()
+        && node.unjudged_target_slots.is_empty()
+        && node.illegal_local_target_slots.is_empty()
+        && node.context.chosen_group_targets.is_empty()
+        && node.context.attach_target_bindings.is_empty()
+        && node.chosen_x.is_none()
+        && node.trigger_source.is_none()
+        && node.cost_paid_object.is_none()
+        && node.cost_paid_objects.is_empty()
+        && node.noted_mana_payment.is_none()
+        && !node.context.additional_cost_paid
+        && !node.context.alternative_mana_cost_paid
+        && node.context.additional_cost_payments.is_empty()
+        && node.context.kickers_paid.is_empty()
+        && node.context.triggering_spell.is_none()
+        && node.return_result_process.is_none()
+        && node.activation_record.is_none()
+        && node.selected_mode_labels.is_empty()
+        && node.modal_instruction_ordinal.is_none()
+        && node.detached_remainder == crate::types::ability::DetachedRemainder::NoProducer
+        && node.copy_count_status == crate::types::ability::CopyCountStatus::Pending
+        && node.distribution.is_none()
+        && node.may_trigger_origin.is_none()
+        && node.delayed_origin.is_none()
+        && node.force_block_attacker.is_none()
+        && node.parent_target_missing_reason.is_none()
+        && node.chosen_players.is_empty()
+        && node.replacement_applied.is_empty()
+        && node.effect_context_object.is_none()
+        && node.amassed_army_object.is_none()
+        && node
+            .target_children()
+            .all(|(_, child)| coin_target_custody_is_empty(child))
+}
+
+fn clear_custody_target_state(ability: &mut ResolvedAbility) {
+    ability.replace_target_occurrences(Vec::new());
+    ability.target_incarnations.clear();
+    ability.chosen_target_slots = ChosenTargetSlots::Unrecorded;
+    ability.illegal_target_slots.clear();
+    ability.unjudged_target_slots.clear();
+    ability.illegal_local_target_slots.clear();
+    ability.context.attach_target_bindings = Default::default();
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        clear_custody_target_state(child);
+    }
+    if let Some(sub) = ability.sub_ability.as_deref_mut() {
+        clear_custody_target_state(sub);
+    }
+    if let Some(other) = ability.else_ability.as_deref_mut() {
+        clear_custody_target_state(other);
+    }
+}
+
+fn canonical_custody_shape(ability: &ResolvedAbility) -> Result<ResolvedAbility, String> {
+    fn normalize(node: &mut ResolvedAbility) -> Result<(), String> {
+        let mut allowed = node.coin_target_input_projection().context;
+        allowed.face_down_in_exile = node.context.face_down_in_exile;
+        allowed.ability_tag = node.context.ability_tag;
+        allowed.granting_object = node.context.granting_object;
+        allowed.attach_target_bindings = node.context.attach_target_bindings.clone();
+        if node.context != allowed {
+            return Err("coin target custody contains produced resolution context".into());
+        }
+        let empty = ResolvedAbility::new(node.effect.clone(), Vec::new(), ObjectId(0), PlayerId(0));
+        node.source_id = empty.source_id;
+        node.controller = empty.controller;
+        node.original_controller = None;
+        node.scoped_player = None;
+        node.source_incarnation = None;
+        node.announced_source_incarnation = None;
+        node.trigger_source = None;
+        node.trigger_definition_ref = None;
+        node.ability_index = None;
+        node.cast_occurrence = None;
+        node.chosen_x = None;
+        node.cost_paid_object = None;
+        node.cost_paid_objects.clear();
+        node.noted_mana_payment = None;
+        let metadata = (
+            node.context.face_down_in_exile,
+            node.context.ability_tag,
+            node.context.granting_object,
+        );
+        node.context = SpellContext::default();
+        node.context.face_down_in_exile = metadata.0;
+        node.context.ability_tag = metadata.1;
+        node.context.granting_object = metadata.2;
+        for (_, child) in &mut node.coin_branch_target_abilities {
+            normalize(child)?;
+        }
+        if let Some(child) = node.sub_ability.as_deref_mut() {
+            normalize(child)?;
+        }
+        if let Some(child) = node.else_ability.as_deref_mut() {
+            normalize(child)?;
+        }
+        Ok(())
+    }
+    let mut shape = ability.clone();
+    normalize(&mut shape)?;
+    clear_custody_target_state(&mut shape);
+    Ok(shape)
+}
+
+/// Intrinsic node structure only: public projections intentionally omit maps.
+pub(crate) fn validate_coin_target_structure(ability: &ResolvedAbility) -> Result<(), String> {
+    if !ability.coin_branch_target_abilities.is_empty() {
+        let Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } = &ability.effect
+        else {
+            return Err("non-coin ability carries coin target custody".into());
+        };
+        let expected: Vec<_> = [
+            (
+                crate::types::ability::CoinFlipResult::Won,
+                win_effect.as_deref(),
+            ),
+            (
+                crate::types::ability::CoinFlipResult::Lost,
+                lose_effect.as_deref(),
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(outcome, definition)| definition.map(|definition| (outcome, definition)))
+        .collect();
+        if expected.len() != ability.coin_branch_target_abilities.len() {
+            return Err("coin target custody does not match its outcomes".into());
+        }
+        for ((outcome, child), (expected_outcome, definition)) in
+            ability.coin_branch_target_abilities.iter().zip(expected)
+        {
+            if *outcome != expected_outcome {
+                return Err("duplicate or noncanonical coin target outcome".into());
+            }
+            let canonical =
+                build_resolved_from_def(definition, ability.source_id, ability.controller);
+            if canonical_custody_shape(child)? != canonical_custody_shape(&canonical)? {
+                return Err(
+                    "coin target custody differs from its definition or contains execution state"
+                        .into(),
+                );
+            }
+        }
+    }
+    for (_, child) in ability.target_children() {
+        validate_coin_target_structure(child)?;
+    }
+    Ok(())
+}
+
+/// Containing authoritative-state admission; transport projections omit this check.
+pub(crate) fn validate_coin_target_authority(ability: &ResolvedAbility) -> Result<(), String> {
+    validate_coin_target_structure(ability)?;
+    if let Some(group) = ability.reads_chosen_group {
+        if matches!(ability.chosen_target_slots, ChosenTargetSlots::Recorded(_))
+            && !ability
+                .context
+                .chosen_group_targets
+                .iter()
+                .any(|(id, _)| *id == group)
+        {
+            return Err("announced chosen reader is missing captured target authority".into());
+        }
+    }
+    if let Some(group) = ability.declares_chosen_group {
+        if matches!(ability.chosen_target_slots, ChosenTargetSlots::Recorded(_))
+            && ability
+                .context
+                .chosen_group_targets
+                .iter()
+                .find(|(id, _)| *id == group)
+                .is_none_or(|(_, targets)| *targets != ability.target_occurrences())
+        {
+            return Err("chosen producer and captured occurrences disagree".into());
+        }
+    }
+    let input = ability.coin_target_input_projection();
+    for (_, child) in &ability.coin_branch_target_abilities {
+        let mut expected = child.clone();
+        expected.inherit_coin_target_inputs(&input);
+        expected.context.chosen_group_targets = ability.context.chosen_group_targets.clone();
+        restamp_chosen_group_targets(&mut expected);
+        if matches!(child.chosen_target_slots, ChosenTargetSlots::Recorded(_))
+            && child.context.chosen_group_targets != expected.context.chosen_group_targets
+        {
+            return Err(
+                "coin target custody projection disagrees with its owning declarations".into(),
+            );
+        }
+        let mut actual_input = child.coin_target_input_projection();
+        let mut expected_input = expected.coin_target_input_projection();
+        actual_input.context.chosen_group_targets.clear();
+        expected_input.context.chosen_group_targets.clear();
+        if actual_input != expected_input {
+            return Err("coin target custody read inputs disagree with their owner".into());
+        }
+    }
+    for (_, child) in ability.target_children() {
+        validate_coin_target_authority(child)?;
+    }
+    Ok(())
+}
+
+/// Copy only announced target authority into a fresh canonical selected body.
+pub(crate) fn validate_retained_coin_target_custody(
+    owner: &ResolvedAbility,
+    captured: &crate::types::resolution::FlipBranchContext,
+) -> Result<(), String> {
+    fn refines(original: &ResolvedAbility, current: &ResolvedAbility) -> bool {
+        let original_occurrences = original.target_occurrences();
+        let mut remaining = original_occurrences.as_slice();
+        for occurrence in current.target_occurrences() {
+            let Some(position) = remaining
+                .iter()
+                .position(|candidate| *candidate == occurrence)
+            else {
+                return false;
+            };
+            remaining = &remaining[position + 1..];
+        }
+        original.target_incarnations == current.target_incarnations
+            && current.chosen_target_slots.slots().len()
+                <= original.chosen_target_slots.slots().len()
+            && current.illegal_local_target_slots.iter().all(|slot| {
+                *slot < original.targets.len() || original.illegal_local_target_slots.contains(slot)
+            })
+            && original.target_children().count() == current.target_children().count()
+            && original
+                .target_children()
+                .zip(current.target_children())
+                .all(|((path, original), (other_path, current))| {
+                    path == other_path && refines(original, current)
+                })
+    }
+    if owner.coin_branch_target_abilities.len() != captured.coin_branch_target_abilities.len()
+        || !owner
+            .coin_branch_target_abilities
+            .iter()
+            .zip(&captured.coin_branch_target_abilities)
+            .all(|((outcome, original), (captured_outcome, current))| {
+                outcome == captured_outcome && refines(original, current)
+            })
+    {
+        return Err(
+            "parked coin targets do not refine their original announced occurrences".into(),
+        );
+    }
+    let mut admitted = owner.clone();
+    admitted.context.chosen_group_targets = captured.chosen_group_targets.clone();
+    admitted.coin_branch_target_abilities = captured.coin_branch_target_abilities.clone();
+    validate_coin_target_authority(&admitted)
+}
+
+/// Copy only announced target authority into a fresh canonical selected body.
+pub(crate) fn transfer_coin_target_custody(
+    target: &mut ResolvedAbility,
+    custody: &ResolvedAbility,
+) -> Result<(), String> {
+    if canonical_custody_shape(target)? != canonical_custody_shape(custody)? {
+        return Err("selected coin target custody has a different canonical body".into());
+    }
+    fn transfer(target: &mut ResolvedAbility, custody: &ResolvedAbility) {
+        target.replace_target_occurrences(custody.target_occurrences());
+        target.target_incarnations = custody.target_incarnations.clone();
+        target.chosen_target_slots = custody.chosen_target_slots.clone();
+        target.illegal_target_slots = custody.illegal_target_slots.clone();
+        target.unjudged_target_slots = custody.unjudged_target_slots.clone();
+        target.illegal_local_target_slots = custody.illegal_local_target_slots.clone();
+        target.context.attach_target_bindings = custody.context.attach_target_bindings.clone();
+        for ((_, target), (_, custody)) in target
+            .coin_branch_target_abilities
+            .iter_mut()
+            .zip(&custody.coin_branch_target_abilities)
+        {
+            transfer(target, custody);
+        }
+        if let (Some(target), Some(custody)) = (
+            target.sub_ability.as_deref_mut(),
+            custody.sub_ability.as_deref(),
+        ) {
+            transfer(target, custody);
+        }
+        if let (Some(target), Some(custody)) = (
+            target.else_ability.as_deref_mut(),
+            custody.else_ability.as_deref(),
+        ) {
+            transfer(target, custody);
+        }
+    }
+    transfer(target, custody);
+    Ok(())
 }
 
 /// CR 608.2c: Apply an "instead" swap from a sub-ability override
@@ -397,6 +760,8 @@ pub(crate) fn apply_instead_swap(
 ) -> ResolvedAbility {
     let mut overridden = parent.clone();
     overridden.effect = sub.effect.clone();
+    overridden.coin_branch_target_abilities = sub.coin_branch_target_abilities.clone();
+    overridden.refresh_coin_target_inputs();
     overridden.declares_chosen_group = sub.declares_chosen_group;
     overridden.reads_chosen_group = sub.reads_chosen_group;
     overridden.declares_return_result = sub.declares_return_result;
@@ -554,10 +919,53 @@ pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&T
             return Some(filter);
         }
     }
+    fn from_definition(definition: &AbilityDefinition) -> Option<&TargetFilter> {
+        if definition.target_choice_timing == TargetChoiceTiming::Stack {
+            if let Some(filter) = triggers::extract_target_filter_from_effect(&definition.effect) {
+                return Some(filter);
+            }
+        }
+        if let Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } = &*definition.effect
+        {
+            for branch in [win_effect.as_deref(), lose_effect.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(filter) = from_definition(branch) {
+                    return Some(filter);
+                }
+            }
+        }
+        definition
+            .sub_ability
+            .as_deref()
+            .and_then(from_definition)
+            .or_else(|| definition.else_ability.as_deref().and_then(from_definition))
+    }
+    if ability.coin_branch_target_abilities.is_empty() {
+        if let Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } = &ability.effect
+        {
+            for definition in [win_effect.as_deref(), lose_effect.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if let Some(filter) = from_definition(definition) {
+                    return Some(filter);
+                }
+            }
+        }
+    }
     ability
-        .sub_ability
-        .as_deref()
-        .and_then(find_first_target_filter_in_chain)
+        .target_children()
+        .find_map(|(_, child)| find_first_target_filter_in_chain(child))
 }
 
 /// CR 700.2 / CR 601.2b: Accumulates target slots alongside their per-slot mode
@@ -696,6 +1104,14 @@ pub(crate) fn build_target_slots_for_announcement(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Result<TargetSlotBuildOutcome, EngineError> {
+    let mut owned;
+    let ability = if missing_coin_target_custody(ability) {
+        owned = ability.clone();
+        ensure_coin_target_custody(&mut owned);
+        &owned
+    } else {
+        ability
+    };
     let mut acc = SlotAccumulator::default();
     match collect_target_slots(state, ability, &mut acc) {
         Ok(()) => Ok(TargetSlotBuildOutcome::Slots(acc.slots)),
@@ -1574,6 +1990,8 @@ struct TargetInstanceId(usize);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TargetSlotSpec {
+    target_chooser: Option<TargetFilter>,
+    chooser_group: Option<crate::types::ability::ChosenGroupId>,
     filter: TargetFilter,
     optional: bool,
     instance: TargetInstanceId,
@@ -1804,7 +2222,9 @@ pub fn auto_select_targets_for_ability(
     // to auto-resolve even when only one legal combination exists — force the
     // interactive per-slot walk so each announcer declares their own slot. Mirrors
     // the `TargetSelectionMode::Random` guard, which likewise bypasses auto-select.
-    if target_slots.iter().any(|slot| slot.chooser.is_some()) {
+    if target_slots.iter().any(|slot| slot.chooser.is_some())
+        || ability_has_deferred_target_announcer(state, ability)
+    {
         return Ok(None);
     }
     let assignments = build_target_assignments_for_ability_with_limit(
@@ -2269,6 +2689,7 @@ pub fn assign_targets_in_chain(
     ability: &mut ResolvedAbility,
     targets: &[TargetRef],
 ) -> Result<(), EngineError> {
+    ensure_coin_target_custody(ability);
     if is_per_opponent_target_fanout(ability) || !chain_has_target_sink(ability) {
         ability.set_unpinned_targets(targets.to_vec());
         record_root_target_slots(ability);
@@ -2295,6 +2716,7 @@ pub fn assign_selected_slots_in_chain(
     ability: &mut ResolvedAbility,
     selected_slots: &[Option<TargetRef>],
 ) -> Result<(), EngineError> {
+    ensure_coin_target_custody(ability);
     let chosen: Vec<TargetRef> = selected_slots.iter().flatten().cloned().collect();
     if is_per_opponent_target_fanout(ability) || !chain_has_target_sink(ability) {
         ability.set_unpinned_targets(chosen);
@@ -2325,6 +2747,9 @@ pub(crate) fn record_root_target_slots(ability: &mut ResolvedAbility) {
 
 fn clear_chosen_target_slots(ability: &mut ResolvedAbility) {
     ability.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        clear_chosen_target_slots(child);
+    }
     if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
         clear_chosen_target_slots(sub_ability);
     }
@@ -2371,6 +2796,10 @@ fn stamp_other_batch_source_targets(ability: &mut ResolvedAbility) {
         }
 
         let branch_slots = recent_slots.clone();
+        for (_, child) in &mut ability.coin_branch_target_abilities {
+            let mut local_slots = branch_slots.clone();
+            visit(child, &mut local_slots);
+        }
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             visit(sub, recent_slots);
         }
@@ -2407,11 +2836,8 @@ fn chain_node_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
 
 pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     let mut targets = chain_node_targets(ability);
-    if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        targets.extend(flatten_targets_in_chain(sub_ability));
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref() {
-        targets.extend(flatten_targets_in_chain(else_ability));
+    for (_, child) in ability.target_children() {
+        targets.extend(flatten_targets_in_chain(child));
     }
     targets
 }
@@ -2525,6 +2951,11 @@ fn walk_declared_slots<'a>(
             );
             path.pop();
             return;
+        }
+        for (outcome, child) in &node.coin_branch_target_abilities {
+            path.push(ChainStep::CoinBranch(*outcome));
+            go(child, numbering, false, next_slot, path, visit);
+            path.pop();
         }
         if let Some(sub_ability) = node.sub_ability.as_deref() {
             path.push(ChainStep::SubAbility);
@@ -2759,6 +3190,9 @@ pub(crate) fn illegal_declared_target_slots(
 /// normal initial legality check.
 pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
     ability.illegal_local_target_slots.clear();
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        clear_illegal_local_target_slots(child);
+    }
     if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
         clear_illegal_local_target_slots(sub_ability);
     }
@@ -2905,12 +3339,15 @@ pub(crate) fn clear_illegal_local_target_slots(ability: &mut ResolvedAbility) {
 /// as `validate_targets_in_chain`'s context-ref arm keeps it.
 pub(crate) fn flatten_specified_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
     fn visit(ability: &ResolvedAbility, targets_are_inherited: bool, out: &mut Vec<TargetRef>) {
-        if !targets_are_inherited {
+        if !targets_are_inherited && ability.reads_chosen_group.is_none() {
             if is_per_opponent_target_fanout(ability) {
                 out.extend(object_targets_only(&ability.targets));
             } else {
                 out.extend(ability.targets.iter().cloned());
             }
+        }
+        for (_, child) in &ability.coin_branch_target_abilities {
+            visit(child, false, out);
         }
         // An inherited node's own entries are skipped, but its sub-chain is
         // still walked: a rider may itself carry a genuinely targeting child.
@@ -3149,7 +3586,7 @@ pub(crate) fn validate_targets_in_chain_with_view(
     ability: &ResolvedAbility,
 ) -> (ResolvedAbility, Vec<Option<targeting::DeclaredSlotBinding>>) {
     let mut view = Vec::new();
-    let validated = validate_targets_in_chain_inner(
+    let mut validated = validate_targets_in_chain_inner(
         state,
         ability,
         TargetReadOrigin::OwnAnnouncement,
@@ -3158,6 +3595,7 @@ pub(crate) fn validate_targets_in_chain_with_view(
         DeclaredNumbering::of(ability),
         &[],
     );
+    restamp_chosen_group_targets(&mut validated);
     (validated, view)
 }
 
@@ -4023,6 +4461,17 @@ fn validate_targets_in_chain_inner(
     } else {
         parent_block
     };
+    for (_, child) in &mut validated.coin_branch_target_abilities {
+        **child = validate_targets_in_chain_inner(
+            state,
+            child,
+            TargetReadOrigin::OwnAnnouncement,
+            view_out,
+            false,
+            numbering,
+            child_block,
+        );
+    }
     if let Some(sub_ability) = validated.sub_ability.as_mut() {
         // Mirrors `declared_targets_in_chain`: a paid-"instead" delegate carries
         // its delegator's inheritance; any other sub inherits per
@@ -4063,7 +4512,6 @@ fn validate_targets_in_chain_inner(
             child_block,
         );
     }
-    restamp_chosen_group_targets(&mut validated);
     validated
 }
 
@@ -4561,12 +5009,16 @@ fn collect_target_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
-    let resolved_chooser = ability.target_chooser.as_ref().and_then(|filter| {
-        crate::game::targeting::resolve_effect_player_ref(state, ability, filter)
-            // A chooser equal to the controller is the CR-601.2c default; leave the
-            // slot's `chooser` as None so default routing and serde-omission apply.
-            .filter(|&player| player != ability.controller)
-    });
+    let resolved_chooser = ability
+        .target_chooser
+        .as_ref()
+        .filter(|filter| !matches!(filter, TargetFilter::ParentTargetController))
+        .and_then(|filter| {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, filter)
+                // A chooser equal to the controller is the CR-601.2c default; leave the
+                // slot's `chooser` as None so default routing and serde-omission apply.
+                .filter(|&player| player != ability.controller)
+        });
     let previous_chooser = std::mem::replace(&mut acc.current_chooser, resolved_chooser);
     // CR 115.1: stamp this link's own effect on the slots it is about to push.
     // Restored below so a chained sub-ability does not leak its kind upward.
@@ -5149,6 +5601,9 @@ fn collect_sub_chain_slots(
     ability: &ResolvedAbility,
     acc: &mut SlotAccumulator,
 ) -> Result<(), TargetSlotBuildError> {
+    for (_, child) in &ability.coin_branch_target_abilities {
+        collect_target_slots(state, child, acc)?;
+    }
     if defers_sub_ability_target_selection(&ability.effect) {
         collect_target_slots_after_deferred_effect(state, ability.sub_ability.as_deref(), acc)?;
         return Ok(());
@@ -5170,6 +5625,11 @@ fn collect_sub_chain_slots(
             collect_sub_chain_slots(state, sub_ability, acc)?;
         } else {
             collect_target_slots(state, sub_ability, acc)?;
+        }
+    }
+    if let Some(child) = ability.else_ability.as_deref() {
+        if !defers_conditional_target_selection(child) {
+            collect_target_slots(state, child, acc)?;
         }
     }
     Ok(())
@@ -5371,6 +5831,14 @@ pub fn ability_target_legality_needs_chosen_x(
     ability: &ResolvedAbility,
     distribute: Option<&crate::types::game_state::DistributionUnit>,
 ) -> bool {
+    let mut owned;
+    let ability = if missing_coin_target_custody(ability) {
+        owned = ability.clone();
+        ensure_coin_target_custody(&mut owned);
+        &owned
+    } else {
+        ability
+    };
     if ability.chosen_x.is_some() {
         return false;
     }
@@ -5387,6 +5855,10 @@ pub fn ability_target_legality_needs_chosen_x(
 
 fn ability_target_legality_needs_chosen_x_inner(ability: &ResolvedAbility) -> bool {
     target_slot_construction_needs_chosen_x(ability)
+        || ability
+            .coin_branch_target_abilities
+            .iter()
+            .any(|(_, child)| ability_target_legality_needs_chosen_x_inner(child))
         || ability
             .sub_ability
             .as_deref()
@@ -6581,6 +7053,8 @@ fn collect_attach_attachment_target_slot_specs(
                     optional: slot_index >= bounds.min,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
         }
@@ -6592,6 +7066,8 @@ fn collect_attach_attachment_target_slot_specs(
             optional: attach_attachment_targeting_is_optional(ability),
             instance: id,
             group: ability.declares_chosen_group,
+            target_chooser: ability.target_chooser.clone(),
+            chooser_group: None,
         });
     }
 }
@@ -7689,6 +8165,8 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
         } else if let Some(src_leaf) = damage_replacement_source_slot_filter(&ability.effect) {
@@ -7699,6 +8177,8 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
     }
@@ -7719,6 +8199,8 @@ fn collect_target_slot_specs(
                 optional: ability.targeting_is_optional(),
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
         collect_sub_chain_slot_specs(state, ability, specs, next_instance);
@@ -7737,6 +8219,8 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
         return;
@@ -7758,6 +8242,8 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
         }
@@ -7776,6 +8262,8 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
     } else if let Effect::Attach {
@@ -7801,6 +8289,8 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
         }
@@ -7831,6 +8321,8 @@ fn collect_target_slot_specs(
                             optional: slot_index >= bounds.min,
                             instance: id,
                             group: ability.declares_chosen_group,
+                            target_chooser: ability.target_chooser.clone(),
+                            chooser_group: None,
                         });
                     }
                 }
@@ -7842,6 +8334,8 @@ fn collect_target_slot_specs(
                     optional: false,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
             // CR 115.4 + CR 601.2c: group-B spec — its OWN instance, between the
@@ -7856,6 +8350,8 @@ fn collect_target_slot_specs(
                     optional: true,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
             let id = TargetInstanceId(*next_instance);
@@ -7865,6 +8361,8 @@ fn collect_target_slot_specs(
                 optional: false,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
     } else {
@@ -7890,6 +8388,8 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7905,6 +8405,8 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
         if ability.target_choice_timing == TargetChoiceTiming::Stack
@@ -7917,6 +8419,8 @@ fn collect_target_slot_specs(
                 optional: ability.optional_targeting,
                 instance: id,
                 group: ability.declares_chosen_group,
+                target_chooser: ability.target_chooser.clone(),
+                chooser_group: None,
             });
         }
         // CR 115.1 + CR 601.2c: EXACT MIRROR of the `BecomeCopy` recipient slot
@@ -7942,6 +8446,8 @@ fn collect_target_slot_specs(
                     optional: ability.optional_targeting,
                     instance: id,
                     group: ability.declares_chosen_group,
+                    target_chooser: ability.target_chooser.clone(),
+                    chooser_group: None,
                 });
             }
         }
@@ -7966,6 +8472,8 @@ fn collect_target_slot_specs(
                                 optional: slot_index >= bounds.min,
                                 instance: id,
                                 group: ability.declares_chosen_group,
+                                target_chooser: ability.target_chooser.clone(),
+                                chooser_group: None,
                             });
                         }
                     }
@@ -7977,6 +8485,8 @@ fn collect_target_slot_specs(
                         optional: ability.optional_targeting,
                         instance: id,
                         group: ability.declares_chosen_group,
+                        target_chooser: ability.target_chooser.clone(),
+                        chooser_group: None,
                     });
                 }
             }
@@ -7995,6 +8505,9 @@ fn collect_sub_chain_slot_specs(
     specs: &mut Vec<TargetSlotSpec>,
     next_instance: &mut usize,
 ) {
+    for (_, child) in &ability.coin_branch_target_abilities {
+        collect_target_slot_specs(state, child, specs, next_instance);
+    }
     if defers_sub_ability_target_selection(&ability.effect) {
         collect_target_slot_specs_after_deferred_effect(
             state,
@@ -8013,6 +8526,11 @@ fn collect_sub_chain_slot_specs(
             collect_sub_chain_slot_specs(state, sub_ability, specs, next_instance);
         } else {
             collect_target_slot_specs(state, sub_ability, specs, next_instance);
+        }
+    }
+    if let Some(child) = ability.else_ability.as_deref() {
+        if !defers_conditional_target_selection(child) {
+            collect_target_slot_specs(state, child, specs, next_instance);
         }
     }
 }
@@ -8591,12 +9109,16 @@ fn collect_per_opponent_target_fanout_specs(
             optional: false,
             instance: player_id,
             group: None,
+            target_chooser: None,
+            chooser_group: None,
         });
         specs.push(TargetSlotSpec {
             filter: object_filter.clone(),
             optional: ability.targeting_is_optional(),
             instance: object_id,
             group: None,
+            target_chooser: None,
+            chooser_group: None,
         });
     }
 }
@@ -8705,12 +9227,107 @@ fn rewrite_declared_target_player(
 }
 
 fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
+    let mut owned;
+    let ability = if missing_coin_target_custody(ability) {
+        owned = ability.clone();
+        ensure_coin_target_custody(&mut owned);
+        &owned
+    } else {
+        ability
+    };
     let mut specs = Vec::new();
     // CR 601.2c + CR 115.3: instance ids are allocated densely from 0 as specs
     // are collected; each fresh-id push site bumps the seed.
     let mut next_instance = 0usize;
     collect_target_slot_specs(state, ability, &mut specs, &mut next_instance);
+    fn anchors(
+        node: &ResolvedAbility,
+        preceding: Option<crate::types::ability::ChosenGroupId>,
+        out: &mut std::collections::HashMap<
+            crate::types::ability::ChosenGroupId,
+            Option<crate::types::ability::ChosenGroupId>,
+        >,
+    ) {
+        let mut preceding = preceding;
+        if let Some(group) = node.declares_chosen_group {
+            out.insert(group, preceding);
+            preceding = triggers::extract_target_filter_from_effect(&node.effect)
+                .filter(|filter| filter.denotes_battlefield_objects())
+                .map(|_| group);
+        }
+        for (_, child) in &node.coin_branch_target_abilities {
+            anchors(child, preceding, out);
+        }
+        if let Some(child) = node.sub_ability.as_deref() {
+            anchors(child, preceding, out);
+        }
+        if let Some(child) = node.else_ability.as_deref() {
+            anchors(child, preceding, out);
+        }
+    }
+    let mut declaration_anchors = std::collections::HashMap::new();
+    anchors(ability, None, &mut declaration_anchors);
+    for spec in &mut specs {
+        if spec.target_chooser == Some(TargetFilter::ParentTargetController) {
+            spec.chooser_group = spec
+                .group
+                .and_then(|group| declaration_anchors.get(&group).copied().flatten());
+        }
+    }
     specs
+}
+
+pub(crate) fn ability_has_deferred_target_announcer(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    target_slot_specs(state, ability)
+        .iter()
+        .any(|spec| spec.target_chooser == Some(TargetFilter::ParentTargetController))
+}
+
+/// CR 601.2c + CR 608.2c: a dependent announcer reads only the immediately
+/// preceding declared object group in the already selected prefix.
+pub(crate) fn target_announcer_for_selected_slot(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    slots: &[TargetSelectionSlot],
+    selection: &TargetSelectionProgress,
+) -> Result<PlayerId, EngineError> {
+    let slot = slots
+        .get(selection.current_slot)
+        .ok_or_else(|| EngineError::InvalidAction("missing current target slot".into()))?;
+    let specs = target_slot_specs(state, ability);
+    let spec = specs
+        .get(selection.current_slot)
+        .ok_or_else(|| EngineError::InvalidAction("missing current target declaration".into()))?;
+    if spec.target_chooser == Some(TargetFilter::ParentTargetController) {
+        let group = spec.chooser_group.ok_or_else(|| {
+            EngineError::InvalidAction(
+                "dependent target announcer has no preceding object declaration".into(),
+            )
+        })?;
+        let mut controllers = specs
+            .iter()
+            .zip(&selection.selected_slots)
+            .filter(|(prior, _)| prior.group == Some(group))
+            .filter_map(|(_, target)| match target {
+                Some(TargetRef::Object(id)) => {
+                    state.objects.get(id).map(|object| object.controller)
+                }
+                _ => None,
+            });
+        let controller = controllers.next().ok_or_else(|| {
+            EngineError::InvalidAction("dependent target announcer has no selected object".into())
+        })?;
+        if controllers.any(|other| other != controller) {
+            return Err(EngineError::InvalidAction(
+                "dependent target announcer is ambiguous".into(),
+            ));
+        }
+        return Ok(controller);
+    }
+    Ok(slot.chooser.unwrap_or(ability.controller))
 }
 
 /// CR 608.2c + CR 115.1a: the first player announced for each declared group in the
@@ -9114,6 +9731,12 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
             &sub.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
         )
+        // CR 601.2c: optional-cost-dependent targets exist only when that
+        // announced cost was chosen. Target-relative payment conditions keep
+        // their ordinary targets and resolution-time condition check.
+        || matches!(&sub.condition,
+            Some(AbilityCondition::AdditionalCostPaid { subject: ObjectScope::Source, source, origin: None, origin_ordinal: None, variant, kicker_cost, min_count })
+                if !sub.context.additional_cost_paid_matches(*source, *variant, kicker_cost.as_ref(), *min_count))
         || sub.target_choice_timing == TargetChoiceTiming::Resolution
 }
 
@@ -9480,7 +10103,13 @@ pub(crate) fn build_target_selection_progress_for_ability(
     // is never a non-choice even with a singleton legal set.
     // CR 601.2c + CR 115.1: `chooser.is_none()` — a slot announced by another player
     // is not the controller's to auto-resolve.
-    if is_per_opponent_target_fanout(ability) && !slot.optional && slot.chooser.is_none() {
+    if is_per_opponent_target_fanout(ability)
+        && !slot.optional
+        && slot.chooser.is_none()
+        && !specs
+            .get(current_slot)
+            .is_some_and(|spec| spec.target_chooser.is_some())
+    {
         if let Some(TargetSlotSpec {
             filter: TargetFilter::SpecificPlayer { id },
             ..
@@ -9563,6 +10192,7 @@ fn homogeneous_required_target_walk_spec<'a>(
         || specs.iter().any(|spec| {
             spec.instance != first.instance
                 || spec.filter != first.filter
+                || spec.target_chooser.is_some()
                 || target_filter_has_another_target_marker(&spec.filter)
                 || relative_controller_kind(&spec.filter).is_some()
                 || caster_scoped_selection(&spec.filter)
@@ -10719,6 +11349,10 @@ fn assign_sub_chain_targets(
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
+    ability.refresh_coin_target_inputs();
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        assign_targets_recursive(state, child, targets, next_target)?;
+    }
     if defers_sub_ability_target_selection(&ability.effect) {
         assign_targets_after_deferred_effect(
             state,
@@ -10747,6 +11381,11 @@ fn assign_sub_chain_targets(
             assign_sub_chain_targets(state, sub_ability, targets, next_target)?;
         } else {
             assign_targets_recursive(state, sub_ability, targets, next_target)?;
+        }
+    }
+    if let Some(child) = ability.else_ability.as_deref_mut() {
+        if !defers_conditional_target_selection(child) {
+            assign_targets_recursive(state, child, targets, next_target)?;
         }
     }
     Ok(())
@@ -11220,6 +11859,10 @@ fn assign_sub_chain_selected_slots(
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
+    ability.refresh_coin_target_inputs();
+    for (_, child) in &mut ability.coin_branch_target_abilities {
+        assign_selected_slots_recursive(state, child, selected_slots, next_slot)?;
+    }
     if defers_sub_ability_target_selection(&ability.effect) {
         assign_selected_slots_after_deferred_effect(
             state,
@@ -11248,6 +11891,11 @@ fn assign_sub_chain_selected_slots(
             assign_sub_chain_selected_slots(state, sub_ability, selected_slots, next_slot)?;
         } else {
             assign_selected_slots_recursive(state, sub_ability, selected_slots, next_slot)?;
+        }
+    }
+    if let Some(child) = ability.else_ability.as_deref_mut() {
+        if !defers_conditional_target_selection(child) {
+            assign_selected_slots_recursive(state, child, selected_slots, next_slot)?;
         }
     }
     Ok(())
@@ -11485,6 +12133,13 @@ fn paired_subject_slot_filters(effect: &Effect) -> impl Iterator<Item = &TargetF
 }
 
 fn chain_has_target_sink(ability: &ResolvedAbility) -> bool {
+    if ability
+        .coin_branch_target_abilities
+        .iter()
+        .any(|(_, child)| chain_has_target_sink(child))
+    {
+        return true;
+    }
     // CR 601.2c: a paired-subject node IS a target sink whenever it claims at
     // least one declared slot. This cannot be left to the generic
     // `extract_target_filter_from_effect` test below: that reads
@@ -12065,6 +12720,12 @@ fn descend_retarget_slots(
     bindings: &mut Vec<RetargetSlotBinding>,
     next_run: &mut usize,
 ) {
+    for (outcome, child) in &ability.coin_branch_target_abilities {
+        let mut child_path = path.to_vec();
+        child_path.push(ChainStep::CoinBranch(*outcome));
+        emit_node(child, &child_path, false, bindings, next_run);
+        descend_retarget_slots(child, &child_path, bindings, next_run);
+    }
     if defers_sub_ability_target_selection(&ability.effect) {
         descend_retarget_slots_after_deferred_effect(
             ability.sub_ability.as_deref(),
@@ -12088,6 +12749,14 @@ fn descend_retarget_slots(
             sub_path.push(ChainStep::SubAbility);
             emit_node(sub, &sub_path, false, bindings, next_run);
             descend_retarget_slots(sub, &sub_path, bindings, next_run);
+        }
+    }
+    if let Some(child) = ability.else_ability.as_deref() {
+        if !defers_conditional_target_selection(child) {
+            let mut child_path = path.to_vec();
+            child_path.push(ChainStep::ElseAbility);
+            emit_node(child, &child_path, false, bindings, next_run);
+            descend_retarget_slots(child, &child_path, bindings, next_run);
         }
     }
 }
@@ -12161,6 +12830,16 @@ pub fn chain_retarget_slots(ability: &ResolvedAbility) -> Vec<RetargetSlotBindin
     bindings
 }
 
+pub(crate) fn base_exposed_target_path(ability: &ResolvedAbility) -> Vec<ChainStep> {
+    let mut path = Vec::new();
+    let mut node = ability;
+    while let Some(sub) = paid_instead_delegate(node) {
+        path.push(ChainStep::SubAbility);
+        node = sub;
+    }
+    path
+}
+
 /// Exhaustive over `ChainStep`; `None` when the path does not resolve, which
 /// `apply_retarget` turns into `InvalidAction` rather than writing elsewhere.
 pub(crate) fn node_at<'a>(
@@ -12172,6 +12851,17 @@ pub(crate) fn node_at<'a>(
         node = match step {
             ChainStep::SubAbility => node.sub_ability.as_deref()?,
             ChainStep::ElseAbility => node.else_ability.as_deref()?,
+            ChainStep::CoinBranch(outcome) => {
+                let mut matching = node
+                    .coin_branch_target_abilities
+                    .iter()
+                    .filter(|(candidate, _)| candidate == outcome);
+                let (_, child) = matching.next()?;
+                if matching.next().is_some() {
+                    return None;
+                }
+                child.as_ref()
+            }
         };
     }
     Some(node)
@@ -12284,6 +12974,22 @@ pub(crate) fn node_at_mut<'a>(
         node = match step {
             ChainStep::SubAbility => node.sub_ability.as_deref_mut()?,
             ChainStep::ElseAbility => node.else_ability.as_deref_mut()?,
+            ChainStep::CoinBranch(outcome) => {
+                if node
+                    .coin_branch_target_abilities
+                    .iter()
+                    .filter(|(candidate, _)| candidate == outcome)
+                    .count()
+                    != 1
+                {
+                    return None;
+                }
+                node.coin_branch_target_abilities
+                    .iter_mut()
+                    .find(|(candidate, _)| candidate == outcome)?
+                    .1
+                    .as_mut()
+            }
         };
     }
     Some(node)
@@ -12725,6 +13431,9 @@ pub(crate) fn widen_dependent_retarget_pools(
 pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
     fn remirror(ability: &mut ResolvedAbility) {
         let mut mirrored = None;
+        for (_, child) in &mut ability.coin_branch_target_abilities {
+            remirror(child);
+        }
         if let Some(sub) = ability.sub_ability.as_deref_mut() {
             remirror(sub);
             if is_paid_instead_sub(&ability.context, sub) {
@@ -12750,7 +13459,7 @@ pub(crate) fn restamp_derived_chain_targets(ability: &mut ResolvedAbility) {
 
 /// CR 601.2c + CR 608.2b: An anaphoric instruction reads only the active
 /// producer's announced targets. An empty vector is an intentional binding.
-fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
+pub(crate) fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
     use std::collections::HashMap;
 
     type GroupTargets = Vec<(TargetRef, Option<ObjectIncarnationRef>)>;
@@ -12791,8 +13500,19 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
         node: &mut ResolvedAbility,
         groups: &HashMap<crate::types::ability::ChosenGroupId, GroupTargets>,
     ) {
+        let mut captured: crate::types::ability::ChosenGroupTargets = groups
+            .iter()
+            .map(|(id, targets)| (*id, targets.clone()))
+            .collect();
+        captured.sort_by_key(|(group, _)| group.0);
+        node.context.chosen_group_targets = captured;
         if let Some(id) = node.reads_chosen_group {
             node.replace_target_occurrences(groups.get(&id).cloned().unwrap_or_default());
+        }
+        for (_, child) in &mut node.coin_branch_target_abilities {
+            let mut local = groups.clone();
+            collect(child, &mut local);
+            bind(child, &local);
         }
         if let Some(sub) = node.sub_ability.as_deref_mut() {
             bind(sub, groups);
@@ -12802,7 +13522,12 @@ fn restamp_chosen_group_targets(ability: &mut ResolvedAbility) {
         }
     }
 
-    let mut groups = HashMap::new();
+    let mut groups = ability
+        .context
+        .chosen_group_targets
+        .iter()
+        .cloned()
+        .collect();
     collect(ability, &mut groups);
     bind(ability, &groups);
 }
@@ -13120,14 +13845,29 @@ fn minimum_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> usi
 /// `TargetReadOrigin::ParentAnnouncement` rider) contributes none of its own,
 /// but the chain below it — a later chained mode — still counts.
 fn minimum_targets_below(state: &GameState, ability: &ResolvedAbility) -> usize {
+    let branch_minimum: usize = ability
+        .coin_branch_target_abilities
+        .iter()
+        .map(|(_, child)| minimum_targets_in_chain(state, child))
+        .sum();
+    let else_minimum = ability
+        .else_ability
+        .as_deref()
+        .map_or(0, |child| minimum_targets_in_chain(state, child));
     if defers_sub_ability_target_selection(&ability.effect) {
-        return minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref());
+        return branch_minimum
+            + else_minimum
+            + minimum_targets_after_deferred_effect(state, ability.sub_ability.as_deref());
     }
-    match ability.sub_ability.as_deref() {
-        Some(sub) if rider_entries_are_inherited(ability, sub) => minimum_targets_below(state, sub),
-        Some(sub) => minimum_targets_in_chain(state, sub),
-        None => 0,
-    }
+    branch_minimum
+        + else_minimum
+        + match ability.sub_ability.as_deref() {
+            Some(sub) if rider_entries_are_inherited(ability, sub) => {
+                minimum_targets_below(state, sub)
+            }
+            Some(sub) => minimum_targets_in_chain(state, sub),
+            None => 0,
+        }
 }
 
 fn minimum_targets_after_deferred_effect(
@@ -17850,6 +18590,34 @@ mod tests {
             swapped_partial_parent.targets,
             vec![TargetRef::Player(PlayerId(0)), TargetRef::Player(PlayerId(1))],
             "swap must retain every target valid for the override, even when the parent retained a narrower subset"
+        );
+        let coin_parent = super::coin_target_custody_tests::recorded_coin(71, 801);
+        let mut coin_sub = super::coin_target_custody_tests::recorded_coin(72, 802);
+        coin_sub.coin_branch_target_abilities[0]
+            .1
+            .illegal_local_target_slots = vec![0];
+        let selected = apply_instead_swap(&coin_parent, &coin_sub);
+        assert_eq!(
+            selected.coin_branch_target_abilities,
+            coin_sub.coin_branch_target_abilities
+        );
+        assert_ne!(
+            selected.coin_branch_target_abilities,
+            coin_parent.coin_branch_target_abilities
+        );
+        assert_eq!(selected.source_id, coin_parent.source_id);
+        assert_eq!(selected.controller, coin_parent.controller);
+        assert_eq!(selected.targets, coin_parent.targets);
+        let mut empty_coin_sub = coin_sub.clone();
+        empty_coin_sub.coin_branch_target_abilities.clear();
+        assert!(apply_instead_swap(&coin_parent, &empty_coin_sub)
+            .coin_branch_target_abilities
+            .is_empty());
+        assert!(
+            apply_instead_swap(&coin_parent, &sub)
+                .coin_branch_target_abilities
+                .is_empty(),
+            "non-coin swap clears all old custody"
         );
     }
 
@@ -29736,5 +30504,339 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(target_slot_specs(runner.state(), &deferred).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod coin_target_custody_tests {
+    use super::*;
+    use crate::types::ability::{ChosenGroupId, CoinFlipResult, CoinFlipRun};
+    use crate::types::game_state::{StackEntry, StackEntryKind};
+    use crate::types::resolution::{FlipBranchContext, ResolutionStateWire};
+
+    pub(super) fn recorded_coin(id: u64, birth: u64) -> ResolvedAbility {
+        let mut declaration = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        declaration.declares_chosen_group = Some(ChosenGroupId(2));
+        let mut reader = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::ParentTarget,
+                cant_regenerate: false,
+            },
+        );
+        reader.reads_chosen_group = Some(ChosenGroupId(2));
+        declaration.sub_ability = Some(Box::new(reader));
+        let definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(declaration)),
+                lose_effect: None,
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut root = build_resolved_from_def(&definition, ObjectId(10), PlayerId(0));
+        root.start_target_record_recursive();
+        let local = &mut root.coin_branch_target_abilities[0].1;
+        let target = ObjectId(id);
+        local.replace_target_occurrences(vec![(
+            TargetRef::Object(target),
+            Some(ObjectIncarnationRef::of(target, birth)),
+        )]);
+        local.chosen_target_slots = ChosenTargetSlots::Recorded(vec![0]);
+        restamp_chosen_group_targets(&mut root);
+        root
+    }
+
+    #[test]
+    fn canonical_coin_custody_addresses_and_fresh_transfer_preserve_exact_occurrences() {
+        let mut root = recorded_coin(77, 901);
+        let addresses = declared_position_addresses(&root);
+        assert_eq!(
+            addresses.len(),
+            1,
+            "reader contributes no second declaration"
+        );
+        assert_eq!(
+            addresses[0].as_ref().unwrap().path,
+            vec![ChainStep::CoinBranch(CoinFlipResult::Won)]
+        );
+        assert_eq!(
+            declared_targets_in_chain(&root),
+            vec![TargetRef::Object(ObjectId(77))]
+        );
+        assert_eq!(
+            flatten_specified_targets_in_chain(&root),
+            vec![TargetRef::Object(ObjectId(77))]
+        );
+        assert!(node_at(&root, &[ChainStep::CoinBranch(CoinFlipResult::Lost)]).is_none());
+        let pins = root.coin_branch_target_abilities[0].1.target_occurrences();
+        root.set_chosen_x_recursive(7);
+        root.set_controller_recursive(PlayerId(1));
+        assert_eq!(
+            root.coin_branch_target_abilities[0].1.target_occurrences(),
+            pins
+        );
+        assert_eq!(root.coin_branch_target_abilities[0].1.chosen_x, Some(7));
+        assert_eq!(
+            root.coin_branch_target_abilities[0].1.controller,
+            PlayerId(1)
+        );
+        let Effect::FlipCoins {
+            win_effect: Some(definition),
+            ..
+        } = &root.effect
+        else {
+            panic!("coin")
+        };
+        let mut selected = build_resolved_from_def(definition, root.source_id, root.controller);
+        selected.inherit_coin_target_inputs(&root.coin_target_input_projection());
+        transfer_coin_target_custody(&mut selected, &root.coin_branch_target_abilities[0].1)
+            .unwrap();
+        selected.context.chosen_group_targets = root.context.chosen_group_targets.clone();
+        restamp_chosen_group_targets(&mut selected);
+        assert_eq!(selected.target_occurrences(), pins);
+        assert_eq!(
+            selected.sub_ability.as_ref().unwrap().target_occurrences(),
+            pins
+        );
+        assert!(selected.chosen_players.is_empty());
+        assert!(selected.return_result_process.is_none());
+        assert!(selected.context.damage_source_choice.is_none());
+    }
+
+    #[test]
+    fn intrinsic_coin_transport_and_authoritative_capture_admission_are_separate() {
+        let good = recorded_coin(77, 901);
+        validate_coin_target_authority(&good).unwrap();
+        let value = serde_json::to_value(&good).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolvedAbility>(value.clone()).unwrap(),
+            good
+        );
+        let mut redacted = good.clone();
+        fn redact(node: &mut ResolvedAbility) {
+            node.context.chosen_group_targets.clear();
+            for (_, child) in &mut node.coin_branch_target_abilities {
+                redact(child);
+            }
+            if let Some(child) = node.sub_ability.as_deref_mut() {
+                redact(child);
+            }
+            if let Some(child) = node.else_ability.as_deref_mut() {
+                redact(child);
+            }
+        }
+        redact(&mut redacted);
+        serde_json::from_value::<ResolvedAbility>(serde_json::to_value(&redacted).unwrap())
+            .expect("intrinsic public transport remains decodable");
+        assert!(validate_coin_target_authority(&redacted).is_err());
+        let mut wrong_owner = good.clone();
+        wrong_owner.coin_branch_target_abilities[0].1.source_id = ObjectId(999);
+        validate_coin_target_structure(&wrong_owner).unwrap();
+        assert!(validate_coin_target_authority(&wrong_owner).is_err());
+        let mut wrong_capture = good.clone();
+        wrong_capture.coin_branch_target_abilities[0]
+            .1
+            .context
+            .chosen_group_targets[0]
+            .1[0]
+            .1 = Some(ObjectIncarnationRef::of(ObjectId(77), 902));
+        assert!(validate_coin_target_authority(&wrong_capture).is_err());
+        for malformed in [
+            {
+                let mut node = good.clone();
+                node.coin_branch_target_abilities[0].0 = CoinFlipResult::Lost;
+                node
+            },
+            {
+                let mut node = good.clone();
+                node.coin_branch_target_abilities
+                    .push(node.coin_branch_target_abilities[0].clone());
+                node
+            },
+            {
+                let mut node = good.clone();
+                node.coin_branch_target_abilities[0]
+                    .1
+                    .chosen_players
+                    .push(PlayerId(1));
+                node
+            },
+            {
+                let mut node = good.clone();
+                node.coin_branch_target_abilities[0].1.effect = Effect::NoOp;
+                node
+            },
+            {
+                let mut node = good.clone();
+                node.coin_branch_target_abilities[0]
+                    .1
+                    .target_pins
+                    .push(None);
+                node
+            },
+        ] {
+            assert!(serde_json::from_value::<ResolvedAbility>(
+                serde_json::to_value(malformed).unwrap()
+            )
+            .is_err());
+        }
+        let mut state = GameState::new_two_player(42);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(12),
+            source_id: ObjectId(10),
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ObjectId(10),
+                ability: Box::new(good),
+            },
+        });
+        serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap())
+            .expect("valid authoritative raw");
+        serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+        )
+        .expect("valid authoritative wire");
+        *state.stack[0].ability_mut().unwrap() = redacted;
+        assert!(
+            serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).is_err()
+        );
+        assert!(serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parked_coin_inputs_and_pins_belong_to_the_installed_resolution_carrier() {
+        use crate::types::resolution::{PendingCoinFlip, PendingCoinFlipKind};
+        let owner = recorded_coin(77, 901);
+        let Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } = &owner.effect
+        else {
+            panic!("coin")
+        };
+        let pending = PendingCoinFlip {
+            return_result_occurrence: None,
+            expected_return_result_process: None,
+            source_id: owner.source_id,
+            controller: owner.controller,
+            flipper: owner.controller,
+            targets: Vec::new(),
+            win_effect: win_effect.clone(),
+            lose_effect: lose_effect.clone(),
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+            chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::from_ability(&owner),
+        };
+        let mut state = GameState::new_two_player(42);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(12),
+            source_id: owner.source_id,
+            controller: owner.controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: owner.source_id,
+                ability: Box::new(owner.clone()),
+            },
+        });
+        crate::game::effects::flip_coin::validate_pending_coin_flip(&state, &pending).unwrap();
+        let mut forged_inputs = pending.clone();
+        for (_, child) in &mut forged_inputs.branch_context.coin_branch_target_abilities {
+            child.set_chosen_x_recursive(99);
+        }
+        assert!(
+            crate::game::effects::flip_coin::validate_pending_coin_flip(&state, &forged_inputs)
+                .is_err(),
+            "coherent siblings do not own X"
+        );
+        let mut forged_source = pending.clone();
+        for (_, child) in &mut forged_source.branch_context.coin_branch_target_abilities {
+            child.set_gameplay_source_recursive(ObjectId(999));
+        }
+        assert!(crate::game::effects::flip_coin::validate_pending_coin_flip(
+            &state,
+            &forged_source
+        )
+        .is_err());
+        forged_source.source_id = ObjectId(999);
+        assert!(
+            crate::game::effects::flip_coin::validate_pending_coin_flip(&state, &forged_source)
+                .is_err(),
+            "forging the whole frame still cannot replace its installed owner"
+        );
+        let other = recorded_coin(88, 902);
+        state.stack.push_back(StackEntry {
+            id: ObjectId(13),
+            source_id: owner.source_id,
+            controller: owner.controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: owner.source_id,
+                ability: Box::new(other.clone()),
+            },
+        });
+        let mut forged_copy = pending.clone();
+        forged_copy.branch_context = FlipBranchContext::from_ability(&other);
+        assert!(
+            crate::game::effects::flip_coin::validate_pending_coin_flip(&state, &forged_copy)
+                .is_err(),
+            "same source/definition on an unrelated stack copy is no authority"
+        );
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: owner.controller,
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        state.push_coin_flip_frame(pending);
+        serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap())
+            .expect("valid parked raw owner");
+        serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+        )
+        .expect("valid parked wire owner");
+        state
+            .take_active_coin_flip_frame()
+            .expect("valid top frame")
+            .expect("frame");
+        state.push_coin_flip_frame(forged_inputs);
+        assert!(
+            serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).is_err()
+        );
+        assert!(serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn empty_local_declaration_is_authority_but_targetless_scaffolding_is_not() {
+        let mut local = recorded_coin(77, 901);
+        let child = &mut local.coin_branch_target_abilities[0].1;
+        child.replace_target_occurrences(Vec::new());
+        child.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
+        restamp_chosen_group_targets(&mut local);
+        validate_coin_target_authority(&local).unwrap();
+        let context = FlipBranchContext::from_ability(&local);
+        assert!(!context.is_empty());
+        assert_eq!(
+            context.coin_branch_target_abilities[0]
+                .1
+                .context
+                .chosen_group_targets,
+            vec![(ChosenGroupId(2), Vec::new())]
+        );
+        let mut targetless =
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(10), PlayerId(0));
+        assert!(coin_target_custody_is_empty(&targetless));
+        targetless.chosen_players.push(PlayerId(1));
+        assert!(!coin_target_custody_is_empty(&targetless));
     }
 }

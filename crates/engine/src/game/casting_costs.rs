@@ -579,8 +579,9 @@ fn stamp_pending_ability_context_recursive(pending: &mut PendingCast) {
 
 fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellContext) {
     let announcing_opponent = ability.context.announcing_opponent;
-    ability.context = shared.clone();
+    ability.inherit_context_preserving_targets(shared.clone());
     ability.context.announcing_opponent = announcing_opponent;
+    ability.refresh_coin_target_inputs();
     if let Some(sub) = ability.sub_ability.as_mut() {
         propagate_shared_cast_context(sub, shared);
     }
@@ -2102,6 +2103,13 @@ pub(crate) fn begin_deferred_target_selection(
     mut pending: PendingCast,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 601.2b/c: after additional-cost intentions are latched, announce any
+    // remaining mana X before constructing targets. The payment authority
+    // returns here with chosen_x set, retaining the declared kicker queue.
+    if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
+        state.pending_cast = Some(Box::new(pending));
+        return enter_payment_step(state, player, None, events);
+    }
     // Defense in depth: nest-propagate SpellContext before building slots so
     // GiftDelivery → AdditionalCostPaidInstead sees additional_cost_paid.
     stamp_pending_ability_context_recursive(&mut pending);
@@ -2319,10 +2327,12 @@ pub(crate) fn begin_deferred_target_selection(
     )?;
     // CR 601.2c + CR 115.1: first slot's announcer (controller unless the slot is
     // "of an opponent's choice").
-    let initial_player = target_slots
-        .first()
-        .and_then(|slot| slot.chooser)
-        .unwrap_or(player);
+    let initial_player = super::ability_utils::target_announcer_for_selected_slot(
+        state,
+        &pending.ability,
+        &target_slots,
+        &selection,
+    )?;
     Ok(WaitingFor::TargetSelection {
         player: initial_player,
         pending_cast: Box::new(pending),

@@ -722,28 +722,22 @@ fn handle_replacement_choice_inner(
                 // does not prevent the turn-up), so there is nothing to apply on
                 // the post-replacement Execute path here.
                 ProposedEvent::TurnFaceUp { .. } => {}
-                // CR 701.3a + CR 616.1: Attach accepted after a replacement
-                // ordering choice (2+ "as it becomes attached, choose …"
-                // definitions on the same attachment). Unreachable today — the
-                // parser pool has exactly one `ReplacementEvent::Attached`
-                // producer (Psychic Paper) — but wired for correctness if a
-                // future card shares the class. `source_id` for the
-                // `EffectResolved` push is approximated as `attachment_id`:
-                // `ProposedEvent::Attach` doesn't carry the original ability's
-                // source, which only differs from the attachment for a
-                // non-Equip "attach ~ to" effect (e.g. a triggered ability on
-                // another permanent) — no such card has BOTH that shape AND a
-                // second Attached-event replacement to order against today.
+                // CR 701.3a + CR 616.1: resume the exact selected typed host,
+                // attachment birth and true effect source after replacement.
+                // Authentic old object events retain their old source default.
                 ProposedEvent::Attach {
                     attachment_id,
-                    target_id,
+                    target,
+                    attachment_incarnation,
+                    source_id,
                     ..
                 } => {
                     if let Some(waiting_for) = crate::game::effects::attach::deliver_attach(
                         state,
                         attachment_id,
-                        target_id,
-                        attachment_id,
+                        target,
+                        attachment_incarnation,
+                        source_id.unwrap_or(attachment_id),
                         events,
                     ) {
                         state.waiting_for = waiting_for;

@@ -17865,14 +17865,22 @@ pub(super) fn begin_pending_trigger_target_selection(
     let selection_result = match build_target_slots(state, &ability) {
         Ok(target_slots) if !target_slots.is_empty() => {
             begin_target_selection_for_ability(state, &ability, &target_slots, &target_constraints)
-                .map(|selection| Some((target_slots, selection)))
+                .and_then(|selection| {
+                    let announcer = super::ability_utils::target_announcer_for_selected_slot(
+                        state,
+                        &ability,
+                        &target_slots,
+                        &selection,
+                    )?;
+                    Ok(Some((target_slots, selection, announcer)))
+                })
         }
         // Empty target slots (no targeting), or CR 603.3d no-legal-target: no
         // prompt is needed/possible — fall through to the removal branch.
         Ok(_) | Err(_) => Ok(None),
     };
     super::triggers::restore_trigger_event_context(state, context_snapshot);
-    let Some((target_slots, selection)) = selection_result? else {
+    let Some((target_slots, selection, player)) = selection_result? else {
         // CR 603.3d: No target prompt is required — empty target slots, or
         // `build_target_slots` reported no legal target at choose-time (mapped to
         // `Ok(None)` above). Symmetric to the modal `all-modes-unavailable`

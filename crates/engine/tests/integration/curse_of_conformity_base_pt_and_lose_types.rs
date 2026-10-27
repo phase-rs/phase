@@ -58,6 +58,10 @@ fn curse_of_conformity_sets_base_pt_and_removes_creature_types() {
             scenario.add_creature_from_oracle(P0, "Curse of Conformity", 0, 0, CURSE_OF_CONFORMITY);
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 
@@ -148,6 +152,10 @@ fn curse_of_conformity_effect_ends_when_source_leaves() {
             scenario.add_creature_from_oracle(P0, "Curse of Conformity", 0, 0, CURSE_OF_CONFORMITY);
         builder.as_enchantment();
         builder.with_subtypes(vec!["Aura", "Curse"]);
+        // A lawful player-Aura fixture; the isolated body above is retained.
+        builder.with_keyword(engine::types::keywords::Keyword::Enchant(
+            engine::types::ability::TargetFilter::Player,
+        ));
         builder.id()
     };
 

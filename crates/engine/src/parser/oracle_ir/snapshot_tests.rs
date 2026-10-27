@@ -7,6 +7,23 @@
 use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir, ParsedAbilities};
 
 #[test]
+fn population_relations_full_fifteen_ir_geometry_and_complete_lowered() {
+    use crate::parser::oracle::tests::population_relation_publication::{
+        assert_document, printed_cards,
+    };
+    let cards = printed_cards();
+    assert_eq!(cards.len(), 15);
+    for card in cards {
+        // assert_document checks independent complete expected programs and all
+        // item/chain source geometry before either snapshot can be accepted.
+        let (document, lowered) = assert_document(&card);
+        let key = card.name.replace([':', '!', ','], "");
+        insta::assert_json_snapshot!(format!("population_relations_full_{key}_ir"), document);
+        insta::assert_json_snapshot!(format!("population_relations_full_{key}_lowered"), lowered);
+    }
+}
+
+#[test]
 fn contextual_hand_addle_complete_ir_geometry_and_lowered_before_snapshot() {
     const SOURCE: &str = "Choose a color. Target player reveals their hand and you choose a card of that color from it. That player discards that card.";
     let filter = crate::types::ability::TargetFilter::Typed(

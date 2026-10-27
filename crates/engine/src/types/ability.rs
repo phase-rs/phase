@@ -35497,8 +35497,50 @@ impl DamageOpportunity {
 
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
+pub type ChosenGroupTargets = Vec<(
+    ChosenGroupId,
+    Vec<(TargetRef, Option<ObjectIncarnationRef>)>,
+)>;
+
+pub(crate) fn deserialize_chosen_group_targets<'de, D>(
+    deserializer: D,
+) -> Result<ChosenGroupTargets, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let groups = ChosenGroupTargets::deserialize(deserializer)?;
+    validate_chosen_group_targets(&groups).map_err(serde::de::Error::custom)?;
+    Ok(groups)
+}
+
+pub(crate) fn validate_chosen_group_targets(groups: &ChosenGroupTargets) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for (group, occurrences) in groups {
+        if !seen.insert(*group) {
+            return Err("duplicate chosen target group".into());
+        }
+        for (target, pin) in occurrences {
+            if let Some(pin) = pin {
+                if !matches!(target, TargetRef::Object(id) if *id == pin.object_id) {
+                    return Err("chosen target group pin does not name its occurrence".into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Casting-time facts carried by one resolving ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 601.2c + CR 608.2b: exact announced occurrences projected for
+    /// same-resolution chosen-object readers. Empty groups remain bindings.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_chosen_group_targets"
+    )]
+    pub chosen_group_targets: ChosenGroupTargets,
     /// CR 609.7a: completed selection owned by this producer and its descendants.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub damage_source_choice: Option<crate::types::game_state::ChosenDamageSource>,
@@ -40948,6 +40990,9 @@ impl ChosenTargetSlots {
 pub struct ResolvedAbility {
     pub effect: Effect,
     pub targets: Vec<TargetRef>,
+    /// Target custody for canonical coin templates; these are never executed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coin_branch_target_abilities: Vec<(CoinFlipResult, Box<ResolvedAbility>)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declares_chosen_group: Option<ChosenGroupId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41458,6 +41503,8 @@ impl<'de> Deserialize<'de> for ResolvedAbility {
         ability
             .normalize_decoded_target_pins()
             .map_err(de::Error::custom)?;
+        crate::game::ability_utils::validate_coin_target_structure(&ability)
+            .map_err(de::Error::custom)?;
         Ok(ability)
     }
 }
@@ -41484,6 +41531,7 @@ impl PartialEq for ResolvedAbility {
         let Self {
             effect: a_effect,
             targets: a_targets,
+            coin_branch_target_abilities: a_coin_branch_target_abilities,
             declares_chosen_group: a_declares_chosen_group,
             reads_chosen_group: a_reads_chosen_group,
             declares_return_result: a_declares_return_result,
@@ -41561,6 +41609,7 @@ impl PartialEq for ResolvedAbility {
         let Self {
             effect: b_effect,
             targets: b_targets,
+            coin_branch_target_abilities: b_coin_branch_target_abilities,
             declares_chosen_group: b_declares_chosen_group,
             reads_chosen_group: b_reads_chosen_group,
             declares_return_result: b_declares_return_result,
@@ -41638,6 +41687,7 @@ impl PartialEq for ResolvedAbility {
 
         a_effect == b_effect
             && a_targets == b_targets
+            && a_coin_branch_target_abilities == b_coin_branch_target_abilities
             && a_declares_chosen_group == b_declares_chosen_group
             && a_reads_chosen_group == b_reads_chosen_group
             && a_declares_return_result == b_declares_return_result
@@ -42036,6 +42086,130 @@ impl ResolvedAbility {
         }
     }
 
+    /// The one target-child order. Executable visitors deliberately do not use it.
+    pub(crate) fn target_children(
+        &self,
+    ) -> impl Iterator<Item = (crate::types::game_state::ChainStep, &Self)> {
+        use crate::types::game_state::ChainStep;
+        self.coin_branch_target_abilities
+            .iter()
+            .map(|(outcome, child)| (ChainStep::CoinBranch(*outcome), child.as_ref()))
+            .chain(
+                self.sub_ability
+                    .iter()
+                    .map(|child| (ChainStep::SubAbility, child.as_ref())),
+            )
+            .chain(
+                self.else_ability
+                    .iter()
+                    .map(|child| (ChainStep::ElseAbility, child.as_ref())),
+            )
+    }
+
+    /// Captured announcement inputs only; no invocation or produced result state.
+    pub(crate) fn coin_target_input_projection(&self) -> Self {
+        let mut input = Self::new(
+            self.effect.clone(),
+            Vec::new(),
+            self.source_id,
+            self.controller,
+        );
+        input.original_controller = self.original_controller;
+        input.scoped_player = self.scoped_player;
+        input.source_incarnation = self.source_incarnation;
+        input.announced_source_incarnation = self.announced_source_incarnation;
+        input.trigger_source = self.trigger_source.clone();
+        input.trigger_definition_ref = self.trigger_definition_ref.clone();
+        input.ability_index = self.ability_index;
+        input.cast_occurrence = self.cast_occurrence;
+        input.chosen_x = self.chosen_x;
+        input.cost_paid_object = self.cost_paid_object.clone();
+        input.cost_paid_objects = self.cost_paid_objects.clone();
+        input.noted_mana_payment = self.noted_mana_payment.clone();
+        input.context = SpellContext {
+            chosen_group_targets: self.context.chosen_group_targets.clone(),
+            outer_declared_players: self.context.outer_declared_players.clone(),
+            announcing_opponent: self.context.announcing_opponent,
+            gift_recipient: self.context.gift_recipient,
+            additional_cost_paid: self.context.additional_cost_paid,
+            alternative_mana_cost_paid: self.context.alternative_mana_cost_paid,
+            alt_cost_grant_source: self.context.alt_cost_grant_source,
+            graveyard_permission_authority: self.context.graveyard_permission_authority.clone(),
+            graveyard_permission_latch: self.context.graveyard_permission_latch.clone(),
+            additional_cost_payment_count: self.context.additional_cost_payment_count,
+            additional_cost_payments: self.context.additional_cost_payments.clone(),
+            kickers_paid: self.context.kickers_paid.clone(),
+            chosen_modes: self.context.chosen_modes.clone(),
+            cast_from_zone: self.context.cast_from_zone,
+            cast_controller: self.context.cast_controller,
+            cast_active_player: self.context.cast_active_player,
+            cast_phase: self.context.cast_phase,
+            chain_root_targets: self.context.chain_root_targets.clone(),
+            controller_controlled_as_cast: self.context.controller_controlled_as_cast.clone(),
+            source_transformation_count: self.context.source_transformation_count,
+            triggering_spell: self.context.triggering_spell,
+            source_ability_provenance: self.context.source_ability_provenance,
+            pay_cost_paid_life_amount: self.context.pay_cost_paid_life_amount,
+            cost_removed_counter_amount: self.context.cost_removed_counter_amount,
+            ..SpellContext::default()
+        };
+        input
+    }
+
+    pub(crate) fn inherit_coin_target_inputs(&mut self, input: &Self) {
+        self.source_id = input.source_id;
+        self.controller = input.controller;
+        self.original_controller = input.original_controller;
+        self.scoped_player = input.scoped_player;
+        self.source_incarnation = input.source_incarnation;
+        self.announced_source_incarnation = input.announced_source_incarnation;
+        self.trigger_source = input.trigger_source.clone();
+        self.trigger_definition_ref = input.trigger_definition_ref.clone();
+        self.ability_index = input.ability_index;
+        self.cast_occurrence = input.cast_occurrence;
+        self.chosen_x = input.chosen_x;
+        self.cost_paid_object = input.cost_paid_object.clone();
+        self.cost_paid_objects = input.cost_paid_objects.clone();
+        self.noted_mana_payment = input.noted_mana_payment.clone();
+        let own = self.context.clone();
+        self.context = input.context.clone();
+        self.context.face_down_in_exile = own.face_down_in_exile;
+        self.context.ability_tag = own.ability_tag;
+        self.context.granting_object = own.granting_object;
+        self.context.attach_target_bindings = own.attach_target_bindings;
+        for (group, targets) in own.chosen_group_targets {
+            if let Some((_, inherited)) = self
+                .context
+                .chosen_group_targets
+                .iter_mut()
+                .find(|(id, _)| *id == group)
+            {
+                *inherited = targets;
+            } else {
+                self.context.chosen_group_targets.push((group, targets));
+            }
+        }
+        for (_, child) in &mut self.coin_branch_target_abilities {
+            child.inherit_coin_target_inputs(input);
+        }
+        if let Some(child) = self.sub_ability.as_deref_mut() {
+            child.inherit_coin_target_inputs(input);
+        }
+        if let Some(child) = self.else_ability.as_deref_mut() {
+            child.inherit_coin_target_inputs(input);
+        }
+    }
+
+    pub(crate) fn refresh_coin_target_inputs(&mut self) {
+        if self.coin_branch_target_abilities.is_empty() {
+            return;
+        }
+        let input = self.coin_target_input_projection();
+        for (_, child) in &mut self.coin_branch_target_abilities {
+            child.inherit_coin_target_inputs(&input);
+        }
+    }
+
     /// Build from a typed Effect. Simply stores the fields.
     pub fn new(
         effect: Effect,
@@ -42046,6 +42220,7 @@ impl ResolvedAbility {
         Self {
             effect,
             targets,
+            coin_branch_target_abilities: Vec::new(),
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -42163,6 +42338,9 @@ impl ResolvedAbility {
     /// CR 601.2c + CR 603.3d: Starts the target record of every node of this
     /// chain that has none, so a node no assignment reached declares nothing.
     pub(crate) fn start_target_record_recursive(&mut self) {
+        for (_, child) in &mut self.coin_branch_target_abilities {
+            child.start_target_record_recursive();
+        }
         if self.chosen_target_slots.is_unrecorded() {
             self.chosen_target_slots = ChosenTargetSlots::Recorded(Vec::new());
         }
@@ -42222,6 +42400,7 @@ impl ResolvedAbility {
         if let Some(branch) = self.else_ability.as_mut() {
             branch.set_cast_occurrence_recursive(occurrence);
         }
+        self.refresh_coin_target_inputs();
     }
 
     pub(crate) fn normalize_cast_occurrence_for_loop_recursive(&mut self) {
@@ -42279,6 +42458,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_trigger_source_recursive(source);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity
@@ -42297,6 +42477,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_gameplay_source_recursive(source);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 603.7 + CR 603.10a: Record the battlefield-departure event this
@@ -42361,6 +42542,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_trigger_definition_ref_recursive(definition_ref);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// Preserve the exact named attacker through target selection and every
@@ -42535,6 +42717,9 @@ impl ResolvedAbility {
         self.target_incarnations.clear();
         self.target_pins.clear();
         self.legacy_selected_target_incarnations.clear();
+        for (_, child) in &mut self.coin_branch_target_abilities {
+            child.clear_trigger_identity_recursive();
+        }
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.clear_trigger_identity_recursive();
         }
@@ -42576,6 +42761,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_chain_root_targets_recursive(chain_root_targets);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 400.7: Propagate the source's captured incarnation to this ability
@@ -42589,6 +42775,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_source_incarnation_recursive(incarnation);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 400.7 + CR 602.2a: Propagate the source incarnation captured at an
@@ -42604,6 +42791,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_announced_source_incarnation_recursive(incarnation);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 400.7 + CR 603.7c: Pin this ability's object referents — and every
@@ -42629,6 +42817,9 @@ impl ResolvedAbility {
         state: &crate::types::game_state::GameState,
     ) {
         self.announce_target_pins(state);
+        for (_, child) in &mut self.coin_branch_target_abilities {
+            child.capture_target_incarnations_recursive(state);
+        }
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.capture_target_incarnations_recursive(state);
         }
@@ -42737,6 +42928,7 @@ impl ResolvedAbility {
             .trigger_source_context
             .expect("test source snapshot always contains trigger context");
         self.set_trigger_source_recursive(context);
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 701.27f: Propagate the source's captured transformation generation
@@ -42749,6 +42941,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_source_transformation_count_recursive(count);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 602.2a + CR 607.1: Propagate the announced activated ability's
@@ -42764,6 +42957,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_source_ability_provenance_recursive(provenance);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 607.1 + CR 113.7a: single read authority for the provenance of the
@@ -43217,6 +43411,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_chosen_x_recursive(value);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 117.1 + CR 400.7j + CR 608.2k: Stamp the cost-paid object across this
@@ -43231,6 +43426,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 400.7 + CR 400.7j + CR 608.2k + CR 701.9c: SETTLE this ability's (and
@@ -43323,6 +43519,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.settle_cost_paid_provenance_recursive(state, moved, outcome);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 608.2h + CR 601.2h: RE-CAPTURE this ability's cost-paid provenance
@@ -43394,6 +43591,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.refresh_cost_paid_capture_recursive(state, object_ids);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 106.1b + CR 400.7 + CR 602.2b (issue #6504): Stamp this activation's
@@ -43413,6 +43611,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_noted_mana_payment_recursive(payment);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 707.10 (issue #6504): Clear a noted-mana-payment snapshot across
@@ -43432,6 +43631,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.clear_noted_mana_payment_recursive();
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 601.2h + CR 602.2b (issue #4948): Record EVERY object
@@ -43471,6 +43671,7 @@ impl ResolvedAbility {
             .map(CostPaidObjectRecord::Captured)
             .collect::<Vec<_>>();
         self.add_cost_paid_records_recursive(&records);
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 601.2h + CR 602.2b + CR 400.7j: the records-taking primitive behind
@@ -43505,6 +43706,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.add_cost_paid_records_recursive(records);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// Stamp an object selected by a previous effect in this same resolution
@@ -43590,6 +43792,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_scoped_player_recursive(player);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 614.5 + CR 616.1f: Carry replacement application identity through a
@@ -43746,6 +43949,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_original_controller_recursive(player);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 608.2: Rebind the acting controller across this ability and every
@@ -43765,6 +43969,7 @@ impl ResolvedAbility {
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_controller_recursive(player);
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// CR 608.2c + CR 109.4: Propagate the resolution-scoped chosen-players
@@ -43782,14 +43987,28 @@ impl ResolvedAbility {
         }
     }
 
+    pub(crate) fn inherit_context_preserving_targets(&mut self, context: SpellContext) {
+        let groups = std::mem::take(&mut self.context.chosen_group_targets);
+        let bindings = std::mem::take(&mut self.context.attach_target_bindings);
+        self.context = context;
+        if !groups.is_empty() {
+            self.context.chosen_group_targets = groups;
+        }
+        if !bindings.is_empty() {
+            self.context.attach_target_bindings = bindings;
+        }
+        self.refresh_coin_target_inputs();
+    }
+
     pub fn set_context_recursive(&mut self, context: SpellContext) {
-        self.context = context.clone();
+        self.inherit_context_preserving_targets(context.clone());
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.set_context_recursive(context.clone());
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_context_recursive(context);
         }
+        self.refresh_coin_target_inputs();
     }
 
     pub fn kind(mut self, kind: AbilityKind) -> Self {

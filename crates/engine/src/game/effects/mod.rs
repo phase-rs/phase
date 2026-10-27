@@ -5809,7 +5809,16 @@ pub(crate) fn apply_parent_chain_context(
     // declaration) carries none, so the wholesale hand-off must not erase it.
     let child_duration_events = std::mem::take(&mut child.context.duration_events);
     let child_damage_opportunity = child.context.damage_opportunity.take();
+    let child_chosen_group_targets = std::mem::take(&mut child.context.chosen_group_targets);
+    let child_attach_target_bindings = std::mem::take(&mut child.context.attach_target_bindings);
     child.context = parent.context.clone();
+    if !child_chosen_group_targets.is_empty() {
+        child.context.chosen_group_targets = child_chosen_group_targets;
+    }
+    if !child_attach_target_bindings.is_empty() {
+        child.context.attach_target_bindings = child_attach_target_bindings;
+    }
+    child.refresh_coin_target_inputs();
     // Only explicitly marked remaining members inherit this operation.
     child.context.damage_opportunity = child_damage_opportunity
         .and_then(|owned| parent.context.damage_opportunity.clone().or(Some(owned)));
@@ -6662,7 +6671,7 @@ fn resolve_optional_effect_decision_step(
                 {
                     resolved.mirror_targets_from(&ability);
                 }
-                resolved.context = ability.context.clone();
+                resolved.inherit_context_preserving_targets(ability.context.clone());
                 inherit_missing_parent_referent(&mut resolved, &ability);
                 // CR 608.2c: This optional effect was DECLINED — the decline
                 // branch's `Not{IfYouDo}` / `IfYouDo` gate must evaluate
@@ -23186,7 +23195,7 @@ fn resolve_chain_body(
                 if should_propagate_parent_targets(ability, &else_resolved) {
                     else_resolved.mirror_targets_from(ability);
                 }
-                else_resolved.context = ability.context.clone();
+                else_resolved.inherit_context_preserving_targets(ability.context.clone());
                 inherit_missing_parent_referent(&mut else_resolved, ability);
                 if try_begin_deferred_else_branch_target_selection(
                     state,
@@ -23297,7 +23306,7 @@ fn resolve_chain_body(
                     if should_propagate_parent_targets(ability, &sub_resolved) {
                         sub_resolved.mirror_targets_from(ability);
                     }
-                    sub_resolved.context = ability.context.clone();
+                    sub_resolved.inherit_context_preserving_targets(ability.context.clone());
                     // CR 608.2c: The false-parent ordinal escape bypasses the
                     // ordinary post-effect chain handoff, so it must explicitly
                     // carry this printed ability's index to the next ordinal

@@ -295,12 +295,27 @@ pub(crate) enum ConditionObjectAntecedent {
     BlockedAttacker,
 }
 
+/// One actual enclosing declaration available to a nested same-body parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChosenObjectDeclaration {
+    pub group: ChosenGroupId,
+    /// Parse-only lexical nesting; equal-depth matches remain ambiguous.
+    pub lexical_depth: usize,
+    pub noun: TargetFilter,
+    pub chooser: Option<TargetFilter>,
+    pub preceding_group: Option<ChosenGroupId>,
+}
+
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParseContext {
+    /// Monotonic runtime group allocation within one ability body.
+    pub next_chosen_object_group: u32,
+    /// Lexical declarations; nested parses return their cursor, not their names.
+    pub enclosing_chosen_objects: Vec<ChosenObjectDeclaration>,
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,
     /// Card name for self-reference (~) normalization.

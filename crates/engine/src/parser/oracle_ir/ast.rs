@@ -1692,6 +1692,7 @@ pub(crate) enum ChooseImperativeAst {
     },
     TargetOnly {
         target: TargetFilter,
+        multi_target: Option<MultiTargetSpec>,
     },
     Reparse {
         text: String,
