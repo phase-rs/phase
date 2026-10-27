@@ -11704,74 +11704,95 @@ fn latched_source_matches_doubler_filter(
     latched_doubler_scope(state, source, filter, doubler).unwrap_or(false)
 }
 
-/// The exhaustive scope evaluator for a latched doubler (no wildcard arm: a
-/// new `TargetFilter` or `FilterProp` variant fails to compile until it's
-/// classified). Source-relative reads are modelled exactly from the captured
-/// data: the doubler's identity, controller, chosen attributes, attachment and
-/// power, and the watcher's identity, controller, attachments and
-/// characteristics. Watcher-only properties are judged on the watcher's
-/// snapshot with a neutral context (no source). Everything else is `None`.
-///
-/// Every printed `DoubleTriggers` scope is judgeable here (census at this
-/// change: `You`, `Another`, `SelfRef`, `IsChosenCreatureType`,
-/// `AttachedTo { Source }`, `EquippedBy`, plus watcher-only types, subtypes,
-/// supertypes, a fixed power comparison and color count).
-fn latched_doubler_scope(
-    state: &GameState,
-    watcher: &TriggerSourceContext,
-    filter: &TargetFilter,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
-) -> Option<bool> {
-    let watcher_id = watcher.identity.reference.object_id;
-    match filter {
-        TargetFilter::Any => Some(true),
-        TargetFilter::SelfRef => {
-            Some(watcher.identity.reference == doubler.source.identity.reference)
-        }
-        TargetFilter::SpecificObject { id } => Some(watcher_id == *id),
-        TargetFilter::Or { filters } => filters.iter().try_fold(false, |any, filter| {
-            Some(any | latched_doubler_scope(state, watcher, filter, doubler)?)
-        }),
-        TargetFilter::And { filters } => filters.iter().try_fold(true, |all, filter| {
-            Some(all & latched_doubler_scope(state, watcher, filter, doubler)?)
-        }),
+/// A latched doubler's scope, classified structurally (no game state): the one
+/// authority both the runtime evaluator and the export guard use.
+#[derive(Debug, Clone)]
+pub enum LatchedScopePlan {
+    Any,
+    /// "~": the watcher is the doubler, by exact incarnation.
+    SelfRef,
+    Object(ObjectId),
+    Or(Vec<LatchedScopePlan>),
+    And(Vec<LatchedScopePlan>),
+    Not(Box<LatchedScopePlan>),
+    Typed {
+        /// "you control": the watcher's latched controller is the doubler's.
+        you_control: bool,
+        /// Source-relative properties, judged from the captured data.
+        relative: Vec<LatchedRelativeProperty>,
+        /// The rest of the scope reads only the watcher's characteristics.
+        characteristics: TargetFilter,
+    },
+}
+
+/// A source-relative scope property that the captured data answers exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatchedRelativeProperty {
+    /// CR 109.1: "another": not the doubler.
+    Another,
+    /// CR 205.3e + CR 702.73a: of the doubler's chosen creature type.
+    ChosenCreatureType,
+    /// CR 301.5 + CR 303.4: attached to the doubler.
+    AttachedToDoubler,
+    /// CR 301.5 + CR 301.5f: equipped by the doubler.
+    EquippedByDoubler,
+    /// Greater power than the doubler's.
+    PowerGreaterThanDoubler,
+}
+
+/// Whether a printed doubler scope is judged on the latched (look-back) path
+/// at all. A scope outside this class isn't doubled there (fail closed); the
+/// export guard requires every printed scope to be in it.
+pub fn latched_doubler_scope_is_judged(filter: &TargetFilter) -> bool {
+    latched_doubler_scope_plan(filter).is_some()
+}
+
+/// The exhaustive structural classifier (no wildcard arm: a new
+/// `TargetFilter` or `FilterProp` variant fails to compile until classified).
+/// `None`: the scope reads something the capture doesn't hold.
+pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopePlan> {
+    Some(match filter {
+        TargetFilter::Any => LatchedScopePlan::Any,
+        TargetFilter::SelfRef => LatchedScopePlan::SelfRef,
+        TargetFilter::SpecificObject { id } => LatchedScopePlan::Object(*id),
+        TargetFilter::Or { filters } => LatchedScopePlan::Or(
+            filters
+                .iter()
+                .map(latched_doubler_scope_plan)
+                .collect::<Option<_>>()?,
+        ),
+        TargetFilter::And { filters } => LatchedScopePlan::And(
+            filters
+                .iter()
+                .map(latched_doubler_scope_plan)
+                .collect::<Option<_>>()?,
+        ),
         TargetFilter::Not { filter } => {
-            latched_doubler_scope(state, watcher, filter, doubler).map(|matched| !matched)
+            LatchedScopePlan::Not(Box::new(latched_doubler_scope_plan(filter)?))
         }
         TargetFilter::Typed(typed) => {
-            let controller_matches = match &typed.controller {
-                None => true,
-                Some(crate::types::ability::ControllerRef::You) => {
-                    watcher.lki.controller == doubler.controller()
-                }
+            let you_control = match &typed.controller {
+                None => false,
+                Some(crate::types::ability::ControllerRef::You) => true,
                 Some(_) => return None,
             };
+            let mut relative = Vec::new();
             let mut watcher_only = Vec::new();
             for property in &typed.properties {
-                match latched_doubler_property(state, watcher, property, doubler)? {
-                    LatchedScopeProperty::Judged(matched) => {
-                        if !matched {
-                            return Some(false);
-                        }
-                    }
-                    LatchedScopeProperty::WatcherOnly => watcher_only.push(property.clone()),
+                match latched_property_kind(property)? {
+                    Some(kind) => relative.push(kind),
+                    None => watcher_only.push(property.clone()),
                 }
             }
-            let characteristics = TargetFilter::Typed(crate::types::ability::TypedFilter {
-                type_filters: typed.type_filters.clone(),
-                controller: None,
-                properties: watcher_only,
-            });
-            Some(
-                controller_matches
-                    && matches_target_filter_on_lki_snapshot(
-                        state,
-                        watcher_id,
-                        &watcher.lki,
-                        &characteristics,
-                        &FilterContext::neutral(),
-                    ),
-            )
+            LatchedScopePlan::Typed {
+                you_control,
+                relative,
+                characteristics: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: typed.type_filters.clone(),
+                    controller: None,
+                    properties: watcher_only,
+                }),
+            }
         }
         TargetFilter::None
         | TargetFilter::Player
@@ -11824,69 +11845,25 @@ fn latched_doubler_scope(
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::AllPlayers => None,
-    }
+        | TargetFilter::AllPlayers => return None,
+    })
 }
 
-/// How one property of a latched doubler's scope is judged.
-enum LatchedScopeProperty {
-    /// A source-relative property, judged here from the captured data.
-    Judged(bool),
-    /// Reads only the watcher's own characteristics: judged on its snapshot.
-    WatcherOnly,
-}
-
-/// `None`: not judgeable from the captured data (fail closed).
-fn latched_doubler_property(
-    state: &GameState,
-    watcher: &TriggerSourceContext,
+/// One scope property: `Some(Some(kind))` source-relative and judged from the
+/// capture, `Some(None)` read only from the watcher's own characteristics,
+/// `None` not judgeable (fail closed).
+fn latched_property_kind(
     property: &crate::types::ability::FilterProp,
-    doubler: &crate::types::events::LatchedTriggerDoubler,
-) -> Option<LatchedScopeProperty> {
-    use crate::types::ability::{AttachmentKind, AttachmentReferent, FilterProp, QuantityExpr};
-    use LatchedScopeProperty::{Judged, WatcherOnly};
-    let doubler_id = doubler.source_id();
-    let watcher_id = watcher.identity.reference.object_id;
-    let doubler_lki = &doubler.source.lki;
+) -> Option<Option<LatchedRelativeProperty>> {
+    use crate::types::ability::{AttachmentReferent, FilterProp, QuantityExpr};
     Some(match property {
-        // CR 109.1: "another" excludes the doubler itself.
-        FilterProp::Another => Judged(watcher_id != doubler_id),
-        // CR 205.3e + CR 702.73a: the doubler's chosen creature type, as chosen
-        // then.
-        FilterProp::IsChosenCreatureType => Judged(doubler_lki.chosen_attributes.iter().any(
-            |attribute| match attribute {
-                crate::types::ability::ChosenAttribute::CreatureType(chosen) => {
-                    super::filter::subtype_matches_with_changeling(
-                        chosen,
-                        &watcher.lki.subtypes,
-                        &watcher.lki.keywords,
-                        &state.all_creature_types,
-                    )
-                }
-                _ => false,
-            },
-        )),
-        // CR 301.5 + CR 303.4: the watcher was attached to the doubler.
+        FilterProp::Another => Some(LatchedRelativeProperty::Another),
+        FilterProp::IsChosenCreatureType => Some(LatchedRelativeProperty::ChosenCreatureType),
         FilterProp::AttachedTo {
             to: AttachmentReferent::Source,
-        } => Judged(watcher.attached_to.and_then(|target| target.as_object()) == Some(doubler_id)),
-        // CR 301.5 + CR 301.5f: equipped by the doubler (an attached
-        // Equipment names its own host; an unattached one names nothing; a
-        // non-Equipment doubler asks for any Equipment), as attached then.
-        FilterProp::EquippedBy => Judged(match doubler.source.attached_to {
-            Some(target) => target.as_object() == Some(watcher_id),
-            None if doubler_lki.subtypes.iter().any(|s| s == "Equipment") => false,
-            None => watcher
-                .attachments
-                .iter()
-                .any(|attachment| attachment.kind == AttachmentKind::Equipment),
-        }),
-        // Relative power ("greater power than ~"), both as they were.
-        FilterProp::PowerGTSource => Judged(match (watcher.lki.power, doubler_lki.power) {
-            (Some(watcher_power), Some(doubler_power)) => watcher_power > doubler_power,
-            _ => false,
-        }),
-        // The watcher's own characteristics, on its snapshot.
+        } => Some(LatchedRelativeProperty::AttachedToDoubler),
+        FilterProp::EquippedBy => Some(LatchedRelativeProperty::EquippedByDoubler),
+        FilterProp::PowerGTSource => Some(LatchedRelativeProperty::PowerGreaterThanDoubler),
         FilterProp::HasSupertype { .. }
         | FilterProp::NotSupertype { .. }
         | FilterProp::HasColor { .. }
@@ -11896,33 +11873,28 @@ fn latched_doubler_property(
         | FilterProp::WithKeyword { .. }
         | FilterProp::WithoutKeyword { .. }
         | FilterProp::HasKeywordKind { .. }
-        | FilterProp::WithoutKeywordKind { .. } => WatcherOnly,
+        | FilterProp::WithoutKeywordKind { .. } => None,
         FilterProp::PtComparison { value, .. } => {
             if matches!(value, QuantityExpr::Fixed { .. }) {
-                WatcherOnly
+                None
             } else {
                 return None;
             }
         }
+        // A composite of watcher-only properties reads only the watcher.
         FilterProp::AnyOf { props } => {
-            let mut judged = Vec::new();
             for prop in props {
-                judged.push(latched_doubler_property(state, watcher, prop, doubler)?);
+                if latched_property_kind(prop)?.is_some() {
+                    return None;
+                }
             }
-            if judged
-                .iter()
-                .all(|property| matches!(property, WatcherOnly))
-            {
-                WatcherOnly
-            } else {
-                return None;
-            }
+            None
         }
         FilterProp::Not { prop } => {
-            match latched_doubler_property(state, watcher, prop, doubler)? {
-                Judged(matched) => Judged(!matched),
-                WatcherOnly => WatcherOnly,
+            if latched_property_kind(prop)?.is_some() {
+                return None;
             }
+            None
         }
         // Not judgeable from the captured data: live state, ledgers, other
         // players' choices, zones, stack or event context.
@@ -12011,6 +11983,109 @@ fn latched_doubler_property(
         | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => return None,
     })
+}
+
+/// CR 603.2d + CR 603.10d: judge a latched doubler's scope against the latched
+/// watcher, entirely from the captured data: no live object and no
+/// `TriggerSourceContext::source_read`. `None` when the scope isn't judgeable
+/// (`latched_doubler_scope_plan`).
+fn latched_doubler_scope(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    filter: &TargetFilter,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> Option<bool> {
+    latched_doubler_scope_plan(filter)
+        .map(|plan| latched_scope_plan_matches(state, watcher, &plan, doubler))
+}
+
+fn latched_scope_plan_matches(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    plan: &LatchedScopePlan,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    match plan {
+        LatchedScopePlan::Any => true,
+        LatchedScopePlan::SelfRef => {
+            watcher.identity.reference == doubler.source.identity.reference
+        }
+        LatchedScopePlan::Object(id) => watcher.identity.reference.object_id == *id,
+        LatchedScopePlan::Or(plans) => plans
+            .iter()
+            .any(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
+        LatchedScopePlan::And(plans) => plans
+            .iter()
+            .all(|plan| latched_scope_plan_matches(state, watcher, plan, doubler)),
+        LatchedScopePlan::Not(plan) => !latched_scope_plan_matches(state, watcher, plan, doubler),
+        LatchedScopePlan::Typed {
+            you_control,
+            relative,
+            characteristics,
+        } => {
+            (!you_control || watcher.lki.controller == doubler.controller())
+                && relative
+                    .iter()
+                    .all(|property| latched_relative_matches(state, watcher, *property, doubler))
+                && matches_target_filter_on_lki_snapshot(
+                    state,
+                    watcher.identity.reference.object_id,
+                    &watcher.lki,
+                    characteristics,
+                    &FilterContext::neutral(),
+                )
+        }
+    }
+}
+
+fn latched_relative_matches(
+    state: &GameState,
+    watcher: &TriggerSourceContext,
+    property: LatchedRelativeProperty,
+    doubler: &crate::types::events::LatchedTriggerDoubler,
+) -> bool {
+    use crate::types::ability::AttachmentKind;
+    let doubler_id = doubler.source_id();
+    let watcher_id = watcher.identity.reference.object_id;
+    let doubler_lki = &doubler.source.lki;
+    match property {
+        LatchedRelativeProperty::Another => watcher_id != doubler_id,
+        LatchedRelativeProperty::ChosenCreatureType => {
+            doubler_lki
+                .chosen_attributes
+                .iter()
+                .any(|attribute| match attribute {
+                    crate::types::ability::ChosenAttribute::CreatureType(chosen) => {
+                        super::filter::subtype_matches_with_changeling(
+                            chosen,
+                            &watcher.lki.subtypes,
+                            &watcher.lki.keywords,
+                            &state.all_creature_types,
+                        )
+                    }
+                    _ => false,
+                })
+        }
+        LatchedRelativeProperty::AttachedToDoubler => {
+            watcher.attached_to.and_then(|target| target.as_object()) == Some(doubler_id)
+        }
+        // Mirrors the live `EquippedBy`: an attached doubler names its host; an
+        // unattached Equipment names nothing; otherwise any Equipment.
+        LatchedRelativeProperty::EquippedByDoubler => match doubler.source.attached_to {
+            Some(target) => target.as_object() == Some(watcher_id),
+            None if doubler_lki.subtypes.iter().any(|s| s == "Equipment") => false,
+            None => watcher
+                .attachments
+                .iter()
+                .any(|attachment| attachment.kind == AttachmentKind::Equipment),
+        },
+        LatchedRelativeProperty::PowerGreaterThanDoubler => {
+            match (watcher.lki.power, doubler_lki.power) {
+                (Some(watcher_power), Some(doubler_power)) => watcher_power > doubler_power,
+                _ => false,
+            }
+        }
+    }
 }
 
 /// CR 603.2d: whether `doubler` makes `trigger` trigger an additional time.
@@ -12112,6 +12187,23 @@ fn zone_change_qualifiers_match(
         ZoneChangeQualifier::CoreType(core_type) => record.core_types.contains(core_type),
         ZoneChangeQualifier::Supertype(supertype) => record.supertypes.contains(supertype),
     })
+}
+
+/// CR 603.2d: whether a doubler's spawning-event predicate can match a
+/// `ControllerChanged` event, the event every look-back control-change trigger
+/// fires on (exhaustive, mirrors `trigger_cause_matches`). A doubler whose
+/// cause can't match never doubles such a trigger, whatever its scope.
+pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
+    match cause {
+        TriggerCause::Any => true,
+        TriggerCause::EntersBattlefield { .. }
+        | TriggerCause::CreatureAttacking
+        | TriggerCause::CreatureDying
+        | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControllerCastOrCopiedSpell { .. }
+        | TriggerCause::RoomEntered
+        | TriggerCause::BattlefieldTransition { .. } => false,
+    }
 }
 
 /// CR 603.2d: Predicate check — does a `TriggerCause` match the event that
@@ -18731,10 +18823,10 @@ pub mod tests {
         );
     }
 
-    /// CR 603.2d + CR 603.10d: every printed "triggers an additional time"
-    /// scope (one row per distinct parsed `affected` filter in the card export,
-    /// named by one card that has it) is judgeable by the latched evaluator,
-    /// so no printed doubler is declined on the look-back path.
+    /// CR 603.2d + CR 603.10d: supplementary examples (the export guard,
+    /// `latched_doubler_scopes_over_the_export`, is the data-driven check): the
+    /// distinct printed `affected` scopes at the time of writing, each named by
+    /// one card that has it, are judged by the latched evaluator.
     #[test]
     fn every_printed_doubler_scope_is_judged_on_the_latched_path() {
         let mut state = setup();
@@ -18822,7 +18914,8 @@ pub mod tests {
         ] {
             let filter: TargetFilter = serde_json::from_str(shape).expect("census shape decodes");
             assert!(
-                latched_doubler_scope(&state, &watcher, &filter, &doubler).is_some(),
+                latched_doubler_scope_is_judged(&filter)
+                    && latched_doubler_scope(&state, &watcher, &filter, &doubler).is_some(),
                 "{card}: its scope must be judgeable from the captured data"
             );
         }
@@ -18835,6 +18928,43 @@ pub mod tests {
             latched_doubler_scope(&state, &watcher, &live, &doubler),
             None
         );
+    }
+
+    /// CR 603.2d: the structural cause predicate agrees with the runtime
+    /// matcher on a `ControllerChanged` event, for every cause.
+    #[test]
+    fn cause_predicate_agrees_with_the_runtime_matcher_on_control_changes() {
+        use crate::types::card_type::{CoreType, Supertype};
+        use crate::types::statics::ZoneChangeQualifier;
+        let state = setup();
+        let event = GameEvent::ControllerChanged {
+            object_id: ObjectId(1),
+            old_controller: PlayerId(0),
+            new_controller: PlayerId(1),
+            evidence: Default::default(),
+        };
+        for cause in [
+            TriggerCause::Any,
+            TriggerCause::EntersBattlefield { core_types: vec![] },
+            TriggerCause::CreatureAttacking,
+            TriggerCause::CreatureDying,
+            TriggerCause::ControlledCreatureDealtDamage,
+            TriggerCause::ControllerCastOrCopiedSpell {
+                core_types: vec![CoreType::Instant],
+            },
+            TriggerCause::RoomEntered,
+            TriggerCause::BattlefieldTransition {
+                enter: true,
+                leave: true,
+                qualifiers: vec![ZoneChangeQualifier::Supertype(Supertype::Legendary)],
+            },
+        ] {
+            assert_eq!(
+                trigger_cause_can_match_control_change(&cause),
+                trigger_cause_matches(&state, &cause, Some(&event), PlayerId(0)),
+                "{cause:?}"
+            );
+        }
     }
 
     #[test]

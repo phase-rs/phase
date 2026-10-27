@@ -479,6 +479,18 @@ jobs:
           cargo test -p phase-engine --test integration "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
           grep -F 'test result: ok. 1 passed' /tmp/gemstone-export-guard.log
 
+      - name: Latched doubler-scope export guard (CR 603.2d + CR 603.10d)
+        # Every printed "triggers an additional time" static must have a
+        # structural disposition on the look-back control-change doubling path
+        # (judged from the capture, or unable to reach it, or reviewed). It reads
+        # the generated export, so it lives here; the test is #[ignore]d in the
+        # Rust test job and fails, never skips, without the export.
+        run: |
+          test -s data/card-data.json
+          test_name='opponent_gains_control_from_you_trigger::latched_doubler_scopes_over_the_export'
+          cargo test -p phase-engine --test integration "$test_name" -- --exact --ignored 2>&1 | tee /tmp/latched-doubler-guard.log
+          grep -F 'test result: ok. 1 passed' /tmp/latched-doubler-guard.log
+
       - name: Card export must not mutate the tracked parser vocabulary
         # Regression guard: the export is a PURE READ of the tracked tree.
         #
