@@ -35,8 +35,8 @@ fn private_exact_selection_public_insufficiency_enough_zero_up_to_and_mandatory_
             let mandatory = matches!(branch, 4 | 5);
             let mut scenario = GameScenario::new();
             scenario.at_phase(Phase::PreCombatMain);
-            scenario.add_land(actor, "Live exact count land one");
-            scenario.add_land(actor, "Live exact count land two");
+            scenario.add_land_from_oracle(actor, "Live exact count land one", "");
+            scenario.add_land_from_oracle(actor, "Live exact count land two", "");
             let independent = scenario
                 .add_spell_to_library_top(actor, "Private independent tail draw", true)
                 .id();
@@ -314,7 +314,11 @@ fn private_exact_selection_public_insufficiency_enough_zero_up_to_and_mandatory_
                 assert!(resumed.state().active_optional_effect_frame().is_none());
                 assert!(
                     resumed.state().stack.is_empty()
-                        && resumed.state().trigger_stack.is_empty()
+                        && resumed.state().deferred_triggers.is_empty()
+                        && resumed.state().pending_trigger.is_none()
+                        && resumed.state().pending_trigger_order.is_none()
+                        && resumed.state().pending_trigger_entry.is_none()
+                        && resumed.state().pending_trigger_event_batch.is_empty()
                         && resumed.state().resolution_stack.is_empty()
                 );
                 let completed = serde_json::to_value(resumed.state()).unwrap();
@@ -513,7 +517,11 @@ fn private_exact_selection_public_scoped_owner_and_controller_are_distinct() {
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
+                    && runner.state().pending_trigger_entry.is_none()
+                    && runner.state().pending_trigger_event_batch.is_empty()
                     && runner.state().resolution_stack.is_empty()
             );
         }
@@ -531,8 +539,8 @@ fn nested_optional_put_resumes_independent_draw_once_after_accept_or_decline() {
             let source = scenario.add_spell_to_hand_from_oracle(actor, "Synthetic nested optional with independent tail", true,
                 "Draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped. Draw a card.")
                 .with_mana_cost(ManaCost::generic(1)).id();
-            scenario.add_land(actor, "Battlefield land one");
-            scenario.add_land(actor, "Battlefield land two");
+            scenario.add_land_from_oracle(actor, "Battlefield land one", "");
+            scenario.add_land_from_oracle(actor, "Battlefield land two", "");
             let default = scenario.add_land_to_hand(actor, "Initial Hand land").id();
             scenario.with_library_top(actor, &["Independent tail draw", "Reserve"]);
             let drawn = scenario
@@ -597,7 +605,11 @@ fn nested_optional_put_resumes_independent_draw_once_after_accept_or_decline() {
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
+                    && runner.state().pending_trigger_entry.is_none()
+                    && runner.state().pending_trigger_event_batch.is_empty()
                     && runner.state().resolution_stack.is_empty()
             );
         }
@@ -660,9 +672,11 @@ fn vestige_two_sources_new_birth_control_changes_live_lands_and_retired_reply() 
                     .collect(),
             );
         }
-        let first_land = scenario.add_land(actor, "Live land one").id();
-        scenario.add_land(actor, "Live land two");
-        scenario.add_land(actor, "Live land three");
+        let first_land = scenario
+            .add_land_from_oracle(actor, "Live land one", "")
+            .id();
+        scenario.add_land_from_oracle(actor, "Live land two", "");
+        scenario.add_land_from_oracle(actor, "Live land three", "");
         let destroy_land = scenario
             .add_spell_to_hand_from_oracle(
                 owner,
@@ -812,7 +826,11 @@ fn vestige_two_sources_new_birth_control_changes_live_lands_and_retired_reply() 
         ));
         assert!(
             runner.state().stack.is_empty()
-                && runner.state().trigger_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger.is_none()
+                && runner.state().pending_trigger_order.is_none()
+                && runner.state().pending_trigger_entry.is_none()
+                && runner.state().pending_trigger_event_batch.is_empty()
                 && runner.state().resolution_stack.is_empty()
         );
     }
@@ -905,7 +923,11 @@ fn refused_spectral_window_preserves_public_cast_siblings_draw_and_flying_body()
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
+                    && runner.state().pending_trigger_entry.is_none()
+                    && runner.state().pending_trigger_event_batch.is_empty()
                     && runner.state().resolution_stack.is_empty()
             );
         }
@@ -993,7 +1015,11 @@ fn refused_spectral_window_preserves_public_cast_siblings_draw_and_flying_body()
         ));
         assert!(
             runner.state().stack.is_empty()
-                && runner.state().trigger_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger.is_none()
+                && runner.state().pending_trigger_order.is_none()
+                && runner.state().pending_trigger_entry.is_none()
+                && runner.state().pending_trigger_event_batch.is_empty()
                 && runner.state().resolution_stack.is_empty()
         );
     }
@@ -1041,7 +1067,7 @@ fn vestige_paid_departure_and_paid_warp_select_new_draw_at_live_battlefield_ceil
                         .from_oracle_text_with_keywords(&["Warp"], VESTIGE)
                         .id();
                     for _ in 0..lands {
-                        scenario.add_land(actor, "Controlled battlefield land");
+                        scenario.add_land_from_oracle(actor, "Controlled battlefield land", "");
                     }
                     let grave_land = scenario
                         .add_spell_to_graveyard(actor, "Unrelated graveyard land", false)
@@ -1265,7 +1291,11 @@ fn vestige_paid_departure_and_paid_warp_select_new_draw_at_live_battlefield_ceil
                         ));
                         assert!(
                             runner.state().stack.is_empty()
-                                && runner.state().trigger_stack.is_empty()
+                                && runner.state().deferred_triggers.is_empty()
+                                && runner.state().pending_trigger.is_none()
+                                && runner.state().pending_trigger_order.is_none()
+                                && runner.state().pending_trigger_entry.is_none()
+                                && runner.state().pending_trigger_event_batch.is_empty()
                                 && runner.state().resolution_stack.is_empty()
                         );
                         continue;
@@ -1309,7 +1339,11 @@ fn vestige_paid_departure_and_paid_warp_select_new_draw_at_live_battlefield_ceil
                             ));
                             assert!(
                                 optional.state().stack.is_empty()
-                                    && optional.state().trigger_stack.is_empty()
+                                    && optional.state().deferred_triggers.is_empty()
+                                    && optional.state().pending_trigger.is_none()
+                                    && optional.state().pending_trigger_order.is_none()
+                                    && optional.state().pending_trigger_entry.is_none()
+                                    && optional.state().pending_trigger_event_batch.is_empty()
                                     && optional.state().resolution_stack.is_empty()
                             );
                             continue;
@@ -1323,7 +1357,11 @@ fn vestige_paid_departure_and_paid_warp_select_new_draw_at_live_battlefield_ceil
                             ));
                             assert!(
                                 optional.state().stack.is_empty()
-                                    && optional.state().trigger_stack.is_empty()
+                                    && optional.state().deferred_triggers.is_empty()
+                                    && optional.state().pending_trigger.is_none()
+                                    && optional.state().pending_trigger_order.is_none()
+                                    && optional.state().pending_trigger_entry.is_none()
+                                    && optional.state().pending_trigger_event_batch.is_empty()
                                     && optional.state().resolution_stack.is_empty()
                             );
                             continue;
@@ -1487,7 +1525,11 @@ fn vestige_paid_departure_and_paid_warp_select_new_draw_at_live_battlefield_ceil
                                 ));
                                 assert!(
                                     selection.state().stack.is_empty()
-                                        && selection.state().trigger_stack.is_empty()
+                                        && selection.state().deferred_triggers.is_empty()
+                                        && selection.state().pending_trigger.is_none()
+                                        && selection.state().pending_trigger_order.is_none()
+                                        && selection.state().pending_trigger_entry.is_none()
+                                        && selection.state().pending_trigger_event_batch.is_empty()
                                         && selection.state().resolution_stack.is_empty()
                                 );
                             }
@@ -1858,7 +1900,11 @@ fn nonself_battlefield_result_restores_ungrouped_grant_and_attach_once() {
                     ));
                     assert!(
                         resumed.state().stack.is_empty()
-                            && resumed.state().trigger_stack.is_empty()
+                            && resumed.state().deferred_triggers.is_empty()
+                            && resumed.state().pending_trigger.is_none()
+                            && resumed.state().pending_trigger_order.is_none()
+                            && resumed.state().pending_trigger_entry.is_none()
+                            && resumed.state().pending_trigger_event_batch.is_empty()
                             && resumed.state().resolution_stack.is_empty()
                     );
                 }
@@ -2186,7 +2232,11 @@ fn warp_actual_entry_and_exile_replacements_restore_and_keep_actor_submitter_pri
                     ));
                     assert!(
                         runner.state().stack.is_empty()
-                            && runner.state().trigger_stack.is_empty()
+                            && runner.state().deferred_triggers.is_empty()
+                            && runner.state().pending_trigger.is_none()
+                            && runner.state().pending_trigger_order.is_none()
+                            && runner.state().pending_trigger_entry.is_none()
+                            && runner.state().pending_trigger_event_batch.is_empty()
                             && runner.state().resolution_stack.is_empty()
                     );
                     assert_eq!(
@@ -2334,7 +2384,11 @@ fn paid_warp_stale_births_do_not_exile_or_grant_beside_real_remaining_source() {
                 ));
                 assert!(
                     runner.state().stack.is_empty()
-                        && runner.state().trigger_stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty()
+                        && runner.state().pending_trigger.is_none()
+                        && runner.state().pending_trigger_order.is_none()
+                        && runner.state().pending_trigger_entry.is_none()
+                        && runner.state().pending_trigger_event_batch.is_empty()
                         && runner.state().resolution_stack.is_empty()
                 );
             }
@@ -2518,7 +2572,7 @@ fn paid_warp_two_sources_keep_selected_cost_and_owner_after_control_changes() {
             );
             assert_eq!(
                 runner.state().players[owner.0 as usize].mana_pool.total(),
-                before - cost
+                before - usize::try_from(cost).unwrap()
             );
             runner.advance_until_stack_empty();
             assert!(runner.state().objects[&source]
@@ -2532,7 +2586,11 @@ fn paid_warp_two_sources_keep_selected_cost_and_owner_after_control_changes() {
         ));
         assert!(
             runner.state().stack.is_empty()
-                && runner.state().trigger_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger.is_none()
+                && runner.state().pending_trigger_order.is_none()
+                && runner.state().pending_trigger_entry.is_none()
+                && runner.state().pending_trigger_event_batch.is_empty()
                 && runner.state().resolution_stack.is_empty()
         );
     }
@@ -2654,7 +2712,11 @@ fn paid_warp_redirected_or_no_move_parent_earns_nothing_beside_actual_exile() {
                 ));
                 assert!(
                     runner.state().stack.is_empty()
-                        && runner.state().trigger_stack.is_empty()
+                        && runner.state().deferred_triggers.is_empty()
+                        && runner.state().pending_trigger.is_none()
+                        && runner.state().pending_trigger_order.is_none()
+                        && runner.state().pending_trigger_entry.is_none()
+                        && runner.state().pending_trigger_event_batch.is_empty()
                         && runner.state().resolution_stack.is_empty()
                 );
             }
@@ -2783,7 +2845,11 @@ fn paid_warp_completed_delivery_retains_its_result_through_actual_post_replaceme
             ));
             assert!(
                 runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
+                    && runner.state().pending_trigger_entry.is_none()
+                    && runner.state().pending_trigger_event_batch.is_empty()
                     && runner.state().resolution_stack.is_empty()
             );
         }
@@ -2994,7 +3060,11 @@ fn vestige_late_end_warp_uses_actual_exile_turn_then_owner_pays_normal_six() {
         ));
         assert!(
             runner.state().stack.is_empty()
-                && runner.state().trigger_stack.is_empty()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger.is_none()
+                && runner.state().pending_trigger_order.is_none()
+                && runner.state().pending_trigger_entry.is_none()
+                && runner.state().pending_trigger_event_batch.is_empty()
                 && runner.state().resolution_stack.is_empty()
         );
     }
@@ -3171,7 +3241,11 @@ fn vestige_paid_warp_and_normal_keep_cost_body_delayed_identity_and_independent_
                     ));
                     assert!(
                         runner.state().stack.is_empty()
-                            && runner.state().trigger_stack.is_empty()
+                            && runner.state().deferred_triggers.is_empty()
+                            && runner.state().pending_trigger.is_none()
+                            && runner.state().pending_trigger_order.is_none()
+                            && runner.state().pending_trigger_entry.is_none()
+                            && runner.state().pending_trigger_event_batch.is_empty()
                             && runner.state().resolution_stack.is_empty()
                     );
                 }
@@ -3433,7 +3507,11 @@ fn collision_both_paid_modes_keep_whole_population_and_announced_target() {
                     ));
                     assert!(
                         runner.state().stack.is_empty()
-                            && runner.state().trigger_stack.is_empty()
+                            && runner.state().deferred_triggers.is_empty()
+                            && runner.state().pending_trigger.is_none()
+                            && runner.state().pending_trigger_order.is_none()
+                            && runner.state().pending_trigger_entry.is_none()
+                            && runner.state().pending_trigger_event_batch.is_empty()
                             && runner.state().resolution_stack.is_empty()
                     );
                 }

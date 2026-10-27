@@ -43760,3 +43760,35 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
         ]
     );
 }
+
+#[test]
+fn retained_complete_static_descriptors_keep_known_lists_and_reject_unknown_members() {
+    for descriptor in [
+        "Vampires",
+        "Elves",
+        "Dwarves",
+        "Time Lords",
+        "Elves and Dwarves",
+        "Vampires, Elves, and Dwarves",
+    ] {
+        let line = format!("{descriptor} you control get +1/+1 and have menace.");
+        assert!(
+            parse_static_line(&line).is_some(),
+            "complete known descriptor: {line}"
+        );
+    }
+    for descriptor in [
+        "Spooky creatures",
+        "Spookys",
+        "Vampire Spooky",
+        "Vampires and Spooky",
+        "Spooky and Vampires",
+        "Vampires, Spooky, and Elves",
+    ] {
+        let line = format!("{descriptor} you control have +1/+1 and menace.");
+        assert!(
+            parse_static_line_multi(&line).is_empty(),
+            "whole unknown descriptor: {line}"
+        );
+    }
+}

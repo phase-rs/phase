@@ -917,11 +917,15 @@ pub(super) fn try_parse_conditional_protection_grant_clause(
     } else {
         TargetReadOrigin::OwnAnnouncement
     };
-    let clause =
-        build_conditional_continuous_members(&application, predicate, leading_duration.clone())
-            .or_else(|| {
-                build_conditional_protection_grant_clause(&application, predicate, leading_duration)
-            })?;
+    let clause = build_conditional_continuous_members(
+        &application,
+        predicate,
+        leading_duration.clone(),
+        ctx,
+    )
+    .or_else(|| {
+        build_conditional_protection_grant_clause(&application, predicate, leading_duration)
+    })?;
     *ctx = complete_ctx;
     Some((clause, origin))
 }
@@ -932,6 +936,7 @@ fn build_conditional_continuous_members(
     application: &SubjectApplication,
     predicate: &str,
     leading_duration: Option<Duration>,
+    ctx: &ParseContext,
 ) -> Option<ParsedEffectClause> {
     let (body, trailing_duration) = super::strip_trailing_duration(predicate);
     let members = crate::parser::oracle_static::parse_complete_continuous_members(body)?;
@@ -940,33 +945,70 @@ fn build_conditional_continuous_members(
     }) {
         return None;
     }
+    let has_recipient_gate = members
+        .iter()
+        .any(|(_, _, recipient, _)| recipient.is_some());
     let bound_target = (application.inherits_parent || application.target.is_some())
         && application
             .multi_target
             .as_ref()
             .is_none_or(|targets| matches!(targets.max, Some(QuantityExpr::Fixed { value: 1 })));
-    if members
-        .iter()
-        .any(|(_, _, recipient, _)| recipient.is_some())
-        && !bound_target
-    {
+    let affected = static_affected_for_application(application);
+    if has_recipient_gate && !bound_target && !affected.names_enumerable_population() {
         return None;
     }
-    let duration = leading_duration.or(trailing_duration);
-    let affected = static_affected_for_application(application);
+    let declare_target = has_recipient_gate
+        && application
+            .target
+            .as_ref()
+            .is_some_and(|filter| !filter.is_context_ref());
+    let duration = leading_duration
+        .or(trailing_duration)
+        .or_else(|| ctx.stated_clause_duration.clone());
+    let multiple_members = members.len() > 1;
     let mut definitions = Vec::new();
     for (modifications, condition, recipient, member_duration) in members {
-        let member_duration = member_duration.or_else(|| duration.clone());
+        let member_duration = member_duration
+            .or_else(|| duration.clone())
+            .or(Some(Duration::Permanent));
+        let board_gate = match condition {
+            Some(condition) => Some(super::conditions::static_condition_to_ability_condition(
+                &condition,
+            )?),
+            None => None,
+        };
+        let (member_affected, recipient_gate) = match recipient {
+            Some(filter) if bound_target => (
+                affected.clone(),
+                Some(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::HasObjectTarget,
+                        AbilityCondition::TargetMatchesFilter {
+                            filter,
+                            use_lki: false,
+                            subject_slot: declare_target.then_some(ctx.declared_target_slots.len()),
+                        },
+                    ],
+                }),
+            ),
+            Some(filter) => (
+                TargetFilter::And {
+                    filters: vec![affected.clone(), filter],
+                },
+                None,
+            ),
+            None => (affected.clone(), None),
+        };
         let mut definition = StaticDefinition::continuous()
-            .affected(affected.clone())
+            .affected(member_affected)
             .modifications(modifications);
-        definition.condition = condition;
+        crate::parser::oracle_static::bind_counter_anaphor_to_recipient(&mut definition);
         let mut member = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::GenericEffect {
                 static_abilities: vec![definition],
                 duration: member_duration.clone(),
-                target: if application.inherits_parent {
+                target: if application.inherits_parent || declare_target {
                     Some(TargetFilter::ParentTarget)
                 } else {
                     application.target.clone()
@@ -975,25 +1017,24 @@ fn build_conditional_continuous_members(
             },
         );
         member.duration = member_duration;
-        member.condition = recipient.map(|filter| AbilityCondition::And {
-            conditions: vec![
-                AbilityCondition::HasObjectTarget,
-                AbilityCondition::TargetMatchesFilter {
-                    filter,
-                    use_lki: false,
-                    subject_slot: None,
-                },
-            ],
-        });
-        if application.inherits_parent {
+        member.condition = match (board_gate, recipient_gate) {
+            (Some(board), Some(recipient)) => Some(AbilityCondition::And {
+                conditions: vec![board, recipient],
+            }),
+            (board, recipient) => board.or(recipient),
+        };
+        if application.inherits_parent || declare_target {
             member.target_reads = TargetReadOrigin::ParentAnnouncement;
             if member.condition.is_none() {
                 member.condition = Some(AbilityCondition::HasObjectTarget);
             }
         }
-        // CR 608.2c: a false earlier recipient gate does not suppress a sibling.
-        member.sub_link = SubAbilityLink::SequentialSibling;
-        member.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        if !definitions.is_empty() {
+            member.sub_link = SubAbilityLink::SequentialSibling;
+        }
+        if multiple_members {
+            member.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+        }
         definitions.push(member);
     }
     let mut tail = None;
@@ -1001,10 +1042,18 @@ fn build_conditional_continuous_members(
         member.sub_ability = tail;
         tail = Some(Box::new(member));
     }
-    let first = tail?;
-    // The owner returns the root target-read origin alongside this clause;
-    // its IR caller stamps that metadata at construction rather than losing it
-    // when the root is represented by ParsedEffectClause.
+    let first = if declare_target {
+        let mut declaration = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: application.target.clone()?,
+            },
+        );
+        declaration.sub_ability = tail;
+        Box::new(declaration)
+    } else {
+        tail?
+    };
     Some(ParsedEffectClause {
         unlowered_guard: first.unlowered_guard,
         effect: *first.effect,
@@ -5181,14 +5230,14 @@ fn build_keyword_choice_sub_ability(
     // "gains your choice of ...". `parse_keyword_choice_grant` anchors on the
     // bare "gain ..." form, so deconjugate the remainder here first.
     let normalized = deconjugate_verb(remainder);
-    let (keywords, inline) = parse_keyword_choice_grant(&normalized)?;
+    let (operation, keywords, inline) = parse_keyword_choice_grant(&normalized)?;
     let outer = ctx.stated_clause_duration.clone();
     let duration = resolve_choice_grant_duration(inline, outer, names_deferred);
     let affected = static_affected_for_application(application);
     let choice_duration = duration.clone();
     let branches = keywords
         .into_iter()
-        .map(|kw| keyword_choice_branch(kw, affected.clone(), None, duration.clone()))
+        .map(|kw| keyword_choice_branch(operation, kw, affected.clone(), None, duration.clone()))
         .collect();
     Some((
         AbilityDefinition::new(
@@ -5238,7 +5287,15 @@ fn resolve_choice_grant_duration(
     Some(Duration::Permanent)
 }
 
-fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<Duration>)> {
+#[derive(Clone, Copy)]
+enum KeywordChoiceOperation {
+    Grant,
+    Remove,
+}
+
+fn parse_keyword_choice_grant(
+    predicate: &str,
+) -> Option<(KeywordChoiceOperation, Vec<Keyword>, Option<Duration>)> {
     let lower = predicate.to_lowercase();
 
     // Shape 1: "gain your choice of X, Y, or Z" — an explicit keyword-grant menu
@@ -5246,11 +5303,20 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<D
     // the nom-based `split_choice_list_items` splitter (shared with the counter-
     // choice and "from among" paths) so an Oxford-comma N-ary list parses without
     // manual byte slicing.
-    if let Ok((choice_text, _)) =
-        tag::<_, _, OracleError<'_>>("gain your choice of ").parse(lower.as_str())
+    if let Ok((choice_text, operation)) = alt((
+        value(
+            KeywordChoiceOperation::Grant,
+            tag::<_, _, OracleError<'_>>("gain your choice of "),
+        ),
+        value(
+            KeywordChoiceOperation::Remove,
+            (tag("lose "), opt(tag("your choice of "))),
+        ),
+    ))
+    .parse(lower.as_str())
     {
         let (keyword_text, duration) = super::strip_trailing_duration(choice_text);
-        let items = super::split_choice_list_items(keyword_text.trim())?;
+        let items = super::split_bare_disjunctive_choice_list_items(keyword_text.trim())?;
         // `separated_list1` succeeds on a single item when there is no separator
         // at all; require ≥2 so a lone keyword is not mistaken for a "choice".
         if items.len() < 2 {
@@ -5258,12 +5324,22 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<D
         }
         let keywords: Vec<Keyword> = items
             .iter()
-            .map(|item| parse_granted_keyword_fragment(item.trim()))
+            .map(|item| crate::parser::oracle_keyword::parse_router_keyword_fragment(item.trim()))
             .collect::<Option<Vec<Keyword>>>()?;
         // The inline duration is returned raw; the caller resolves the
         // inline → outer → Permanent precedence via
         // `resolve_choice_grant_duration`.
-        return Some((keywords, duration));
+        if matches!(operation, KeywordChoiceOperation::Remove)
+            && keywords.iter().any(|keyword| {
+                matches!(
+                    keyword,
+                    Keyword::Protection(_) | Keyword::Ward(_) | Keyword::BandsWithOther(_)
+                )
+            })
+        {
+            return None;
+        }
+        return Some((operation, keywords, duration));
     }
 
     // Shape 2: "gain/have protection from X or from the color of your choice"
@@ -5296,22 +5372,32 @@ fn parse_keyword_choice_grant(predicate: &str) -> Option<(Vec<Keyword>, Option<D
         right.trim(),
     ));
     // Raw inline duration; precedence resolved by the caller (see above).
-    Some((vec![first, second], duration))
+    Some((KeywordChoiceOperation::Grant, vec![first, second], duration))
 }
 
 fn keyword_choice_branch(
+    operation: KeywordChoiceOperation,
     keyword: Keyword,
     affected: TargetFilter,
     target: Option<TargetFilter>,
     duration: Option<Duration>,
 ) -> AbilityDefinition {
-    let description = format!("gain {keyword}");
+    let (description, modification) = match operation {
+        KeywordChoiceOperation::Grant => (
+            format!("gain {keyword}"),
+            ContinuousModification::AddKeyword { keyword },
+        ),
+        KeywordChoiceOperation::Remove => (
+            format!("lose {keyword}"),
+            ContinuousModification::RemoveKeyword { keyword },
+        ),
+    };
     let mut branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
                 .affected(affected)
-                .modifications(vec![ContinuousModification::AddKeyword { keyword }])
+                .modifications(vec![modification])
                 .description(description.clone())],
             duration: duration.clone(),
             target,
@@ -5329,13 +5415,13 @@ fn build_keyword_choice_clause(
     ctx: &ParseContext,
     names_deferred: bool,
 ) -> Option<ParsedEffectClause> {
-    let (keywords, inline) = parse_keyword_choice_grant(predicate)?;
+    let (operation, keywords, inline) = parse_keyword_choice_grant(predicate)?;
     let outer = ctx.stated_clause_duration.clone();
     let duration = resolve_choice_grant_duration(inline, outer, names_deferred);
     let affected = static_affected_for_application(application);
     let branches = keywords
         .into_iter()
-        .map(|kw| keyword_choice_branch(kw, affected.clone(), None, duration.clone()))
+        .map(|kw| keyword_choice_branch(operation, kw, affected.clone(), None, duration.clone()))
         .collect();
 
     let choose_effect = Effect::ChooseOneOf {
@@ -5606,7 +5692,10 @@ fn continuous_grant_duration(
             .all(|m| matches!(m, ContinuousModification::GrantTrigger { .. }));
     let pure_activation = !names_deferred && !modifications.is_empty()
         && modifications.iter().all(|m| matches!(m, ContinuousModification::GrantAbility { definition } if definition.kind == AbilityKind::Activated));
-    (suspend || additive || attachable || pure_trigger || pure_activation)
+    let complete_member = !names_deferred
+        && crate::parser::oracle_static::parse_complete_continuous_modifications(predicate)
+            .is_some();
+    (suspend || additive || attachable || pure_trigger || pure_activation || complete_member)
         .then_some(Duration::Permanent)
 }
 
@@ -5790,7 +5879,7 @@ fn build_continuous_clause(
     }
 
     let affected = static_affected_for_application(&application);
-    let static_abilities =
+    let mut static_abilities =
         if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
             let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));
             let mut split_defs = parse_static_line_multi(&synthetic_line);
@@ -5812,6 +5901,10 @@ fn build_continuous_clause(
                 .modifications(modifications)
                 .description(predicate_text.to_string())]
         };
+
+    for definition in &mut static_abilities {
+        crate::parser::oracle_static::bind_counter_anaphor_to_recipient(definition);
+    }
 
     Some(ParsedEffectClause {
         optional_targeting: false,
@@ -8253,20 +8346,9 @@ pub(super) fn try_parse_each_source_deals_damage(
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    // CR 120.1: require a genuine UNIVERSAL/class quantifier subject ("each <X>").
-    // This is what makes every match its own damage source. It deliberately
-    // EXCLUDES singular anaphoric/targeted subjects that denote ONE source — "that
-    // creature" (TriggeringSource), "it"/"this creature" (SelfRef), "enchanted
-    // creature" (AttachedTo), "target creature you control" (a chosen target) — all
-    // of which `parse_subject_application` would otherwise hand back as a bare
-    // `Typed` class filter, wrongly broadcasting one source's damage across the
-    // whole class.
-    if tag::<_, _, OracleError<'_>>("each ")
+    let universal = tag::<_, _, OracleError<'_>>("each ")
         .parse(lower.as_str())
-        .is_err()
-    {
-        return None;
-    }
+        .is_ok();
     // CR 608.2c: split subject vs predicate at the "deals"/"deal" verb. "attach"
     // is not a PREDICATE_VERB, so "each Aura attached to a creature deals …" splits
     // at "deals", not at "attached".
@@ -8337,7 +8419,33 @@ pub(super) fn try_parse_each_source_deals_damage(
     // other" reads the previously announced object pair through ParentTarget.
     // Only `TwoTargets` publishes this two-slot registry; a single multi-target
     // producer therefore fails closed without typed per-member provenance.
-    let sources = parse_subject_application(subject, ctx)?.affected;
+    let sources = if universal {
+        parse_subject_application(subject, ctx)?.affected
+    } else {
+        // A singular source must be an actual established object identity;
+        // a bare creature class cannot stand in for that one source.
+        let (remainder, _) = all_consuming(alt((
+            tag::<_, _, OracleError<'_>>("it"),
+            tag("that creature"),
+            tag("that permanent"),
+        )))
+        .parse(lower[..verb_start].trim())
+        .ok()?;
+        debug_assert!(remainder.is_empty());
+        let reference = ctx.object_pronoun_ref.as_ref()?;
+        if !matches!(
+            reference,
+            TargetFilter::AttachedTo
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::TriggeringSource
+                | TargetFilter::SpecificObject { .. }
+                | TargetFilter::CostPaidObject { .. }
+        ) {
+            return None;
+        }
+        reference.clone()
+    };
     let pairwise_filters = match (&sources, ctx.declared_target_slots.as_slice()) {
         (TargetFilter::ParentTarget, [first, second])
             if has_pairwise_other_recipient(&predicate_lower)
@@ -8350,7 +8458,7 @@ pub(super) fn try_parse_each_source_deals_damage(
         }
         _ => None,
     };
-    if !is_object_class_source(&sources) && pairwise_filters.is_none() {
+    if universal && !is_object_class_source(&sources) && pairwise_filters.is_none() {
         return None;
     }
 
@@ -8391,7 +8499,15 @@ pub(super) fn try_parse_each_source_deals_damage(
     // recipient is the shared announced/context target produced above.
     let recipient = if let Some(source_filters) = pairwise_filters {
         EachDamageRecipient::OtherBatchSource { source_filters }
-    } else if recipient_phrase.is_some_and(is_its_controller_recipient) {
+    } else if recipient_phrase.is_some_and(is_its_controller_recipient)
+        || all_consuming((
+            take_until::<_, _, OracleError<'_>>(" to its controller"),
+            tag(" to its controller"),
+            opt(tag(".")),
+        ))
+        .parse(predicate_lower.as_str())
+        .is_ok()
+    {
         EachDamageRecipient::EachController
     } else {
         EachDamageRecipient::Shared(target)
@@ -13639,5 +13755,116 @@ mod entry_onset_tests {
                 .collect();
             assert_stamps_admit(name, &roots);
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_shipping_member_tests {
+    use super::*;
+
+    // SHAPE: runtime counterparts are the existing jev_modifier_publication tests.
+    #[test]
+    fn complete_keyword_menus_keep_operation_and_all_items() {
+        for (predicate, removing, count) in [
+            (
+                "lose your choice of flying, first strike, or trample until end of turn",
+                true,
+                3,
+            ),
+            ("lose first strike or swampwalk until end of turn", true, 2),
+            (
+                "gain your choice of flying, trample, or haste until end of turn",
+                false,
+                3,
+            ),
+        ] {
+            let (operation, keywords, duration) = parse_keyword_choice_grant(predicate).unwrap();
+            assert_eq!(keywords.len(), count);
+            assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+            for keyword in keywords {
+                let expected = if removing {
+                    ContinuousModification::RemoveKeyword {
+                        keyword: keyword.clone(),
+                    }
+                } else {
+                    ContinuousModification::AddKeyword {
+                        keyword: keyword.clone(),
+                    }
+                };
+                let branch = keyword_choice_branch(
+                    operation,
+                    keyword,
+                    TargetFilter::ParentTarget,
+                    None,
+                    duration.clone(),
+                );
+                let Effect::GenericEffect {
+                    static_abilities, ..
+                } = *branch.effect
+                else {
+                    panic!("concrete member")
+                };
+                assert_eq!(static_abilities[0].modifications, vec![expected]);
+            }
+        }
+        for predicate in [
+            "lose flying and trample until end of turn",
+            "lose flying or an unexplained keyword until end of turn",
+            "lose flying or trample with an unexplained qualifier",
+            "lose flying or protection from red until end of turn",
+        ] {
+            assert!(
+                parse_keyword_choice_grant(predicate).is_none(),
+                "{predicate}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_resolving_members_keep_unbounded_and_local_windows() {
+        let application = SubjectApplication {
+            affected: TargetFilter::SelfRef,
+            target: None,
+            multi_target: None,
+            inherits_parent: false,
+            is_optional: false,
+            player_anaphor: None,
+        };
+        for (predicate, expected) in [
+            ("loses all abilities and becomes a green Elk creature with base power and toughness 3/3", Duration::Permanent),
+            ("loses all abilities and becomes a green Elk creature with base power and toughness 3/3 until end of turn", Duration::UntilEndOfTurn),
+        ] {
+            let clause = build_continuous_clause(application.clone(), predicate, &ParseContext::default(), false).unwrap();
+            assert_eq!(clause.duration, Some(expected.clone()));
+            assert!(matches!(clause.effect, Effect::GenericEffect { duration: Some(ref actual), .. } if actual == &expected));
+        }
+    }
+
+    #[test]
+    fn singular_damage_requires_an_established_object_identity() {
+        let text = "It deals damage equal to its power to its controller";
+        let mut context = ParseContext {
+            object_pronoun_ref: Some(TargetFilter::AttachedTo),
+            ..Default::default()
+        };
+        let clause = try_parse_each_source_deals_damage(text, &mut context).unwrap();
+        assert_eq!(
+            clause.effect,
+            Effect::EachSourceDealsDamage {
+                sources: TargetFilter::AttachedTo,
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::Power {
+                        scope: ObjectScope::BatchSource
+                    }
+                },
+                recipient: EachDamageRecipient::EachController,
+            }
+        );
+        assert!(try_parse_each_source_deals_damage(text, &mut ParseContext::default()).is_none());
+        assert!(try_parse_each_source_deals_damage(
+            "Creatures deal damage equal to their power to their controller",
+            &mut context
+        )
+        .is_none());
     }
 }

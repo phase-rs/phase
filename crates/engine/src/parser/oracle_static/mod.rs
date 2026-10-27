@@ -178,6 +178,7 @@ pub(crate) use mana_transform::{
 pub(crate) use restriction::parse_cant_be_activated_exemption_in_text;
 pub(crate) use restriction::parse_passive_cant_be_cast_spell_filter;
 pub(crate) use restriction::try_parse_top_of_library_cast_permission;
+pub(crate) use shared::bind_counter_anaphor_to_recipient;
 pub(crate) use shared::canonicalize_anchor_label;
 pub(crate) use shared::parse_activated_abilities_cant_be_activated;
 pub(crate) use shared::parse_cant_attack_defended_scope_nom;

@@ -1829,7 +1829,11 @@
     },
     "damageSource": {
       "title": "Fuente de daño",
-      "subtitle": "Elige una fuente"
+      "subtitle": "Elige una fuente",
+      "identity": "Fuente #{{objectId}}, encarnación {{incarnation}}",
+      "unnamed": "Fuente sin nombre",
+      "optionLabel": "{{name}} — {{identity}} — jugador {{controller}}, {{zone}}",
+      "controllerZone": "Jugador {{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "Manifestar pavor",

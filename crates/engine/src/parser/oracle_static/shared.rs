@@ -5817,9 +5817,10 @@ pub(crate) fn typed_you_control_descriptor_filter(
     }
 
     if is_capitalized_words(descriptor.original) {
-        let subtype_name = parse_subtype(descriptor.original)
-            .map(|(canonical, _)| canonical)
-            .unwrap_or_else(|| descriptor.original.to_string());
+        let (subtype_name, consumed) = parse_subtype(descriptor.original)?;
+        if consumed != descriptor.original.len() {
+            return None;
+        }
         return Some(TargetFilter::Typed(
             typed_filter_for_subtype(&subtype_name).controller(ControllerRef::You),
         ));
@@ -5884,20 +5885,18 @@ pub(crate) fn parse_subtype_or_list_insensitive_prefix(
 }
 
 fn parse_subtype_word_capitalized(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-    use nom::bytes::complete::take_while1;
-    let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
-    if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Fail,
-        )));
-    }
-    Ok((rest, word))
+    nom::combinator::verify(parse_subtype_word_any_case, |word: &str| {
+        word.chars()
+            .next()
+            .is_some_and(|character| character.is_uppercase())
+    })
+    .parse(input)
 }
 
 fn parse_subtype_word_any_case(input: &str) -> nom::IResult<&str, &str, OracleError<'_>> {
-    use nom::bytes::complete::take_while1;
-    take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)
+    let (_, consumed) = parse_subtype(input)
+        .ok_or_else(|| nom::Err::Error(OracleError::new(input, nom::error::ErrorKind::Tag)))?;
+    nom::bytes::complete::take(consumed).parse(input)
 }
 
 fn parse_subtype_or_list_with_word_parser(
@@ -5939,15 +5938,16 @@ fn parse_subtype_or_list_prefix_with_word_parser(
         separated_list1(parse_list_separator, parse_subtype_word)
             .parse(input)
             .ok()?;
+    if parse_list_separator(rest).is_ok() {
+        return None;
+    }
     let filters: Vec<TargetFilter> = words
         .iter()
         .map(|w| {
-            let canonical = parse_subtype(w)
-                .map(|(c, _)| c)
-                .unwrap_or_else(|| w.to_string());
-            TargetFilter::Typed(typed_filter_for_subtype(&canonical))
+            let (canonical, consumed) = parse_subtype(w)?;
+            (consumed == w.len()).then(|| TargetFilter::Typed(typed_filter_for_subtype(&canonical)))
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     if filters.len() == 1 {
         filters.into_iter().next().map(|filter| (filter, rest))
     } else {
@@ -6364,13 +6364,7 @@ fn scoped_subject_filter(
 /// Parse one capitalized subtype word (alphabetic characters and hyphens,
 /// starting uppercase) — the atom of an Oxford-comma subtype list.
 fn parse_capitalized_subtype_word(input: &str) -> OracleResult<'_, &str> {
-    use nom::bytes::complete::take_while1;
-    use nom::combinator::verify;
-    verify(
-        take_while1(|c: char| c.is_alphabetic() || c == '-'),
-        |w: &str| w.chars().next().is_some_and(|c| c.is_uppercase()),
-    )
-    .parse(input)
+    parse_subtype_word_capitalized(input)
 }
 
 /// CR 205.3m + CR 611.3a: Parse an Oxford-comma / conjunction subtype LIST
@@ -6411,16 +6405,16 @@ pub(crate) fn parse_subtype_list_filter(
     let filters = words
         .iter()
         .map(|word| {
-            let subtype = parse_subtype(word)
-                .map(|(canonical, _)| canonical)
-                .unwrap_or_else(|| word.to_string());
-            TargetFilter::Typed(
-                typed_filter_for_subtype(&subtype)
-                    .controller(ControllerRef::You)
-                    .properties(all_props.clone()),
-            )
+            let (subtype, consumed) = parse_subtype(word)?;
+            (consumed == word.len()).then(|| {
+                TargetFilter::Typed(
+                    typed_filter_for_subtype(&subtype)
+                        .controller(ControllerRef::You)
+                        .properties(all_props.clone()),
+                )
+            })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
     Some(TargetFilter::Or { filters })
 }
 
@@ -6463,14 +6457,16 @@ pub(crate) fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilte
             return Some(scoped_subject_filter(base, controller, has_other));
         }
         // CR 205.3m: Use parse_subtype for irregular plurals (Elves→Elf, Dwarves→Dwarf)
-        if let Some((canonical, _)) = parse_subtype(descriptor_text) {
+        if let Some((canonical, _)) = parse_subtype(descriptor_text)
+            .filter(|(_, consumed)| *consumed == descriptor_text.len())
+        {
             return Some(scoped_subject_filter(
                 TypedFilter::creature().subtype(canonical),
                 controller,
                 has_other,
             ));
         }
-        descriptor_text.trim_end_matches('s').trim()
+        return None;
     } else {
         return None;
     };
@@ -6506,7 +6502,10 @@ pub(crate) fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilte
     }
 
     if is_capitalized_words(descriptor) {
-        let subtype = descriptor.to_string();
+        let (subtype, consumed) = parse_subtype(descriptor)?;
+        if consumed != descriptor.len() {
+            return None;
+        }
         let mut typed = TypedFilter::creature().subtype(subtype);
         if let Some(controller) = controller {
             typed = typed.controller(controller);

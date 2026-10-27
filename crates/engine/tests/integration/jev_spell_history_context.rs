@@ -92,7 +92,11 @@ fn settled(runner: &GameRunner) {
         runner.state().waiting_for
     );
     assert!(runner.state().stack.is_empty());
-    assert!(runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
     assert!(runner.state().pending_cast.is_none());
 }
 
@@ -256,7 +260,7 @@ fn retained_noncreature_history_drives_complete_combat_parent_payoffs() {
                 "The Thing" => assert_eq!(
                     state.objects[&host]
                         .counters
-                        .get(&CounterType::P1P1)
+                        .get(&CounterType::Plus1Plus1)
                         .copied()
                         .unwrap_or(0),
                     if qualifies { 4 } else { 0 }
@@ -264,7 +268,7 @@ fn retained_noncreature_history_drives_complete_combat_parent_payoffs() {
                 "Lockjaw, Slobbering Teleporter" => assert_eq!(
                     state.objects[&host]
                         .counters
-                        .get(&CounterType::P1P1)
+                        .get(&CounterType::Plus1Plus1)
                         .copied()
                         .unwrap_or(0),
                     u32::from(qualifies)
@@ -375,7 +379,7 @@ fn retained_both_history_requires_both_populations_at_phase_event() {
                     assert_eq!(
                         runner.state().objects[&host]
                             .counters
-                            .get(&CounterType::P1P1)
+                            .get(&CounterType::Plus1Plus1)
                             .copied()
                             .unwrap_or(0),
                         if both { 2 } else { 0 }
@@ -762,7 +766,10 @@ fn gaddock_full_printed_mana_value_and_x_bans_allow_creature_twins() {
         if allowed {
             result.unwrap();
             assert_eq!(runner.state().spells_cast_this_turn_by_player[&P0].len(), 1);
-            assert_eq!(runner.state().players[0].mana_pool.total(), 8 - generic - 1);
+            assert_eq!(
+                runner.state().players[0].mana_pool.total(),
+                usize::try_from(8 - generic - 1).unwrap()
+            );
         } else {
             assert!(result.is_err());
             assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
@@ -1912,7 +1919,7 @@ fn combat_history_uses_live_controller_after_real_control_change() {
                 "The Thing" | "Lockjaw, Slobbering Teleporter" => assert_eq!(
                     runner.state().objects[&host]
                         .counters
-                        .get(&CounterType::P1P1)
+                        .get(&CounterType::Plus1Plus1)
                         .copied()
                         .unwrap_or(0),
                     if matching {
@@ -2004,7 +2011,7 @@ fn torch_grants_expire_while_thing_counters_persist() {
             assert_eq!(
                 runner.state().objects[&host]
                     .counters
-                    .get(&CounterType::P1P1),
+                    .get(&CounterType::Plus1Plus1),
                 Some(&4)
             );
         }
@@ -2027,7 +2034,7 @@ fn torch_grants_expire_while_thing_counters_persist() {
             assert_eq!(
                 runner.state().objects[&host]
                     .counters
-                    .get(&CounterType::P1P1),
+                    .get(&CounterType::Plus1Plus1),
                 Some(&4)
             );
             assert_eq!(runner.state().objects[&host].power, Some(9));
@@ -3520,7 +3527,7 @@ fn queued_combat_trigger_keeps_controller_after_real_flash_creature_theft() {
             "The Thing" | "Lockjaw, Slobbering Teleporter" => assert_eq!(
                 runner.state().objects[&host]
                     .counters
-                    .get(&CounterType::P1P1)
+                    .get(&CounterType::Plus1Plus1)
                     .copied(),
                 Some(if name == "The Thing" { 4 } else { 1 })
             ),

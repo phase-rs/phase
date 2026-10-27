@@ -11109,7 +11109,7 @@ fn departure_source_only_bolster_prevention_step_and_player_thresholds_refuse_be
                         count: amount.clone(),
                     },
                     1 => Effect::PreventDamage {
-                        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+                        lifetime: engine::types::ability::RedirectionLifetime::Continuous,
                         amount: PreventionAmount::All,
                         amount_dynamic: Some(amount.clone()),
                         target: TargetFilter::Controller,
@@ -11337,7 +11337,7 @@ fn departure_direct_damage_shields_validate_later_formulas_and_both_filter_axes_
                     }
                 } else {
                     Effect::PreventDamage {
-                        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+                        lifetime: engine::types::ability::RedirectionLifetime::Continuous,
                         amount: PreventionAmount::All,
                         amount_dynamic: None,
                         target: if slot == 4 {
@@ -11509,7 +11509,7 @@ fn departure_prevention_rider_installs_unbound_and_gets_a_fresh_process_on_actua
                         let mut shield = AbilityDefinition::new(
                             AbilityKind::Spell,
                             Effect::PreventDamage {
-                                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+                                lifetime: engine::types::ability::RedirectionLifetime::Continuous,
                                 amount: PreventionAmount::All,
                                 amount_dynamic: None,
                                 target: TargetFilter::Controller,
@@ -11622,7 +11622,7 @@ fn departure_unselected_epic_cost_and_installed_rider_cannot_import_the_callers_
                 });
             } else {
                 body.effect = Box::new(Effect::PreventDamage {
-                    lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+                    lifetime: engine::types::ability::RedirectionLifetime::Continuous,
                     amount: PreventionAmount::All,
                     amount_dynamic: None,
                     target: TargetFilter::Controller,
@@ -11704,7 +11704,7 @@ fn departure_direct_shield_source_choice_latches_identity_for_actual_later_damag
         });
         let effect = if prevention {
             Effect::PreventDamage {
-                lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+                lifetime: engine::types::ability::RedirectionLifetime::Continuous,
                 amount: PreventionAmount::All,
                 amount_dynamic: None,
                 target: TargetFilter::Controller,

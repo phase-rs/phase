@@ -1018,7 +1018,9 @@ fn doors_scry_nonidentity_then_returned_dwarf_elf_gets_both_grants() {
             object.base_toughness = Some(4);
         }
         runner.advance_to_combat();
-        runner.declare_attackers(vec![(attacker, AttackTarget::Player(P1))]);
+        runner
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .unwrap();
         runner.advance_until_stack_empty();
         let WaitingFor::ScryChoice { player, cards, .. } = &runner.state().waiting_for else {
             panic!("actual Doors scry2");

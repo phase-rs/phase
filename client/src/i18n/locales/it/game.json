@@ -1829,7 +1829,11 @@
     },
     "damageSource": {
       "title": "Sorgente del danno",
-      "subtitle": "Scegli una sorgente"
+      "subtitle": "Scegli una sorgente",
+      "identity": "Sorgente #{{objectId}}, incarnazione {{incarnation}}",
+      "unnamed": "Sorgente senza nome",
+      "optionLabel": "{{name}} — {{identity}} — giocatore {{controller}}, {{zone}}",
+      "controllerZone": "Giocatore {{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "Manifesta Terrore",

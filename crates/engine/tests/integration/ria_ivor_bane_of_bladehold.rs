@@ -630,6 +630,7 @@ fn source_scoped_player_prevention_cast_captures_only_the_creature_source() {
         .with_ability(Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
+            lifetime: engine::types::ability::RedirectionLifetime::Continuous,
             target: TargetFilter::Player,
             recipient_scope: EffectScope::All,
             scope: PreventionScope::CombatDamage,

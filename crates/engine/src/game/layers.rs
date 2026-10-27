@@ -12091,8 +12091,11 @@ fn apply_continuous_effect_filtered(
             // Generic removal keeps same-variant scope, extended to the full
             // hexproof family by CR 702.11e. Chosen-keyword loss below stays exact.
             ContinuousModification::RemoveKeyword { keyword } => {
-                obj.keywords
-                    .retain(|k| !super::keywords::keyword_matches_removal(k, keyword));
+                obj.keywords.retain(|candidate| match keyword {
+                    // CR 702.14a: each landwalk quality is a distinct ability.
+                    crate::types::keywords::Keyword::Landwalk(_) => candidate != keyword,
+                    _ => !super::keywords::keyword_matches_removal(candidate, keyword),
+                });
                 obj.trigger_definitions.retain(|entry| {
                     !KeywordTriggerInstaller::trigger_matches_keyword_kind(
                         entry.definition(),

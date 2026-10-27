@@ -3809,7 +3809,11 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // `AbilityDefinition.condition`. Falls back to the ability-level
             // condition when the effect is not a `GenericEffect` or the
             // condition is not invertible to a `StaticCondition`.
-            let pushed_down = if let Effect::GenericEffect {
+            let pushed_down = if clause_ir.parsed.condition.as_ref() == Some(cond) {
+                // Complete resolving members already own their resolution gate.
+                // Keep it on that member rather than reinstalling a live static gate.
+                None
+            } else if let Effect::GenericEffect {
                 static_abilities, ..
             } = &mut *def.effect
             {

@@ -8699,17 +8699,10 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
     let mut properties = Vec::new();
     let mut disjunctive = false;
 
-    while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
-        match keyword_match {
-            KeywordMatch::Concrete(keyword) => {
-                properties.push(FilterProp::WithKeyword { value: keyword });
-            }
-            KeywordMatch::Kind(kind) => {
-                properties.push(FilterProp::HasKeywordKind { value: kind });
-            }
-        }
-        consumed += keyword_len;
-        remaining = &remaining[keyword_len..];
+    while let Ok((rest, property)) = parse_keyword_membership(remaining) {
+        properties.push(property);
+        consumed += remaining.len() - rest.len();
+        remaining = rest;
 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
@@ -8761,17 +8754,14 @@ pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp
     let mut consumed = leading_ws + "without ".len();
     let mut properties = Vec::new();
 
-    while let Some((keyword_match, keyword_len)) = parse_leading_keyword_match(remaining) {
-        match keyword_match {
-            KeywordMatch::Concrete(keyword) => {
-                properties.push(FilterProp::WithoutKeyword { value: keyword });
-            }
-            KeywordMatch::Kind(kind) => {
-                properties.push(FilterProp::WithoutKeywordKind { value: kind });
-            }
-        }
-        consumed += keyword_len;
-        remaining = &remaining[keyword_len..];
+    while let Ok((rest, property)) = parse_keyword_membership(remaining) {
+        properties.push(match property {
+            FilterProp::WithKeyword { value } => FilterProp::WithoutKeyword { value },
+            FilterProp::HasKeywordKind { value } => FilterProp::WithoutKeywordKind { value },
+            _ => unreachable!("membership returns only keyword predicates"),
+        });
+        consumed += remaining.len() - rest.len();
+        remaining = rest;
 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
@@ -9109,6 +9099,21 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
 enum KeywordMatch {
     Concrete(Keyword),
     Kind(KeywordKind),
+}
+
+/// Shared remainder-preserving keyword membership for recipient predicates and
+/// with/without suffixes. Concrete qualities and kind-only names stay distinct.
+pub(crate) fn parse_keyword_membership(
+    input: &str,
+) -> nom::IResult<&str, FilterProp, OracleError<'_>> {
+    let (keyword, consumed) = parse_leading_keyword_match(input).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    let property = match keyword {
+        KeywordMatch::Concrete(value) => FilterProp::WithKeyword { value },
+        KeywordMatch::Kind(value) => FilterProp::HasKeywordKind { value },
+    };
+    Ok((&input[consumed..], property))
 }
 
 fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {

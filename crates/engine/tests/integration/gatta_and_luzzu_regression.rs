@@ -119,7 +119,7 @@ fn build_gatta_prevention_chain(
 
     let mut prevent = ResolvedAbility::new(
         Effect::PreventDamage {
-            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+            lifetime: engine::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::ParentTarget,

@@ -96,7 +96,11 @@ fn ichneumon_druid_damages_only_after_opponents_first_instant() {
         WaitingFor::Priority { .. }
     ));
     assert!(runner.state().stack.is_empty());
-    assert!(runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
 }
 
 /// In Two-Headed Giant, P0/P1 are teammates and P2/P3 are the

@@ -49,8 +49,13 @@ fn haunted_actual_death_exiles_the_successor_and_each_other_controller_gets_one_
             .iter()
             .filter_map(|id| {
                 let object = &outcome.state().objects[id];
-                (object.is_token && object.subtypes.iter().any(|subtype| subtype == "Angel"))
-                    .then_some(object)
+                (object.is_token
+                    && object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|subtype| subtype == "Angel"))
+                .then_some(object)
             })
             .collect();
         assert_eq!(
@@ -69,7 +74,7 @@ fn haunted_actual_death_exiles_the_successor_and_each_other_controller_gets_one_
             );
             for token in own {
                 assert_eq!((token.power, token.toughness), (Some(3), Some(3)));
-                assert_eq!(token.colors, vec![ManaColor::Black]);
+                assert_eq!(token.color, vec![ManaColor::Black]);
                 assert!(token.keywords.contains(&Keyword::Flying));
                 assert_eq!(token.owner, player);
             }
@@ -141,14 +146,18 @@ fn haunted_unavailable_dying_source_does_not_gate_tokens_or_exile_a_later_birth(
                     let object = &runner.state().objects[id];
                     (object.is_token
                         && object.controller == player
-                        && object.subtypes.iter().any(|subtype| subtype == "Angel"))
+                        && object
+                            .card_types
+                            .subtypes
+                            .iter()
+                            .any(|subtype| subtype == "Angel"))
                     .then_some(object)
                 })
                 .collect();
             assert_eq!(angels.len(), usize::from(player != P1));
             for angel in angels {
                 assert_eq!((angel.power, angel.toughness), (Some(3), Some(3)));
-                assert_eq!(angel.colors, vec![ManaColor::Black]);
+                assert_eq!(angel.color, vec![ManaColor::Black]);
                 assert!(angel.keywords.contains(&Keyword::Flying));
             }
         }

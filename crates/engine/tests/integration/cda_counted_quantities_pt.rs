@@ -493,7 +493,11 @@ fn relative_cdas_paid_sources_keep_head_overlap_and_live_membership() {
         cda_pt(runner.state(), spell, 3);
         cda_full_source(runner.state(), spell);
         cda_complete(runner.state());
-        assert!(runner.state().trigger_stack.is_empty());
+        assert!(
+            runner.state().pending_trigger.is_none()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger_order.is_none()
+        );
     }
 }
 
@@ -836,7 +840,11 @@ fn relative_thought_sponge_public_totals_entry_death_and_new_birth() {
                     .iter()
                     .all(|id| resumed.state().players[0].hand.contains(id)));
                 assert_eq!(resumed.state().objects[&sponge].power, Some(4));
-                assert!(resumed.state().trigger_stack.is_empty());
+                assert!(
+                    resumed.state().pending_trigger.is_none()
+                        && resumed.state().deferred_triggers.is_empty()
+                        && resumed.state().pending_trigger_order.is_none()
+                );
                 cda_complete(resumed.state());
             }
         }
@@ -1164,7 +1172,11 @@ fn relative_cdas_public_copy_control_type_loss_and_new_birth_keep_two_authoritie
             );
             resumed.cast(source).resolve();
             cda_pt(resumed.state(), source, 2);
-            assert!(resumed.state().trigger_stack.is_empty());
+            assert!(
+                resumed.state().pending_trigger.is_none()
+                    && resumed.state().deferred_triggers.is_empty()
+                    && resumed.state().pending_trigger_order.is_none()
+            );
             cda_complete(resumed.state());
         }
     }
@@ -1706,7 +1718,11 @@ fn relative_katilda_two_replacements_preserve_selected_source_and_stack_origin()
                 assert_eq!(resumed.state().objects[&host].power, Some(2));
                 assert_eq!(resumed.state().objects[&first].power, Some(2));
                 assert_eq!(resumed.state().objects[&redirect].zone, Zone::Battlefield);
-                assert!(resumed.state().trigger_stack.is_empty());
+                assert!(
+                    resumed.state().pending_trigger.is_none()
+                        && resumed.state().deferred_triggers.is_empty()
+                        && resumed.state().pending_trigger_order.is_none()
+                );
                 cda_complete(resumed.state());
             }
         }

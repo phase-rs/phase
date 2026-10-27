@@ -3,7 +3,8 @@
 #
 # The 39 v1 JSON input keys may exist as quoted keys only in the
 # ResolutionStateWire v1 reader, its legacy wire structures/inventory, the
-# instruction-batch compatibility visitor, or test fixtures. Runtime resolution
+# instruction-batch compatibility visitor, the two source-choice carrier reads
+# in complete-state decode admission, or test fixtures. Runtime resolution
 # work is represented by typed ResolutionFrame
 # payloads; identically named typed payload members are not wire keys. The
 # frame stack permits top access, a captured adjacent-pair boundary, or
@@ -278,6 +279,40 @@ def function_span(source: str, function_name: str) -> tuple[int, int]:
     return block_span(source, match)
 
 
+def source_choice_legacy_read_spans(source: str) -> list[tuple[int, int]]:
+    # This decoder also validates current captures, so its whole body is NOT a
+    # legacy-key exception. Admit only the two historical carrier accessors;
+    # inserts, emitted keys, and reads outside this exact owner stay forbidden.
+    start, end = function_span(source, "prepare_damage_source_authority")
+    accessor = re.compile(
+        r'\.get\s*\(\s*("(?:pending_continuation|pending_coin_flip)")\s*\)'
+    )
+    return [
+        (start + match.start(1), start + match.end(1))
+        for match in accessor.finditer(source[start:end])
+    ]
+
+
+# Pin the new distinction locally: admitting a compatibility read must never
+# admit the same key as an inserted/emitted value or in a different function.
+for carrier in ("pending_continuation", "pending_coin_flip"):
+    control = (
+        "fn prepare_damage_source_authority(value: &mut Value) {"
+        f'value.get("{carrier}"); value.insert("{carrier}", Value::Null);'
+        "} fn outside(value: &Value) {"
+        f'value.get("{carrier}");'
+        "}"
+    )
+    spans = source_choice_legacy_read_spans(control)
+    admitted = [
+        in_any_span(offset, spans)
+        for offset, key in string_literals(control)
+        if key == carrier
+    ]
+    if admitted != [True, False, False]:
+        raise ValueError("source-choice legacy accessor boundary control failed")
+
+
 def rust_fn_signatures(source: str) -> list[tuple[str, str, str]]:
     """`(name, params, tail)` for every `fn` in `source`.
 
@@ -412,6 +447,7 @@ for file_name in files:
         # v1 child continuation before ResolutionStateWire projects it into a
         # typed resolution frame.
         allowed_spans.append(function_span(source, "migrate_legacy_trigger_firing_carriers"))
+        allowed_spans.extend(source_choice_legacy_read_spans(source))
 
     for offset, key in string_literals(source):
         if key not in legacy_keys or in_any_span(offset, allowed_spans):

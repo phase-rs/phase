@@ -59554,9 +59554,248 @@ mod replacement_subtree_boundary_tests {
 #[cfg(test)]
 mod damage_source_canonical_admission_tests {
     use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::*;
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::zones::Zone;
+
+    fn paid_gambit_source_prompt(thumb: bool) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature(P0, "Selected source", 2, 2).id();
+        if thumb {
+            scenario.add_artifact_from_oracle(
+                P0,
+                "Krark's Thumb",
+                "If you would flip a coin, instead flip two coins and ignore one.",
+            );
+        }
+        let gambit = scenario.add_spell_to_hand_from_oracle(P0, "Desperate Gambit", true,
+            "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.")
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Red], generic: 0 }).id();
+        let mut runner = scenario.build();
+        runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        ));
+        runner.cast(gambit).resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DamageSourceChoice { .. }
+        ));
+        (runner, source, gambit)
+    }
+
+    fn v1_source_choice_payload(state: &GameState) -> serde_json::Value {
+        // Use the same pending-payload projection as resolution.rs's existing
+        // restore_v1_ability_fixture / restore_v1_coin_flip_fixture helpers.
+        let mut value = serde_json::to_value(state).unwrap();
+        for frame in state.resolution_stack.iter() {
+            match frame {
+                ResolutionFrame::AbilityContinuation(frame) => {
+                    assert!(frame.choose_zone_trigger_context.is_none());
+                    value["pending_continuation"] = serde_json::to_value(&frame.pending).unwrap();
+                }
+                ResolutionFrame::CoinFlip(frame) => {
+                    value["pending_coin_flip"] = serde_json::to_value(frame).unwrap();
+                    let flip = value["pending_coin_flip"].as_object_mut().unwrap();
+                    // Neither field existed on the base writer's PendingCoinFlip.
+                    flip.remove("return_result_occurrence");
+                    flip.remove("expected_return_result_process");
+                }
+                other => panic!("unexpected source-choice fixture frame: {other:?}"),
+            }
+        }
+        if let WaitingFor::DamageSourceChoice { options, .. } = &state.waiting_for {
+            value["waiting_for"]["options"] = serde_json::to_value(
+                options
+                    .iter()
+                    .map(|option| option.identity.reference.object_id)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        }
+        let object = value.as_object_mut().unwrap();
+        object.remove("resolution_stack");
+        object.remove("resolved_rules_journal");
+        object.insert("resolution_state_version".into(), serde_json::json!(1));
+        // Base 337d4d7 has scalar prompt options and no owned source captures,
+        // chooser tags, or resolved coin-branch target bodies. Erase them from
+        // every retained copy, including the resolving entry, before decoding.
+        fn erase_current_source_authority(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    for field in [
+                        "damage_source_choice",
+                        "damage_source_candidates",
+                        "coin_branch_target_abilities",
+                        "chosen_group_targets",
+                    ] {
+                        object.remove(field);
+                    }
+                    if object.get("type").and_then(serde_json::Value::as_str)
+                        == Some("ChosenDamageSource")
+                    {
+                        object.remove("chooser");
+                    }
+                    object.values_mut().for_each(erase_current_source_authority);
+                }
+                serde_json::Value::Array(items) => {
+                    items.iter_mut().for_each(erase_current_source_authority);
+                }
+                _ => {}
+            }
+        }
+        erase_current_source_authority(&mut value);
+        assert!(value.get("last_chosen_damage_source").is_none());
+        value
+    }
+
+    #[test]
+    fn v1_scalar_source_prompt_restores_its_continuation_and_completes_public_choice() {
+        let (mut runner, source, gambit) = paid_gambit_source_prompt(false);
+        let expected = crate::types::identifiers::ObjectIncarnationRef::of(
+            source,
+            runner.state().objects[&source].incarnation,
+        );
+        let legacy = v1_source_choice_payload(runner.state());
+        assert!(legacy.get("pending_continuation").is_some());
+        assert!(legacy["waiting_for"]["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(serde_json::Value::is_u64));
+        *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(legacy)
+            .expect("a genuine unanswered scalar prompt has recoverable live options")
+            .into_game_state();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("the restored continuation owns its source prompt");
+        };
+        assert!(options
+            .iter()
+            .any(|option| option.identity.reference == expected));
+        runner
+            .act(GameAction::ChooseDamageSource { source: expected })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        let installed: Vec<_> = runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .chain(
+                runner
+                    .state()
+                    .objects
+                    .values()
+                    .flat_map(|object| object.replacement_definitions.iter_all()),
+            )
+            .filter_map(|definition| definition.selected_damage_source.as_ref())
+            .collect();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].identity.reference, expected);
+        assert_eq!(runner.state().objects[&gambit].zone, Zone::Graveyard);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().owed_spell_final_part().is_none());
+        let current =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        assert!(current.get("pending_continuation").is_none());
+        assert!(current.get("pending_coin_flip").is_none());
+        assert!(current.get("resolution_frames").is_some());
+    }
+
+    #[test]
+    fn v1_parked_selected_flip_without_historical_identity_refuses_and_preserves_input() {
+        let (mut runner, source, _) = paid_gambit_source_prompt(true);
+        let expected = crate::types::identifiers::ObjectIncarnationRef::of(
+            source,
+            runner.state().objects[&source].incarnation,
+        );
+        runner
+            .act(GameAction::ChooseDamageSource { source: expected })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::CoinFlipKeepChoice { .. }
+        ));
+        let legacy = v1_source_choice_payload(runner.state());
+        assert!(legacy.get("pending_coin_flip").is_some());
+        assert!(legacy["pending_coin_flip"]["branch_context"]
+            .get("damage_source_choice")
+            .is_none());
+        let saved = serde_json::to_vec(&legacy).unwrap();
+        let live = serde_json::to_value(runner.state()).unwrap();
+        let error = serde_json::from_value::<ResolutionStateWire>(legacy.clone())
+            .unwrap_err()
+            .to_string();
+        // The historical public action cleared its transient scalar even when
+        // the flip suspended. A complete no-move ledger cannot recover WHICH
+        // source was selected, so do not fabricate a scalar for this fixture.
+        assert!(error.contains("/pending_coin_flip: unrecoverable selected-source identity in the owned flip branch"), "{error}");
+        assert!(!error.contains("source-origin ambiguity"));
+        assert_eq!(serde_json::to_vec(&legacy).unwrap(), saved);
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), live);
+        assert_eq!(
+            runner
+                .state()
+                .active_coin_flip_frame()
+                .unwrap()
+                .branch_context
+                .damage_source_choice
+                .as_ref()
+                .unwrap()
+                .source
+                .as_ref()
+                .unwrap()
+                .identity
+                .reference,
+            expected
+        );
+        // The same real pause with sufficient owned evidence remains usable.
+        // This is a current save, not an invented historical scalar writer.
+        let current =
+            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                .unwrap();
+        *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(current)
+            .unwrap()
+            .into_game_state();
+        runner
+            .act(GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert!(runner
+            .state()
+            .pending_damage_replacements
+            .iter()
+            .chain(
+                runner.state().objects[&source]
+                    .replacement_definitions
+                    .iter_all()
+            )
+            .any(|definition| definition
+                .selected_damage_source
+                .as_ref()
+                .is_some_and(|capture| capture.identity.reference == expected)));
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().owed_spell_final_part().is_none());
+    }
 
     fn completed_materializer(selected: bool) -> (GameState, ObjectId) {
         let mut state = GameState::new_two_player(23);

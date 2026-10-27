@@ -50,7 +50,10 @@ use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
-use engine::types::ability::{CastingPermission, EffectKind, TargetRef};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, CastingPermission, Effect, EffectKind, QuantityExpr,
+    TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;

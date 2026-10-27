@@ -247,7 +247,7 @@ fn agrus_red_white_and_dual_attackers_keep_independent_pumps() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
-    runner.declare_attackers(vec![
+    runner.declare_attackers(&[
         (source, AttackTarget::Player(P1)),
         (red, AttackTarget::Player(P1)),
         (white, AttackTarget::Player(P1)),
@@ -794,15 +794,78 @@ fn liara_combat_uses_own_battlefield_and_graveyard_names_but_not_opponents() {
 }
 
 #[test]
-fn martyrdom_granted_redirect_keeps_original_authorized_activator_and_recipient() {
+fn martyrdom_complete_fixed_activator_gap_survives_a_real_paid_cast() {
+    use engine::types::ability::Effect;
+
+    let face = printed("Martyrdom");
+    let oracle = face["text"].as_str().unwrap();
+    assert_eq!(oracle, "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.");
+    let parsed =
+        engine::parser::parse_oracle_text(oracle, "Martyrdom", &[], &["Instant".into()], &[]);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert_eq!(
+        parsed.abilities[0].effect.as_ref(),
+        &Effect::unimplemented("fixed_grant_activator", oracle),
+        "the complete duration, targeted quote and outside OnlyYou restriction form one gap"
+    );
+    assert!(parsed.abilities[0].sub_ability.is_none());
+    assert!(parsed.statics.is_empty());
+    assert!(parsed.replacements.is_empty());
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let grantee = scenario
+        .add_creature(P0, "Potential redirect grantee", 2, 6)
+        .id();
+    let other = scenario.add_creature(P1, "Unrelated creature", 3, 7).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Martyrdom", true, oracle)
+        .with_mana_cost(cost(face["manaCost"].as_str().unwrap()))
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+        .with_mana_cost(cost("{R}"))
+        .id();
+    let mut runner = scenario.build();
+    fund(&mut runner, 1, &[ManaType::White; 2]);
+    // The targeted phrase is retained inside the unsupported atom; it does
+    // not fabricate a supported target declaration or a granted activation.
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(
+        engine::game::casting::activated_ability_definitions(runner.state(), grantee).is_empty()
+    );
+    assert!(engine::game::casting::activated_ability_definitions(runner.state(), other).is_empty());
+    assert!(runner.state().transient_continuous_effects.is_empty());
+    assert!(runner.state().pending_damage_replacements.is_empty());
+    settled(&runner);
+
+    fund(&mut runner, 0, &[ManaType::Red]);
+    runner.cast(shock).target_player(P0).resolve();
+    assert_eq!(
+        runner.life(P0),
+        18,
+        "real damage has no fabricated redirection shield"
+    );
+    assert_eq!(runner.state().objects[&grantee].damage_marked, 0);
+    assert_eq!(runner.state().objects[&other].damage_marked, 0);
+    settled(&runner);
+}
+
+#[test]
+fn ordinary_quoted_redirect_sibling_follows_the_recipients_current_controller() {
     use engine::game::engine::apply;
     use engine::types::game_state::CastPaymentMode;
+
+    // Explicitly synthetic supported sibling: the ordinary quoted grant has
+    // no outside OnlyYou restriction. It is not full Martyrdom support.
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let grantee = scenario.add_creature(P0, "Redirect grantee", 2, 6).id();
     let other = scenario.add_creature(P1, "Exchange partner", 3, 7).id();
-    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Martyrdom", true,
-        "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.").with_mana_cost(cost("{1}{W}{W}")).id();
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic ordinary redirect grant", true,
+        "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\"").with_mana_cost(cost("{1}{W}{W}")).id();
     let exchange = scenario
         .add_spell_to_hand_from_oracle(
             P0,
@@ -819,33 +882,55 @@ fn martyrdom_granted_redirect_keeps_original_authorized_activator_and_recipient(
     let mut runner = scenario.build();
     fund(&mut runner, 1, &[ManaType::White; 2]);
     runner.cast(spell).target_object(grantee).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(
+        engine::game::casting::activated_ability_definitions(runner.state(), grantee).len(),
+        1
+    );
     fund(&mut runner, 4, &[ManaType::Blue]);
     runner
         .cast(exchange)
         .target_objects(&[grantee, other])
         .resolve();
     assert_eq!(runner.state().objects[&grantee].controller, P1);
-    let index = engine::game::casting::activated_ability_definitions(runner.state(), grantee)[0].0;
+    let definitions = engine::game::casting::activated_ability_definitions(runner.state(), grantee);
+    assert_eq!(
+        definitions.len(),
+        1,
+        "the ordinary grant survives the control exchange"
+    );
+    let index = definitions[0].0;
     let action = GameAction::ActivateAbility {
         source_id: grantee,
         ability_index: index,
         payment_mode: CastPaymentMode::Auto,
     };
+    // CR 602.2: the recipient's current controller owns this ordinary
+    // activation permission. Test the former controller while it has priority.
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0));
     assert!(
-        apply(runner.state_mut(), P1, action.clone()).is_err(),
-        "new controller is not original only-you activator"
+        apply(runner.state_mut(), P0, action.clone()).is_err(),
+        "the granting spell's controller cannot activate the opponent's ordinary granted ability"
     );
-    apply(runner.state_mut(), P0, action).unwrap();
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1));
+    apply(runner.state_mut(), P1, action).unwrap();
     let WaitingFor::TargetSelection { player, .. } = &runner.state().waiting_for else {
         panic!("actual granted redirect target prompt");
     };
-    assert_eq!(*player, P0);
+    assert_eq!(*player, P1);
     runner
         .act(GameAction::ChooseTarget {
             target: Some(engine::types::ability::TargetRef::Player(P0)),
         })
         .unwrap();
     runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().pending_damage_replacements.len(),
+        1,
+        "real activation creates the one-damage redirection shield"
+    );
+    settled(&runner);
     fund(&mut runner, 0, &[ManaType::Red]);
     runner.cast(shock).target_player(P0).resolve();
     assert_eq!(runner.life(P0), 19);
@@ -953,7 +1038,7 @@ fn explore_full_compass_activation_and_lantern_granted_attack_are_actions() {
         runner.activate(source, 0).target_object(target).resolve();
         if equipment {
             runner.advance_to_combat();
-            runner.declare_attackers(vec![(target, AttackTarget::Player(P1))]);
+            runner.declare_attackers(&[(target, AttackTarget::Player(P1))]);
             runner.advance_until_stack_empty();
         }
         let WaitingFor::DigChoice { player, cards, .. } = &runner.state().waiting_for else {
@@ -1280,7 +1365,7 @@ fn strength_snapshots_three_attackers_and_preserves_trample_until_cleanup() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
-    runner.declare_attackers(vec![
+    runner.declare_attackers(&[
         (target, AttackTarget::Player(P1)),
         (first, AttackTarget::Player(P1)),
         (second, AttackTarget::Player(P1)),

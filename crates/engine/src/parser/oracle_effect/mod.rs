@@ -43284,6 +43284,58 @@ fn refuse_untargeted_dynamic_graveyard_windows(
 // unit's source span; an independent later sentence remains executable.
 fn unsupported_relation_body(text: &str) -> Option<(&'static str, usize)> {
     let lower = text.to_ascii_lowercase();
+    // The outside activator restriction and its one quoted activation share
+    // one authority. The existing model cannot retain that fixed player.
+    if let Some(((), tail)) = nom_on_lower(text, &lower, |input| {
+        let (input, _) = opt(terminated(
+            crate::parser::oracle_nom::duration::parse_duration,
+            tag(", "),
+        ))
+        .parse(input)?;
+        let (input, subject) = terminated(take_until(" gains "), tag(" gains ")).parse(input)?;
+        let (target, remainder) = crate::parser::oracle_target::parse_target(subject);
+        if !remainder.trim().is_empty()
+            || target.is_context_ref()
+            || matches!(target, TargetFilter::Any)
+        {
+            return Err(oracle_err(input));
+        }
+        let (input, (quoted, ())) =
+            nom::combinator::consumed(parse_cast_this_way_gains_rider_quoted_segment)
+                .parse(input)?;
+        let (_, inner) =
+            nom::sequence::delimited(tag("\""), take_until("\""), tag("\"")).parse(quoted)?;
+        let classified = crate::parser::oracle_static::classify_quoted_inner(inner);
+        if !matches!(classified.as_slice(), [ContinuousModification::GrantAbility { definition }]
+            if definition.kind == AbilityKind::Activated)
+        {
+            return Err(oracle_err(input));
+        }
+        let (input, _) =
+            (opt(tag(".")), tag(" only you may activate this ability")).parse(input)?;
+        let (tail, ()) = alt((
+            value((), (tag("."), peek(alt((eof, tag(" ")))))),
+            value((), eof),
+        ))
+        .parse(input)?;
+        Ok((tail, ()))
+    }) {
+        return Some(("fixed_grant_activator", text.len() - tail.len()));
+    }
+    if let Ok((tail, _)) = (
+        alt((tag::<_, _, OracleError<'_>>("it's "), tag("it is "))),
+        tag("on an adventure. "),
+        tag("when it enters from being on an adventure, "),
+        tag("it explores"),
+        alt((
+            value((), (tag("."), peek(alt((eof, tag(" ")))))),
+            value((), eof),
+        )),
+    )
+        .parse(lower.as_str())
+    {
+        return Some(("on_adventure_provenance", text.len() - tail.len()));
+    }
     if let Ok((tail, _)) = (
         tag::<_, _, OracleError<'_>>("target creature "),
         alt((tag("it's blocking"), tag("it is blocking"))),
@@ -43826,6 +43878,22 @@ fn parse_effect_chain_ir_body(
         // unconditionally every iteration as a pure function of the clauses
         // pushed so far, so none of the body's early `continue` paths can leave
         // a stale antecedent for the next chunk.
+        let chain_object_reference = builder.clauses().last().and_then(|clause| {
+            let reference = match &clause.parsed.effect {
+                Effect::EachSourceDealsDamage { sources, .. } => Some(sources),
+                effect => effect.target_filter(),
+            }?;
+            matches!(
+                reference,
+                TargetFilter::AttachedTo
+                    | TargetFilter::ParentTarget
+                    | TargetFilter::ParentTargetSlot { .. }
+                    | TargetFilter::TriggeringSource
+                    | TargetFilter::SpecificObject { .. }
+                    | TargetFilter::CostPaidObject { .. }
+            )
+            .then(|| reference.clone())
+        });
         ctx.chain_declared_object_target = chain_declared_object_target(builder.clauses()).cloned();
         ctx.chain_declared_slots = chain_declared_slot_registry(builder.clauses());
         let prospective_rejected_guard = pending_rejected_search_guard.take();
@@ -43914,6 +43982,21 @@ fn parse_effect_chain_ir_body(
         // CR 608.2c + CR 611.2c: own all conditional members before suffix
         // peeling, after the declared-target registry above has been published.
         let mut complete_member_ctx = ctx.clone();
+        let follows_battlefield_result = builder.clauses().last().is_some_and(|clause| {
+            matches!(
+                clause.parsed.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            )
+        });
+        if follows_battlefield_result || chain_has_prior_typed_referent(builder.clauses(), false) {
+            complete_member_ctx.parent_target_available = true;
+            complete_member_ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
+        } else if let Some(reference) = &chain_object_reference {
+            complete_member_ctx.object_pronoun_ref = Some(reference.clone());
+        }
         if let Some((parsed, target_reads)) = subject::try_parse_conditional_protection_grant_clause(
             normalized_text,
             &mut complete_member_ctx,
@@ -45451,10 +45534,16 @@ fn parse_effect_chain_ir_body(
         // on the text output from strip_if_you_do_conditional. For compound
         // "when you do, if it has N counters" patterns, WhenYouDo is always true for
         // non-optional parents (CR 603.12), so the QuantityCheck is the meaningful gate.
-        let (counter_cond, text) = strip_counter_conditional(
-            &text,
-            conditions::CounterConditionalContext::from_parse_context(ctx),
-        );
+        let counter_context = conditions::CounterConditionalContext::from_parse_context(ctx);
+        let (counter_cond, text) = if let Some(reference) = &chain_object_reference {
+            conditions::strip_counter_conditional_for_referent(
+                &text,
+                counter_context,
+                Some(reference),
+            )
+        } else {
+            strip_counter_conditional(&text, counter_context)
+        };
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
         let (mv_cond, text) = strip_mana_value_conditional(&text);
         // CR 608.2c: Spell-target superlative gate — "if it has the least/greatest
@@ -46553,6 +46642,7 @@ fn parse_effect_chain_ir_body(
             // Thing in the Ice and The Emperor of Palamecia stopped transforming.
             object_pronoun_ref: prior_typed_referent
                 .then_some(TargetFilter::ParentTarget)
+                .or_else(|| chain_object_reference.clone())
                 .or_else(|| {
                     (!binds_source_counter_pronoun)
                         .then(|| ctx.object_pronoun_ref.clone())
@@ -46577,6 +46667,7 @@ fn parse_effect_chain_ir_body(
             // (#8549), which is not a demonstrative grammar.
             demonstrative_object_ref: prior_typed_referent
                 .then_some(TargetFilter::ParentTarget)
+                .or_else(|| chain_object_reference.clone())
                 .or_else(|| ctx.demonstrative_object_ref.clone()),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
@@ -54454,6 +54545,39 @@ mod structural_marker_tests {
             "the chosen player controls",
         ] {
             assert!(parse(declined).is_none(), "{declined:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod retained_complete_relation_unit_tests {
+    use super::*;
+
+    #[test]
+    fn complete_quoted_activator_and_adventure_units_keep_independent_tails() {
+        let grant = "Until end of turn, target creature you control gains \"{0}: The next 1 damage that would be dealt to target creature, planeswalker, or player this turn is dealt to this creature instead.\" Only you may activate this ability.";
+        let adventure =
+            "It's on an adventure. When it enters from being on an adventure, it explores.";
+        for (unit, category) in [
+            (grant, "fixed_grant_activator"),
+            (adventure, "on_adventure_provenance"),
+        ] {
+            assert_eq!(
+                unsupported_relation_body(unit),
+                Some((category, unit.len()))
+            );
+            let with_tail = format!("{unit} Draw a card.");
+            assert_eq!(
+                unsupported_relation_body(&with_tail),
+                Some((category, unit.len()))
+            );
+        }
+        for malformed in [
+            "Until end of turn, target creature gains \"{0}: Draw a card.\" Only you may activate this ability unexpectedly.",
+            "Until end of turn, target creature gains \"{0}: Draw a card. Only you may activate this ability.",
+            "It's on an adventure. When it enters unexpectedly, it explores.",
+        ] {
+            assert!(unsupported_relation_body(malformed).is_none(), "{malformed}");
         }
     }
 }

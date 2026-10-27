@@ -2752,6 +2752,7 @@ fn assert_arranger_election(
             candidates: offered,
             ability,
             purpose,
+            return_result_occurrence: _,
         } => {
             assert_eq!(
                 *purpose,

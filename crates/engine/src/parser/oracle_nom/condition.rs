@@ -2068,10 +2068,25 @@ fn parse_bare_predicate_tail(input: &str) -> OracleResult<'_, TargetFilter> {
             },
             tag::<_, _, OracleError<'_>>("basic"),
         ),
+        value(
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Host,
+            },
+            tag("host"),
+        ),
     ))
     .parse(rest)
     {
-        if rest.is_empty() {
+        if peek(alt((
+            eof::<_, OracleError<'_>>,
+            tag(" or "),
+            tag(","),
+            tag(";"),
+            tag("."),
+        )))
+        .parse(rest)
+        .is_ok()
+        {
             return Ok((
                 rest,
                 TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
@@ -2221,12 +2236,54 @@ fn parse_top_of_library_condition(input: &str) -> OracleResult<'_, StaticConditi
 /// "it's enchanted" names the source and is bound by the caller
 /// (`rewrite_self_pronoun_subject` → `SourceIsEnchanted`, Metathran Elite), which
 /// relies on this context-free grammar declining it.
+fn parse_recipient_predicate_member(input: &str) -> OracleResult<'_, TargetFilter> {
+    alt((
+        map(
+            preceded(
+                alt((tag("has "), tag("have "))),
+                crate::parser::oracle_target::parse_keyword_membership,
+            ),
+            |property| TargetFilter::Typed(TypedFilter::default().properties(vec![property])),
+        ),
+        preceded(opt(value((), parse_it_copula)), parse_bare_predicate_tail),
+    ))
+    .parse(input)
+}
+
+fn parse_recipient_predicate(input: &str) -> OracleResult<'_, (bool, Vec<TargetFilter>)> {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" has the same name as ").parse(input) {
+        let (rest, reference) = crate::parser::oracle_target::parse_shared_quality_reference(
+            rest,
+            &crate::parser::oracle_ir::context::ParseContext::default(),
+        )?;
+        return Ok((
+            rest,
+            (
+                false,
+                vec![TargetFilter::Typed(TypedFilter::default().properties(
+                    vec![FilterProp::SharesQuality {
+                        quality: SharedQuality::Name,
+                        reference: Some(Box::new(reference)),
+                        relation: SharedQualityRelation::Shares,
+                    }],
+                ))],
+            ),
+        ));
+    }
+    let (rest, negated) = alt((
+        parse_it_copula,
+        value(false, peek(alt((tag(" has "), tag(" have "))))),
+    ))
+    .parse(input)?;
+    let (rest, filters) =
+        nom::multi::separated_list1(tag(" or "), parse_recipient_predicate_member)
+            .parse(rest.trim_start())?;
+    Ok((rest, (negated, filters)))
+}
+
 fn parse_recipient_is_filter_condition(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, (negated, filters)) = alt((
-        preceded(
-            tag("it"),
-            (parse_it_copula, parse_bare_predicate_disjunction),
-        ),
+        preceded(tag("it"), parse_recipient_predicate),
         preceded(
             (
                 tag("that "),
@@ -2236,13 +2293,13 @@ fn parse_recipient_is_filter_condition(input: &str) -> OracleResult<'_, StaticCo
                     value((), tag("card")),
                 )),
             ),
-            (
-                parse_it_copula,
-                alt((
+            alt((
+                (
+                    parse_it_copula,
                     map(parse_enchanted_status_filter, |filter| vec![filter]),
-                    parse_bare_predicate_disjunction,
-                )),
-            ),
+                ),
+                parse_recipient_predicate,
+            )),
         ),
     ))
     .parse(input)?;
@@ -26640,5 +26697,33 @@ mod intervening_if_state_condition_tests {
         assert!(properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::InZone { .. })));
+    }
+}
+
+#[cfg(test)]
+mod retained_recipient_predicate_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_recipient_members_and_name_reference_own_complete_predicates() {
+        let (_, mixed) = parse_recipient_is_filter_condition("it's a host or has augment").unwrap();
+        assert!(matches!(mixed, StaticCondition::Or { ref conditions } if conditions.len() == 2));
+        let (_, name) = parse_recipient_is_filter_condition("it has the same name as another creature you control or a creature card in your graveyard").unwrap();
+        assert!(matches!(name, StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(ref typed)
+        } if matches!(typed.properties.as_slice(), [FilterProp::SharesQuality { quality: SharedQuality::Name, reference: Some(reference), .. }] if matches!(reference.as_ref(), TargetFilter::Or { filters } if filters.len() == 2))));
+        for input in [
+            "it's a host or has augment unexpectedly",
+            "it's a host or has an unknown keyword",
+            "it has the same name as an unexplained thing",
+        ] {
+            assert!(
+                parse_recipient_is_filter_condition(input).is_err(),
+                "{input}"
+            );
+        }
+        let (_, ordinary) =
+            parse_recipient_is_filter_condition("it's a Zombie or a Skeleton").unwrap();
+        assert!(matches!(ordinary, StaticCondition::Or { conditions } if conditions.len() == 2));
     }
 }

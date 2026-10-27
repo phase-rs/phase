@@ -1,5 +1,6 @@
 //! Complete printed hand-choice bodies through paid casting and public replies.
 use engine::game::derived_views::ClientGameStateRef;
+use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::ability::{
@@ -142,7 +143,11 @@ fn settle(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
         match runner.state().waiting_for {
             WaitingFor::Priority { .. }
                 if runner.state().stack.is_empty()
-                    && runner.state().trigger_stack.is_empty()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().pending_trigger_order.is_none()
+                    && runner.state().pending_trigger_entry.is_none()
+                    && runner.state().pending_trigger_event_batch.is_empty()
                     && runner.state().resolution_stack.is_empty() =>
             {
                 return
@@ -162,7 +167,11 @@ fn terminal(runner: &GameRunner) {
         WaitingFor::Priority { player: P0 }
     ));
     assert!(runner.state().stack.is_empty());
-    assert!(runner.state().trigger_stack.is_empty());
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(runner.state().pending_trigger.is_none());
+    assert!(runner.state().pending_trigger_order.is_none());
+    assert!(runner.state().pending_trigger_entry.is_none());
+    assert!(runner.state().pending_trigger_event_batch.is_empty());
     assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().owed_spell_final_part().is_none());
 }
@@ -372,10 +381,10 @@ fn contextual_hand_addle_owned_color_revalidation_and_both_envelopes() {
         },
     ] {
         let mut state = runner.state().clone();
-        assert!(engine::apply(&mut state, P0, invalid).is_err());
+        assert!(apply(&mut state, P0, invalid).is_err());
     }
     let mut wrong_actor = runner.state().clone();
-    assert!(engine::apply(
+    assert!(apply(
         &mut wrong_actor,
         P1,
         GameAction::ChooseOption {
@@ -476,7 +485,7 @@ fn contextual_hand_addle_owned_color_revalidation_and_both_envelopes() {
         vec![cards.last().unwrap().0],
     ] {
         let mut state = runner.state().clone();
-        assert!(engine::apply(&mut state, P0, GameAction::SelectCards { cards: invalid }).is_err());
+        assert!(apply(&mut state, P0, GameAction::SelectCards { cards: invalid }).is_err());
     }
     for corrupt in 0..5 {
         let mut state = runner.state().clone();
@@ -509,7 +518,7 @@ fn contextual_hand_addle_owned_color_revalidation_and_both_envelopes() {
             4 => chain.original_controller = Some(P1),
             _ => unreachable!(),
         }
-        assert!(engine::apply(
+        assert!(apply(
             &mut state,
             P0,
             GameAction::SelectCards {
@@ -520,7 +529,7 @@ fn contextual_hand_addle_owned_color_revalidation_and_both_envelopes() {
         assert_eq!(state.objects[&selected].zone, Zone::Hand);
     }
     let mut wrong_actor = runner.state().clone();
-    assert!(engine::apply(
+    assert!(apply(
         &mut wrong_actor,
         P1,
         GameAction::SelectCards {
@@ -542,7 +551,7 @@ fn contextual_hand_addle_owned_color_revalidation_and_both_envelopes() {
             .count(),
         1
     );
-    assert!(paid.events.iter().any(|event| matches!(
+    assert!(paid.events().iter().any(|event| matches!(
         event,
         GameEvent::EffectResolved {
             kind: EffectKind::Choose,
@@ -600,7 +609,12 @@ fn contextual_hand_random_color_uses_owned_resolution_context() {
     let (cards, foreign) = color_hand(&mut scene);
     let source = spell(&mut scene, "Random hand SHAPE", RANDOM, black_cost(1));
     let mut runner = scene.build();
-    let events = runner.cast(source).target_player(P1).resolve().events;
+    let events = runner
+        .cast(source)
+        .target_player(P1)
+        .resolve()
+        .events()
+        .to_vec();
     assert!(!matches!(
         runner.state().waiting_for,
         WaitingFor::NamedChoice { .. }
@@ -687,7 +701,12 @@ fn contextual_hand_color_anaphor_crosses_draw_only_in_its_own_body() {
         let source = spell(&mut scene, "Draw hand SHAPE", text, black_cost(1));
         let mut runner = scene.build();
         let library = runner.state().players[0].library.clone();
-        let mut events = runner.cast(source).target_player(P1).resolve().events;
+        let mut events = runner
+            .cast(source)
+            .target_player(P1)
+            .resolve()
+            .events()
+            .to_vec();
         if !random {
             color_prompt(&runner);
             let before = runner
@@ -744,7 +763,10 @@ fn contextual_hand_color_anaphor_crosses_draw_only_in_its_own_body() {
         prompt(&runner, &offered, false);
         addle_disposal_capture(&runner, source, &capture);
         assert_eq!(runner.state().players[0].library.len(), library.len() - 1);
-        assert_eq!(runner.state().players[0].library.as_slice(), &library[1..]);
+        assert!(runner.state().players[0]
+            .library
+            .iter()
+            .eq(library.iter().skip(1)));
         assert_eq!(runner.state().objects[&library[0]].zone, Zone::Hand);
         assert_eq!(
             events
@@ -874,12 +896,8 @@ fn contextual_hand_addle_ai_both_actions_authorized_controller_and_empty_cohorts
                     .is_empty()
             );
             let mut wrong = runner.state().clone();
-            assert!(engine::apply(&mut wrong, P1, action.clone()).is_err());
-            events.extend(
-                engine::apply(runner.state_mut(), actor, action)
-                    .unwrap()
-                    .events,
-            );
+            assert!(apply(&mut wrong, P1, action.clone()).is_err());
+            events.extend(apply(runner.state_mut(), actor, action).unwrap().events);
             if !card_stage {
                 prompt(
                     &runner,
@@ -1086,7 +1104,11 @@ fn contextual_hand_two_paid_addles_keep_source_controller_hand_and_color_separat
     unchanged_hand(&runner, &[blue[0], red_first, red_decoy]);
     assert!(
         runner.state().stack.is_empty()
-            && runner.state().trigger_stack.is_empty()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger.is_none()
+            && runner.state().pending_trigger_order.is_none()
+            && runner.state().pending_trigger_entry.is_none()
+            && runner.state().pending_trigger_event_batch.is_empty()
             && runner.state().resolution_stack.is_empty()
     );
     assert!(runner.state().owed_spell_final_part().is_none());
@@ -1186,7 +1208,7 @@ fn contextual_hand_paid_spells_exact_nondefault_selection_and_public_rejections(
             ),
         ] {
             let mut attempted = runner.state().clone();
-            assert!(engine::apply(&mut attempted, actor, action).is_err());
+            assert!(apply(&mut attempted, actor, action).is_err());
             assert_eq!(serde_json::to_value(runner.state()).unwrap(), pending);
         }
         let events = answer(&mut runner, ids.second);
@@ -1424,8 +1446,8 @@ fn contextual_hand_actual_ai_and_authorized_turn_controller() {
             .is_empty()
     );
     let mut unauthorized = runner.state().clone();
-    assert!(engine::apply(&mut unauthorized, P0, action.clone()).is_err());
-    engine::apply(runner.state_mut(), PlayerId(2), action).unwrap();
+    assert!(apply(&mut unauthorized, P0, action.clone()).is_err());
+    apply(runner.state_mut(), PlayerId(2), action).unwrap();
     let mut events = vec![];
     settle(&mut runner, &mut events);
     assert_eq!(runner.state().objects[&ids.second].zone, Zone::Graveyard);
@@ -1563,7 +1585,7 @@ fn contextual_hand_both_envelopes_public_reveal_private_look_and_private_decoys(
             libraries
         );
         assert_eq!(runner.state().objects[&ids.second].zone, Zone::Graveyard);
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Zone::Hand, to: Zone::Graveyard, .. } if *object_id == ids.second)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Hand), to: Zone::Graveyard, .. } if *object_id == ids.second)).count(), 1);
         unchanged_hand(
             &runner,
             &[
@@ -1702,7 +1724,7 @@ fn contextual_hand_private_optional_zero_one_four_cohorts_and_known_candidates()
                         .filter(|actor| *actor != submitter)
                     {
                         let mut rejected = runner.state().clone();
-                        assert!(engine::apply(
+                        assert!(apply(
                             &mut rejected,
                             actor,
                             GameAction::SelectCards {
@@ -1711,7 +1733,7 @@ fn contextual_hand_private_optional_zero_one_four_cohorts_and_known_candidates()
                         )
                         .is_err());
                     }
-                    let result = engine::apply(
+                    let result = apply(
                         runner.state_mut(),
                         submitter,
                         GameAction::SelectCards {
@@ -1741,7 +1763,7 @@ fn contextual_hand_private_optional_zero_one_four_cohorts_and_known_candidates()
                         );
                     }
                     unchanged_hand(&runner, &[foreign]);
-                    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Zone::Hand, to: Zone::Graveyard, .. } if selected.contains(object_id))).count(), selected.len());
+                    assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Hand), to: Zone::Graveyard, .. } if selected.contains(object_id))).count(), selected.len());
                     assert!(runner.state().private_look_ids.is_empty());
                     assert_eq!(runner.state().private_look_player, None);
                     terminal(&runner);
@@ -1969,7 +1991,7 @@ fn contextual_hand_optional_decline_and_two_reveals_do_not_reuse_selected_card()
     answer(&mut runner, ids.second);
     prompt(&runner, &[ids.creature, ids.legendary], false);
     let mut attempted = runner.state().clone();
-    assert!(engine::apply(
+    assert!(apply(
         &mut attempted,
         P0,
         GameAction::SelectCards {
@@ -2130,7 +2152,7 @@ fn contextual_hand_two_natural_sagas_departure_keeps_independent_chapter_choices
         false,
     );
     let mut rejected = runner.state().clone();
-    assert!(engine::apply(
+    assert!(apply(
         &mut rejected,
         P0,
         GameAction::SelectCards {
@@ -2141,7 +2163,7 @@ fn contextual_hand_two_natural_sagas_departure_keeps_independent_chapter_choices
     events.extend(answer(&mut runner, second_last));
     for id in [first_hand.second, second_last] {
         assert_eq!(runner.state().objects[&id].zone, Zone::Graveyard);
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Zone::Hand, to: Zone::Graveyard, .. } if *object_id == id)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Hand), to: Zone::Graveyard, .. } if *object_id == id)).count(), 1);
     }
     unchanged_hand(
         &runner,

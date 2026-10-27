@@ -3814,9 +3814,71 @@ pub(super) fn strip_counter_conditional(
     text: &str,
     ctx: CounterConditionalContext,
 ) -> (Option<AbilityCondition>, String) {
+    strip_counter_conditional_for_referent(text, ctx, None)
+}
+
+pub(super) fn strip_counter_conditional_for_referent(
+    text: &str,
+    ctx: CounterConditionalContext,
+    referent: Option<&TargetFilter>,
+) -> (Option<AbilityCondition>, String) {
     let in_trigger = ctx.in_trigger();
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
+
+    // CR 608.2c + CR 122.1: a same-body demonstrated object is the
+    // counter holder. Replacement-shaped tails remain with their own owner.
+    if let Some(referent) = referent {
+        if let Ok((rest, _)) = (
+            tag::<_, _, OracleError<'_>>("if that "),
+            alt((
+                tag("creature has "),
+                tag("permanent has "),
+                tag("card has "),
+                tag("artifact has "),
+            )),
+        )
+            .parse(lower.as_str())
+        {
+            if let Some((comparator, threshold, counter_type, consumed)) =
+                parse_counter_threshold(rest)
+            {
+                if let Ok((body, _)) = preceded(
+                    nom::character::complete::space0,
+                    (
+                        tag::<_, _, OracleError<'_>>(","),
+                        nom::character::complete::space0,
+                    ),
+                )
+                .parse(&rest[consumed..])
+                {
+                    let has_instead = nom_primitives::scan_at_word_boundaries(body, |input| {
+                        terminated(
+                            tag::<_, _, OracleError<'_>>("instead"),
+                            peek(alt((eof, tag(" "), tag("."), tag(",")))),
+                        )
+                        .parse(input)
+                    })
+                    .is_some();
+                    if !has_instead {
+                        return (
+                            Some(AbilityCondition::QuantityCheck {
+                                lhs: QuantityExpr::Ref {
+                                    qty: QuantityRef::CountersOnObjects {
+                                        counter_type,
+                                        filter: referent.clone(),
+                                    },
+                                },
+                                comparator,
+                                rhs: QuantityExpr::Fixed { value: threshold },
+                            }),
+                            text[text.len() - body.len()..].to_owned(),
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // Leading form: "if it has [N] [type] counter[s] on it, [effect]". The
     // subject here is ALWAYS the source ("it"); the demonstrative "that

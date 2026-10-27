@@ -1872,7 +1872,11 @@
     },
     "damageSource": {
       "title": "ダメージの発生源",
-      "subtitle": "発生源を選択"
+      "subtitle": "発生源を選択",
+      "identity": "発生源 #{{objectId}}、世代 {{incarnation}}",
+      "unnamed": "名前のない発生源",
+      "optionLabel": "{{name}} — {{identity}} — プレイヤー{{controller}}、{{zone}}",
+      "controllerZone": "プレイヤー{{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "戦慄予示",

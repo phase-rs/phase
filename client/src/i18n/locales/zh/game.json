@@ -555,7 +555,11 @@
     },
     "damageSource": {
       "subtitle": "选择来源",
-      "title": "伤害来源"
+      "title": "伤害来源",
+      "identity": "来源 #{{objectId}}，实例 {{incarnation}}",
+      "unnamed": "未命名来源",
+      "optionLabel": "{{name}} — {{identity}} — 牌手 {{controller}}，{{zone}}",
+      "controllerZone": "牌手 {{controller}} · {{zone}}"
     },
     "dig": {
       "badgeBottom": "牌库底",

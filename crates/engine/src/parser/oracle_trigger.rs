@@ -11391,10 +11391,12 @@ fn split_and_when_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     }
     // CR 603.2: "When ~ enters and at the beginning of your upkeep" (Gathering
     // Stone) — two independent trigger events sharing one effect.
-    if let Ok((_, (before, _))) = split_once_on(cond_lower, " and at the beginning of ") {
+    if let Some((before, _, _)) = nom_primitives::scan_preceded(cond_lower, |input| {
+        preceded(tag("and "), parse_dangling_phase_trigger_head).parse(input)
+    }) {
         let pos = before.len();
         let first = condition[..pos].trim().to_string();
-        let second_start = pos + " and ".len();
+        let second_start = pos + "and ".len();
         let second =
             normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
         return Some(vec![first, second]);
@@ -17339,7 +17341,7 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
         ));
     }
 
-    // CR 312.5 / CR 701.31d: encounter == the planeswalked-to face-up endpoint.
+    // CR 701.31d: arrival names the planeswalked-to face-up endpoint.
     // A plane/phenomenon's arrival trigger fires when it becomes the face-up
     // card. Oracle text names that arrival several ways — all one phrase axis,
     // composed with a single `alt` rather than enumerated as whole sentences:
@@ -17350,19 +17352,22 @@ fn try_parse_named_trigger_mode(lower: &str) -> Option<(TriggerMode, TriggerDefi
     //   * "encounter this phenomenon"  (literal self-reference)
     // "this plane"/"this phenomenon" are absent from `SELF_REF_TYPE_PHRASES`, so
     // they survive normalization as literals — hence the explicit literal arms.
-    if (
-        alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
-        tag("you "),
-        alt((
-            tag("planeswalk here"),
-            tag("planeswalk to ~"),
-            tag("planeswalk to this plane"),
-            tag("encounter ~"),
-            tag("encounter this phenomenon"),
-        )),
-    )
-        .parse(lower)
-        .is_ok()
+    if all_consuming(terminated(
+        (
+            alt((tag::<_, _, OracleError<'_>>("whenever "), tag("when "))),
+            tag("you "),
+            alt((
+                tag("planeswalk here"),
+                tag("planeswalk to ~"),
+                tag("planeswalk to this plane"),
+                tag("encounter ~"),
+                tag("encounter this phenomenon"),
+            )),
+        ),
+        multispace0,
+    ))
+    .parse(lower)
+    .is_ok()
     {
         def.mode = TriggerMode::Planeswalked {
             role: PlaneswalkRole::To,
@@ -19947,6 +19952,32 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
         return Some((TriggerMode::Phase, def));
     }
 
+    // Ordinary concrete and compound phase heads share full ownership,
+    // including the omitted "of" Oracle spelling.
+    if let Ok((remainder, phase)) = parse_beginning_phase_trigger_head(lower) {
+        if !remainder.is_empty() {
+            // The specialized owner below handles explicit phase-controller
+            // qualifiers; unrelated trailing prose is not a phase head.
+            if tag::<_, _, OracleError<'_>>(" of ")
+                .parse(remainder)
+                .is_err()
+            {
+                return None;
+            }
+        } else {
+            let (phase_text, _) = (
+                tag::<_, _, OracleError<'_>>("at the beginning "),
+                opt(tag("of ")),
+            )
+                .parse(lower)
+                .ok()?;
+            let mut definition = make_base();
+            definition.mode = TriggerMode::Phase;
+            definition.phase = Some(phase);
+            definition.constraint = parse_turn_constraint(phase_text);
+            return Some((TriggerMode::Phase, definition));
+        }
+    }
     let (stripped, ()) = value((), tag::<_, _, OracleError<'_>>("at the beginning of"))
         .parse(lower)
         .ok()?;
@@ -23969,9 +24000,13 @@ fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
 /// alternation and cannot consume "each of your draw steps" — measured, that form
 /// fires zero times corpus-wide.
 pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_, Phase> {
+    terminated(parse_beginning_phase_trigger_head, eof).parse(input)
+}
+
+fn parse_beginning_phase_trigger_head(input: &str) -> OracleResult<'_, Phase> {
     terminated(
         preceded(
-            tag("at the beginning of "),
+            (tag("at the beginning "), opt(tag("of "))),
             map(
                 (
                     opt(alt((
@@ -23984,13 +24019,10 @@ pub(crate) fn parse_dangling_phase_trigger_head(input: &str) -> OracleResult<'_,
                 |(_, _, phase)| phase,
             ),
         ),
-        (
-            opt(preceded(
-                tag(" "),
-                alt((tag("on your turn"), tag("on each of your turns"))),
-            )),
-            eof,
-        ),
+        (opt(preceded(
+            tag(" "),
+            alt((tag("on your turn"), tag("on each of your turns"))),
+        )),),
     )
     .parse(input)
 }
@@ -25692,5 +25724,67 @@ mod attached_set_trigger_tests {
         assert!(crate::game::filter::filter_denotes_battlefield_permanent(
             bare.valid_card.as_ref().unwrap()
         ));
+    }
+}
+
+#[cfg(test)]
+mod retained_compound_phase_tests {
+    use super::*;
+
+    #[test]
+    fn omitted_of_phase_and_arrival_keep_both_complete_events() {
+        let source = "When you planeswalk here and at the beginning your upkeep, put a spooky counter on target creature you control.";
+        let triggers = parse_trigger_lines(source, "Sorin's Remastered Manor");
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(
+            triggers[0].mode,
+            TriggerMode::Planeswalked {
+                role: PlaneswalkRole::To
+            }
+        );
+        assert_eq!(triggers[1].mode, TriggerMode::Phase);
+        assert_eq!(triggers[1].phase, Some(Phase::Upkeep));
+        assert_eq!(
+            triggers[1].constraint,
+            Some(TriggerConstraint::OnlyDuringYourTurn)
+        );
+        for trigger in triggers {
+            assert!(matches!(
+                trigger
+                    .execute
+                    .as_deref()
+                    .map(|ability| ability.effect.as_ref()),
+                Some(Effect::PutCounter {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                })
+            ));
+        }
+        for head in [
+            "At the beginning your upkeep",
+            "At the beginning of your upkeep",
+        ] {
+            let trigger = parse_trigger_line(&format!("{head}, draw a card."), "Test");
+            assert_eq!(trigger.mode, TriggerMode::Phase);
+            assert_eq!(trigger.phase, Some(Phase::Upkeep));
+            assert_eq!(
+                trigger.constraint,
+                Some(TriggerConstraint::OnlyDuringYourTurn)
+            );
+        }
+        for head in [
+            "When you planeswalk here unexpectedly",
+            "When you planeswalk to this plane and",
+            "When you planeswalk here and at the beginning your upkeep unexpectedly",
+            "At the beginning your banana",
+            "At the beginning of your upkeep unexpectedly",
+        ] {
+            let trigger = parse_trigger_line(&format!("{head}, draw a card."), "Test");
+            assert!(
+                matches!(trigger.mode, TriggerMode::Unknown(_)),
+                "full refused condition: {head}: {:?}",
+                trigger.mode
+            );
+        }
     }
 }

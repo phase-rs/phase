@@ -126,7 +126,8 @@ pub(crate) fn parse_typed_you_control(
                         .is_some_and(|(_, consumed)| consumed == descriptor.len())
                 {
                     TargetFilter::Typed(
-                        typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
+                        typed_filter_for_subtype(&parse_subtype(descriptor)?.0)
+                            .controller(ControllerRef::You),
                     )
                 // CR 105.1 + CR 205.4a: a compound color/supertype descriptor
                 // ("Black legendary", "Legendary black", ...) — the Legends
@@ -200,7 +201,7 @@ pub(crate) fn parse_typed_you_control(
             {
                 // Combat-status prefix found + remaining is a subtype
                 TargetFilter::Typed(
-                    typed_filter_for_subtype(desc_remaining)
+                    typed_filter_for_subtype(&parse_subtype(desc_remaining)?.0)
                         .controller(ControllerRef::You)
                         .properties(extra_props),
                 )
@@ -310,9 +311,10 @@ pub(crate) fn parse_typed_you_control(
                     TargetFilter::Typed(base.controller(ControllerRef::You))
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
-                    let subtype_name = parse_subtype(descriptor)
-                        .map(|(canonical, _)| canonical)
-                        .unwrap_or_else(|| descriptor.trim_end_matches('s').to_string());
+                    let (subtype_name, consumed) = parse_subtype(descriptor)?;
+                    if consumed != descriptor.len() {
+                        return None;
+                    }
                     TargetFilter::Typed(
                         typed_filter_for_subtype(&subtype_name).controller(ControllerRef::You),
                     )
@@ -326,9 +328,10 @@ pub(crate) fn parse_typed_you_control(
                 TargetFilter::Typed(base.controller(ControllerRef::You).properties(extra_props))
             } else if is_capitalized_words(desc_remaining) {
                 // CR 205.3m: Normalize plural subtypes to canonical singular form
-                let subtype_name = parse_subtype(desc_remaining)
-                    .map(|(canonical, _)| canonical)
-                    .unwrap_or_else(|| desc_remaining.trim_end_matches('s').to_string());
+                let (subtype_name, consumed) = parse_subtype(desc_remaining)?;
+                if consumed != desc_remaining.len() {
+                    return None;
+                }
                 TargetFilter::Typed(
                     typed_filter_for_subtype(&subtype_name)
                         .controller(ControllerRef::You)
@@ -1486,11 +1489,14 @@ pub(crate) fn parse_base_pt_each_equal_dynamic(lower: &str) -> Option<QuantityEx
     // Everything else routes through the shared CDA quantity grammar so the
     // dynamic base-P/T set composes over every count/aggregate phrase the
     // engine already recognizes (e.g. "the number of creatures you control").
-    all_consuming(nom_quantity::parse_quantity)
-        .parse(tail)
-        .ok()
-        .map(|(_, value)| value)
-        .or_else(|| parse_cda_quantity(tail))
+    all_consuming(alt((
+        nom_quantity::parse_recipient_counter_quantity,
+        nom_quantity::parse_quantity,
+    )))
+    .parse(tail)
+    .ok()
+    .map(|(_, value)| value)
+    .or_else(|| parse_cda_quantity(tail))
 }
 
 /// Back-compat shim: the historical name used by callers that only need the

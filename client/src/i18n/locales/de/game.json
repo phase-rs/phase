@@ -1829,7 +1829,11 @@
     },
     "damageSource": {
       "title": "Schadensquelle",
-      "subtitle": "Wähle eine Quelle"
+      "subtitle": "Wähle eine Quelle",
+      "identity": "Quelle #{{objectId}}, Inkarnation {{incarnation}}",
+      "unnamed": "Unbenannte Quelle",
+      "optionLabel": "{{name}} — {{identity}} — Spieler {{controller}}, {{zone}}",
+      "controllerZone": "Spieler {{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "Grauen manifestieren",

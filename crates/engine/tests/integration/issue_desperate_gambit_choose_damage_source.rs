@@ -6,8 +6,8 @@ use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityKind, ControllerRef, DamageModification, Effect, PreventionAmount, QuantityExpr,
-    ReplacementDefinition, ResolvedAbility, ShieldKind, TargetFilter, TargetRef, TypedFilter,
+    AbilityKind, ControllerRef, DamageModification, Effect, QuantityExpr, ReplacementDefinition,
+    ResolvedAbility, ShieldKind, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -434,7 +434,7 @@ fn full_paid_gambit_public_choice_both_outcomes_survive_donate_and_current_resto
             .identity
             .reference;
         let offered = options.clone();
-        let ai = engine::ai_support::candidates::candidate_actions_exact(runner.state());
+        let ai = engine::ai_support::candidate_actions_exact(runner.state());
         let expected_actions: Vec<_> = offered
             .iter()
             .map(|option| GameAction::ChooseDamageSource {
@@ -651,7 +651,7 @@ fn paid_public_source_domain_includes_permanent_spells_referred_departures_and_f
     ));
     runner
         .act(GameAction::ChooseTarget {
-            target: TargetRef::Player(P0),
+            target: Some(TargetRef::Player(P0)),
         })
         .unwrap();
     assert_eq!(
@@ -1255,7 +1255,7 @@ fn paid_jade_competing_birth_histories_restore_exact_current_and_refuse_authenti
         assert_eq!(
             runner.state().objects[&recipient]
                 .replacement_definitions
-                .iter_all()
+                .iter_unchecked()
                 .filter(|definition| definition.selected_damage_source.is_some())
                 .count(),
             1
@@ -2304,7 +2304,15 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
         // A typed activated composition exercises the existing installer anchor.
         // The complete actual DG program supplies the lexical producer/branches;
         // this is a building-block fixture, not a claim about a printed artifact.
-        let mut program = parse_oracle_text(DESPERATE_GAMBIT).abilities[0].clone();
+        let mut program = parse_oracle_text(
+            DESPERATE_GAMBIT,
+            "Desperate Gambit",
+            &[],
+            &["Instant".into()],
+            &[],
+        )
+        .abilities[0]
+            .clone();
         program.kind = AbilityKind::Activated;
         program.cost = Some(AbilityCost::Mana {
             cost: ManaCost::generic(1),
@@ -2567,7 +2575,10 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
                 // Authentic old TYPED Continuous/rider custody. Rider cloning
                 // and recursive cast stamping predate the new capture field;
                 // this does not claim the old full Reverse parser attached it.
-                let mut program = parse_oracle_text(REVERSE).abilities[0].clone();
+                let mut program =
+                    parse_oracle_text(REVERSE, "Reverse Damage", &[], &["Instant".into()], &[])
+                        .abilities[0]
+                        .clone();
                 let Effect::PreventDamage { lifetime, .. } = program.effect.as_mut() else {
                     panic!("complete typed prevention program");
                 };
@@ -2957,7 +2968,7 @@ fn incompatible_same_cast_chosen_leaf_cannot_turn_its_wrong_capture_into_install
         // Supported typed alternatives, not a printed-card claim. Both are
         // chosen-source materializers in one actual recursively stamped cast;
         // their independently different lifetimes cannot install the same leaf.
-        let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+        let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.", "Reverse Damage", &[], &["Instant".into()], &[])
             .abilities[0].clone();
         let Effect::PreventDamage {
             damage_source_filter,
@@ -3037,7 +3048,7 @@ fn incompatible_same_cast_chosen_leaf_cannot_turn_its_wrong_capture_into_install
         assert_source_program_complete(&runner);
         assert_eq!(runner.state().pending_damage_replacements.len(), 1);
         let expected = runner.state().pending_damage_replacements.clone();
-        assert_eq!(expected[0].kind, ShieldKind::PreventionOneShot);
+        assert_eq!(expected[0].shield_kind, ShieldKind::PreventionOneShot);
         let original = assert_installed_cast_owner(&runner);
         let selected = original.sub_ability.as_ref().unwrap();
         let alternative = selected.else_ability.as_ref().unwrap();
@@ -3131,7 +3142,7 @@ fn same_cast_resolved_native_and_chosen_alternatives_cannot_lend_each_other_sour
                 )
                 .id();
             // Supported typed conditional composition, not printed Oracle.
-            let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+            let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.", "Reverse Damage", &[], &["Instant".into()], &[])
                 .abilities[0].clone();
             let Effect::PreventDamage {
                 damage_source_filter,
@@ -3265,7 +3276,7 @@ fn own_resolution_nested_choice_keeps_its_actual_missing_cast_stamp_and_current_
                         "{B}: This creature deals 1 damage to each creature and each player.",
                     )
                     .id();
-                let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+                let mut chosen = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.", "Reverse Damage", &[], &["Instant".into()], &[])
                 .abilities[0].clone();
                 let Effect::PreventDamage {
                     damage_source_filter,
@@ -3544,7 +3555,7 @@ fn cast_owned_source_rider_does_not_borrow_a_registered_later_boon_body() {
                 "{B}: This creature deals 1 damage to each creature and each player.",
             )
             .id();
-        let mut program = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.")
+        let mut program = parse_oracle_text("The next time a source of your choice would deal damage to you this turn, prevent that damage. You gain life equal to the damage prevented this way.", "Reverse Damage", &[], &["Instant".into()], &[])
             .abilities[0].clone();
         let mut later = program.clone();
         let Effect::PreventDamage {

@@ -1829,7 +1829,11 @@
     },
     "damageSource": {
       "title": "Source de blessures",
-      "subtitle": "Choisissez une source"
+      "subtitle": "Choisissez une source",
+      "identity": "Source n°{{objectId}}, incarnation {{incarnation}}",
+      "unnamed": "Source sans nom",
+      "optionLabel": "{{name}} — {{identity}} — joueur {{controller}}, {{zone}}",
+      "controllerZone": "Joueur {{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "Manifester l'effroi",

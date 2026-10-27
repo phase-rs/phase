@@ -2184,14 +2184,12 @@ fn nested_all_retarget_changes_exact_branch_address_and_copy_keeps_original_cust
                 },
             );
             pass_mogg_priority(&mut game.runner);
-            nested_finished(
-                &game,
-                if copy {
-                    &[game.b, game.c, game.d]
-                } else {
-                    &[game.b, game.d]
-                },
-            );
+            let destroyed = if copy {
+                vec![game.b, game.c, game.d]
+            } else {
+                vec![game.b, game.d]
+            };
+            nested_finished(&game, &destroyed);
         }
     }
 }
@@ -2363,14 +2361,12 @@ fn paid_instead_nested_shape_owns_its_selected_custody_through_swap_and_all_admi
                         panic!("actual swap keep")
                     };
                     assert_eq!(*player, P0);
-                    assert_eq!(
-                        results,
-                        if level == 0 {
-                            &vec![false, true]
-                        } else {
-                            &vec![!inner, inner]
-                        }
-                    );
+                    let expected = if level == 0 {
+                        vec![false, true]
+                    } else {
+                        vec![!inner, inner]
+                    };
+                    assert_eq!(results, &expected);
                     game.runner = nested_roundtrip(game.runner, codec);
                     game.runner
                         .act(GameAction::SelectCoinFlips {
@@ -2507,7 +2503,8 @@ fn nested_distinct_declaring_instances_can_capture_the_same_artifact_independent
         assert!(groups[2].1[0].1.is_some());
         pin_mogg(&mut game.runner, &[outer, true]);
         pass_mogg_priority(&mut game.runner);
-        nested_finished(&game, if outer { &[game.b, c] } else { &[c] });
+        let destroyed = if outer { vec![game.b, c] } else { vec![c] };
+        nested_finished(&game, &destroyed);
     }
 }
 
@@ -2584,7 +2581,12 @@ fn nested_new_birth_keep_is_stale_but_actual_reelection_refreshes_only_that_pin(
             );
             pin_mogg(&mut game.runner, &[true, true]);
             pass_mogg_priority(&mut game.runner);
-            nested_finished(&game, if reelect { &[game.b, c] } else { &[game.b] });
+            let destroyed = if reelect {
+                vec![game.b, c]
+            } else {
+                vec![game.b]
+            };
+            nested_finished(&game, &destroyed);
         }
     }
 }

@@ -719,7 +719,11 @@ fn assert_freebooter_terminal(runner: &GameRunner) {
         WaitingFor::Priority { player: P0 }
     ));
     assert!(runner.state().stack.is_empty());
-    assert!(runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
     assert!(runner.state().resolution_stack.is_empty());
     assert!(runner.state().owed_spell_final_part().is_none());
 }
@@ -788,7 +792,7 @@ fn kitesail_freebooter_reentry_old_etb_current_and_legacy_keep_the_ended_interva
     for state in super::contextual_hand_choice::restored_forms(runner.state()) {
         let mut restored = GameRunner::from_state(state);
         let mut invalid = restored.state().clone();
-        assert!(engine::apply(
+        assert!(engine::game::apply(
             &mut invalid,
             P0,
             GameAction::SelectCards {

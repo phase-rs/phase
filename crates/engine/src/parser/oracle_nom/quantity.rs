@@ -2047,6 +2047,21 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Used for patterns like "equal to the number of charge counters on it".
 /// Maps to `QuantityRef::CountersOn` with the appropriate scope and counter type.
 fn parse_number_of_counters_on_object(input: &str) -> OracleResult<'_, QuantityRef> {
+    parse_number_of_counters_on_object_with_pronoun_scope(input, ObjectScope::Source)
+}
+
+/// Keep a recipient's counter pronoun deferred until the affected filter is known.
+pub(crate) fn parse_recipient_counter_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (input, _) = parse_card_count_introduction(input)?;
+    let (rest, qty) =
+        parse_number_of_counters_on_object_with_pronoun_scope(input, ObjectScope::Anaphoric)?;
+    Ok((rest, QuantityExpr::Ref { qty }))
+}
+
+fn parse_number_of_counters_on_object_with_pronoun_scope(
+    input: &str,
+    pronoun_scope: ObjectScope,
+) -> OracleResult<'_, QuantityRef> {
     let (rest, counter_type) = alt((
         value(None, tag("counters on ")),
         map(
@@ -2055,7 +2070,7 @@ fn parse_number_of_counters_on_object(input: &str) -> OracleResult<'_, QuantityR
         ),
     ))
     .parse(input)?;
-    let (rest, scope) = parse_counter_object_scope(rest)?;
+    let (rest, scope) = parse_counter_object_scope_with_pronoun_scope(rest, pronoun_scope)?;
     Ok((
         rest,
         QuantityRef::CountersOn {
@@ -2102,17 +2117,22 @@ fn parse_number_of_counters_it_had(input: &str) -> OracleResult<'_, QuantityRef>
 /// `parse_self_possessive`. The it/them/him/her set is routed through the
 /// single-authority `parse_object_recipient_pronoun` combinator (composed with
 /// the self-reference token `~`) so it cannot drift from the other sites.
-fn parse_counter_object_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+fn parse_counter_object_scope_with_pronoun_scope(
+    input: &str,
+    pronoun_scope: ObjectScope,
+) -> OracleResult<'_, ObjectScope> {
     alt((
         // CR 201.5a: a granted body's by-name counter read names the granting object.
         value(
             ObjectScope::GrantingObject,
             super::target::parse_granting_object_ref,
         ),
+        value(ObjectScope::Source, tag("~")),
         value(
-            ObjectScope::Source,
-            alt((tag("~"), super::primitives::parse_object_recipient_pronoun)),
+            pronoun_scope,
+            super::primitives::parse_object_recipient_pronoun,
         ),
+        value(ObjectScope::Source, parse_source_self_ref),
         value(ObjectScope::Target, tag("that creature")),
         value(ObjectScope::Target, tag("that permanent")),
         value(ObjectScope::Target, tag("that artifact")),

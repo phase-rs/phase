@@ -1829,7 +1829,11 @@
     },
     "damageSource": {
       "title": "Źródło obrażeń",
-      "subtitle": "Wybierz źródło"
+      "subtitle": "Wybierz źródło",
+      "identity": "Źródło #{{objectId}}, wcielenie {{incarnation}}",
+      "unnamed": "Źródło bez nazwy",
+      "optionLabel": "{{name}} — {{identity}} — gracz {{controller}}, {{zone}}",
+      "controllerZone": "Gracz {{controller}} · {{zone}}"
     },
     "manifestDread": {
       "title": "Manifest Dread",

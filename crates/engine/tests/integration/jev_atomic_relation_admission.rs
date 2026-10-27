@@ -218,6 +218,7 @@ fn kamachal_paid_pump_actual_combat_treasure_and_cleanup_preserve_refused_cast_o
         .iter()
         .filter(|id| {
             combat.state().objects[id]
+                .card_types
                 .subtypes
                 .iter()
                 .any(|subtype| subtype == "Treasure")
@@ -246,7 +247,7 @@ fn kamachal_paid_pump_actual_combat_treasure_and_cleanup_preserve_refused_cast_o
 
 #[test]
 fn you_paid_five_colors_reveals_eight_and_bottoms_only_its_actual_revealed_cohort() {
-    for count in [0, 3, 10] {
+    for count in [0_usize, 3, 10] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let you = scenario

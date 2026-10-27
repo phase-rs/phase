@@ -210,7 +210,7 @@ fn paid_pilgrim_protects_the_entire_wumpus_opportunity_then_expires_on_use() {
 
 #[test]
 fn paid_circle_and_rune_you_only_next_time_and_authentic_generic_continuous_programs() {
-    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::types::ability::RedirectionLifetime;
     use engine::types::actions::GameAction;
     use engine::types::game_state::WaitingFor;
@@ -602,7 +602,8 @@ fn wumpus_raw_remainders_preserve_first_later_optional_pauses_and_exclude_nested
             .objects
             .get_mut(&source)
             .unwrap()
-            .install_resolution_replacement(optional);
+            .replacement_definitions
+            .push(optional);
         runner.activate(source, 0).resolve();
         let mut decisions = 0;
         let mut first_before_use = false;
@@ -689,7 +690,7 @@ fn wumpus_raw_remainders_preserve_first_later_optional_pauses_and_exclude_nested
 
 #[test]
 fn full_paid_continuous_source_prevention_witnesses_keep_both_independent_damage_events() {
-    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::game::scenario::{GameScenario, P0};
     use engine::types::actions::GameAction;
     use engine::types::game_state::WaitingFor;
     use engine::types::identifiers::ObjectId;

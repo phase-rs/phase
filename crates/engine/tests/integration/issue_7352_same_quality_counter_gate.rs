@@ -628,7 +628,9 @@ fn hisoka_lowers_to_a_cost_paid_same_quality_gate() {
         ability.condition,
         Some(AbilityCondition::ObjectsShareQuality {
             subject: TargetFilter::ParentTarget,
-            reference: TargetFilter::CostPaidObject,
+            reference: TargetFilter::CostPaidObject {
+                reference: engine::types::ability::CostPaidObjectRef::Selected,
+            },
             quality: SharedQuality::ManaValue,
         })
     );

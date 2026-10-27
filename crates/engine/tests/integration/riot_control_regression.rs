@@ -63,7 +63,7 @@ fn riot_control_chain_gains_life_and_prevents_damage() {
     // path used at runtime.
     let prevent = ResolvedAbility::new(
         Effect::PreventDamage {
-            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+            lifetime: engine::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::Controller,

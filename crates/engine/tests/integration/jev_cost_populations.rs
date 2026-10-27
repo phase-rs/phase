@@ -96,7 +96,12 @@ fn retained_color_and_historic_cost_subjects_apply_once_per_source() {
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }
             ));
-            assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+            assert!(
+                runner.state().stack.is_empty()
+                    && runner.state().pending_trigger.is_none()
+                    && runner.state().deferred_triggers.is_empty()
+                    && runner.state().pending_trigger_order.is_none()
+            );
         }
     }
 }
@@ -152,7 +157,12 @@ fn retained_lyse_discount_paid_casts_prowess_and_next_turn_history_reset() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().stack.is_empty()
+            && runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
     let old_turn = runner.state().turn_number;
     runner.advance_to_combat();
     runner.declare_attackers(&[]).unwrap();
@@ -170,7 +180,12 @@ fn retained_lyse_discount_paid_casts_prowess_and_next_turn_history_reset() {
     assert!(!runner.state().objects[&lyse]
         .keywords
         .contains(&Keyword::DoubleStrike));
-    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().stack.is_empty()
+            && runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
 }
 
 /// CR 601.2f + CR 601.2i: the in-flight Guardian cannot count itself as an
@@ -222,7 +237,12 @@ fn retained_academy_guardian_uses_actual_prior_noncreature_and_pays_full_colored
             outcome.final_waiting_for(),
             WaitingFor::Priority { .. }
         ));
-        assert!(outcome.state().stack.is_empty() && outcome.state().trigger_stack.is_empty());
+        assert!(
+            outcome.state().stack.is_empty()
+                && outcome.state().pending_trigger.is_none()
+                && outcome.state().deferred_triggers.is_empty()
+                && outcome.state().pending_trigger_order.is_none()
+        );
     }
 }
 
@@ -298,7 +318,12 @@ fn retained_lyse_late_entry_and_departure_use_existing_history_and_live_source()
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
-    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().stack.is_empty()
+            && runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
 }
 
 /// CR 601.2f: two distinct reducers apply once each, the generic floor is
@@ -357,7 +382,12 @@ fn retained_lyse_cost_floor_colored_failure_and_foreign_source() {
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
         ));
-        assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+        assert!(
+            runner.state().stack.is_empty()
+                && runner.state().pending_trigger.is_none()
+                && runner.state().deferred_triggers.is_empty()
+                && runner.state().pending_trigger_order.is_none()
+        );
     }
 }
 
@@ -442,7 +472,12 @@ fn retained_lyse_cleanup_priority_keeps_history_based_double_strike() {
         runner.state().waiting_for,
         WaitingFor::Priority { player: P0 }
     ));
-    assert!(runner.state().stack.is_empty() && runner.state().trigger_stack.is_empty());
+    assert!(
+        runner.state().stack.is_empty()
+            && runner.state().pending_trigger.is_none()
+            && runner.state().deferred_triggers.is_empty()
+            && runner.state().pending_trigger_order.is_none()
+    );
     runner.advance_to_phase(Phase::PreCombatMain);
     assert!(runner.state().turn_number > turn);
     assert!(!runner.state().objects[&lyse]
@@ -3406,7 +3441,11 @@ fn resolving_adventure_filtered_independent_permission_uses_the_selected_face_in
             assert!(
                 resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
             );
-            assert!(resumed.state().trigger_stack.is_empty());
+            assert!(
+                resumed.state().pending_trigger.is_none()
+                    && resumed.state().deferred_triggers.is_empty()
+                    && resumed.state().pending_trigger_order.is_none()
+            );
             assert!(resumed.state().owed_spell_final_part().is_none());
             assert_eq!(
                 events
@@ -4972,7 +5011,9 @@ fn relative_frantic_reads_the_actual_paid_response_graveyard_after_commit() {
             ));
             assert!(
                 resumed.state().stack.is_empty()
-                    && resumed.state().trigger_stack.is_empty()
+                    && resumed.state().pending_trigger.is_none()
+                    && resumed.state().deferred_triggers.is_empty()
+                    && resumed.state().pending_trigger_order.is_none()
                     && resumed.state().resolution_stack.is_empty()
             );
         }
@@ -5044,7 +5085,9 @@ fn relative_hearth_population_floors_generic_and_retains_the_red_shard() {
                 ));
                 assert!(
                     result.state().stack.is_empty()
-                        && result.state().trigger_stack.is_empty()
+                        && result.state().pending_trigger.is_none()
+                        && result.state().deferred_triggers.is_empty()
+                        && result.state().pending_trigger_order.is_none()
                         && result.state().resolution_stack.is_empty()
                 );
             } else {
