@@ -1,6 +1,6 @@
 ---
-source: crates/engine/src/parser/oracle_effect/mod.rs
-assertion_line: 31989
+source: crates/engine/src/parser/oracle_effect/snapshot_tests.rs
+assertion_line: 427
 expression: def
 ---
 {
@@ -30,6 +30,7 @@ expression: def
         "type": "ParentTargetController"
       }
     },
+    "instruction_actor": "ParentTargetController",
     "cost": null,
     "sub_ability": {
       "kind": "Spell",
@@ -40,6 +41,7 @@ expression: def
           "value": 2
         }
       },
+      "instruction_actor": "You",
       "cost": null,
       "sub_ability": null,
       "duration": null,

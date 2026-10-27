@@ -252,6 +252,7 @@ fn parse_library_owner_phrase<'a>(
         // CR 608.2c: the player named earlier in the same instruction, resolved
         // by the context-aware authority (#8467) rather than a fixed anaphor.
         ("that player's library", that_player.clone()),
+        ("that opponent's library", that_player.clone()),
         ("their library", that_player),
         // CR 115.1: an announced target names whose library this is.
         (
@@ -28640,6 +28641,7 @@ mod tests {
             "your library",
             "their library",
             "that player's library",
+            "that opponent's library",
             "target opponent's library",
             "target player's library",
             "each player's library",
@@ -28679,8 +28681,8 @@ mod tests {
         // #8467 x #8498: the anaphor arm runs BEFORE the fail-closed table and
         // returns on its own, so making the table fail closed cannot turn the
         // anaphor into an "unrecognized owner". `"that opponent's library"` is
-        // the sharp case — it is NOT a row of the shared table at all, so if the
-        // anaphor arm were ever folded into the table it would decline here.
+        // the sharp case: the shared table and the dig scan must agree on the
+        // event-bound antecedent as well as on context-free owners.
         for anaphor in ["that player's library", "that opponent's library"] {
             assert_eq!(
                 parse_dig_library_owner(

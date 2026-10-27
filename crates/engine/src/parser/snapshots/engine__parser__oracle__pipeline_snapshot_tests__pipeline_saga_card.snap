@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_pipeline_snapshot_tests.rs
+assertion_line: 153
 expression: result
 ---
 {
@@ -19,6 +20,7 @@ expression: result
             "type": "Controller"
           }
         },
+        "instruction_actor": "You",
         "cost": null,
         "sub_ability": {
           "kind": "Spell",
@@ -32,6 +34,7 @@ expression: result
               "type": "Controller"
             }
           },
+          "instruction_actor": "You",
           "cost": null,
           "sub_ability": null,
           "duration": null,
@@ -158,6 +161,7 @@ expression: result
             "properties": []
           }
         },
+        "instruction_actor": "TargetOpponent",
         "declares_chosen_group": 2147483648,
         "cost": null,
         "sub_ability": null,

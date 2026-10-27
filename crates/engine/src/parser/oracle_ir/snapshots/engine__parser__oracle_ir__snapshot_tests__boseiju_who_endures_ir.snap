@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1659
 expression: "&ir"
 ---
 {
@@ -281,6 +282,7 @@ expression: "&ir"
                       "type": "ParentTargetController"
                     }
                   },
+                  "instruction_actor": "ParentTargetController",
                   "duration": null,
                   "sub_ability": null,
                   "distribute": null,

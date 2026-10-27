@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 2736
 expression: "&ir"
 ---
 {
@@ -60,6 +61,7 @@ expression: "&ir"
                       "type": "Player"
                     }
                   },
+                  "instruction_actor": "TargetPlayer",
                   "duration": null,
                   "sub_ability": null,
                   "distribute": null,
@@ -184,6 +186,7 @@ expression: "&ir"
                       "type": "Player"
                     }
                   },
+                  "instruction_actor": "TargetPlayer",
                   "duration": null,
                   "sub_ability": null,
                   "distribute": null,

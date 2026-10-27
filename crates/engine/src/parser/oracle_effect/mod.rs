@@ -27414,6 +27414,17 @@ fn lower_subject_predicate_ast(
 ) -> ParsedEffectClause {
     let instruction_actor =
         instruction_actor_for_subject(subject.affected.as_ref(), subject.target.as_ref());
+    let library_player = match (&predicate, subject.affected.as_ref()) {
+        (PredicateAst::ImperativeFallback { text }, Some(affected)) => {
+            Some(subject_predicate_library_player(
+                &text.to_lowercase(),
+                ctx,
+                affected,
+                instruction_actor.as_ref(),
+            ))
+        }
+        _ => None,
+    };
     let possessive_player_subject = matches!(
         subject.affected,
         Some(TargetFilter::ParentTargetController | TargetFilter::ParentTargetOwner)
@@ -27438,6 +27449,7 @@ fn lower_subject_predicate_ast(
                 original_clause,
                 Some(&seed),
                 instruction_actor.as_ref(),
+                library_player.as_ref(),
             );
             ctx.declared_player_scope = prev_declared;
             ctx.prior_player_declaration = prev_prior;
@@ -27451,6 +27463,7 @@ fn lower_subject_predicate_ast(
                 original_clause,
                 Some(&seed),
                 instruction_actor.as_ref(),
+                library_player.as_ref(),
             )
         }),
         None => lower_subject_predicate_ast_body(
@@ -27460,6 +27473,7 @@ fn lower_subject_predicate_ast(
             original_clause,
             None,
             instruction_actor.as_ref(),
+            library_player.as_ref(),
         ),
     };
     if let Some(previous) = previous_object_pronoun {
@@ -27469,6 +27483,48 @@ fn lower_subject_predicate_ast(
         lower::default_clause_instruction_actor(&mut lowered, actor);
     }
     lowered
+}
+
+/// Resolve a subject-predicate's independently named library through the shared
+/// owner grammar, retaining the subject only when no owner phrase was found.
+fn subject_predicate_library_player(
+    predicate: &str,
+    ctx: &ParseContext,
+    affected: &TargetFilter,
+    instruction_actor: Option<&ControllerRef>,
+) -> TargetFilter {
+    let named = nom_primitives::scan_at_word_boundaries(predicate, |input| {
+        let (rest, player) =
+            imperative::parse_library_player_suffix(input, ctx).ok_or_else(|| oracle_err(input))?;
+        // CR 608.2c: "their library" follows the subject doing this action;
+        // an explicit "that player's/opponent's" keeps the enclosing antecedent.
+        let own_library = (
+            alt((tag::<_, _, OracleError<'_>>("cards of "), tag("card of "))),
+            tag("their library"),
+        )
+            .parse(input)
+            .is_ok();
+        Ok((
+            rest,
+            if own_library {
+                affected.clone()
+            } else {
+                player
+            },
+        ))
+    });
+    // CR 109.5 + CR 608.2c: the named library is independent of the player
+    // performing the reveal/exile. Explicit "your" retains the printed
+    // controller even when another player's instruction supplies the actor.
+    match named {
+        Some(TargetFilter::Controller)
+            if instruction_actor.is_some_and(|actor| *actor != ControllerRef::You) =>
+        {
+            TargetFilter::OriginalController
+        }
+        Some(player) => player,
+        None => affected.clone(),
+    }
 }
 
 /// The body of [`lower_subject_predicate_ast`]. `seeded` is the subject
@@ -27481,6 +27537,7 @@ fn lower_subject_predicate_ast_body(
     original_clause: &str,
     seeded: Option<&ControllerRef>,
     instruction_actor: Option<&ControllerRef>,
+    library_player: Option<&TargetFilter>,
 ) -> ParsedEffectClause {
     // CR 115.1d: Propagate multi_target from the subject phrase (e.g., "any number of
     // target creatures", "up to two target artifacts") into the lowered clause so the
@@ -27602,7 +27659,7 @@ fn lower_subject_predicate_ast_body(
                     1
                 };
                 return parsed_clause(Effect::RevealTop {
-                    player: affected,
+                    player: library_player.cloned().unwrap_or_else(|| affected.clone()),
                     count,
                 });
             }
@@ -27645,7 +27702,7 @@ fn lower_subject_predicate_ast_body(
                 // moved object's `face_down` flag so `visibility.rs` redacts it.
                 let face_down = scan_contains_phrase(&pred_lower, "face down");
                 return parsed_clause(Effect::ExileTop {
-                    player: affected,
+                    player: library_player.cloned().unwrap_or_else(|| affected.clone()),
                     count,
                     position: crate::types::ability::LibraryPosition::Top,
                     face_down,
@@ -44435,6 +44492,18 @@ fn parse_effect_chain_ir_body(
             // controller, not the damaged player from the trigger
             // condition's TriggeringPlayer scope).
             .or_else(|| chain_parent_target_controller_scope.clone())
+            // CR 608.2c: a defending-player instruction establishes the
+            // antecedent of a following "that player" even when the attack
+            // trigger's condition itself names no defending player.
+            .or_else(|| {
+                builder
+                    .clauses()
+                    .last()
+                    .and_then(|clause| clause.parsed.instruction_actor.as_ref())
+                    .and_then(|actor| actor.as_controller())
+                    .filter(|actor| **actor == ControllerRef::DefendingPlayer)
+                    .cloned()
+            })
             .or_else(|| ctx.relative_player_scope.clone())
             .or_else(|| {
                 player_scope
@@ -49560,6 +49629,33 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
 }
 
 #[test]
+fn subject_library_owner_keeps_named_players_independent_of_its_actor() {
+    let ctx = ParseContext {
+        relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+        ..ParseContext::default()
+    };
+    for noun in ["card", "cards"] {
+        for (owner, expected) in [
+            ("their", TargetFilter::ParentTargetController),
+            ("that player's", TargetFilter::TriggeringPlayer),
+            ("that opponent's", TargetFilter::TriggeringPlayer),
+            ("your", TargetFilter::OriginalController),
+        ] {
+            assert_eq!(
+                subject_predicate_library_player(
+                    &format!("reveals the top two {noun} of {owner} library"),
+                    &ctx,
+                    &TargetFilter::ParentTargetController,
+                    Some(&ControllerRef::ParentTargetController),
+                ),
+                expected,
+                "{noun} of {owner} library",
+            );
+        }
+    }
+}
+
+#[test]
 fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
     let def = parse_effect_chain(
         "The owner of target permanent shuffles it into their library, then reveals the top card of your library.",
@@ -49575,7 +49671,7 @@ fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
     let Effect::RevealTop { player, count: 1 } = reveal else {
         panic!("expected RevealTop of your library, got {reveal:?}");
     };
-    assert_eq!(*player, TargetFilter::Controller);
+    assert_eq!(*player, TargetFilter::OriginalController);
 }
 
 #[test]

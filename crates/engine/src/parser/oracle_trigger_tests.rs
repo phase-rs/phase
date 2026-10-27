@@ -5619,6 +5619,40 @@ fn combat_damage_dig_binds_that_players_library_to_the_damaged_player() {
     );
 }
 
+#[test]
+fn defending_player_reveal_keeps_the_following_instructions_actor() {
+    let def = parse_trigger_line(
+        "Whenever this creature attacks, defending player reveals the top card of their library. If it's a land card, that player puts it into their hand.",
+        "Goblin Guide",
+    );
+    let reveal = def.execute.as_deref().expect("reveal instruction");
+    assert!(matches!(
+        reveal.effect.as_ref(),
+        Effect::RevealTop {
+            player: TargetFilter::DefendingPlayer,
+            count: 1
+        }
+    ));
+    let put = reveal
+        .sub_ability
+        .as_deref()
+        .expect("put in hand instruction");
+    assert!(matches!(
+        put.effect.as_ref(),
+        Effect::ChangeZone {
+            destination: Zone::Hand,
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    ));
+    assert_eq!(
+        put.instruction_actor
+            .as_ref()
+            .and_then(|actor| actor.as_controller()),
+        Some(&ControllerRef::DefendingPlayer),
+    );
+}
+
 /// CR 120.1 + CR 510.2 + CR 102.2 (issue #8467): the `"that opponent's"`
 /// spelling of the same library-owner anaphor. Gonti, Night Minister's damage
 /// trigger names its ACTING player separately ("its controller looks at ...")
@@ -37452,7 +37486,7 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         }
     ));
     let base_kincaller: serde_json::Value = serde_json::from_str(
-        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Controller"},"card_filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GainLife","amount":{"type":"Fixed","value":3}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"Or","conditions":[{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},{"type":"QuantityCheck","lhs":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":"You","properties":[{"type":"Another"},{"type":"InZone","zone":"Battlefield"}]}}},"comparator":"GE","rhs":{"type":"Fixed","value":1}}]},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false}"#,
+        r#"{"kind":"Spell","effect":{"type":"RevealHand","target":{"type":"Controller"},"card_filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":null,"properties":[]},"count":null,"reveal":true},"cost":null,"sub_ability":{"kind":"Spell","effect":{"type":"GainLife","amount":{"type":"Fixed","value":3}},"instruction_actor":"You","cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":{"type":"Or","conditions":[{"type":"EffectOutcome","signal":"OptionalEffectPerformed"},{"type":"QuantityCheck","lhs":{"type":"Ref","qty":{"type":"ObjectCount","filter":{"type":"Typed","type_filters":[{"Subtype":"Dinosaur"}],"controller":"You","properties":[{"type":"Another"},{"type":"InZone","zone":"Battlefield"}]}}},"comparator":"GE","rhs":{"type":"Fixed","value":1}}]},"optional_targeting":false,"optional":false,"forward_result":false,"sub_link":"SequentialSibling"},"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":true,"forward_result":false}"#,
     )
     .expect("base Kincaller JSON");
     assert_eq!(

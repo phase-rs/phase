@@ -33791,10 +33791,15 @@ fn m_odo_the_gnarled_oracle_parses_its_printed_eminence_ability() {
     // "then that player shuffles the rest into their library" — the revealing
     // (targeted) player's library, not the activator's.
     let sub = ability.sub_ability.as_deref().expect("rest-shuffle clause");
+    let player_group = ability
+        .declares_chosen_group
+        .expect("the reveal instruction declares its targeted player");
     assert_eq!(
         *sub.effect,
         Effect::Shuffle {
-            target: TargetFilter::ParentTargetController
+            target: TargetFilter::DeclaredPlayer {
+                group: player_group
+            }
         }
     );
     assert!(sub.sub_ability.is_none(), "no trailing gap: {sub:?}");

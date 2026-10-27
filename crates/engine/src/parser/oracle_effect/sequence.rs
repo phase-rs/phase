@@ -2129,6 +2129,22 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
         return Some((ClauseBoundary::Comma, whitespace_len));
     }
 
+    let subject_consequence = tag::<_, _, OracleError<'_>>("each ")
+        .parse(current_lower.as_str())
+        .ok()
+        .and_then(|_| {
+            super::lower::strip_each_scope_who_doesnt_subject(&current_lower)
+                .or_else(|| super::lower::strip_each_scope_who_cant_subject(&current_lower))
+                .or_else(|| super::lower::strip_each_scope_who_does_subject(&current_lower))
+        });
+    if let Some((_, body)) = subject_consequence {
+        // CR 118.12 + CR 608.2c: the outcome subject and its first action form
+        // one instruction, while later body commas use the ordinary grammar.
+        return (!body.is_empty())
+            .then(|| split_comma_clause_boundary(&body, remainder))
+            .flatten();
+    }
+
     if starts_prefix_clause(&current_lower) {
         // CR 118.12 + CR 608.2c: the consequence header stays attached to its
         // first action, but later commas belong to the ordinary body grammar.
@@ -5018,6 +5034,16 @@ pub(super) fn apply_clause_continuation(
     kind: AbilityKind,
     env: &super::assembly::AssemblyEnv,
 ) {
+    apply_clause_continuation_with_actor(defs, continuation, kind, env, None);
+}
+
+pub(super) fn apply_clause_continuation_with_actor(
+    defs: &mut Vec<AbilityDefinition>,
+    continuation: ContinuationAst,
+    kind: AbilityKind,
+    env: &super::assembly::AssemblyEnv,
+    consumer_actor: Option<&crate::types::ability::InstructionActorRef>,
+) {
     match continuation {
         ContinuationAst::SearchDestination {
             destination,
@@ -5133,6 +5159,11 @@ pub(super) fn apply_clause_continuation(
             choice_optional,
             binding: _,
         } => {
+            // CR 608.2c + CR 109.5: this choice belongs to the consuming
+            // instruction, independently of the player revealing their hand.
+            let choice_actor = consumer_actor
+                .cloned()
+                .unwrap_or_else(|| ControllerRef::You.into());
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -5167,6 +5198,7 @@ pub(super) fn apply_clause_continuation(
                     );
                     choice.player_scope = Some(scope);
                     choice.sub_link = SubAbilityLink::SequentialSibling;
+                    choice.instruction_actor = Some(choice_actor);
                     Some(choice)
                 }
                 // A single-player reveal, or a per-player partial reveal whose
@@ -5174,6 +5206,7 @@ pub(super) fn apply_clause_continuation(
                 _ => {
                     *existing = card_filter;
                     *existing_choice_optional = choice_optional;
+                    previous.instruction_actor = Some(choice_actor);
                     None
                 }
             };
@@ -10800,14 +10833,21 @@ mod tests {
     #[test]
     fn decline_consequence_keeps_its_header_and_splits_later_body_actions() {
         for outcome in ["doesn't", "does not", "can't", "cannot"] {
-            let head = format!("For each opponent who {outcome}, put a flying counter, a lifelink counter, and a vigilance counter on target creature you control");
-            assert_eq!(clause_texts(&head), vec![head.clone()]);
-            let tail = "that player puts a +1/+1 counter on a creature they control";
-            let chunks = split_clause_sequence(&format!("{head}, then {tail}."));
-            assert_eq!(chunks.len(), 2, "{chunks:?}");
-            assert_eq!(chunks[0].text, head);
-            assert_eq!(chunks[0].boundary_after, Some(ClauseBoundary::Then));
-            assert_eq!(chunks[1].text, tail);
+            for subject in [
+                "For each opponent",
+                "Each opponent",
+                "Each other player",
+                "Each player",
+            ] {
+                let head = format!("{subject} who {outcome}, put a flying counter, a lifelink counter, and a vigilance counter on target creature you control");
+                assert_eq!(clause_texts(&head), vec![head.clone()]);
+                let tail = "that player puts a +1/+1 counter on a creature they control";
+                let chunks = split_clause_sequence(&format!("{head}, then {tail}."));
+                assert_eq!(chunks.len(), 2, "{chunks:?}");
+                assert_eq!(chunks[0].text, head);
+                assert_eq!(chunks[0].boundary_after, Some(ClauseBoundary::Then));
+                assert_eq!(chunks[1].text, tail);
+            }
         }
     }
 

@@ -10386,7 +10386,10 @@ fn parse_draw_replacement(
         // CR 614.6 + CR 608.2c: the replaced drawer is already the antecedent
         // of "they" before a reveal's patient is normalized below.
         let mut execute_context = ParseContext {
-            relative_player_scope: Some(ControllerRef::TriggeringPlayer),
+            // A replacement has an affected player, not a triggering player.
+            // Keep the contextual anaphor until the existing event-recipient
+            // rewrite binds it to PostReplacementDamageTarget below.
+            relative_player_scope: Some(ControllerRef::ScopedPlayer),
             ..ParseContext::default()
         };
         let mut execute = parse_effect_chain_with_context(

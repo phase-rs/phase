@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 951
 expression: "&ir"
 ---
 {
@@ -67,6 +68,7 @@ expression: "&ir"
                       }
                     }
                   },
+                  "instruction_actor": "You",
                   "duration": null,
                   "sub_ability": null,
                   "distribute": null,

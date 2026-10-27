@@ -70,7 +70,9 @@ use super::lower::{
     target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
     timed_clause_sub_chain,
 };
-use super::sequence::{apply_clause_continuation, def_bears_retargetable_copy};
+use super::sequence::{
+    apply_clause_continuation, apply_clause_continuation_with_actor, def_bears_retargetable_copy,
+};
 use super::{
     append_to_deepest_sub_ability, apply_player_scope_rewrites,
     attach_alt_cost_to_prior_cast_from_zone, attach_mana_retention_to_prior_mana,
@@ -2138,7 +2140,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // Apply the Continue clause's continuation to the defs built so far
                 // (formerly the absorbed `followup_continuation` path).
                 if let Some(continuation) = clause_ir.disposition.followup() {
-                    apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
+                    apply_clause_continuation_with_actor(
+                        &mut defs,
+                        continuation.clone(),
+                        kind,
+                        &env,
+                        clause_ir.parsed.instruction_actor.as_ref(),
+                    );
                     env.observe(&defs, None, NodeRole::ContinuationProduct);
                     apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
                 }
@@ -2881,7 +2889,13 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // Non-absorbed, non-special followup continuation — apply it to the
         // previous defs before building this clause's def (`Emit.followup`).
         if let Some(continuation) = clause_ir.disposition.followup() {
-            apply_clause_continuation(&mut defs, continuation.clone(), kind, &env);
+            apply_clause_continuation_with_actor(
+                &mut defs,
+                continuation.clone(),
+                kind,
+                &env,
+                clause_ir.parsed.instruction_actor.as_ref(),
+            );
             env.observe(&defs, None, NodeRole::ContinuationProduct);
             apply_where_x_to_latest_def(&mut defs, clause_ir.where_x_expression.as_deref());
         }

@@ -1,5 +1,6 @@
 ---
 source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1175
 expression: "&ir"
 ---
 {
@@ -579,6 +580,7 @@ expression: "&ir"
                       "type": "TerminalShuffle"
                     }
                   },
+                  "instruction_actor": "ParentTargetController",
                   "duration": null,
                   "sub_ability": {
                     "kind": "Spell",
@@ -588,6 +590,7 @@ expression: "&ir"
                         "type": "ParentTargetController"
                       }
                     },
+                    "instruction_actor": "ParentTargetController",
                     "cost": null,
                     "sub_ability": null,
                     "duration": null,

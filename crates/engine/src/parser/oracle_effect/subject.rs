@@ -3343,6 +3343,14 @@ fn parse_subject_application_for(
                 TargetFilter::ParentTargetController
             } else if matches!(
                 ctx.relative_player_scope,
+                Some(ControllerRef::DefendingPlayer)
+            ) && matches!(subject_anaphor, PlayerSubjectAnaphor::Player)
+            {
+                // CR 608.2c: the named defending player remains the antecedent
+                // of "that player"; an explicit attacking player stays separate.
+                TargetFilter::DefendingPlayer
+            } else if matches!(
+                ctx.relative_player_scope,
                 Some(ControllerRef::TriggeringPlayer | ControllerRef::DefendingPlayer)
             ) {
                 // CR 608.2c + CR 106.12a: An explicit triggering/defending player
@@ -10864,6 +10872,24 @@ mod tests {
         let result = parse_subject_application("that player", &mut ctx);
         assert!(result.is_some());
         assert_eq!(result.unwrap().affected, TargetFilter::TriggeringPlayer);
+    }
+
+    #[test]
+    fn parse_subject_that_player_preserves_the_defending_player_antecedent() {
+        for subject in ["that player", "the player", "that opponent"] {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                relative_player_scope: Some(ControllerRef::DefendingPlayer),
+                ..ParseContext::default()
+            };
+            assert_eq!(
+                parse_subject_application(subject, &mut ctx)
+                    .unwrap()
+                    .affected,
+                TargetFilter::DefendingPlayer,
+                "{subject}",
+            );
+        }
     }
 
     #[test]
