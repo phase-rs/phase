@@ -173,6 +173,10 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
+fn boxed_map_is_empty<K, V>(map: &impl std::ops::Deref<Target = BTreeMap<K, V>>) -> bool {
+    map.is_empty()
+}
+
 fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
     (delta != 0)
         .then_some(delta.unsigned_abs())
@@ -24816,8 +24820,10 @@ declare_game_state! {
     /// pause; should one ever park, its entry is resolution-scoped residue,
     /// cleared at the next turn (no resolution spans a turn boundary), and is
     /// serialized so authoritative save/restore can't lose it.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub control_change_captures: BTreeMap<u64, crate::types::events::ControlChangeLink>,
+    /// Boxed: empty outside a resolution, so it stays off `GameState`'s stack
+    /// budget (`game_state_size`).
+    #[serde(default, skip_serializing_if = "boxed_map_is_empty")]
+    pub control_change_captures: Box<BTreeMap<u64, crate::types::events::ControlChangeLink>>,
     /// The next `control_change_captures` key.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_capture_id: u64,
@@ -24829,9 +24835,10 @@ declare_game_state! {
     /// action finishes, only entries a retained trigger-event carrier still
     /// names are kept (`release_unreferenced_control_change_observations`). An
     /// id with no entry authorizes nothing.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    /// Boxed for the stack budget, like `control_change_captures`.
+    #[serde(default, skip_serializing_if = "boxed_map_is_empty")]
     pub control_change_observations:
-        BTreeMap<u64, crate::types::events::ControlChangeObservation>,
+        Box<BTreeMap<u64, crate::types::events::ControlChangeObservation>>,
     /// The next `control_change_observations` key.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_observation_id: u64,
@@ -32396,9 +32403,9 @@ impl GameState {
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
-            control_change_captures: BTreeMap::new(),
+            control_change_captures: Box::default(),
             next_control_change_capture_id: 0,
-            control_change_observations: BTreeMap::new(),
+            control_change_observations: Box::default(),
             next_control_change_observation_id: 0,
             exiled_from_hand_this_resolution: 0,
             monarch: None,
