@@ -188,6 +188,11 @@ pub enum GameAction {
     ActivateAbility {
         source_id: ObjectId,
         ability_index: usize,
+        /// CR 602.2b + CR 601.2g-h: the activation's mana-payment preference,
+        /// the same opt-in as `CastSpell`'s. `Manual` stops in `ManaPayment`
+        /// after targets so the player activates mana abilities themself.
+        #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+        payment_mode: CastPaymentMode,
     },
     DeclareAttackers {
         attacks: Vec<(ObjectId, AttackTarget)>,
@@ -1153,6 +1158,14 @@ fn default_true() -> bool {
 /// can still be multiplied by ordinary token replacement effects.
 pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
 
+/// Maximum amount for one sandbox `GainLife` / `LoseLife` debug action. A sanity
+/// bound on the request, not the representability authority: it leaves about 2^11
+/// headroom under `i32::MAX` for doubling replacements, but a stack of replacements
+/// can still carry the result past what the engine represents. That result is never
+/// clamped: the checked quantity resolver and the checked `Times` / `Plus` appliers
+/// report it as an unrepresentable life change and the action is rejected unchanged.
+pub const MAX_DEBUG_LIFE_AMOUNT: u32 = 1_000_000;
+
 /// Serde default for debug create counts: legacy payloads create one object.
 fn default_debug_create_count() -> u32 {
     1
@@ -1308,6 +1321,12 @@ pub enum DebugAction {
     // ── Player State Manipulation ─────────────────────────────────────────
     /// Set a player's life total directly.
     SetLife { player_id: PlayerId, life: i32 },
+    /// Gain life through the real CR 119.3 life-gain event (replacements, can't-gain statics, life-gain triggers apply).
+    /// Requires a Priority window, so an open prompt (e.g. a CR 616.1 replacement choice) keeps its owner.
+    GainLife { player_id: PlayerId, amount: u32 },
+    /// Lose life through the real CR 119.3 life-loss event.
+    /// Requires a Priority window, like `GainLife`.
+    LoseLife { player_id: PlayerId, amount: u32 },
     /// Modify a non-energy player counter. Positive delta adds, negative removes.
     ModifyPlayerCounters {
         player_id: PlayerId,
@@ -1453,6 +1472,8 @@ impl DebugAction {
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
             | Self::SetLife { .. }
+            | Self::GainLife { .. }
+            | Self::LoseLife { .. }
             | Self::ModifyPlayerCounters { .. }
             | Self::ModifyEnergy { .. }
             | Self::AddMana { .. }
@@ -1490,6 +1511,50 @@ impl DebugAction {
             ));
         }
         Ok(())
+    }
+
+    /// Rejects sandbox life-change amounts above `MAX_DEBUG_LIFE_AMOUNT` before
+    /// any state change (no silent wrap or clamp).
+    pub fn validate_life_change_amount(&self) -> Result<(), String> {
+        match self {
+            Self::GainLife { amount, .. } | Self::LoseLife { amount, .. } => {
+                if *amount > MAX_DEBUG_LIFE_AMOUNT {
+                    return Err(format!(
+                        "Debug life change amount {amount} exceeds the maximum {MAX_DEBUG_LIFE_AMOUNT}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::MoveToZone { .. }
+            | Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => Ok(()),
+        }
     }
 
     /// Human-readable description of this debug action, used by the sandbox
@@ -1679,6 +1744,12 @@ impl DebugAction {
             }
             DebugAction::SetLife { player_id, life } => {
                 format!("SetLife ({} → {})", player_label(*player_id), life)
+            }
+            DebugAction::GainLife { player_id, amount } => {
+                format!("GainLife ({} gains {})", player_label(*player_id), amount)
+            }
+            DebugAction::LoseLife { player_id, amount } => {
+                format!("LoseLife ({} loses {})", player_label(*player_id), amount)
             }
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
@@ -1942,11 +2013,12 @@ impl GameAction {
         )
     }
 
-    /// The cast payment preference carried by this action, if it is one of
-    /// the cast-family variants (CR 601.2g).
+    /// The payment preference carried by this action, if it is one of the
+    /// cast-family variants (CR 601.2g) or an activation (CR 602.2b).
     pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
         match self {
             GameAction::CastSpell { payment_mode, .. }
+            | GameAction::ActivateAbility { payment_mode, .. }
             | GameAction::CastSpellForFree { payment_mode, .. }
             | GameAction::CastSpellAsMiracle { payment_mode, .. }
             | GameAction::CastSpellAsMadness { payment_mode, .. }
@@ -2587,6 +2659,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: oid,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 Some(oid),
             ),

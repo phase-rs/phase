@@ -269,6 +269,7 @@ fn recorded_push_carries_the_bound_force_block_source() {
         .act(GameAction::ActivateAbility {
             source_id: sled,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real force-block ability must activate");
     if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for.clone() {

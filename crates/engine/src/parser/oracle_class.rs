@@ -30,7 +30,7 @@ use super::oracle_ir::trigger::TriggerNodeIr;
 use super::oracle_keyword::extract_granted_keyword_list;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_replacement::parse_replacement_line;
+use super::oracle_replacement::{enters_with_fails_closed, parse_replacement_line, EntersWithGap};
 use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::{is_graveyard_cast_permission_lead, parse_static_line};
 use super::oracle_trigger::parse_trigger_lines_at_index;
@@ -313,6 +313,26 @@ pub(crate) fn parse_class_oracle_text(
                 // and an install `Effect` has nowhere to carry that gate — a lift
                 // here would silently drop it. No Class card prints a windowed
                 // replacement clause, so the gap costs no coverage.
+
+                // CR 614.1c + CR 122.6: an "enters with" line that prints a
+                // counter placement no reader reads fails closed. A Class card
+                // never reaches the general route's Priority-8 guard, so record
+                // a typed replacement-structure gap here before the effect
+                // fallback below can claim a quoted rider as an ability.
+                if let Some(EntersWithGap::Clause) = enters_with_fails_closed(line, card_name) {
+                    items.push((
+                        line_index,
+                        OracleNodeIr::Unsupported {
+                            unsupported: UnsupportedAbilityIr::new(
+                                UnsupportedAbilityCategory::ReplacementStructure,
+                                line,
+                                line,
+                            ),
+                            min_x_value: 0,
+                        },
+                    ));
+                    continue;
+                }
             }
 
             // Ability word prefixed lines

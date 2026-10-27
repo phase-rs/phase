@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
-use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value, verify};
 use nom::multi::{many0, many1};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
@@ -388,6 +388,26 @@ pub fn parse_color(input: &str) -> OracleResult<'_, ManaColor> {
     .parse(input)
 }
 
+/// CR 903.4: Parse the possessive phrase "your commander's color identity".
+///
+/// The `alt()` covers the singular possessive and both plural apostrophe
+/// placements ("commanders'" and the apostrophe-less "commanders") that
+/// Oracle text and normalized text use for a partnered commander pair
+/// (CR 702.124c). "commanders'" precedes "commanders" so the longer spelling
+/// is tried first. Operates on already-lowercased text and consumes nothing
+/// beyond the phrase itself.
+pub(crate) fn parse_your_commanders_color_identity(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("your "),
+            alt((tag("commander's"), tag("commanders'"), tag("commanders"))),
+            tag(" color identity"),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 205.2a: Parse a single printed card-type word into its [`CoreType`].
 ///
 /// Enumerates the CR 205.2a card-type list ("artifact, battle, conspiracy,
@@ -682,6 +702,45 @@ fn parse_signed_number(input: &str) -> OracleResult<'_, i32> {
         preceded(char('-'), map(parse_digit_number, |n| -(n as i32))),
     ))
     .parse(input)
+}
+
+/// Parse a loyalty symbol written in effect text: `[+N]` or `[−N]` with a nonzero
+/// count. Returns the signed delta, the sign convention of
+/// `AbilityCost::Loyalty { amount }`: a positive symbol puts loyalty counters on the
+/// permanent and a negative one removes them.
+///
+/// CR 107.7: "[+N] means 'Put N loyalty counters on this permanent,' [-N] means
+/// 'Remove N loyalty counters from this permanent,' and [0] means 'Put zero loyalty
+/// counters on this permanent.'" CR 122.1e + CR 306.5c: a planeswalker's loyalty is
+/// the number of loyalty counters on it. The rule frames the symbol as part of an
+/// activation cost, and CR 606.4 governs that cost only; a printed effect that
+/// writes the symbol in its own text (the result rows of Comet, Stellar Pup) gives
+/// it the same meaning on its own authority, which is the card's ruling and not CR
+/// text.
+///
+/// All three minus glyphs are accepted (U+2212, U+2013 and the ASCII hyphen). The
+/// sign is required and the count must be a nonzero digit string, so `[0]` (which
+/// puts zero counters and is used by no printed effect), `[+X]`, `[−X]`, an
+/// unsigned `[1]` and number words are declined and stay visibly unparsed. The
+/// combinator leaves any tail; a caller that wants the whole clause checks the end.
+pub(crate) fn parse_loyalty_symbol_delta(input: &str) -> OracleResult<'_, i32> {
+    delimited(
+        char('['),
+        alt((
+            preceded(char('+'), loyalty_symbol_magnitude),
+            preceded(
+                alt((char('\u{2212}'), char('\u{2013}'), char('-'))),
+                map(loyalty_symbol_magnitude, |n| -n),
+            ),
+        )),
+        char(']'),
+    )
+    .parse(input)
+}
+
+/// The count of a loyalty symbol: a digit string that fits an `i32` and is nonzero.
+fn loyalty_symbol_magnitude(input: &str) -> OracleResult<'_, i32> {
+    verify(map_res(parse_digit_number, i32::try_from), |n: &i32| *n > 0).parse(input)
 }
 
 /// Parse a P/T value pair from a token like "3/3", "X/X", "0/0", or "*/*".
@@ -2104,6 +2163,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_your_commanders_color_identity_covers_all_three_spellings() {
+        // CR 903.4 + CR 702.124c: singular and both plural possessive spellings.
+        for phrase in [
+            "your commander's color identity",
+            "your commanders' color identity",
+            "your commanders color identity",
+        ] {
+            let (rest, ()) = parse_your_commanders_color_identity(phrase)
+                .unwrap_or_else(|_| panic!("{phrase} must parse"));
+            assert_eq!(rest, "", "{phrase} must be fully consumed");
+        }
+        // The combinator consumes only the phrase and leaves the tail intact.
+        let (rest, ()) =
+            parse_your_commanders_color_identity("your commander's color identity.").unwrap();
+        assert_eq!(rest, ".");
+        // Negative: "colors" is not "color identity".
+        assert!(parse_your_commanders_color_identity("your commander's colors").is_err());
+    }
+
+    #[test]
     fn test_parse_counter_type_plus() {
         let (rest, ct) = parse_counter_type_typed("+1/+1 counter").unwrap();
         assert_eq!(ct, CounterType::Plus1Plus1);
@@ -2473,5 +2552,75 @@ mod tests {
         let (rest, parsed) = parse_core_type_disjunction("instant, then draw a card").unwrap();
         assert_eq!(parsed, vec![CoreType::Instant]);
         assert_eq!(rest, ", then draw a card");
+    }
+
+    /// CR 107.7: a signed loyalty symbol yields the signed delta, with every printed
+    /// minus glyph (U+2212, U+2013 and the ASCII hyphen) and any digit count.
+    #[test]
+    fn loyalty_symbol_delta_reads_the_sign_and_the_count() {
+        for (input, expected) in [
+            ("[+2]", 2),
+            ("[+1]", 1),
+            ("[+10]", 10),
+            ("[\u{2212}1]", -1),
+            ("[\u{2212}2]", -2),
+            ("[\u{2013}1]", -1),
+            ("[-1]", -1),
+            ("[-12]", -12),
+        ] {
+            assert_eq!(
+                parse_loyalty_symbol_delta(input),
+                Ok(("", expected)),
+                "{input:?}"
+            );
+        }
+    }
+
+    /// The combinator leaves its tail: the clause the symbol opens is the caller's.
+    #[test]
+    fn loyalty_symbol_delta_leaves_the_tail() {
+        assert_eq!(
+            parse_loyalty_symbol_delta("[\u{2212}2]. then"),
+            Ok((". then", -2)),
+        );
+        assert_eq!(
+            parse_loyalty_symbol_delta("[+1], and you may"),
+            Ok((", and you may", 1)),
+        );
+    }
+
+    /// Everything that is not a signed nonzero digit count stays declined: `[0]`
+    /// puts zero counters and no printed effect uses it, `[+X]` / `[−X]` are the
+    /// announced-X forms of a cost, an unsigned count and a number word are not the
+    /// symbol, and the brackets are required. The positive reach-guard is the first
+    /// assertion: the combinator accepts a well-formed symbol.
+    #[test]
+    fn loyalty_symbol_delta_declines_everything_else() {
+        assert!(parse_loyalty_symbol_delta("[+3]").is_ok(), "reach-guard");
+        for input in [
+            "[0]",
+            "[+0]",
+            "[\u{2212}0]",
+            "[+X]",
+            "[\u{2212}X]",
+            "[1]",
+            "[+two]",
+            "[+]",
+            "[]",
+            "+2",
+            "+2]",
+            "[+2",
+            " [+2]",
+            "[ +2]",
+            "[+2 ]",
+            "[+-2]",
+            "[++2]",
+            "[+99999999999]",
+        ] {
+            assert!(
+                parse_loyalty_symbol_delta(input).is_err(),
+                "{input:?} must be declined"
+            );
+        }
     }
 }

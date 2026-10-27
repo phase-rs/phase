@@ -19,7 +19,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     super::end_phase::clear_preexisting_unstacked_triggers(state);
 
-    if !super::end_phase::exile_nonresolving_stack_objects(state, ability.source_id, events) {
+    if !super::end_phase::exile_every_stack_object(state, ability.source_id, events) {
         return Ok(());
     }
 

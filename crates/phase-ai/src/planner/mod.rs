@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use engine::ai_support::{
     build_decision_context, classify_payment_continuation, witness_payment_continuations,
@@ -644,6 +645,146 @@ impl UtilityReducer for SampledReplyUtilityReducer {
     }
 }
 
+/// Ceiling on the child `GameState` snapshots one decision's successor memo
+/// may retain. This is the memo's memory budget: every successful stored edge
+/// keeps one full snapshot alive until the decision ends.
+///
+/// Retention is first-come, which keeps the shallow edges every rung
+/// re-walks. Once the ceiling is reached an edge is simulated on every visit
+/// and its child is untracked, which yields the same states search produced
+/// before the memo existed (a quiescence chain leaving the tracked region pays
+/// one extra state clone), so the ceiling changes cost and never the result.
+///
+/// 16 is a measured choice, not a derived one. Workload: `ai-duel`, profiling
+/// build, Hard, red against green, seed 7, `--batch 4`, compared with the
+/// build that has no memo (average game 5.36 s, peak RSS 1.50 GB):
+///
+/// | ceiling | average game | peak RSS |
+/// |---------|--------------|----------|
+/// | 0       | -7%          | +0-1%    |
+/// | 8       | -12%         | +1.5%    |
+/// | 16      | -14%         | +3%      |
+/// | 32      | -16%         | +6%      |
+/// | 64      | -17%         | +13%     |
+/// | 128     | -17%         | +16%     |
+/// | 256     | -16%         | +31%     |
+/// | 2048    | -15%         | +65%     |
+///
+/// Without a binding ceiling one decision retained up to 528 snapshots and 462
+/// decision contexts, and that retention is the whole RSS increase. 41% of
+/// the successor hits land on the first 16 snapshots a decision admits, 64% on
+/// the first 32 and 85% on the first 64. At ceiling 0 no position below a
+/// root is tracked. The same runs produced byte-identical game output at
+/// every ceiling. Run-to-run spread on the average game is about two points:
+/// a second set of three alternating runs at 16 measured -12%.
+const SUCCESSOR_STATE_CAPACITY: usize = 16;
+
+/// Defensive ceiling on the successor edges one decision may memoize, failed
+/// applies included. A failed edge retains no snapshot, only its `GameAction`,
+/// so it is not charged to `SUCCESSOR_STATE_CAPACITY`; this separate ceiling
+/// keeps the edge lists bounded even for a search that keeps failing. The
+/// workload measured for `SUCCESSOR_STATE_CAPACITY` stored no failed apply at
+/// all, so 256 is headroom rather than a tuned value.
+const SUCCESSOR_EDGE_CAPACITY: usize = 256;
+
+/// Identity of one position inside a single decision's search.
+///
+/// Issued only by [`PlannerServices`]. An id denotes exactly one `GameState`
+/// value: the root state handed to [`PlannerServices::new_search_root`], or
+/// the state reached from a tracked parent by cloning it and applying one fixed
+/// action with `apply_as_current_for_simulation`. Anything keyed by an id is
+/// therefore exact, unlike the lossy hash-keyed `candidate_cache` and
+/// `eval_cache`. Ids never outlive the `PlannerServices` that issued them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SearchNodeId(u32);
+
+/// The memoized outcome of applying one action at a tracked position: the
+/// child's identity and state, or `None` when the apply failed.
+type TrackedSuccessor = Option<(SearchNodeId, Arc<GameState>)>;
+
+/// Local witnesses for the per-decision search memos. Not engine perf counters
+/// (`perf_counters.rs` is out of scope); they exist so tests can prove that a
+/// repeated simulation or context build was actually skipped.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SearchMemoWitness {
+    /// Successor requests answered from the memo without simulating.
+    pub successor_hits: u32,
+    /// Successor requests that ran their simulation closure.
+    pub successor_simulations: u32,
+    /// Decision-context requests answered from the per-position memo.
+    pub context_hits: u32,
+    /// Decision-context requests that ran the engine's context builder.
+    pub context_builds: u32,
+    /// Highest number of successor edges held by the memo at once, failed
+    /// applies included. Not a measure of memory: see `peak_retained_states`.
+    pub peak_successor_edges: usize,
+    /// Highest number of child `GameState` snapshots held by the successor
+    /// memo at once (one per stored successful edge). This is the quantity
+    /// the memo's capacity bounds.
+    pub peak_retained_states: usize,
+    /// Highest number of decision contexts held by the per-position memo at
+    /// once, roots included.
+    pub peak_node_contexts: usize,
+}
+
+/// Where quiescence currently stands. It starts by borrowing the caller's
+/// state, moves onto shared memoized successors while the position is tracked,
+/// and takes ownership only when a step has to be applied in place.
+enum QuiesceCursor<'s> {
+    /// The caller's state, untouched so far.
+    Borrowed(&'s GameState),
+    /// A memoized successor shared with the successor memo.
+    Shared(Arc<GameState>),
+    /// A private copy that steps are applied to in place, boxed so the
+    /// cursor itself stays pointer-sized.
+    Owned(Box<GameState>),
+}
+
+impl QuiesceCursor<'_> {
+    /// The state the cursor currently points at.
+    fn state(&self) -> &GameState {
+        match self {
+            Self::Borrowed(state) => state,
+            Self::Shared(state) => state,
+            Self::Owned(state) => state,
+        }
+    }
+
+    /// Take a private copy of the current state (cloning unless the cursor
+    /// already owns one) and hand it out for an in-place apply.
+    fn make_owned(&mut self) -> &mut GameState {
+        if !matches!(self, Self::Owned(_)) {
+            *self = Self::Owned(Box::new(self.state().clone()));
+        }
+        match self {
+            Self::Owned(state) => state,
+            Self::Borrowed(_) | Self::Shared(_) => {
+                unreachable!("the cursor was made owned just above")
+            }
+        }
+    }
+
+    /// Consume the cursor into an owned state, cloning only when it does not
+    /// already own one.
+    #[cfg(test)]
+    fn into_owned(self) -> GameState {
+        match self {
+            Self::Borrowed(state) => state.clone(),
+            Self::Shared(state) => GameState::clone(&state),
+            Self::Owned(state) => *state,
+        }
+    }
+}
+
+/// Outcome of one forced quiescence step.
+enum QuiesceStep {
+    /// The action applied; the payload is the identity of the new position when
+    /// it is tracked.
+    Advanced(Option<SearchNodeId>),
+    /// The action failed to apply; quiescence stops here.
+    Failed,
+}
+
 pub struct PlannerServices<'a> {
     pub ai_player: PlayerId,
     pub config: &'a AiConfig,
@@ -691,6 +832,43 @@ pub struct PlannerServices<'a> {
     /// realized search depth (did the deep rung complete, with how much
     /// node headroom).
     pub rung_stats: Vec<RungStat>,
+    /// Exact successor memo: for each tracked position, the actions already
+    /// applied there and what each produced. `GameAction` is `PartialEq` but
+    /// not `Hash`, so each position keeps a short `Vec` compared by `==` (the
+    /// same reasoning as `killers`). The map is used for keyed lookup only and
+    /// is never iterated. Scope is the `PlannerServices` lifetime — one
+    /// decision — so nothing crosses determinized samples or decisions.
+    successors: HashMap<SearchNodeId, Vec<(GameAction, TrackedSuccessor)>>,
+    /// Number of edges currently held by `successors`, failed applies included.
+    /// Never exceeds `successor_edge_capacity`.
+    stored_successor_edges: usize,
+    /// Number of child snapshots currently held by `successors`: its
+    /// successful edges. Never exceeds `successor_state_capacity`.
+    retained_successor_states: usize,
+    /// Next unissued [`SearchNodeId`]. Ids only ever increase; one is issued
+    /// per root and one per retained snapshot, so the count is bounded by
+    /// `successor_state_capacity` plus the number of roots.
+    next_search_node: u32,
+    /// Ceiling on `retained_successor_states`, initialised from
+    /// `SUCCESSOR_STATE_CAPACITY`. Once it is reached no further edge is
+    /// stored, successful or not. A field so tests can lower it; `0` turns the
+    /// successor memo off, which leaves every position below a root untracked.
+    pub(crate) successor_state_capacity: usize,
+    /// Ceiling on `stored_successor_edges`, initialised from
+    /// `SUCCESSOR_EDGE_CAPACITY`. A field so tests can lower it.
+    successor_edge_capacity: usize,
+    /// Exact per-position decision contexts, keyed by tracked position. Keyed
+    /// lookup only, never iterated. Holds at most
+    /// `successor_state_capacity + 1` entries: a key is a tracked child (one
+    /// per retained snapshot, so at most `successor_state_capacity` of them)
+    /// or a root, and production search issues one root per decision.
+    /// `exact_decision_context` enforces the same ceiling on insert, so the
+    /// bound also holds for a caller that issues more roots.
+    node_contexts: HashMap<SearchNodeId, Arc<AiDecisionContext>>,
+    /// Witness counters for the memos above. Not engine perf counters; local
+    /// evidence that repeated work was actually skipped, used by the memo
+    /// regression tests.
+    pub memo_witness: SearchMemoWitness,
 }
 
 impl<'a> PlannerServices<'a> {
@@ -771,6 +949,14 @@ impl<'a> PlannerServices<'a> {
             beta_cutoffs: 0,
             killer_orderings: 0,
             rung_stats: Vec::new(),
+            successors: HashMap::new(),
+            stored_successor_edges: 0,
+            retained_successor_states: 0,
+            next_search_node: 0,
+            successor_state_capacity: SUCCESSOR_STATE_CAPACITY,
+            successor_edge_capacity: SUCCESSOR_EDGE_CAPACITY,
+            node_contexts: HashMap::new(),
+            memo_witness: SearchMemoWitness::default(),
         }
     }
 
@@ -797,6 +983,19 @@ impl<'a> PlannerServices<'a> {
         &mut self,
         state: &GameState,
     ) -> std::sync::Arc<AiDecisionContext> {
+        self.build_decision_context_at(None, state)
+    }
+
+    /// [`PlannerServices::build_decision_context`] for a position that may be
+    /// tracked. The hash-keyed `candidate_cache` is consulted first and wins,
+    /// so its insert and hit history is the same whether or not `node` is
+    /// tracked; only on a miss is the context taken from
+    /// [`PlannerServices::exact_decision_context`], which equals a fresh build.
+    fn build_decision_context_at(
+        &mut self,
+        node: Option<SearchNodeId>,
+        state: &GameState,
+    ) -> Arc<AiDecisionContext> {
         // MUST use candidate_cache_key, NOT quick_state_hash: the latter omits
         // state.waiting_for, which is the dispatch key for candidate_actions.
         // Using the wrong hash collides states with identical boards but
@@ -804,12 +1003,148 @@ impl<'a> PlannerServices<'a> {
         // cached candidates from the wrong state.
         let key = candidate_cache_key(state);
         if let Some(hit) = self.candidate_cache.get(&key) {
-            return std::sync::Arc::clone(hit);
+            return Arc::clone(hit);
         }
-        let ctx = std::sync::Arc::new(build_decision_context(state));
-        self.candidate_cache
-            .insert(key, std::sync::Arc::clone(&ctx));
+        let ctx = self.exact_decision_context(node, state);
+        self.candidate_cache.insert(key, Arc::clone(&ctx));
         ctx
+    }
+
+    /// The engine's decision context for exactly `state`. A tracked `node`
+    /// answers from the per-position memo after its first build; an untracked
+    /// one builds every time. The builder reads nothing but the state, so the
+    /// memoized value equals a fresh build. Never reads or writes
+    /// `candidate_cache`. `node`, when given, must identify `state`.
+    ///
+    /// The memo holds at most `successor_state_capacity + 1` contexts (every
+    /// tracked child plus one root). A tracked position past that ceiling,
+    /// which takes more than one root to reach, is built on every request like
+    /// an untracked one.
+    fn exact_decision_context(
+        &mut self,
+        node: Option<SearchNodeId>,
+        state: &GameState,
+    ) -> Arc<AiDecisionContext> {
+        if let Some(node) = node {
+            if let Some(hit) = self.node_contexts.get(&node) {
+                self.memo_witness.context_hits = self.memo_witness.context_hits.saturating_add(1);
+                return Arc::clone(hit);
+            }
+        }
+        self.memo_witness.context_builds = self.memo_witness.context_builds.saturating_add(1);
+        let ctx = Arc::new(build_decision_context(state));
+        if let Some(node) = node {
+            if self.node_contexts.len() <= self.successor_state_capacity {
+                self.node_contexts.insert(node, Arc::clone(&ctx));
+                self.memo_witness.peak_node_contexts = self
+                    .memo_witness
+                    .peak_node_contexts
+                    .max(self.node_contexts.len());
+            }
+        }
+        ctx
+    }
+
+    /// Start tracking a new search root and return its identity. The caller
+    /// owns the association between the id and the root state: every later
+    /// call that passes this id must pass that same state.
+    pub(crate) fn new_search_root(&mut self) -> SearchNodeId {
+        let id = SearchNodeId(self.next_search_node);
+        self.next_search_node = self.next_search_node.wrapping_add(1);
+        id
+    }
+
+    /// The successor of `parent` under `action`, simulating at most once per
+    /// tracked `(parent, action)` pair.
+    ///
+    /// `simulate` must be "clone the parent's state and apply `action` with
+    /// `apply_as_current_for_simulation`", returning `None` when the apply
+    /// fails. A tracked parent must not be payment-affiliated, or `simulate`
+    /// must return `None` for it, so an entry means the same thing whichever
+    /// caller wrote it.
+    ///
+    /// - Untracked parent (`None`): always simulates; the child is untracked.
+    /// - Tracked hit: returns the stored result (`None` for a stored failure)
+    ///   without calling `simulate`.
+    /// - Tracked miss: simulates and stores the result, failures included,
+    ///   unless the memo already retains `successor_state_capacity` child
+    ///   snapshots or holds `successor_edge_capacity` edges; then nothing is
+    ///   stored and the child is untracked.
+    ///
+    /// Only a stored success retains a snapshot and counts toward
+    /// `successor_state_capacity`. A stored failure counts toward
+    /// `successor_edge_capacity` alone.
+    pub(crate) fn successor(
+        &mut self,
+        parent: Option<SearchNodeId>,
+        action: &GameAction,
+        simulate: impl FnOnce() -> Option<GameState>,
+    ) -> Option<(Option<SearchNodeId>, Arc<GameState>)> {
+        let Some(parent) = parent else {
+            self.memo_witness.successor_simulations =
+                self.memo_witness.successor_simulations.saturating_add(1);
+            return simulate().map(|state| (None, Arc::new(state)));
+        };
+        if let Some((_, stored)) = self
+            .successors
+            .get(&parent)
+            .and_then(|edges| edges.iter().find(|(known, _)| known == action))
+        {
+            self.memo_witness.successor_hits = self.memo_witness.successor_hits.saturating_add(1);
+            return stored
+                .as_ref()
+                .map(|(child, state)| (Some(*child), Arc::clone(state)));
+        }
+        self.memo_witness.successor_simulations =
+            self.memo_witness.successor_simulations.saturating_add(1);
+        let simulated = simulate();
+        if self.retained_successor_states >= self.successor_state_capacity
+            || self.stored_successor_edges >= self.successor_edge_capacity
+        {
+            return simulated.map(|state| (None, Arc::new(state)));
+        }
+        let tracked: TrackedSuccessor = simulated.map(|state| {
+            let child = SearchNodeId(self.next_search_node);
+            self.next_search_node = self.next_search_node.wrapping_add(1);
+            self.retained_successor_states += 1;
+            (child, Arc::new(state))
+        });
+        self.successors
+            .entry(parent)
+            .or_default()
+            .push((action.clone(), tracked.clone()));
+        self.stored_successor_edges += 1;
+        self.memo_witness.peak_successor_edges = self
+            .memo_witness
+            .peak_successor_edges
+            .max(self.stored_successor_edges);
+        self.memo_witness.peak_retained_states = self
+            .memo_witness
+            .peak_retained_states
+            .max(self.retained_successor_states);
+        tracked.map(|(child, state)| (Some(child), state))
+    }
+
+    /// The one search edge: the state reached from `state` by `candidate`.
+    ///
+    /// A carried `payment_successor` is returned as-is with an untracked child
+    /// and no memo access, because equivalent actions are not interchangeable
+    /// across payment certificates. Otherwise the edge is exactly
+    /// `apply_candidate(state, candidate)`, memoized under `node` when the
+    /// position is tracked. `node`, when given, must identify `state`.
+    pub(crate) fn successor_edge(
+        &mut self,
+        node: Option<SearchNodeId>,
+        state: &GameState,
+        candidate: &CandidateAction,
+        payment_successor: Option<GameState>,
+    ) -> Option<(Option<SearchNodeId>, Arc<GameState>)> {
+        match payment_successor {
+            Some(successor) => Some((None, Arc::new(successor))),
+            None => self.successor(node, &candidate.action, || {
+                apply_candidate(state, candidate)
+            }),
+        }
     }
 
     pub fn validate_candidates(
@@ -885,13 +1220,18 @@ impl<'a> PlannerServices<'a> {
     /// order, and illegal ones (`apply_candidate` → None) are skipped WITHOUT
     /// consuming a sample slot, so a high-prior illegal candidate does not
     /// starve the sample. Returns each surviving continuation paired with the
-    /// prior that produced it. `&self` — only reads via `apply_candidate`.
+    /// prior that produced it and with the identity of the position it reached
+    /// (`None` when untracked). `&mut self` because each continuation goes
+    /// through the successor memo under `node`, which must identify `state`
+    /// when given; a prior's carried payment successor is moved out and never
+    /// memoized.
     fn sample_backfilled_continuations(
-        &self,
+        &mut self,
+        node: Option<SearchNodeId>,
         state: &GameState,
         mut priors: Vec<PolicyPrior>,
         sample_count: usize,
-    ) -> Vec<(f64, GameState)> {
+    ) -> Vec<(f64, Option<SearchNodeId>, Arc<GameState>)> {
         priors.sort_by(|a, b| {
             b.prior
                 .partial_cmp(&a.prior)
@@ -913,11 +1253,9 @@ impl<'a> PlannerServices<'a> {
             if out.len() == sample_count || self.deadline.expired() {
                 break;
             }
-            let sim = prior
-                .payment_successor
-                .or_else(|| self.apply_candidate(state, &prior.candidate));
-            if let Some(sim) = sim {
-                out.push((prior.prior, sim));
+            let sim = self.successor_edge(node, state, &prior.candidate, prior.payment_successor);
+            if let Some((child, sim)) = sim {
+                out.push((prior.prior, child, sim));
             }
         }
         out
@@ -1121,10 +1459,67 @@ impl<'a> PlannerServices<'a> {
     ///    resolved via `deterministic_choice`
     ///
     /// Capped at MAX_QUIESCE_STEPS to prevent runaway loops from cascading triggers.
-    fn quiesce(&self, state: &GameState) -> GameState {
+    ///
+    /// Untracked owned form of [`PlannerServices::quiesce_at`], kept for tests.
+    #[cfg(test)]
+    fn quiesce(&mut self, state: &GameState) -> GameState {
+        self.quiesce_at(None, state).into_owned()
+    }
+
+    /// Apply one forced quiescence `action` at the cursor's position.
+    ///
+    /// When the position is tracked and not payment-affiliated, the step goes
+    /// through the successor memo: the cursor moves onto the shared successor
+    /// and nothing is cloned or applied on a revisit. Otherwise (untracked,
+    /// affiliated, or a tracked apply that failed) the cursor takes ownership
+    /// and the action is applied in place; on failure the cursor is left
+    /// holding the state exactly as the failed in-place apply left it.
+    fn quiesce_step(
+        &mut self,
+        node: Option<SearchNodeId>,
+        cursor: &mut QuiesceCursor<'_>,
+        action: GameAction,
+    ) -> QuiesceStep {
+        if node.is_some()
+            && matches!(
+                classify_payment_continuation(cursor.state()),
+                PaymentContinuationState::NotAffiliated
+            )
+        {
+            let shared = self.successor(node, &action, || {
+                let mut sim = cursor.state().clone();
+                apply_as_current_for_simulation(&mut sim, action.clone()).ok()?;
+                Some(sim)
+            });
+            if let Some((child, successor)) = shared {
+                *cursor = QuiesceCursor::Shared(successor);
+                return QuiesceStep::Advanced(child);
+            }
+        }
+        match apply_as_current_for_simulation(cursor.make_owned(), action) {
+            Ok(_) => QuiesceStep::Advanced(None),
+            Err(_) => QuiesceStep::Failed,
+        }
+    }
+
+    /// Quiescence from a position that may be tracked (see
+    /// [`PlannerServices::quiesce`] for what it resolves). Returns a cursor at
+    /// the quiet position: still borrowing `state` when no step was taken.
+    ///
+    /// Every break (deadline, game over, no candidates, step cap) and every
+    /// choice is recomputed on each call. Only two pure things are shared for a
+    /// tracked position: its decision context and the successor of
+    /// `(position, chosen action)`. The quiesced result itself is never
+    /// memoized, so a revisit that chooses differently simply follows a
+    /// different edge. `node`, when given, must identify `state`.
+    fn quiesce_at<'s>(
+        &mut self,
+        mut node: Option<SearchNodeId>,
+        state: &'s GameState,
+    ) -> QuiesceCursor<'s> {
         const MAX_QUIESCE_STEPS: u32 = 20;
 
-        let mut sim = state.clone();
+        let mut cursor = QuiesceCursor::Borrowed(state);
         for _ in 0..MAX_QUIESCE_STEPS {
             // Search wall-clock bound (CR-agnostic): once the deadline is blown,
             // stop resolving the stack. A single quiesce can otherwise run up to
@@ -1141,11 +1536,11 @@ impl<'a> PlannerServices<'a> {
                 break;
             }
 
-            if matches!(sim.waiting_for, WaitingFor::GameOver { .. }) {
+            if matches!(cursor.state().waiting_for, WaitingFor::GameOver { .. }) {
                 break;
             }
 
-            let ctx = build_decision_context(&sim);
+            let ctx = self.exact_decision_context(node, cursor.state());
 
             // No candidates: nothing to do
             if ctx.candidates.is_empty() {
@@ -1158,48 +1553,58 @@ impl<'a> PlannerServices<'a> {
                 .iter()
                 .all(|c| matches!(c.action, engine::types::actions::GameAction::PassPriority));
             if all_pass {
-                if apply_as_current_for_simulation(
-                    &mut sim,
+                match self.quiesce_step(
+                    node,
+                    &mut cursor,
                     engine::types::actions::GameAction::PassPriority,
-                )
-                .is_err()
-                {
-                    break;
+                ) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
                 }
-                continue;
             }
 
             // Case 2: Only one legal action — apply it (forced move)
             if ctx.candidates.len() == 1 {
-                if apply_as_current_for_simulation(&mut sim, ctx.candidates[0].action.clone())
-                    .is_err()
-                {
-                    break;
+                match self.quiesce_step(node, &mut cursor, ctx.candidates[0].action.clone()) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
                 }
-                continue;
             }
 
             // Case 3: Deterministic mechanical choice (scry, surveil, mulligan, etc.)
             // These are non-strategic decisions that can be resolved with heuristics.
             let actions: Vec<_> = ctx.candidates.iter().map(|c| c.action.clone()).collect();
-            let acting_player = sim.waiting_for.acting_player().unwrap_or(self.ai_player);
+            let acting_player = cursor
+                .state()
+                .waiting_for
+                .acting_player()
+                .unwrap_or(self.ai_player);
             if let Some(action) = crate::search::deterministic_choice(
-                &sim,
+                cursor.state(),
                 acting_player,
                 self.config,
                 &actions,
                 None,
             ) {
-                if apply_as_current_for_simulation(&mut sim, action).is_err() {
-                    break;
+                match self.quiesce_step(node, &mut cursor, action) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
                 }
-                continue;
             }
 
             // Genuine decision point — stop quiescence
             break;
         }
-        sim
+        cursor
     }
 
     /// Evaluate a leaf state with quiescence: if the stack is non-empty and only
@@ -1208,22 +1613,40 @@ impl<'a> PlannerServices<'a> {
     /// static eval is a good-enough approximation and quiescence can itself
     /// clone + simulate state through the stack.
     pub fn evaluate_state_quiesced(&mut self, state: &GameState) -> f64 {
+        self.evaluate_state_quiesced_at(None, state)
+    }
+
+    /// [`PlannerServices::evaluate_state_quiesced`] for a position that may be
+    /// tracked; `node`, when given, must identify `state`. The quiesced state
+    /// is evaluated by reference, so a revisit of a tracked position clones
+    /// nothing.
+    pub(crate) fn evaluate_state_quiesced_at(
+        &mut self,
+        node: Option<SearchNodeId>,
+        state: &GameState,
+    ) -> f64 {
         if state.stack.is_empty() || self.deadline.expired() {
             return self.evaluate_state_cached(state);
         }
-        let quiesced = self.quiesce(state);
-        self.evaluate_state_cached(&quiesced)
+        let quiesced = self.quiesce_at(node, state);
+        self.evaluate_state_cached(quiesced.state())
     }
 
     /// Evaluate a leaf state for utility with quiescence.
     pub fn quiesced_leaf_eval(&mut self, state: &GameState) -> f64 {
+        self.quiesced_leaf_eval_at(None, state)
+    }
+
+    /// [`PlannerServices::quiesced_leaf_eval`] for a position that may be
+    /// tracked; `node`, when given, must identify `state`.
+    fn quiesced_leaf_eval_at(&mut self, node: Option<SearchNodeId>, state: &GameState) -> f64 {
         if state.stack.is_empty() || self.deadline.expired() {
             let value = self.evaluate_for_planner(state);
             return self.reduce_utility(state, &value);
         }
-        let quiesced = self.quiesce(state);
-        let value = self.evaluate_for_planner(&quiesced);
-        self.reduce_utility(&quiesced, &value)
+        let quiesced = self.quiesce_at(node, state);
+        let value = self.evaluate_for_planner(quiesced.state());
+        self.reduce_utility(quiesced.state(), &value)
     }
 
     pub fn tactical_score(
@@ -1293,12 +1716,27 @@ impl<'a> PlannerServices<'a> {
         self.policies.priors(&env, candidates)
     }
 
+    /// Policy priors and the planner value for `state`, as a rollout node sees
+    /// them. Computed afresh on every call: nothing a policy scores is
+    /// memoized.
     pub fn planner_evaluation(&mut self, state: &GameState) -> PlannerEvaluation {
+        self.planner_evaluation_at(None, state)
+    }
+
+    /// [`PlannerServices::planner_evaluation`] for a position that may be
+    /// tracked; `node`, when given, must identify `state`. Only the decision
+    /// context can come from a memo; the priors and the value are recomputed
+    /// on every call.
+    fn planner_evaluation_at(
+        &mut self,
+        node: Option<SearchNodeId>,
+        state: &GameState,
+    ) -> PlannerEvaluation {
         // Rollout leaf skips upfront legality validation — illegal candidates are
         // dropped at apply time by `sample_backfilled_continuations`
         // (`apply_candidate` → None), mirroring the beam path. This removes one
         // clone-and-apply-per-candidate probe (`state_clone_for_legality`).
-        let ctx = self.build_decision_context(state);
+        let ctx = self.build_decision_context_at(node, state);
         let candidates = prepare_payment_candidates(state, ctx.candidates.clone());
         let scoring_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         let mut priors = self.policy_priors(
@@ -1349,40 +1787,58 @@ impl<'a> PlannerServices<'a> {
             .reduce(&self.utility_vector(state, value))
     }
 
+    /// Depth-limited rollout value of `state`: sample the best-prior legal
+    /// continuations, recurse, and fall back to the quiesced leaf evaluation at
+    /// depth 0, at game over, or once the wall-clock deadline is blown.
     pub fn rollout_estimate(&mut self, state: &GameState, depth: u32) -> f64 {
+        self.rollout_estimate_at(None, state, depth)
+    }
+
+    /// [`PlannerServices::rollout_estimate`] for a position that may be
+    /// tracked; `node`, when given, must identify `state`. Scoring runs on
+    /// every visit; only the pure successor and decision-context work is
+    /// shared with earlier visits of the same position.
+    pub(crate) fn rollout_estimate_at(
+        &mut self,
+        node: Option<SearchNodeId>,
+        state: &GameState,
+        depth: u32,
+    ) -> f64 {
         // CR-agnostic: if the wall-clock budget is blown, short-circuit to the
         // cheap leaf evaluator rather than descending further. Without this
         // bail, rollout recursion ignores `time_budget_ms` entirely.
         if self.deadline.expired() {
-            return self.quiesced_leaf_eval(state);
+            return self.quiesced_leaf_eval_at(node, state);
         }
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return self.quiesced_leaf_eval(state);
+            return self.quiesced_leaf_eval_at(node, state);
         }
 
-        let evaluation = self.planner_evaluation(state);
+        let evaluation = self.planner_evaluation_at(node, state);
         if evaluation.priors.is_empty() {
-            return self.quiesced_leaf_eval(state);
+            return self.quiesced_leaf_eval_at(node, state);
         }
 
         let rollout_player = state.waiting_for.acting_player().unwrap_or(self.ai_player);
         let sample_count = self.config.search.rollout_samples.max(1) as usize;
         let continuations =
-            self.sample_backfilled_continuations(state, evaluation.priors, sample_count);
+            self.sample_backfilled_continuations(node, state, evaluation.priors, sample_count);
         if continuations.is_empty() {
-            return self.quiesced_leaf_eval(state);
+            return self.quiesced_leaf_eval_at(node, state);
         }
         // CR-agnostic: if the budget was blown while sampling continuations,
         // short-circuit to the cheap leaf eval instead of descending the rollout
         // tree. Closes the post-sampling path the reporter flagged; the top-of-
         // function guard covers a deadline already expired on entry.
         if self.deadline.expired() {
-            return self.quiesced_leaf_eval(state);
+            return self.quiesced_leaf_eval_at(node, state);
         }
         let is_maximizing = rollout_player == self.ai_player;
         continuations
             .into_iter()
-            .map(|(prior, sim)| self.rollout_estimate(&sim, depth - 1) + (prior * 0.05))
+            .map(|(prior, child, sim)| {
+                self.rollout_estimate_at(child, &sim, depth - 1) + (prior * 0.05)
+            })
             .reduce(|best, value| {
                 if is_maximizing {
                     best.max(value)
@@ -1390,11 +1846,13 @@ impl<'a> PlannerServices<'a> {
                     best.min(value)
                 }
             })
-            .unwrap_or_else(|| self.quiesced_leaf_eval(state))
+            .unwrap_or_else(|| self.quiesced_leaf_eval_at(node, state))
     }
 }
 
 pub trait ContinuationPlanner {
+    /// Value of `state`, the position reached after a root action, from the
+    /// searching player's point of view.
     fn evaluate_after_action(
         &mut self,
         state: &GameState,
@@ -1410,9 +1868,34 @@ pub struct BeamContinuationPlanner {
 }
 
 impl BeamContinuationPlanner {
+    /// Alpha-beta beam value of `state` at `depth` plies remaining. Untracked
+    /// wrapper over [`BeamContinuationPlanner::search_value_at`], kept for
+    /// tests that drive the search directly.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn search_value(
         &self,
+        state: &GameState,
+        depth: u32,
+        ply: usize,
+        alpha: f64,
+        beta: f64,
+        services: &mut PlannerServices<'_>,
+        budget: &mut SearchBudget,
+    ) -> f64 {
+        self.search_value_at(None, state, depth, ply, alpha, beta, services, budget)
+    }
+
+    /// Alpha-beta beam value of `state` at `depth` plies remaining, for a
+    /// position that may be tracked; `node`, when given, must identify `state`.
+    /// Ranking, killer ordering, the transposition table, the budget and the
+    /// deadline behave the same for tracked and untracked positions; a tracked
+    /// position only reuses its decision context and the successors of the
+    /// actions already applied there.
+    #[allow(clippy::too_many_arguments)]
+    fn search_value_at(
+        &self,
+        node: Option<SearchNodeId>,
         state: &GameState,
         depth: u32,
         ply: usize,
@@ -1423,10 +1906,10 @@ impl BeamContinuationPlanner {
     ) -> f64 {
         budget.tick();
         if depth == 0 {
-            return services.rollout_estimate(state, self.rollout_depth);
+            return services.rollout_estimate_at(node, state, self.rollout_depth);
         }
         if budget.exhausted() || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-            return services.evaluate_state_quiesced(state);
+            return services.evaluate_state_quiesced_at(node, state);
         }
 
         let key = transposition_key(state);
@@ -1439,7 +1922,7 @@ impl BeamContinuationPlanner {
         let alpha_orig = alpha;
         let beta_orig = beta;
 
-        let ctx = services.build_decision_context(state);
+        let ctx = services.build_decision_context_at(node, state);
         // Skip upfront validation in beam search — invalid candidates are handled
         // by apply_candidate returning None in the loop below. This avoids cloning
         // the state once per candidate just to test validity. The rollout leaf
@@ -1448,7 +1931,7 @@ impl BeamContinuationPlanner {
         // None during backfill sampling, not by an upfront clone-per-candidate probe.
         let candidates = prepare_payment_candidates(state, ctx.candidates.clone());
         if candidates.is_empty() {
-            return services.evaluate_state_quiesced(state);
+            return services.evaluate_state_quiesced_at(node, state);
         }
 
         let node_player = state.waiting_for.acting_player();
@@ -1489,15 +1972,24 @@ impl BeamContinuationPlanner {
             if services.deadline.expired() {
                 break;
             }
-            let Some(sim) = ranked
-                .payment_successor
-                .clone()
-                .or_else(|| services.apply_candidate(state, &ranked.candidate))
-            else {
+            let Some((child, sim)) = services.successor_edge(
+                node,
+                state,
+                &ranked.candidate,
+                ranked.payment_successor.clone(),
+            ) else {
                 continue;
             };
-            let value = self.search_value(&sim, depth - 1, ply + 1, alpha, beta, services, budget)
-                + (ranked.score * 0.05);
+            let value = self.search_value_at(
+                child,
+                &sim,
+                depth - 1,
+                ply + 1,
+                alpha,
+                beta,
+                services,
+                budget,
+            ) + (ranked.score * 0.05);
 
             if is_maximizing {
                 best = best.max(value);
@@ -1517,7 +2009,7 @@ impl BeamContinuationPlanner {
         }
 
         let result = if best.is_infinite() {
-            services.evaluate_state_quiesced(state)
+            services.evaluate_state_quiesced_at(node, state)
         } else {
             best
         };
@@ -1530,21 +2022,23 @@ impl BeamContinuationPlanner {
         }
         result
     }
-}
 
-impl ContinuationPlanner for BeamContinuationPlanner {
-    fn evaluate_after_action(
-        &mut self,
+    /// [`ContinuationPlanner::evaluate_after_action`] for a position that may
+    /// be tracked; `node`, when given, must identify `state`.
+    pub(crate) fn evaluate_after_action_at(
+        &self,
+        node: Option<SearchNodeId>,
         state: &GameState,
         services: &mut PlannerServices<'_>,
         budget: &mut SearchBudget,
     ) -> f64 {
         if self.depth == 0 {
-            services.evaluate_state_quiesced(state)
+            services.evaluate_state_quiesced_at(node, state)
         } else {
             // Ply-from-root starts at 0 for the rung root: a killer recorded at
             // ply 1 of one rung is reused at ply 1 of the next (chess convention).
-            self.search_value(
+            self.search_value_at(
+                node,
                 state,
                 self.depth,
                 0,
@@ -1554,6 +2048,18 @@ impl ContinuationPlanner for BeamContinuationPlanner {
                 budget,
             )
         }
+    }
+}
+
+impl ContinuationPlanner for BeamContinuationPlanner {
+    /// Untracked form of [`BeamContinuationPlanner::evaluate_after_action_at`].
+    fn evaluate_after_action(
+        &mut self,
+        state: &GameState,
+        services: &mut PlannerServices<'_>,
+        budget: &mut SearchBudget,
+    ) -> f64 {
+        self.evaluate_after_action_at(None, state, services, budget)
     }
 }
 
@@ -2151,13 +2657,14 @@ mod tests {
         assert!(priors[1].prior > priors[0].prior);
     }
 
+    /// A position with an empty stack is already quiet, so quiescence returns it unchanged.
     #[test]
     fn quiesce_is_noop_on_empty_stack() {
         let state = make_state();
         assert!(state.stack.is_empty());
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         let policies = PolicyRegistry::default();
-        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, &policies);
         let quiesced = services.quiesce(&state);
         assert!(quiesced.stack.is_empty());
         // Board state should be identical
@@ -2224,6 +2731,7 @@ mod tests {
         state
     }
 
+    /// Quiescence resolves a creature spell on the stack before the position is evaluated.
     #[test]
     fn quiesce_resolves_creature_spell_on_stack() {
         // Both players have priority, only PassPriority is legal
@@ -2233,7 +2741,7 @@ mod tests {
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         let policies = PolicyRegistry::default();
-        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, &policies);
         let quiesced = services.quiesce(&state);
 
         // After quiescence, the stack should be resolved
@@ -2273,7 +2781,7 @@ mod tests {
         let policies = PolicyRegistry::default();
 
         // Positive reach-guard (non-vacuity): a live deadline resolves the stack.
-        let live = PlannerServices::with_deadline(
+        let mut live = PlannerServices::with_deadline(
             PlayerId(0),
             &config,
             &policies,
@@ -2289,7 +2797,7 @@ mod tests {
         );
 
         // Negative (the fix): an expired deadline leaves the stack untouched.
-        let expired = PlannerServices::with_deadline(
+        let mut expired = PlannerServices::with_deadline(
             PlayerId(0),
             &config,
             &policies,
@@ -2447,17 +2955,19 @@ mod tests {
     // T2: sample_backfilled_continuations sorts by prior (desc), skips illegal
     // candidates WITHOUT consuming a sample slot, and pairs each survivor with
     // its own prior.
+    /// Sampling backfills past an illegal high-prior candidate without spending a sample slot.
     #[test]
     fn sample_backfilled_continuations_backfills_past_illegal_high_prior() {
         let state = make_state_with_land();
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         let policies = PolicyRegistry::default();
-        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, &policies);
 
         let illegal = CandidateAction {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
         };
@@ -2491,6 +3001,7 @@ mod tests {
         // the single surviving slot carries the legal candidate. A take-then-filter
         // implementation would take the illegal top, drop it, and return [].
         let sampled = services.sample_backfilled_continuations(
+            None,
             &state,
             vec![illegal_prior.clone(), legal_prior.clone()],
             1,
@@ -2517,25 +3028,27 @@ mod tests {
             payment_successor: None,
         };
         let two = services.sample_backfilled_continuations(
+            None,
             &state,
             vec![illegal_prior.clone(), legal_a, legal_b],
             2,
         );
         assert_eq!(two.len(), 2, "both legal candidates survive backfill");
         assert!(
-            two.iter().all(|(p, _)| *p <= 0.2),
+            two.iter().all(|(p, _, _)| *p <= 0.2),
             "only the legal priors (<= 0.2) survive; the illegal 0.9 top is dropped"
         );
 
         // Sibling: empty priors → empty result.
         assert!(services
-            .sample_backfilled_continuations(&state, Vec::new(), 1)
+            .sample_backfilled_continuations(None, &state, Vec::new(), 1)
             .is_empty());
 
         // Sibling: all-illegal → empty result (nothing to backfill from).
         assert!(
             services
                 .sample_backfilled_continuations(
+                    None,
                     &state,
                     vec![illegal_prior.clone(), illegal_prior.clone()],
                     2,
@@ -2545,16 +3058,18 @@ mod tests {
         );
     }
 
+    /// A retained payment successor is used directly instead of the inapplicable rollout fallback.
     #[test]
     fn retained_payment_successor_bypasses_inapplicable_rollout_fallback() {
         let state = make_state_with_land();
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
         let policies = PolicyRegistry::default();
-        let services = PlannerServices::new_default(PlayerId(0), &config, &policies);
+        let mut services = PlannerServices::new_default(PlayerId(0), &config, &policies);
         let fallback = CandidateAction {
             action: GameAction::ActivateAbility {
                 source_id: ObjectId(99999),
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
         };
@@ -2572,6 +3087,7 @@ mod tests {
             )
             .expect("reach-guard: a concrete retained successor exists");
         let sampled = services.sample_backfilled_continuations(
+            None,
             &state,
             vec![PolicyPrior {
                 candidate: fallback,
@@ -2582,7 +3098,7 @@ mod tests {
         );
         assert_eq!(sampled.len(), 1);
         assert_eq!(
-            quick_state_hash(&sampled[0].1),
+            quick_state_hash(&sampled[0].2),
             quick_state_hash(&retained),
             "rollout consumes the witnessed successor instead of retrying its hostile fallback"
         );
@@ -2592,6 +3108,7 @@ mod tests {
     // PINNED to a land-only empty-stack fixture: every sampled continuation leaves
     // an empty stack, so the depth-0 leaf never enters quiesce → build_decision_context
     // (mod.rs:584), which would otherwise fire the generation recorders.
+    /// The rollout estimate does not probe legality at its production entry point.
     #[test]
     fn rollout_estimate_probe_free_at_production_entry() {
         let state = make_state_with_land();
@@ -2611,14 +3128,18 @@ mod tests {
 
         // Reach-guard B: sampled continuations exist AND all leave an empty stack.
         let sample_count = services.config.search.rollout_samples.max(1) as usize;
-        let continuations =
-            services.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        let continuations = services.sample_backfilled_continuations(
+            None,
+            &state,
+            eval.priors.clone(),
+            sample_count,
+        );
         assert!(
             !continuations.is_empty(),
             "reach-guard B: at least one legal continuation must be sampled"
         );
         assert!(
-            continuations.iter().all(|(_, sim)| sim.stack.is_empty()),
+            continuations.iter().all(|(_, _, sim)| sim.stack.is_empty()),
             "T3′ requires an empty-stack fixture so the depth-0 leaf never enters \
              quiesce → build_decision_context (mod.rs:584)"
         );
@@ -2664,7 +3185,7 @@ mod tests {
         );
         let sample_count = live.config.search.rollout_samples.max(1) as usize;
         let live_conts =
-            live.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+            live.sample_backfilled_continuations(None, &state, eval.priors.clone(), sample_count);
         assert!(
             !live_conts.is_empty(),
             "non-vacuity: a live deadline must sample at least one continuation"
@@ -2682,8 +3203,12 @@ mod tests {
             expired.deadline.expired(),
             "witness: the injected deadline must be expired so the guard fires"
         );
-        let empty =
-            expired.sample_backfilled_continuations(&state, eval.priors.clone(), sample_count);
+        let empty = expired.sample_backfilled_continuations(
+            None,
+            &state,
+            eval.priors.clone(),
+            sample_count,
+        );
         assert!(
             empty.is_empty(),
             "revert-failing (Edit 2): sample_backfilled_continuations must apply \
@@ -3405,6 +3930,590 @@ mod tests {
             quick_state_hash(&dandan),
             quick_state_hash(&buried),
             "reach: the pile's graveyard contents are hashed"
+        );
+    }
+
+    /// A `PassPriority` candidate for player 0, the legal edge of the memo tests.
+    fn pass_candidate() -> CandidateAction {
+        CandidateAction {
+            action: GameAction::PassPriority,
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Pass),
+        }
+    }
+
+    /// An activation of an object that does not exist: an edge whose apply fails.
+    fn inapplicable_candidate() -> CandidateAction {
+        CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: ObjectId(99999),
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Mana),
+        }
+    }
+
+    /// T1: a tracked `(parent, action)` pair is simulated once; the revisit is a
+    /// memo hit that returns the very same successor, equal to a fresh apply.
+    #[test]
+    fn successor_memo_simulates_a_tracked_edge_once() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let pass = pass_candidate();
+        let root = services.new_search_root();
+        let runs = std::cell::Cell::new(0u32);
+        let simulate = || {
+            runs.set(runs.get() + 1);
+            apply_candidate(&state, &pass)
+        };
+
+        let (first_child, first) = services
+            .successor(Some(root), &pass.action, simulate)
+            .expect("reach-guard: passing priority applies at this root");
+        let (second_child, second) = services
+            .successor(Some(root), &pass.action, simulate)
+            .expect("the memoized edge is still a success");
+
+        assert_eq!(runs.get(), 1, "the revisit must not simulate again");
+        assert_eq!(services.memo_witness.successor_hits, 1);
+        assert_eq!(services.memo_witness.successor_simulations, 1);
+        assert_eq!(services.memo_witness.peak_successor_edges, 1);
+        assert_eq!(services.memo_witness.peak_retained_states, 1);
+        assert!(first_child.is_some(), "a stored success is tracked");
+        assert_eq!(first_child, second_child);
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "the hit shares the stored state"
+        );
+        let fresh = apply_candidate(&state, &pass).expect("fresh apply succeeds");
+        assert!(
+            *first == fresh,
+            "the memoized successor equals a fresh apply"
+        );
+    }
+
+    /// T2: an untracked parent never reads or writes the memo. Reach-guard:
+    /// `successor_memo_simulates_a_tracked_edge_once` on the same fixture.
+    #[test]
+    fn successor_memo_is_bypassed_for_an_untracked_parent() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let pass = pass_candidate();
+        let runs = std::cell::Cell::new(0u32);
+        let simulate = || {
+            runs.set(runs.get() + 1);
+            apply_candidate(&state, &pass)
+        };
+
+        for _ in 0..2 {
+            let (child, _) = services
+                .successor(None, &pass.action, simulate)
+                .expect("reach-guard: passing priority applies");
+            assert!(
+                child.is_none(),
+                "an untracked parent yields an untracked child"
+            );
+        }
+
+        assert_eq!(runs.get(), 2, "every untracked request simulates");
+        assert_eq!(services.memo_witness.successor_hits, 0);
+        assert_eq!(services.memo_witness.successor_simulations, 2);
+        assert_eq!(services.memo_witness.peak_successor_edges, 0);
+        assert_eq!(services.memo_witness.peak_retained_states, 0);
+        assert!(services.successors.is_empty());
+    }
+
+    /// T3: a failed apply at a tracked parent is memoized as a failure, which
+    /// is an edge that retains no state.
+    #[test]
+    fn successor_memo_remembers_a_failed_apply() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let illegal = inapplicable_candidate();
+        let root = services.new_search_root();
+        let runs = std::cell::Cell::new(0u32);
+        let simulate = || {
+            runs.set(runs.get() + 1);
+            apply_candidate(&state, &illegal)
+        };
+
+        assert!(services
+            .successor(Some(root), &illegal.action, simulate)
+            .is_none());
+        assert!(services
+            .successor(Some(root), &illegal.action, simulate)
+            .is_none());
+
+        assert_eq!(runs.get(), 1, "the stored failure answers the revisit");
+        assert_eq!(services.memo_witness.successor_hits, 1);
+        assert_eq!(services.memo_witness.peak_successor_edges, 1);
+        assert_eq!(services.memo_witness.peak_retained_states, 0);
+    }
+
+    /// T4 (hostile): two roots on different states never share an edge, even
+    /// for an equal action. Reach-guard: the T1 test on the same action.
+    #[test]
+    fn successor_memo_keeps_distinct_roots_apart() {
+        let with_land = make_state_with_land();
+        let without_land = make_state();
+        assert!(with_land != without_land, "fixture: the roots differ");
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let pass = pass_candidate();
+        let first_root = services.new_search_root();
+        let second_root = services.new_search_root();
+        assert_ne!(first_root, second_root);
+
+        let (_, from_first) = services
+            .successor(Some(first_root), &pass.action, || {
+                apply_candidate(&with_land, &pass)
+            })
+            .expect("reach-guard: pass applies at the first root");
+        let (_, from_second) = services
+            .successor(Some(second_root), &pass.action, || {
+                apply_candidate(&without_land, &pass)
+            })
+            .expect("reach-guard: pass applies at the second root");
+
+        assert_eq!(services.memo_witness.successor_simulations, 2);
+        assert_eq!(services.memo_witness.successor_hits, 0);
+        assert!(!Arc::ptr_eq(&from_first, &from_second));
+        assert!(
+            *from_first != *from_second,
+            "each root keeps the successor of its own state"
+        );
+    }
+
+    /// T5: once `successor_state_capacity` snapshots are retained an edge is
+    /// simulated on every visit and its child is untracked, while the edges
+    /// stored earlier keep hitting. The witness reports the bound binding.
+    #[test]
+    fn successor_memo_falls_open_past_capacity() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        services.successor_state_capacity = 1;
+        let pass = pass_candidate();
+        let other = build_decision_context(&state)
+            .candidates
+            .into_iter()
+            .find(|candidate| !matches!(candidate.action, GameAction::PassPriority))
+            .expect("fixture: the land in hand gives a second legal action");
+        let root = services.new_search_root();
+
+        let (stored_child, _) = services
+            .successor(Some(root), &pass.action, || apply_candidate(&state, &pass))
+            .expect("reach-guard: pass applies");
+        assert!(stored_child.is_some(), "the first edge fits and is tracked");
+
+        for _ in 0..2 {
+            let (child, _) = services
+                .successor(Some(root), &other.action, || {
+                    apply_candidate(&state, &other)
+                })
+                .expect("reach-guard: the second action applies");
+            assert!(child.is_none(), "an edge past capacity is untracked");
+        }
+        assert_eq!(
+            services.memo_witness.successor_simulations, 3,
+            "the edge past capacity simulates on every visit"
+        );
+        assert_eq!(services.memo_witness.successor_hits, 0);
+        assert_eq!(services.memo_witness.peak_successor_edges, 1);
+        assert_eq!(
+            services.memo_witness.peak_retained_states, 1,
+            "the retained snapshots stop at the capacity"
+        );
+
+        let (again, _) = services
+            .successor(Some(root), &pass.action, || apply_candidate(&state, &pass))
+            .expect("the stored edge is still there");
+        assert_eq!(again, stored_child);
+        assert_eq!(services.memo_witness.successor_hits, 1);
+        assert_eq!(services.memo_witness.successor_simulations, 3);
+    }
+
+    /// T5b: a stored failure retains no snapshot, so it takes none of the
+    /// retained-state budget: with room for one snapshot, a success requested
+    /// after a failure is still tracked. Once that snapshot is retained the
+    /// memo is closed to every new edge, a failing one included. Reach-guard:
+    /// the failure and the success are both stored, as their revisits hit.
+    #[test]
+    fn failed_apply_takes_no_retained_state_budget() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        services.successor_state_capacity = 1;
+        let pass = pass_candidate();
+        let illegal = inapplicable_candidate();
+        let root = services.new_search_root();
+
+        assert!(services
+            .successor(Some(root), &illegal.action, || {
+                apply_candidate(&state, &illegal)
+            })
+            .is_none());
+        assert_eq!(services.memo_witness.peak_successor_edges, 1);
+        assert_eq!(services.memo_witness.peak_retained_states, 0);
+
+        let (child, _) = services
+            .successor(Some(root), &pass.action, || apply_candidate(&state, &pass))
+            .expect("reach-guard: pass applies");
+        let child = child.expect("the failure left the whole state budget free");
+        assert_eq!(services.memo_witness.peak_successor_edges, 2);
+        assert_eq!(services.memo_witness.peak_retained_states, 1);
+
+        assert!(services
+            .successor(Some(root), &illegal.action, || {
+                apply_candidate(&state, &illegal)
+            })
+            .is_none());
+        services
+            .successor(Some(root), &pass.action, || apply_candidate(&state, &pass))
+            .expect("the stored success is still there");
+        assert_eq!(
+            services.memo_witness.successor_hits, 2,
+            "reach-guard: both edges were stored"
+        );
+        assert_eq!(services.memo_witness.successor_simulations, 2);
+
+        // The budget is spent: a new failing edge below the tracked child is
+        // simulated on every visit and never stored.
+        for _ in 0..2 {
+            assert!(services
+                .successor(Some(child), &illegal.action, || {
+                    apply_candidate(&state, &illegal)
+                })
+                .is_none());
+        }
+        assert_eq!(services.memo_witness.successor_simulations, 4);
+        assert_eq!(services.memo_witness.successor_hits, 2);
+        assert_eq!(services.memo_witness.peak_successor_edges, 2);
+        assert_eq!(services.memo_witness.peak_retained_states, 1);
+    }
+
+    /// T5c: failed applies are bounded by `successor_edge_capacity` on their
+    /// own, so a search that only ever fails cannot grow the edge lists
+    /// without limit, and reaching that ceiling closes the memo to successes
+    /// too. Reach-guard: the first failure is stored and answers its revisit.
+    #[test]
+    fn failed_applies_stop_at_the_edge_capacity() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        services.successor_edge_capacity = 1;
+        let pass = pass_candidate();
+        let illegal = inapplicable_candidate();
+        let first_root = services.new_search_root();
+        let second_root = services.new_search_root();
+
+        for _ in 0..2 {
+            assert!(services
+                .successor(Some(first_root), &illegal.action, || {
+                    apply_candidate(&state, &illegal)
+                })
+                .is_none());
+        }
+        assert_eq!(
+            services.memo_witness.successor_hits, 1,
+            "reach-guard: the first failure is stored"
+        );
+
+        for _ in 0..2 {
+            assert!(services
+                .successor(Some(second_root), &illegal.action, || {
+                    apply_candidate(&state, &illegal)
+                })
+                .is_none());
+        }
+        let (child, _) = services
+            .successor(Some(second_root), &pass.action, || {
+                apply_candidate(&state, &pass)
+            })
+            .expect("reach-guard: pass applies");
+        assert!(child.is_none(), "a full edge list tracks no new child");
+        assert_eq!(services.memo_witness.successor_hits, 1);
+        assert_eq!(services.memo_witness.successor_simulations, 4);
+        assert_eq!(services.memo_witness.peak_successor_edges, 1);
+        assert_eq!(services.memo_witness.peak_retained_states, 0);
+    }
+
+    /// T5d: the decision-context memo holds at most
+    /// `successor_state_capacity + 1` contexts however many positions are
+    /// tracked. One root and one retained child fill it at capacity 1; a
+    /// second root, the only way to track a further position, is then built on
+    /// every request. Reach-guard: the two stored contexts answer their
+    /// revisits from the memo.
+    #[test]
+    fn context_memo_stays_within_the_retained_state_bound() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        services.successor_state_capacity = 1;
+        let pass = pass_candidate();
+        let root = services.new_search_root();
+        let (child, child_state) = services
+            .successor(Some(root), &pass.action, || apply_candidate(&state, &pass))
+            .expect("reach-guard: pass applies");
+        let child = child.expect("the first edge is tracked");
+        let extra_root = services.new_search_root();
+
+        for _ in 0..2 {
+            services.exact_decision_context(Some(root), &state);
+            services.exact_decision_context(Some(child), &child_state);
+        }
+        assert_eq!(services.memo_witness.context_builds, 2);
+        assert_eq!(
+            services.memo_witness.context_hits, 2,
+            "reach-guard: the root and the retained child are memoized"
+        );
+        assert_eq!(services.node_contexts.len(), 2);
+
+        let fresh = build_decision_context(&state);
+        for _ in 0..2 {
+            let ctx = services.exact_decision_context(Some(extra_root), &state);
+            assert_eq!(
+                ctx.candidates.len(),
+                fresh.candidates.len(),
+                "a context past the bound is still the exact one"
+            );
+        }
+        assert_eq!(
+            services.memo_witness.context_builds, 4,
+            "a position past the bound is built on every request"
+        );
+        assert_eq!(services.memo_witness.context_hits, 2);
+        assert_eq!(services.node_contexts.len(), 2);
+        assert_eq!(services.memo_witness.peak_node_contexts, 2);
+        assert_eq!(
+            services.memo_witness.peak_node_contexts,
+            services.successor_state_capacity + 1
+        );
+    }
+
+    /// T6 (hostile): an edge carrying a payment successor returns that state
+    /// with an untracked child and never touches the action-keyed memo, so an
+    /// equal action with a different payment certificate cannot be confused
+    /// with it. Reach-guard: the same node and action without a payment
+    /// successor do go through the memo.
+    #[test]
+    fn payment_successor_edge_is_never_memoized() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let illegal = inapplicable_candidate();
+        let retained = apply_candidate(&state, &pass_candidate())
+            .expect("reach-guard: a concrete retained successor exists");
+        let root = services.new_search_root();
+
+        for _ in 0..2 {
+            let (child, successor) = services
+                .successor_edge(Some(root), &state, &illegal, Some(retained.clone()))
+                .expect("a carried payment successor is the edge's result");
+            assert!(child.is_none(), "a payment edge yields an untracked child");
+            assert!(*successor == retained);
+        }
+        assert!(services.successors.is_empty());
+        assert_eq!(services.memo_witness, SearchMemoWitness::default());
+
+        assert!(
+            services
+                .successor_edge(Some(root), &state, &illegal, None)
+                .is_none(),
+            "reach-guard: without the payment successor the action itself is applied"
+        );
+        assert_eq!(services.memo_witness.successor_simulations, 1);
+        assert_eq!(services.memo_witness.peak_successor_edges, 1);
+        let (child, successor) = services
+            .successor_edge(Some(root), &state, &illegal, Some(retained.clone()))
+            .expect("a stored failure for the bare action must not shadow the payment edge");
+        assert!(child.is_none());
+        assert!(*successor == retained);
+        assert_eq!(services.memo_witness.successor_hits, 0);
+    }
+
+    /// T11: quiescing a tracked position a second time simulates nothing and
+    /// builds no context, and its value is bit-equal to an untracked run on a
+    /// separate services instance (on one instance the evaluation cache would
+    /// make the equality vacuous).
+    #[test]
+    fn tracked_quiescence_revisit_reuses_successors_and_contexts() {
+        let state = creature_spell_on_stack_state();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+
+        let mut tracked = hard_services(&config, &policies);
+        let node = tracked.new_search_root();
+        let first = tracked.evaluate_state_quiesced_at(Some(node), &state);
+        let after_first = tracked.memo_witness;
+        assert!(
+            after_first.successor_simulations > 0,
+            "reach-guard: the first visit resolves the stack through the memo"
+        );
+        assert!(after_first.context_builds > 0);
+        let second = tracked.evaluate_state_quiesced_at(Some(node), &state);
+        let after_second = tracked.memo_witness;
+        assert_eq!(
+            after_second.successor_simulations, after_first.successor_simulations,
+            "the revisit must not simulate any step again"
+        );
+        assert_eq!(
+            after_second.context_builds, after_first.context_builds,
+            "the revisit must not rebuild any decision context"
+        );
+        assert!(after_second.successor_hits > after_first.successor_hits);
+        assert!(after_second.context_hits > after_first.context_hits);
+        assert_eq!(first.to_bits(), second.to_bits());
+
+        // Fall-open arm: an untracked call never goes through the memo. Its
+        // forced steps are applied in place on a private copy.
+        let mut untracked = hard_services(&config, &policies);
+        let value = untracked.evaluate_state_quiesced_at(None, &state);
+        assert_eq!(value.to_bits(), first.to_bits());
+        assert_eq!(untracked.memo_witness.successor_hits, 0);
+        assert_eq!(untracked.memo_witness.successor_simulations, 0);
+        assert_eq!(untracked.memo_witness.context_hits, 0);
+        assert_eq!(untracked.memo_witness.peak_successor_edges, 0);
+        assert_eq!(untracked.memo_witness.peak_retained_states, 0);
+        assert_eq!(untracked.memo_witness.peak_node_contexts, 0);
+        let builds = untracked.memo_witness.context_builds;
+        assert!(matches!(
+            untracked.quiesce_at(None, &state),
+            QuiesceCursor::Owned(_)
+        ));
+        assert!(
+            untracked.memo_witness.context_builds > builds,
+            "an untracked revisit builds its contexts again"
+        );
+        assert_eq!(untracked.memo_witness.successor_simulations, 0);
+    }
+
+    /// T11 (seam): a forced step whose apply fails reports `Failed` and leaves
+    /// the cursor holding the state exactly as an in-place apply leaves it,
+    /// both on the first visit and when the failure is answered from the memo.
+    #[test]
+    fn quiesce_step_failed_apply_matches_an_in_place_apply() {
+        let state = make_state_with_land();
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = hard_services(&config, &policies);
+        let illegal = inapplicable_candidate().action;
+        let mut in_place = state.clone();
+        assert!(
+            apply_as_current_for_simulation(&mut in_place, illegal.clone()).is_err(),
+            "fixture: the action does not apply"
+        );
+        let node = services.new_search_root();
+
+        for visit in 0..2u32 {
+            let mut cursor = QuiesceCursor::Borrowed(&state);
+            let step = services.quiesce_step(Some(node), &mut cursor, illegal.clone());
+            assert!(matches!(step, QuiesceStep::Failed));
+            assert!(matches!(cursor, QuiesceCursor::Owned(_)));
+            assert!(*cursor.state() == in_place);
+            assert_eq!(services.memo_witness.successor_simulations, 1);
+            assert_eq!(services.memo_witness.successor_hits, visit);
+        }
+
+        // Reach-guard: a step that applies moves the cursor onto the shared
+        // successor and reports the tracked child.
+        let mut cursor = QuiesceCursor::Borrowed(&state);
+        let step = services.quiesce_step(Some(node), &mut cursor, GameAction::PassPriority);
+        assert!(matches!(step, QuiesceStep::Advanced(Some(_))));
+        assert!(matches!(cursor, QuiesceCursor::Shared(_)));
+    }
+
+    /// T12: the hash-keyed `candidate_cache` is consulted before the exact
+    /// per-position memo, exactly as before the memo existed. Reach-guard:
+    /// without a hash entry the position's own context is returned and inserted.
+    #[test]
+    fn decision_context_lookup_prefers_the_hash_cache() {
+        let state = make_state_with_land();
+        let key = candidate_cache_key(&state);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+
+        let mut services = hard_services(&config, &policies);
+        let node = services.new_search_root();
+        let sentinel = Arc::new(build_decision_context(&state));
+        let exact = Arc::new(build_decision_context(&state));
+        services.candidate_cache.insert(key, Arc::clone(&sentinel));
+        services.node_contexts.insert(node, Arc::clone(&exact));
+        let got = services.build_decision_context_at(Some(node), &state);
+        assert!(
+            Arc::ptr_eq(&got, &sentinel),
+            "the hash cache entry wins over the position's memo"
+        );
+        assert_eq!(services.memo_witness.context_hits, 0);
+        assert_eq!(services.memo_witness.context_builds, 0);
+
+        let mut guard = hard_services(&config, &policies);
+        let node = guard.new_search_root();
+        let exact = Arc::new(build_decision_context(&state));
+        guard.node_contexts.insert(node, Arc::clone(&exact));
+        let got = guard.build_decision_context_at(Some(node), &state);
+        assert!(
+            Arc::ptr_eq(&got, &exact),
+            "reach-guard: the memo is consulted"
+        );
+        assert_eq!(guard.memo_witness.context_hits, 1);
+        assert!(Arc::ptr_eq(
+            guard.candidate_cache.get(&key).expect("inserted on miss"),
+            &exact
+        ));
+    }
+
+    /// T19: quiescence clones nothing when it takes no step, and a tracked
+    /// revisit ends on the shared memoized successor without simulating.
+    #[test]
+    fn quiescence_cursor_clones_only_when_it_must() {
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+
+        // A finished game is quiet before any step: quiescence takes none.
+        let mut quiet = make_state_with_land();
+        quiet.waiting_for = WaitingFor::GameOver { winner: None };
+        let mut services = hard_services(&config, &policies);
+        match services.quiesce_at(None, &quiet) {
+            QuiesceCursor::Borrowed(borrowed) => assert!(std::ptr::eq(borrowed, &quiet)),
+            QuiesceCursor::Shared(_) | QuiesceCursor::Owned(_) => {
+                panic!("a quiet position must be returned by reference")
+            }
+        }
+        let quiet_node = services.new_search_root();
+        assert!(matches!(
+            services.quiesce_at(Some(quiet_node), &quiet),
+            QuiesceCursor::Borrowed(_)
+        ));
+        assert_eq!(services.memo_witness.successor_simulations, 0);
+
+        let stacked = creature_spell_on_stack_state();
+        let node = services.new_search_root();
+        let first = services.quiesce_at(Some(node), &stacked).into_owned();
+        let simulations = services.memo_witness.successor_simulations;
+        assert!(simulations > 0, "reach-guard: the first visit takes a step");
+        let revisit = services.quiesce_at(Some(node), &stacked);
+        assert!(
+            matches!(revisit, QuiesceCursor::Shared(_)),
+            "a tracked revisit must end on the memoized successor"
+        );
+        assert!(*revisit.state() == first);
+        assert_eq!(services.memo_witness.successor_simulations, simulations);
+        assert!(
+            first == services.quiesce(&stacked),
+            "equals untracked quiescence"
         );
     }
 }

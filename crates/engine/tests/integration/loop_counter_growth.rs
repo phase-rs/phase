@@ -284,6 +284,7 @@ fn drive_plus1_token_engine_to_declared_offer() -> (GameRunner, ObjectId) {
         match runner.act(GameAction::ActivateAbility {
             source_id: rider,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         }) {
             Ok(_) => activations += 1,
             Err(e) => {

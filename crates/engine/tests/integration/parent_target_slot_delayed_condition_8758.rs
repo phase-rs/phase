@@ -501,9 +501,15 @@ fn a_restored_legacy_lose_control_trigger_still_unattaches_the_uniform() {
                 .expect("the saved condition carries its trigger")
         };
         assert_eq!(
-            trigger["mode"], "ChangesController",
+            trigger["mode"],
+            serde_json::json!({ "ChangesController": { "side": "Loses" } }),
             "reach guard: the saved trigger is the lose-control trigger"
         );
+        // A legacy save carries the bare mode tag (decoded as `Loses`) and the
+        // losing "you" in the player slot.
+        if legacy {
+            trigger["mode"] = serde_json::json!("ChangesController");
+        }
         trigger["valid_target"] = if legacy {
             serde_json::json!({ "type": "Controller" })
         } else {

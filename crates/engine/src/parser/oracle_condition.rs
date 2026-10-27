@@ -360,6 +360,10 @@ fn static_condition_to_restriction_condition(
         // restriction must not tell.
         StaticCondition::Unrecognized { .. } => None,
         // The absence of a condition. A restriction with no condition is not a restriction.
+        // CR 500.8 + CR 506.1 + CR 608.2c: a per-turn phase-occurrence gate has
+        // no exact restriction-surface representation, so it fails closed here
+        // rather than approximating.
+        StaticCondition::FirstCombatPhaseOfTurn => None,
         StaticCondition::None => None,
         // CR 118.12a + CR 508.1d + CR 509.1c: an optional-cost combat tax, resolved via a
         // `WaitingFor::CombatTaxPayment` round-trip at declaration time. It is not a
@@ -386,6 +390,9 @@ fn static_condition_to_restriction_condition(
         // migration), NOT adding a fallback here.
         StaticCondition::DevotionGE { .. }
         | StaticCondition::IsPresent { filter: None }
+        // An arithmetic quality ("a prime number of …") has no `ParsedCondition`
+        // carrier; callers must treat None as fail-closed.
+        | StaticCondition::QuantityQuality { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::SpeedGE { .. }
@@ -396,12 +403,14 @@ fn static_condition_to_restriction_condition(
         | StaticCondition::SourceAttackingAlone
         | StaticCondition::SourceIsBlocking
         | StaticCondition::IsMonarch { .. }
+        | StaticCondition::HasBoon { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::WasStartingPlayer { .. }
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -1248,6 +1257,34 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// An arithmetic quality has no `ParsedCondition` carrier, so the restriction
+    /// bridge declines it rather than approximating it.
+    #[test]
+    fn quantity_quality_does_not_convert_to_a_restriction() {
+        use crate::types::ability::NumberQuality;
+        let quantity = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: crate::types::ability::PlayerScope::Controller,
+            },
+        };
+        assert_eq!(
+            static_condition_to_restriction_condition(StaticCondition::QuantityQuality {
+                quantity: quantity.clone(),
+                quality: NumberQuality::Prime,
+            }),
+            None
+        );
+        // Paired positive: the same quantity as a comparison converts.
+        assert!(
+            static_condition_to_restriction_condition(StaticCondition::QuantityComparison {
+                lhs: quantity,
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            })
+            .is_some()
+        );
     }
 
     /// The explicit rejects named by the design: these are not conditions a cast/activation

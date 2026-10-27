@@ -234,7 +234,8 @@ enum KeywordActivation {
     Ninjutsu,
 }
 
-/// The live object a play's legality read asks about (an `ObjectId` persists across zones).
+/// The object a play's legality read asks about: an `ObjectId` persists across zones, except
+/// that a token that left the battlefield has ceased to exist (CR 111.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayLocus {
     Cast(ObjectId),
@@ -403,6 +404,8 @@ struct PendingRead {
     node: usize,
     seat: PlayerId,
     locus: PlayLocus,
+    /// The play's index in the trace.
+    at: usize,
 }
 
 /// An action that reverses a play the trace holds.
@@ -451,6 +454,9 @@ pub(crate) struct PlayTrace {
     last_play: Option<usize>,
     optional_triggers: im::HashSet<usize>,
     consumed: im::HashSet<usize>,
+    /// Each node's first play, since the node last read legal, that its pending read found
+    /// consumed or made from a source that has ceased to exist and was not made again.
+    spent_from: im::HashMap<usize, usize>,
     pending_reads: im::Vector<PendingRead>,
     named: im::Vector<NamedSpan>,
     /// The first named span no window has read.
@@ -460,6 +466,8 @@ pub(crate) struct PlayTrace {
     undo: im::Vector<UndoPoint>,
     /// CR 733.1: the mana abilities the engine reversed inside the action in progress.
     reversed: Vec<(ObjectId, usize)>,
+    /// A reducer-discovered illegal casting procedure, rather than CancelCast.
+    process_reversed: bool,
     /// Each entry that activates a mana ability or answers one of its choices (CR 605.3b), with
     /// the ability it belongs to.
     mana_ability_entries: im::HashMap<usize, (ObjectId, usize)>,
@@ -483,12 +491,14 @@ impl PlayTrace {
             last_play: None,
             optional_triggers: im::HashSet::new(),
             consumed: im::HashSet::new(),
+            spent_from: im::HashMap::new(),
             pending_reads: im::Vector::new(),
             named: im::Vector::new(),
             unread: 0,
             offered: None,
             undo: im::Vector::new(),
             reversed: Vec::new(),
+            process_reversed: false,
             mana_ability_entries: im::HashMap::new(),
             carried: im::Vector::new(),
             carried_named: im::Vector::new(),
@@ -537,6 +547,7 @@ impl PlayTrace {
                     node,
                     seat: entry.seat,
                     locus,
+                    at,
                 });
             }
         }
@@ -758,7 +769,6 @@ fn refresh_carrying(
     let sources: Vec<AbilitySource<'_>> = objects
         .iter()
         .map(|object| AbilitySource {
-            name: &object.base_name,
             mana_cost: &object.base_mana_cost,
             card_type: &object.base_card_types,
             abilities: &object.base_abilities,
@@ -856,6 +866,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => Choice::Play(Play::Activate(*source_id, *ability_index)),
         GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             Choice::Play(Play::Mana(
@@ -1124,6 +1135,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::ExploreChoice { .. }
         // CR 701.30c: each clashing player puts their card on top or on the bottom.
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
@@ -1196,7 +1208,11 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::AssignCombatDamage { .. }
         | WaitingFor::AssignBlockerDamage { .. }
         | WaitingFor::DistributeAmong { .. }
-        | WaitingFor::PhyrexianPayment { .. } => Mandatory,
+        | WaitingFor::PhyrexianPayment { .. }
+        // Digital-only Alchemy (no CR entry): the "one of them" token-host
+        // choice names no "may" — the controller picks one of the stamped
+        // entrants, or no prompt is raised at all.
+        | WaitingFor::ChooseTokenHost { .. } => Mandatory,
     }
 }
 
@@ -1393,6 +1409,31 @@ pub(crate) fn mana_ability_reversed(state: &mut GameState, source: ObjectId, pla
     }
 }
 
+/// CR 733.1: the cast rollback also reversed mana activations made during it.
+/// Use the trace's exact undo identities, including nested choices.
+pub(crate) fn cast_mana_abilities_reversed(state: &mut GameState) {
+    if let Some(trace) = state.play_trace.as_deref_mut() {
+        let abilities: Vec<_> = trace
+            .undo
+            .iter()
+            .rev()
+            .take_while(|point| point.undoes != Reversal::Process)
+            .filter_map(|point| match point.undoes {
+                Reversal::ManaAbility(source, place) => Some((source, place)),
+                Reversal::Process | Reversal::ManaSource(_) => None,
+            })
+            .collect();
+        trace.reversed.extend(abilities);
+    }
+}
+
+/// CR 733.1: a failed casting procedure reverses the same play as CancelCast.
+pub(crate) fn casting_procedure_reversed(state: &mut GameState) {
+    if let Some(trace) = state.play_trace.as_deref_mut() {
+        trace.process_reversed = true;
+    }
+}
+
 /// Restores the trace when the action did not apply; applies the reversal when it did.
 pub(crate) fn end_action(
     state: &mut GameState,
@@ -1421,8 +1462,14 @@ pub(crate) fn end_action(
         .as_deref_mut()
         .map(|trace| std::mem::take(&mut trace.reversed))
         .unwrap_or_default();
+    let process_reversed = state
+        .play_trace
+        .as_deref_mut()
+        .is_some_and(|trace| std::mem::take(&mut trace.process_reversed));
     if let Some(reversal) = snapshot.reverses {
         reverse(state, reversal);
+    } else if process_reversed {
+        reverse(state, Reversal::Process);
     }
     let began_play = play_in_progress(state);
     let cost_move = snapshot
@@ -1554,6 +1601,86 @@ pub(crate) fn record_resolutions(state: &mut GameState, before: &BeforeResolutio
     });
 }
 
+/// Whether `locus` names a mana ability's source that no longer exists.
+fn source_ceased(state: &GameState, locus: PlayLocus) -> bool {
+    matches!(locus, PlayLocus::Mana(id, Some(_)) if !state.objects.contains_key(&id))
+}
+
+/// CR 111.7 + CR 111.1: where the play at `at` is made now that its token source has ceased to
+/// exist, in a span starting at `from`. The plays of one activated mana ability from `from` on
+/// whose sources ceased take, one each and in order, the battlefield objects made since the first
+/// of them that their seat controls and that bear the ability.
+fn remade_source(
+    state: &GameState,
+    trace: &PlayTrace,
+    from: usize,
+    at: usize,
+) -> Option<PlayLocus> {
+    let entry = trace.entries.get(at)?;
+    let EntryKind::Play { node, locus, .. } = entry.kind else {
+        return None;
+    };
+    let PlayLocus::Mana(_, Some(index)) = locus else {
+        return None;
+    };
+    if !source_ceased(state, locus) {
+        return None;
+    }
+    let NodeKey::Activated(definition) = trace.nodes.get(node)? else {
+        return None;
+    };
+    let earlier: Vec<&TraceEntry> = trace
+        .entries
+        .iter()
+        .skip(from)
+        .take(at.saturating_sub(from))
+        .filter(|play| {
+            play.seat == entry.seat
+                && matches!(
+                    play.kind,
+                    EntryKind::Play { node: other, locus: PlayLocus::Mana(source, Some(i)), .. }
+                        if other == node && i == index && !state.objects.contains_key(&source)
+                )
+        })
+        .collect();
+    let since = earlier
+        .first()
+        .map_or(entry.next_object_id, |first| first.next_object_id);
+    let mut remade: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| id.0 >= since)
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|object| {
+                object.controller == entry.seat
+                    && object.abilities.get(index) == Some(&**definition)
+            })
+        })
+        .collect();
+    remade.sort_unstable();
+    remade
+        .get(earlier.len())
+        .map(|&id| PlayLocus::Mana(id, Some(index)))
+}
+
+/// The object [`remade_source`] finds for the entry at `at` of a span the current window named
+/// in its own trace; a carried span has none.
+pub(crate) fn remade_play_source(
+    state: &GameState,
+    span: NamedSpan,
+    at: usize,
+) -> Option<ObjectId> {
+    let remade = match span.source {
+        SpanSource::Window => remade_source(state, current(state)?, span.start, at),
+        SpanSource::Carried(_) => None,
+    };
+    match remade? {
+        PlayLocus::Mana(id, _) => Some(id),
+        PlayLocus::Cast(_) | PlayLocus::Activate(..) | PlayLocus::Unread => None,
+    }
+}
+
 /// One legality read of one play through the engine's own authority (mana abilities by CR
 /// 605.3a's); `None` when the locus has no single-play authority.
 fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Option<bool> {
@@ -1607,11 +1734,21 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
             match read_legality(state, holder, &read.locus) {
                 Some(true) => {
                     trace.consumed.remove(&read.node);
+                    trace.spent_from.remove(&read.node);
                 }
                 Some(false) => {
                     trace.consumed.insert(read.node);
+                    trace.spent_from.entry(read.node).or_insert(read.at);
                 }
-                None => {}
+                // A token spent and not made again is not a consumed play, which would turn the
+                // empty-stack retry to consumed plays only; it only starts its node's span.
+                None => {
+                    if source_ceased(state, read.locus)
+                        && remade_source(state, &trace, read.at, read.at).is_none()
+                    {
+                        trace.spent_from.entry(read.node).or_insert(read.at);
+                    }
+                }
             }
         }
         trace.pending_reads = kept;
@@ -1667,14 +1804,35 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
             } else {
                 NamingCause::LegalNow
             };
+            let mut earlier_starts = Vec::new();
             for (start, node, locus) in played {
-                if any_consumed && !trace.consumed.contains(&node) {
+                // CR 111.7 + CR 111.1: a token source spent and made again is a consumed play
+                // that is available again, so its node is retried at the token made again.
+                let remade = remade_source(state, &trace, start, start);
+                if any_consumed && !trace.consumed.contains(&node) && remade.is_none() {
                     continue;
                 }
-                if read_legality(state, holder, &locus) == Some(true) {
+                if let Some(&first) = trace.spent_from.get(&node).filter(|&&first| first < start) {
+                    earlier_starts.push((first, node));
+                }
+                if read_legality(state, holder, &remade.unwrap_or(locus)) == Some(true) {
+                    trace.spent_from.remove(&node);
                     trace
                         .named
                         .push_back(NamedSpan::in_window(start, end, cause));
+                }
+            }
+            // A token node played more than once before it was available again is also named
+            // from the first of those plays, after every span the window names from a last play.
+            for (first, node) in earlier_starts {
+                let Some(locus) = remade_source(state, &trace, first, first) else {
+                    continue;
+                };
+                if read_legality(state, holder, &locus) == Some(true) {
+                    trace.spent_from.remove(&node);
+                    trace
+                        .named
+                        .push_back(NamedSpan::in_window(first, end, cause));
                 }
             }
         }
@@ -1847,6 +2005,7 @@ pub fn install_plays_for_tests(state: &mut GameState, plays: &[(PlayerId, PlayLo
             | PlayLocus::Mana(source_id, Some(ability_index)) => GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode: Default::default(),
             },
             PlayLocus::Cast(object_id) => GameAction::CastSpell {
                 object_id,
@@ -2000,6 +2159,7 @@ mod tests {
                     player,
                     card: source,
                     remaining: vec![],
+                    bottom_cards: vec![],
                 },
                 Mandatory,
             ),
@@ -2010,6 +2170,7 @@ mod tests {
                     source_id: source,
                     counter_type: None,
                     available: vec![(CounterType::Plus1Plus1, 2)],
+                    max_total: None,
                     pending_effect: effect(source),
                 },
                 Optional,

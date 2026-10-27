@@ -1525,7 +1525,8 @@ export interface SerializedAbility {
 }
 
 export type ChooseFromZoneConstraint =
-  | { type: "DistinctCardTypes"; categories: string[] };
+  | { type: "DistinctCardTypes"; categories: string[] }
+  | { type: "TotalManaValue"; comparator: string; value: number };
 
 export type SearchSelectionConstraint =
   | { type: "None" }
@@ -2165,10 +2166,18 @@ export interface TriggerContextDisplay {
   player?: PlayerId;
 }
 
+/** Mirrors `engine::game::derived_views::StackAbilityKindView`: the typed
+ * template behind `kind_label`, so the display layer localizes the ability
+ * label without parsing English text. */
+export type StackAbilityKindView =
+  | { type: "Activated"; data: { number?: number | null } } // older engines send null; current omits the key
+  | { type: "Triggered" };
+
 export interface StackEntryDisplay {
   source_name: string;
   token_image_ref?: TokenImageRef | null;
   kind_label: string;
+  ability_kind?: StackAbilityKindView;
   ability_description?: string;
   selected_mode_labels?: string[];
   is_pending?: boolean;
@@ -2214,6 +2223,32 @@ export interface PendingCast {
   // `#[serde(default, skip_serializing_if = "Option::is_none")]` — absent for
   // spells and for activations that have not reached their fold.
   activation_cost_snapshot?: ActivationCostSnapshot;
+  // CR 107.4f + CR 118.13a + CR 601.2b + CR 601.2h: a manually paid
+  // activation's Phyrexian announcement and, once selected, its actual
+  // Phyrexian payment. Engine-authored and transported as is; the frontend
+  // derives nothing from it. `#[serde(default, skip_serializing_if =
+  // "Option::is_none")]` — absent for spells, automatic activations and a
+  // manual activation that has not reached its announcement.
+  activation_phyrexian_intent?: ActivationPhyrexianIntent;
+}
+
+/// CR 107.4f + CR 118.13a: how one Phyrexian-shaped symbol of an activation's
+/// mana cost is paid, keyed by its index in the activation's mana component and
+/// the raw printed symbol at that index.
+export interface ActivationShardChoice {
+  shard_index: number;
+  shard: ManaCostShard;
+  choice: ShardChoice;
+}
+
+/// CR 118.13a + CR 601.2b + CR 601.2h: the announcement (`native_choices`, bound
+/// while the activation is proposed) and the actual payment selections
+/// (`payment_choices`, bound when the locked total is paid). No permission is
+/// stored.
+export interface ActivationPhyrexianIntent {
+  native_choices: ActivationShardChoice[];
+  // `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+  payment_choices?: ActivationShardChoice[];
 }
 
 /// CR 601.2f + CR 602.2b: every cost modifier that applied to one activation,
@@ -2459,6 +2494,18 @@ export type SpellStackToGraveyardReplacement =
   | { type: "Library"; position: LibraryPosition }
   | { type: "Hand" };
 
+/**
+ * Mirrors engine `PendingEntersModifications` — the cast-this-way
+ * gains-modifications rider carried on a cast permission/offer: the typed
+ * continuous modifications plus the printed spell-quality predicate ("a
+ * creature spell" in "If you cast a creature spell this way, it gains …").
+ * Each field is omitted when absent.
+ */
+export type PendingEntersModifications = {
+  modifications?: ContinuousModification[];
+  cast_filter?: TargetFilter;
+};
+
 export type CastOfferKind =
   | { type: "Adventure"; object_id: ObjectId; card_id: CardId; payment_mode?: CastPaymentMode }
   | { type: "Miracle"; object_id: ObjectId; cost: ManaCost }
@@ -2481,6 +2528,9 @@ export type CastOfferKind =
       additional_cost?: ManaCost;
       // CR 614.1a + CR 608.2n: optional cast-this-way redirect.
       graveyard_replacement?: SpellStackToGraveyardReplacement;
+      // CR 608.2c + CR 611.2a: optional cast-this-way gains-modifications
+      // rider (Strago and Relm); omitted when empty.
+      enters_with_modifications?: PendingEntersModifications;
       // Frozen resolution authority, including receipts to withdraw if the
       // accepted offer never becomes a cast.
       cleanup: ResolutionCastCleanup;
@@ -2496,7 +2546,13 @@ export type CastOfferKind =
       /** Required bridge carrier; old filter-only windows fail closed. */
       face_policy: ResolutionCastFacePolicy;
       zones: Zone[];
-      exile_instead_of_graveyard?: boolean;
+      // CR 614.1a: optional cast-this-way redirect. The engine's serialized
+      // field is `graveyard_replacement` (the legacy
+      // `exile_instead_of_graveyard` key survives only as a serde alias).
+      graveyard_replacement?: SpellStackToGraveyardReplacement;
+      // CR 608.2c + CR 611.2a: optional cast-this-way gains-modifications
+      // rider; omitted when empty.
+      enters_with_modifications?: PendingEntersModifications;
       // CR 607.2a: THIS resolution's "exiled this way" batch (Plargg and
       // Nassari); omitted when empty (no batch restriction). Display-only
       // pass-through — the modal renders `candidates`.
@@ -2515,6 +2571,100 @@ export type PendingMulliganAction =
 export type MulliganDecisionPhase =
   | { type: "Declare" }
   | { type: "BottomCards"; count: number; then: PendingMulliganAction };
+
+/**
+ * One click collected by a local contest host, stamped with the host's own clock
+ * and addressed to the engine-authored identity of the contest it was made in.
+ */
+export interface ContestClickInput {
+  contest: number;
+  player: PlayerId;
+  seq: number;
+  at_ms: number;
+}
+
+/** What one local-host contest tick did. `step` mirrors the engine's `ContestStep`. */
+export interface ContestDriveResult {
+  step: "NotInContest" | "Unchanged" | "Updated" | "Settled";
+  events: GameEvent[];
+  log_entries: GameLogEntry[];
+  /**
+   * The contest still running after this tick (its identity and seats), or null when
+   * none is. A host reads it to decide which inputs it may accept and buffer.
+   */
+  contest: { id: number; players: [PlayerId, PlayerId] } | null;
+  /**
+   * Set by an adapter that owns the commit of this tick's transition (snapshot and
+   * events) through its own state channel, ahead of any follow-up play it runs. The
+   * caller must not commit it again: an adapter that publishes owns the commit, and a
+   * second one would replay the resolution events and log entries. An adapter whose
+   * snapshot read failed keeps the transition and delivers it, once, on a later tick.
+   */
+  published?: boolean;
+}
+
+/** Which printed contest is being adapted. Presentation only. */
+export type ContestKind = "Staring" | "BreathHolding";
+
+export type ContestPhase =
+  | "Pending"
+  | "Preparing"
+  | "Active"
+  | "Resolving"
+  | "Completed"
+  | "Cancelled";
+
+export type ContestLossReason = "Inactivity" | "Forfeit";
+
+export type ContestOutcome =
+  | { Decided: { winner: PlayerId; loser: PlayerId; reason: ContestLossReason } }
+  | "Tie";
+
+export type ContestCancelReason =
+  | "BothDisconnected"
+  | "TimeLimit"
+  | "ParticipantLeftGame"
+  | "HostAborted";
+
+export type ContestResult = { Outcome: ContestOutcome } | { Cancelled: ContestCancelReason };
+
+export type ContestantConnection = "Connected" | { Disconnected: { since_ms: number } };
+
+export interface Contestant {
+  player: PlayerId;
+  /** Valid clicks counted while Active (display only — never decides the winner). */
+  clicks: number;
+  last_activity_ms: number;
+  last_seq?: number | null;
+  connection: ContestantConnection;
+}
+
+export interface ContestConfig {
+  countdown_ms: number;
+  inactivity_timeout_ms: number;
+  reconnect_grace_ms: number;
+  settle_window_ms: number;
+  max_active_ms: number;
+}
+
+/**
+ * Engine-owned contest state. Times are in the host's monotonic millisecond
+ * timebase (`clock_ms` is the host instant this snapshot was produced at), so a
+ * client derives "time until GO" as `go_at_ms - clock_ms` and counts down from the
+ * moment it received the snapshot — it never compares against its own clock.
+ */
+export interface ContestState {
+  /** Engine-authored identity, unique within a game; every input is bound to it. */
+  id: number;
+  kind: ContestKind;
+  phase: ContestPhase;
+  config: ContestConfig;
+  contestants: [Contestant, Contestant];
+  clock_ms: number;
+  go_at_ms?: number | null;
+  paused_since_ms?: number | null;
+  result?: ContestResult | null;
+}
 
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
@@ -2562,6 +2712,7 @@ export type WaitingFor =
   | { type: "CopyTargetChoice"; data: { player: PlayerId; source_id: ObjectId; valid_targets: ObjectId[]; max_mana_value?: number | null; purpose?: { type: "BecomeCopy" | "PersistChosenAttribute" | "CopyTokenSource" } } }
   | { type: "ExploreChoice"; data: { player: PlayerId; source_id: ObjectId; choosable: ObjectId[]; remaining: ObjectId[]; pending_effect: unknown } }
   | { type: "ReturnAsAuraTarget"; data: { player: PlayerId; source_id: ObjectId; returned_id: ObjectId; legal_targets: TargetRef[]; pending_effect: unknown } }
+  | { type: "ChooseTokenHost"; data: { player: PlayerId; source_id: ObjectId; legal_targets: TargetRef[]; pending_ability: unknown } }
   | { type: "EquipTarget"; data: { player: PlayerId; equipment_id: ObjectId; valid_targets: ObjectId[] } }
   | { type: "CrewVehicle"; data: { player: PlayerId; vehicle_id: ObjectId; crew_power: number; eligible_creatures: ObjectId[]; contributions?: number[] } }
   | { type: "StationTarget"; data: { player: PlayerId; spacecraft_id: ObjectId; eligible_creatures: ObjectId[] } }
@@ -2604,7 +2755,7 @@ export type WaitingFor =
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
   | { type: "ModeChoice"; data: { player: PlayerId; modal: ModalChoice; pending_cast: PendingCast; unavailable_modes?: number[] } }
-  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; activation_cost_snapshot?: ActivationCostSnapshot; unavailable_modes?: number[] } }
+  | { type: "AbilityModeChoice"; data: { player: PlayerId; modal: ModalChoice; source_id: ObjectId; mode_abilities: unknown[]; is_activated: boolean; ability_index?: number; ability_cost?: unknown; activation_cost_snapshot?: ActivationCostSnapshot; activation_payment_mode?: CastPaymentMode; unavailable_modes?: number[] } }
   | { type: "DiscardToHandSize"; data: { player: PlayerId; count: number; cards: ObjectId[] } }
   | { type: "OptionalCostChoice"; data: { player: PlayerId; cost: AdditionalCost; times_kicked: number; origin?: string; gift_kind?: { type: string }; pending_cast: PendingCast } }
   | { type: "CostTypeChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; pending_cast: PendingCast } }
@@ -2694,7 +2845,7 @@ export type WaitingFor =
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
   | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
   | { type: "ChooseUntapSubset"; data: { player: PlayerId; group: ObjectId[]; max: number } }
-  | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; remaining?: ObjectId[] } }
+  | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; permission: TriggerDefinitionRef; remaining?: { attacker: ObjectId; permission: TriggerDefinitionRef }[] } }
   | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
   | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; trample: TrampleKind | null; defending_player: PlayerId; attack_target: AttackTarget; pw_loyalty?: number; pw_controller?: PlayerId } }
@@ -2704,7 +2855,7 @@ export type WaitingFor =
   | { type: "AssignBlockerDamage"; data: { player: PlayerId; blocker_id: ObjectId; total_damage: number; attackers: ObjectId[] } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "MoveCountersDistribution"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; destinations: ObjectId[]; pending_effect: unknown } }
-  | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; pending_effect: unknown } }
+  | { type: "RemoveCountersChoice"; data: { player: PlayerId; source_id: ObjectId; counter_type?: CounterType | null; available: [CounterType, number][]; max_total?: number | null; pending_effect: unknown } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; up_to?: boolean; constraint?: ChooseFromZoneConstraint | null; source_id: ObjectId; reciprocal_role?: "Produce" | "Consume" | null } }
   | { type: "BeholdChoice"; data: { player: PlayerId; choices: ObjectId[] } }
   | { type: "EmpowerJaceChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[]; count: number } }
@@ -2743,10 +2894,14 @@ export type WaitingFor =
   | { type: "ClashChooseOpponent"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown } }
   // CR 608.2d: "an opponent chooses" from a zone (multiplayer) — the controller
   // picks WHICH opponent makes the choice before the zone choice is presented.
-  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" } }
+  | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
   | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
-  | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][] } }
+  | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
+  // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
+  // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
+  // engine's state machine. See `ContestState`.
+  | { type: "PhysicalContest"; data: { contest: ContestState; source_id: ObjectId } }
   | { type: "VoteChoice"; data: {
       player: PlayerId;
       remaining_votes: number;
@@ -3071,6 +3226,8 @@ export type DebugAction =
   | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "SetLife"; data: { player_id: PlayerId; life: number } }
+  | { type: "GainLife"; data: { player_id: PlayerId; amount: number } }
+  | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
@@ -3140,7 +3297,7 @@ export type GameAction =
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[]; payment_mode?: CastPaymentMode } }
   | { type: "Foretell"; data: { object_id: ObjectId; card_id: CardId } }
-  | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
+  | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number; payment_mode?: CastPaymentMode } }
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][]; bands?: ObjectId[][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "MulliganDecision"; data: { choice: MulliganChoice } }
@@ -3380,8 +3537,8 @@ export type GameEvent =
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
   // `kind` is the engine's activated-ability kind (CR 605.1a / 606.1); it is
   // omitted by legacy payloads, which mean "Normal". `departed_source_lki`,
-  // `trigger_state` and `stack_entry` are engine-internal trigger authority the
-  // UI never renders.
+  // `trigger_state`, `stack_entry` and `activation_cost` are engine-internal
+  // trigger authority the UI never renders.
   | { type: "AbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; kind?: ActivatedAbilityKind } }
   | { type: "ExhaustAbilityActivated"; data: { player_id: PlayerId; source_id: ObjectId; is_mana_ability: boolean } }
   // `from` is null for an object that enters from no zone (a created token).
@@ -3476,6 +3633,7 @@ export type GameEvent =
   | { type: "DungeonCompleted"; data: { player_id: PlayerId; dungeon: DungeonId } }
   | { type: "InitiativeTaken"; data: { player_id: PlayerId } }
   | { type: "CardPredicateGuessMade"; data: { player_id: PlayerId; source_id: ObjectId | null; choice: string } }
+  | { type: "CardNamed"; data: { player_id: PlayerId; source_id: ObjectId | null; name: string } }
   | { type: "DebugActionUsed"; data: { player_id: PlayerId; description: string } }
   | { type: "DebugPermissionGranted"; data: { host: PlayerId; player_id: PlayerId } }
   | { type: "DebugPermissionRevoked"; data: { host: PlayerId; player_id: PlayerId } }
@@ -3492,6 +3650,10 @@ export type GameEvent =
   // results tables, aggregates, and AI must not read it. `result` is always
   // the natural value (modifiers never touch ignored rolls).
   | { type: "DieRollIgnored"; data: { player_id: PlayerId; sides: number; result: number } }
+  // Eye to Eye / Mouth to Mouth: the contest between `participants` (controller first)
+  // began / reached a terminal result (a decided win, a tie, or a technical cancellation).
+  | { type: "PhysicalContestStarted"; data: { kind: ContestKind; participants: [PlayerId, PlayerId] } }
+  | { type: "PhysicalContestResolved"; data: { kind: ContestKind; participants: [PlayerId, PlayerId]; result: ContestResult } }
   // CR 103.1: the starting-player d20 roll-off as one structured event. `rounds`
   // preserves the round boundaries (round 1 = every seat; each later round = the
   // previous round's tied-max group that rerolled); `winner` is the engine's
@@ -3776,7 +3938,10 @@ export interface BoardDelta {
 /** Mirrors `engine::analysis::loop_check::LoopCertificate`. */
 export interface LoopCertificate {
   unbounded: ResourceAxis[];
-  win_kind: WinKind;
+  /** Absent when the certificate determines no outcome. */
+  win_kind?: WinKind;
+  /** The count whose take `win_kind` is the outcome of; absent for the loop as a whole. */
+  win_kind_at?: number;
   mandatory: boolean;
   residual_board_delta: BoardDelta;
 }
@@ -3882,7 +4047,8 @@ export interface ShortcutProposal {
   predicted_winner: PlayerId | null;
   count: IterationCount;
   unbounded: ResourceAxis[];
-  win_kind: WinKind;
+  win_kind?: WinKind;
+  win_kind_at?: number;
   shortened_by?: PlayerId;
   road: OfferRoad;
 }
@@ -4249,6 +4415,10 @@ export type ExileLinkKind =
 export type LookGrant = "SourceController" | { Player: { player: PlayerId } };
 
 export interface GameState {
+  /** CR 500.1 + CR 500.8: how many times each step has begun this turn, counting
+   *  the second combat damage step (CR 510.4) and repeated cleanup steps. Mirrors
+   *  engine `steps_started_this_turn`; omitted from the wire while empty. */
+  steps_started_this_turn?: Partial<Record<Phase, number>>;
   turn_number: number;
   active_player: PlayerId;
   phase: Phase;
@@ -4667,6 +4837,21 @@ export class AdapterError extends Error {
     this.recoverable = recoverable;
     this.panic = panic;
     this.rejection = rejection;
+  }
+}
+
+/**
+ * A browser's module map retains failed dynamic imports for the document
+ * lifetime. Retrying this requires a page reload, unlike WASM initialization
+ * and card-data loading failures.
+ */
+export class EngineModuleReloadRequiredError extends Error {
+  readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super("The engine module failed to load; reload the page to retry.");
+    this.name = "EngineModuleReloadRequiredError";
+    this.cause = cause;
   }
 }
 
@@ -5108,6 +5293,30 @@ export interface EngineAdapter {
    * action payload or the UI state.
    */
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
+  /**
+   * Submit one click in the running Eye to Eye / Mouth to Mouth contest for the
+   * local seat. Fire-and-forget: the host stamps the instant and decides the
+   * winner, so a click carries only the contest's identity and a per-contest
+   * sequence number (duplicate and reorder protection). Returns whether the
+   * transport took the click; `false` means this client hosts the contest itself and
+   * must stamp the click for `driveContest`. Transports that cannot host a contest
+   * omit it.
+   */
+  submitContestClick?(contest: number, seq: number): boolean;
+  /**
+   * Local engines only (single-player WASM, P2P host): there is no server to host
+   * the running contest, so the client drives it. `nowMs` and each click's `at_ms`
+   * are the client's own monotonic clock; `aiPlayers` are the seats the engine
+   * should click for, and `awayPlayers` the seats currently disconnected (the
+   * engine pauses the contest for them and forfeits them past its reconnect grace).
+   * Server transports omit this — the server drives.
+   */
+  driveContest?(
+    nowMs: number,
+    aiPlayers: PlayerId[],
+    clicks: ContestClickInput[],
+    awayPlayers?: PlayerId[],
+  ): Promise<ContestDriveResult>;
   /** Submit an opaque response from the engine's current interaction projection. */
   submitInteraction?(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   /**

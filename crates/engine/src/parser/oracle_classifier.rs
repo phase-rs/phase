@@ -33,6 +33,21 @@ pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
     })
 }
 
+/// Digital-only Alchemy (no CR entry): true when the line grants a one-time
+/// boon — "you get a one-time boon with …", "target opponent gets a one-time
+/// boon with …", "that player gets a one-time boon with …", or the same grant
+/// as a trigger/activated consequence ("Whenever …, you get a one-time boon
+/// with …"). The quoted ability inside routinely contains replacement-shaped
+/// tokens ("enters", "counter"), so the top-level router must exclude these
+/// lines from the replacement interceptor and the replacement gate and let
+/// the effect chain parse the grant via `try_parse_boon_creation` instead.
+/// Matches on the wrapper head only — never on the quoted body — so
+/// "if you have a boon" (Underbridge Warlock, no "one-time boon with")
+/// never matches.
+pub(crate) fn is_one_time_boon_grant_line(lower: &str) -> bool {
+    scan_contains(lower, "one-time boon with \"")
+}
+
 /// CR 603.1: `When`/`Whenever`/`At` are the printed templating for triggered
 /// abilities. CR 701.27e adds one more head that is a triggered ability without
 /// using those words — `As ⟨this permanent⟩ transforms into ⟨name⟩, …` — and
@@ -280,25 +295,15 @@ fn is_self_conditional_flash_grant(lower: &str) -> bool {
     nom_primitives::parse_self_spell_has_flash_prefix(lower).is_ok()
 }
 
+/// CR 502.3 + CR 611.2a: Lines on an instant or sorcery containing a "doesn't/don't untap
+/// during ... next untap step" restriction are resolution-time continuous effects of the spell,
+/// not permanent-hosted static abilities.
 fn is_spell_resolution_next_untap_restriction(lower: &str) -> bool {
-    let has_next_untap_restriction = (scan_contains(lower, "doesn't untap during")
-        || scan_contains(lower, "doesn’t untap during"))
-        && scan_contains(lower, "next untap step");
-    if !has_next_untap_restriction {
-        return false;
-    }
-
-    alt((
-        tag::<_, _, OracleError<'_>>("put "),
-        tag("tap "),
-        tag("untap "),
-        tag("target "),
-        tag("that "),
-        tag("it "),
-        tag("those "),
-    ))
-    .parse(lower)
-    .is_ok()
+    (scan_contains(lower, "doesn't untap during")
+        || scan_contains(lower, "doesn’t untap during")
+        || scan_contains(lower, "don't untap during")
+        || scan_contains(lower, "don’t untap during"))
+        && scan_contains(lower, "next untap step")
 }
 
 fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
@@ -445,6 +450,14 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // The "of ..." infix between "abilities" and "can't be activated" blocks the contiguous
     // scan above; recognize the dispatched prefix separately so parse_static_line is reached.
     "activated abilities of ",
+    // CR 606.3: loyalty-activation SET-cap statics — "You may activate the
+    // loyalty abilities of [subject] twice each turn rather than only once"
+    // (Oath of Teferi, Urza, Planeswalker). Census: exactly 4 distinct cards
+    // carry this tail, all loyalty-activation lines; the trigger-led
+    // (Kaito, Dancing Shadow) and saga-chapter (Urza Assembles the Titans III)
+    // members never reach the static slot, so only the Oath/Urza-PW lines can
+    // be claimed here.
+    "rather than only once",
     // CR 701.23 + CR 101.2: Ashiok-class search prohibition — a "can't search"
     // effect takes precedence over any effect directing a search.
     "can't cause their controller to search their library",
@@ -1006,6 +1019,12 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if is_as_enters_choose_pattern(lower) {
         return true;
     }
+    // CR 614.1c + CR 614.12a: "As ~ enters, pay any amount of life" entry
+    // payments (Phyrexian Processor class) route to `parse_replacement_line`;
+    // the builder carries the anchored-`as ` frame guard (F7).
+    if is_as_enters_pay_pattern(lower) {
+        return true;
+    }
     // CR 701.3a + CR 614.1: "As ~ becomes attached [to X], choose …" — the
     // attach-time analogue of `is_as_enters_choose_pattern` (Psychic Paper).
     if is_as_becomes_attached_choose_pattern(lower) {
@@ -1246,6 +1265,28 @@ fn is_as_enters_choose_pattern(lower: &str) -> bool {
     })
     .is_some();
     has_as && has_enters && has_choose
+}
+
+/// CR 614.1c + CR 614.12a: coarse gate for the "As ~ enters, pay any amount of
+/// life" entry-payment class (Phyrexian Processor, Minion of the Wastes,
+/// Nameless Race). Mirrors `is_as_enters_choose_pattern`'s probe shape; the
+/// builder (`parse_as_enters_pay`) carries the anchored-`as ` frame guard, so
+/// a `when`-framed line (Vizkopa Confessor) declines there even if this coarse
+/// gate ever claims one.
+fn is_as_enters_pay_pattern(lower: &str) -> bool {
+    let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
+    })
+    .is_some();
+    let has_enters = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("enters").parse(i)
+    })
+    .is_some();
+    let has_pay_any_life = nom_primitives::scan_at_word_boundaries(lower, |i| {
+        tag::<_, _, OracleError<'_>>("pay any amount of life").parse(i)
+    })
+    .is_some();
+    has_as && has_enters && has_pay_any_life
 }
 
 /// CR 701.3a + CR 614.1: the attach-time analogue of `is_as_enters_choose_pattern`
@@ -1806,6 +1847,17 @@ mod tests {
             );
         }
     }
+
+    /// CR 606.3: Oath of Teferi's loyalty-activation static tail routes to the
+    /// static parser.
+    #[test]
+    fn rather_than_only_once_tail_is_static() {
+        assert!(is_static_pattern(
+            "you may activate the loyalty abilities of planeswalkers you control twice each turn rather than only once."
+        ));
+        // Existing guard preserved: an effect-shaped line stays non-static.
+        assert!(!is_static_pattern("target creature gets +1/+1."));
+    }
 }
 
 /// The as-enters choice CLASSIFIER must agree with the as-enters choice BUILDER
@@ -1968,5 +2020,56 @@ mod as_enters_choose_qualifier_classification_tests {
             Some("choose a basic land type. ~ has landwalk of the chosen type.".to_string())
         );
         assert_eq!(super::excise_selection_qualifier("choose a color."), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CR 614.1c + CR 614.12a: the "As ~ enters, pay any amount of life"
+// entry-payment class (Phyrexian Processor, Minion of the Wastes, Nameless
+// Race) routes to `parse_replacement_line`. The classifier probes the
+// lowercased (not self-ref-normalized) line, so the fixtures below keep their
+// printed "this artifact/creature" subjects.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod as_enters_pay_classification_tests {
+    use super::is_as_enters_pay_pattern;
+
+    /// The three printed class lines classify — one per subject shape plus the
+    /// two-sentence Nameless line (the classifier sees the whole line; the
+    /// builder splits its sentences).
+    #[test]
+    fn class_lines_classify() {
+        for line in [
+            "as this artifact enters, pay any amount of life.",
+            "as this creature enters, pay any amount of life.",
+            "as this creature enters, pay any amount of life. the amount you pay can't be more than the total number of white nontoken permanents your opponents control plus the total number of white cards in their graveyards.",
+        ] {
+            assert!(is_as_enters_pay_pattern(line), "{line}");
+        }
+    }
+
+    /// F7 NEGATIVE: Vizkopa Confessor's `when`-framed trigger line carries the
+    /// same pay phrase but must NOT classify (and the builder's anchored-`as `
+    /// frame declines it structurally even if this gate ever claims one).
+    #[test]
+    fn vizkopa_trigger_line_does_not_classify() {
+        assert!(!is_as_enters_pay_pattern(
+            "when this creature enters, pay any amount of life. target opponent reveals that many cards from their hand. you choose one of them and exile it."
+        ));
+    }
+
+    /// NEGATIVE: neighboring as-enters payment shapes stay out — shock-land
+    /// optionals, fixed life payments, and rider-only lines ("if you do")
+    /// without the pay phrase.
+    #[test]
+    fn neighboring_payment_shapes_do_not_classify() {
+        for line in [
+            "as ~ enters, you may pay 2 life. if you don't, ~ enters tapped.",
+            "as ~ enters, pay 2 life.",
+            "if you paid life as ~ entered, draw that many cards.",
+            "at the beginning of your end step, you may pay any amount of life. if you do, draw that many cards.",
+        ] {
+            assert!(!is_as_enters_pay_pattern(line), "{line}");
+        }
     }
 }

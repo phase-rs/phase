@@ -212,6 +212,7 @@ fn intrinsic_food_creature_sacrificed_to_mana_ability_fires_both_triggers() {
         .act(GameAction::ActivateAbility {
             source_id: goose,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Gilded Goose mana ability");
 
@@ -291,6 +292,7 @@ fn ygra_food_creature_sacrificed_to_mana_ability_fires_both_triggers() {
         .act(GameAction::ActivateAbility {
             source_id: goose,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Gilded Goose mana ability");
 
@@ -371,6 +373,7 @@ fn faithful_scavengers_talent_and_ygra_food_sacrifice() {
         .act(GameAction::ActivateAbility {
             source_id: goose,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Gilded Goose mana ability");
 
@@ -504,6 +507,7 @@ fn food_sacrifice_during_mana_payment_fires_triggers() {
         .act(GameAction::ActivateAbility {
             source_id: goose,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Gilded Goose mana ability during payment");
 
@@ -696,6 +700,7 @@ fn food_sacrifice_during_payment_fires_both_triggers_exactly_once() {
         .act(GameAction::ActivateAbility {
             source_id: goose,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the colorless mana ability during payment");
 
@@ -773,6 +778,7 @@ fn tap_another_creature_for_mana_during_payment_fires_becomes_tapped_once() {
         .act(GameAction::ActivateAbility {
             source_id: relic,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the tap-another-creature mana ability during payment");
 

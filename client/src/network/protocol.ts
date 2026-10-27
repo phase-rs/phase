@@ -1,3 +1,4 @@
+import { WIRE_PROTOCOL_VERSION } from "../generated/protocol-versions";
 import type {
   AbilityBlockEntry,
   EndContinuousEffectOffer,
@@ -105,13 +106,82 @@ export function legalActionsFromWire(wire: LegalActionsWire): LegalActionsResult
  * first-contact gate rejects a missing or unequal value before it allocates a
  * seat or adopts reconnect state.
  *
- * Bumps to date:
- *  124 — game_setup and state_update carry GameState whose ControllerChanged
- *       events may carry evidence, whose resolving abilities may carry
- *       control_change_instruction, and which may carry
- *       control_change_observations and control_change_captures
- *       (CR 603.10d control-change evidence). Bumped in lockstep with full-game
- *       protocol 142.
+ * Record incompatible changes: `node scripts/protocol-versions.mjs bump game --reason "description"`.
+ * Historical introductions:
+ *  141 — game_setup and state_update carry GameState whose effects carry
+ *       Effect::FlipCoins { flips, .. } in place of FlipCoin, FlipCoins { count }
+ *       and FlipCoinUntilLose, and whose coin-flip resolution frame kind is
+ *       Exactly or UntilLoss. A v140 or older peer reads a multi-flip or until-loss run
+ *       as one flip, so first contact rejects the skew. Bumped in lockstep with
+ *       full-game protocol 159.
+ *  139 — ChooseFromZoneConstraint.TotalManaValue extends serialized paused zone
+ *       choices and ability state; full-game protocol 157.
+ *  138 — game_setup and state_update carry GameState whose ability conditions
+ *       may carry QuantityQuality/NumberQuality. Bumped in lockstep with
+ *       full-game protocol 156, which also adds the optional per-seat
+ *       created_tokens channel (each seat's pinned creation result) on the
+ *       player-scope tail sidecar inside paused resolution frames.
+ *  137 — game_setup and state_update carry GameState whose parked ChangeZone
+ *       frame stores each remaining member with its pre-event entry
+ *       modifications (CR 603.6a + CR 614.12) and whose resolution state moves
+ *       from version 6 to 7; a v136 peer cannot parse it. Bumped in lockstep
+ *       with full-game protocol 155.
+ *  136 — game_setup and state_update carry GameState whose
+ *       pending_cost_move_resume may hold PendingCostMoveResume
+ *       CounterCostRemovalPayment (a counter-removal cost paused on a CR 616.1
+ *       replacement choice) and whose mana cost cursor may hold
+ *       counter_removal. A v135 peer cannot parse the new tag, so first
+ *       contact rejects the skew. Bumped in lockstep with full-game protocol
+ *       154; PausedCounterCostRemoval carries its replacement_subtree
+ *       boundary.
+ *  135 — game_setup and state_update carry GameState, whose activated grants
+ *       carry an optional kind selector (Nicol Bolas, Dragon-God's loyalty
+ *       subset). A v134 peer drops the defaulted field silently and
+ *       over-grants, so first contact rejects the skew. Bumped in
+ *       lockstep with full-game protocol 153.
+ *  134 — game_setup and state_update carry GameState whose loop offers may carry
+ *       ShortcutDecisionSchema suggested_declaration and leading_aims, and
+ *       ShortcutProposal leading_aims. Bumped in lockstep with full-game protocol 152.
+ *  133: Populated GameObject.bestow_form carries removed creature subtypes
+ *       as an object instead of the legacy boolean; full-game protocol 151.
+ *  132 — game_setup and state_update carry GameState whose casting permissions may
+ *       carry the reshaped cast-this-way gains rider (the permission's
+ *       enters_with_modifications object and Effect.AddPendingEntersModifications.rider).
+ *       A wire 131 peer cannot parse either shape. Bumped in lockstep with
+ *       full-game protocol 150.
+ *  131 — GameState.deferred_spell_delivery is removed and GameState.resolving_spell_final_part
+ *       ({ spell }) marks the CR 608.2n final part a paused instant or sorcery still owes,
+ *       in game_setup and state_update; a v130 peer drops the key and would move the spell
+ *       too early. Bumped with full-game protocol 149.
+ *  130 — game_setup and state_update carry GameState whose abilities may hold
+ *       Effect::ExileTopCardContest (Timesifter) and whose resolution frames may
+ *       park BatchCompletion::TopCardContestRoundComplete; a v129 peer cannot
+ *       parse either tag. Bumped in lockstep with full-game protocol 148.
+ *  129 — game_setup and state_update carry GameState whose waiting_for may be
+ *       WaitingFor::PhysicalContest (Eye to Eye / Mouth to Mouth) and whose
+ *       abilities may hold Effect::PhysicalContest; a v128 peer cannot parse
+ *       either tag. Bumped in lockstep with full-game protocol 147.
+ *  128 — game_setup and state_update carry GameState whose loop offers may carry
+ *       ConfirmedPeriod counted_by and performance (CR 732.2a). Bumped in
+ *       lockstep with full-game protocol 146.
+ *  127 — ParentTargetMissingReason gains SearchLibrary (CR 701.23b), serialized
+ *       on ResolvedAbility.parent_target_missing_reason in game_setup and
+ *       state_update; a wire 126 peer cannot parse the tag. Bumped in lockstep
+ *       with full-game protocol 145; lobby messages unchanged.
+ *  126 — game_setup and state_update carry GameState, whose one-time boons
+ *       (#7495) add Effect.CreateBoon / Effect.NoteNumber, the HasBoon
+ *       conditions, and WaitingFor.ChooseTokenHost, and whose perpetual P/T
+ *       edit retypes power_delta/toughness_delta integers to required tagged
+ *       QuantityExpr power/toughness. A v125 peer cannot parse the new tags or
+ *       the retyped edit, so first contact rejects the skew. Bumped in
+ *       lockstep with full-game protocol 144.
+ *  125 — game_setup and state_update carry GameState whose modal no-repeat
+ *       history (modal_modes_chosen_this_turn / _this_game) is keyed by
+ *       object incarnation, not bare ObjectId (CR 400.7). Bumped in lockstep
+ *       with full-game protocol 143.
+ *  124 — game_setup and state_update carry GameState whose linked-exile
+ *       snapshots carry the exiled card's incarnation (CR 400.7). Bumped in
+ *       lockstep with full-game protocol 142.
  *  123 — game_setup and state_update carry GameState whose exile_links may hold
  *       ExileLinkKind CastCost (CR 607.2q). Bumped in lockstep with full-game
  *       protocol 141.
@@ -677,7 +747,7 @@ export type P2PInteractionPreviewAnswer =
   | { type: "preview"; preview: InteractionPreview }
   | { type: "failed"; message: string };
 
-export const WIRE_PROTOCOL_VERSION = 124 as const;
+export { WIRE_PROTOCOL_VERSION };
 
 export type P2PMessage = P2PAuthorityWire & (
   | {
@@ -698,6 +768,12 @@ export type P2PMessage = P2PAuthorityWire & (
       playerNames?: Record<number, string>;
     } & LegalActionsWire)
   | { type: "action"; senderPlayerId: number; action: GameAction }
+  /** One click in the running Eye to Eye / Mouth to Mouth contest. No `senderPlayerId`
+   *  and no timestamp: the host reads the seat from the authenticated connection and
+   *  stamps the instant on its own clock, so a guest can claim neither. `contest` is
+   *  the engine-authored identity of the contest the click was made in, so a frame
+   *  delayed from an earlier contest is never counted in a later one. */
+  | { type: "contest_click"; contest: number; seq: number }
   | { type: "interaction"; senderPlayerId: number; submission: InteractionSubmission }
   | { type: "preview_mana_payment"; requestId: number; action: GameAction }
   /** Carries the request VERBATIM. No `senderPlayerId`: the host reads the
@@ -773,6 +849,8 @@ export type P2PMessage = P2PAuthorityWire & (
    * lease-bound; guests pin the first valid terminal id and never reconnect
    * after accepting the commitment for their filtered state. */
   | { type: "terminal_result"; result: P2PTerminalResult }
+  /** Guest → host: the exact statement already committed to IndexedDB. */
+  | { type: "terminal_result_receipt"; result: P2PTerminalResult }
   /** Native server AI became unable to advance the authoritative session.
    * The host sends this only after the final state revision it depends on. */
   | { type: "ai_driver_fault"; id: number; revision: number; message: string }
@@ -796,6 +874,7 @@ const VALID_TYPES = new Set([
   "guest_deck",
   "game_setup",
   "action",
+  "contest_click",
   "interaction",
   "preview_mana_payment",
   "preview_interaction",
@@ -821,6 +900,7 @@ const VALID_TYPES = new Set([
   "kick",
   "host_left",
   "terminal_result",
+  "terminal_result_receipt",
   "ai_driver_fault",
   "player_kicked",
   "player_conceded",

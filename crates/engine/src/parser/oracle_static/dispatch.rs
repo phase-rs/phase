@@ -838,6 +838,21 @@ pub(crate) fn parse_static_line_inner(
 ) -> Option<StaticDefinition> {
     let raw_lower = text.to_lowercase();
     let text = strip_reminder_text(text);
+    // CR 602.1 + CR 604.1: "[Cost]: [Effect]" is an activated ability, not a static
+    // ability, so the static-line authority declines it. Callers that own activated
+    // abilities then claim it: the document router via `find_activated_colon`
+    // (oracle.rs Priority 4), the level preprocessor via `oracle_level.rs`, a
+    // token's quoted grant via `push_parsed_statics` → `classify_quoted_inner` →
+    // `parse_quoted_ability`, and the runtime token catalog via
+    // `catalog_rules_text_abilities` → `classify_quoted_inner`.
+    // Evaluated on the REMINDER-STRIPPED text so a
+    // parenthetical cost ("Equipped creature gets +2/+2. ({2}: Attach to target
+    // creature you control. Equip only as a sorcery.)") is not mistaken for one, and
+    // on the quote-masked text so a granted inner ability
+    // ("… have \"{T}: Add {G}.\"") is not either.
+    if super::grammar::unquoted_cost_separator(&text).is_some() {
+        return None;
+    }
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
 
@@ -921,6 +936,14 @@ pub(crate) fn parse_static_line_inner(
     }
 
     if let Some(def) = parse_tagged_ability_activation_timing_permission(&tp, &text) {
+        return Some(def);
+    }
+
+    // CR 606.3: "You may activate [the] loyalty abilities of <subject> <count>
+    // each turn rather than only once" (Oath of Teferi / Urza, Planeswalker).
+    // Earliest point whose earlier arms provably return None on this shape, so
+    // it takes precedence over the later branches below.
+    if let Some(def) = parse_loyalty_activation_limit_static(&tp, &text) {
         return Some(def);
     }
 

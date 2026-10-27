@@ -255,6 +255,7 @@ fn activated_signet_states() -> (GameState, GameState, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: signet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the real Signet mana ability must activate");
     (pre_state, runner.state().clone(), signet)

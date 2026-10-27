@@ -1813,6 +1813,13 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
                 *player = antecedent.clone();
             }
         }
+        // Digital-only Alchemy (no CR entry): same scoped-subject rebind as
+        // the monarch arm above.
+        StaticCondition::HasBoon { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
         // Only boolean structure carries nested static conditions. Quantities
         // and filters are separate scopes, so this clause does not rebind them.
         StaticCondition::DevotionGE { .. }
@@ -1820,6 +1827,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::ChosenLabelIs { .. }
         | StaticCondition::QuantityComparison { .. }
+        | StaticCondition::QuantityQuality { .. }
         | StaticCondition::HasMaxSpeed
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::DayNightIs { .. }
@@ -1848,6 +1856,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
         | StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceHasDealtDamage
+        | StaticCondition::SourceExertedThisTurn
         | StaticCondition::WasCast { .. }
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }
@@ -1870,6 +1879,7 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::AdditionalCostPaid
+        | StaticCondition::FirstCombatPhaseOfTurn
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::None => {}
     }

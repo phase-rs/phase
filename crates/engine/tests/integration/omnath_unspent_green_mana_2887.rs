@@ -118,6 +118,7 @@ fn retained_green_mana_is_reverified_after_the_journal_resets() {
         .act(GameAction::ActivateAbility {
             source_id: forest,
             ability_index: forest_idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Forest's mana ability");
     let pip = runner.state().players[0]

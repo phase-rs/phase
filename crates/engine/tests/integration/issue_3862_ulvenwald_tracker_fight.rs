@@ -89,6 +89,7 @@ fn ulvenwald_tracker_dual_target_fight_no_fallback_when_one_fighter_leaves() {
         .act(GameAction::ActivateAbility {
             source_id: tracker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Ulvenwald Tracker");
 

@@ -1,7 +1,8 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CommanderBracketTier } from "../../types/bracketEstimate";
 
-type Deck = { main_deck: string[] };
+type Deck = { main_deck: string[]; bracket_tier?: CommanderBracketTier };
 type DeckList = { player: Deck; opponent: Deck; ai_decks: Deck[] };
 
 const {
@@ -116,6 +117,13 @@ vi.mock("../../services/nativeEngine", () => ({
 }));
 
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class {} }));
+
+// A P2P host reads its pending Full terminal cleanup before building a deck;
+// jsdom has no IndexedDB, so these launches start with none pending.
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/gamePersistence")>(),
+  loadFullTerminalCleanupStrict: vi.fn(async () => null),
+}));
 
 vi.mock("../../stores/gameStore", () => ({
   clearActiveGame: vi.fn(),
@@ -272,6 +280,7 @@ describe("GameProvider host-supplied pile routes", () => {
       await waitFor(() => expect(recorded.ws).toHaveLength(1));
       expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual([]);
+      expect(recorded.ws[0].deck.bracket_tier).toBeUndefined();
     });
   });
 
@@ -293,7 +302,22 @@ describe("GameProvider host-supplied pile routes", () => {
     it("an online guest submits its active deck", async () => {
       renderRoute({ mode: "online", joinCode: "ABC123", formatConfig: config("Standard") });
       await waitFor(() => expect(recorded.ws).toHaveLength(1));
+      expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
+      expect(recorded.ws[0].deck.bracket_tier).toBe("core");
+    });
+
+    it("an online guest preserves its active deck's declared bracket", async () => {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}Active`, JSON.stringify({
+        main: [{ name: "Plains", count: 60 }],
+        sideboard: [],
+        bracket: 5,
+      }));
+      renderRoute({ mode: "online", joinCode: "ABC123", formatConfig: config("Commander") });
+      await waitFor(() => expect(recorded.ws).toHaveLength(1));
+      expect(recorded.ws[0].mode).toBe("join");
+      expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
+      expect(recorded.ws[0].deck.bracket_tier).toBe("cedh");
     });
 
     it("a fresh P2P host submits its active deck", async () => {

@@ -9,6 +9,7 @@ import type {
   AiDecisionDiagnosticReceipt,
   AiLlmProposalResult,
   AiProposalSubmission,
+  ContestDriveResult,
   FormatConfig,
   GameAction,
   GameEvent,
@@ -34,6 +35,7 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
@@ -262,6 +264,13 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "canonicalCardNames", names });
   }
 
+  async query<K extends EngineQueryName>(
+    name: K,
+    args: EngineQueryArgs<K>,
+  ): Promise<EngineQueryResult<K>> {
+    return this.request<EngineQueryResult<K>>({ type: "query", name, args });
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,
@@ -321,6 +330,18 @@ export class EngineWorkerClient {
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async driveContest(
+    nowMs: number,
+    aiPlayers: number[],
+    awayPlayers: number[],
+    clicks: unknown[],
+  ): Promise<ContestDriveResult> {
+    return this.request<ContestDriveResult>(
+      { type: "driveContest", nowMs, aiPlayers, awayPlayers, clicks },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

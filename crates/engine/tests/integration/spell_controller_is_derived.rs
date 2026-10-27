@@ -1861,9 +1861,9 @@ fn cr603_10d_lose_control_trigger_is_controlled_by_the_player_who_lost_control()
 /// control changed (`source_id != object_id`). Its controller comes from a
 /// wholly separate authority — `DelayedTrigger.controller`, bound once at
 /// installation and read directly by `triggers::delayed_trigger_to_context`
-/// — never from `collect_matching_triggers_inner`'s CR 603.10d override
-/// above (which is gated on `trig_def.mode == ChangesController && *object_id
-/// == obj_id`, false here by construction). This row pins that the class
+/// — never from `collect_matching_triggers_inner`'s `ControlChangeSide`
+/// override above (which is gated on `ChangesController { side }` with
+/// `*object_id == obj_id`, false here by construction). This row pins that the class
 /// still resolves for the correct player (P0, the temp holder who created
 /// the delayed trigger) after U3, confirming the two authorities do not
 /// collide — the "must NOT be re-keyed" half of V8b.
@@ -1931,7 +1931,9 @@ fn cr603_10d_delayed_specific_object_shape_still_attributes_to_its_own_source() 
         runner.state().objects.get(&source).unwrap(),
     ));
     let mut trig = engine::types::ability::TriggerDefinition::new(
-        engine::types::triggers::TriggerMode::ChangesController,
+        engine::types::triggers::TriggerMode::ChangesController {
+            side: engine::types::triggers::ControlChangeSide::Loses,
+        },
     );
     trig.valid_card = Some(TargetFilter::SpecificObject { id: sword });
     trig.execute = None;
@@ -2064,6 +2066,7 @@ fn announcement_window_display_uses_the_stack_entry_controller() {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 },
             );

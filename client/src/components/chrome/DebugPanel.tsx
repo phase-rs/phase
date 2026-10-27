@@ -329,7 +329,7 @@ export function DebugPanel({
     <div className="fixed right-0 top-0 z-[9999] flex h-full w-80 flex-col border-l border-gray-700 bg-gray-900/95 text-sm text-gray-300 shadow-xl backdrop-blur-sm">
       <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
         <span className="font-mono text-xs font-bold uppercase tracking-wider text-gray-400">
-          Debug Panel
+          {t("game:sandboxTools.panelTitle")}
         </span>
         <button
           onClick={() => useUiStore.getState().toggleDebugPanel()}
@@ -351,7 +351,7 @@ export function DebugPanel({
                 : "text-gray-500 hover:text-gray-300")
             }
           >
-            {tab}
+            {t(`game:sandboxTools.${tab}`)}
           </button>
         ))}
       </div>

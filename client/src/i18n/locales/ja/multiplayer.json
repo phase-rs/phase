@@ -285,7 +285,8 @@
     "botGameNotice": "Discordゲーム {{code}} をホストしています。接続とプライバシーの設定はDiscordの投稿に従います。",
     "botSeedIgnored": "Discordの投稿の一部の設定はここでは使用できません — フォーマットとプレイヤー数を確認してください。",
     "botP2PNotice": "この端末がゲームを実行します。アプリを開いたまま接続を維持してください。",
-    "botServerNotice": "専用サーバーがゲームを実行します。遅くなったりオフラインになったりする場合があります。"
+    "botServerNotice": "専用サーバーがゲームを実行します。遅くなったりオフラインになったりする場合があります。",
+    "poolBracketConflict": "選択中の{{selected}}デッキは現在のフィルターで1つも使用できないため、ランダムな対戦相手は全{{total}}デッキから選択します。"
   },
   "page": {
     "deckRejected": "ホストにデッキを拒否されました。",
@@ -351,5 +352,10 @@
   "deepLink": {
     "gameInProgressTitle": "ゲーム進行中",
     "gameInProgressBody": "現在のゲームを終了するか退出してから、もう一度リンクを開いてください。"
+  },
+  "terminalRecovery": {
+    "finalViewsUnpublished": "投了により Full の終了状態に達しましたが、ネイティブの最終ビューを公開できませんでした。",
+    "concedeUnreconciled": "投了の結果を照合できませんでした。この席はロックされたままです。",
+    "receiptUnsent": "最終結果の永続的な受領確認を送信できませんでした。再配信を待っています"
   }
 }

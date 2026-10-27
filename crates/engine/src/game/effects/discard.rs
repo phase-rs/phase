@@ -184,10 +184,11 @@ fn park_discard_batch(
     effect_kind: EffectKind,
     paused_card: ObjectIncarnationRef,
     discard_frame: Option<crate::types::identifiers::DiscardFrameId>,
-    preceding_events: Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
+    events_before_self: usize,
     completion: crate::types::game_state::PendingDiscardBatchCompletion,
 ) {
-    let paused_events = preceding_events.clone();
+    let preceding_events = events[events_before_self..].to_vec();
     state.pending_discard_batch = Some(Box::new(crate::types::game_state::PendingDiscardBatch {
         player,
         cursor,
@@ -203,8 +204,8 @@ fn park_discard_batch(
     }));
     crate::game::engine_resolution_choices::defer_observer_triggers_for_paused_choice(
         state,
-        &paused_events,
-        0,
+        events,
+        events_before_self,
     );
 }
 
@@ -257,14 +258,16 @@ pub fn resolve(
     // the upper-bound expression and the may-pick-fewer flag. Plain
     // `QuantityExpr` means a mandatory count; wrapped in `UpTo` means the
     // player may discard 0..=count.
-    let (num_cards, up_to, unless_filter, target_filter, random) = match &ability.effect {
-        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false),
+    let (num_cards, up_to, unless_filter, target_filter, random, card_filter) = match &ability
+        .effect
+    {
+        Effect::DiscardCard { count, target } => (*count, false, None, target.clone(), false, None),
         Effect::Discard {
             count,
             unless_filter,
             target,
             selection,
-            ..
+            filter,
         } => {
             let (inner, up_to) = count.peel_up_to();
             (
@@ -279,9 +282,10 @@ pub fn resolve(
                 unless_filter.clone(),
                 target.clone(),
                 selection.is_random(),
+                filter.clone(),
             )
         }
-        _ => (1, false, None, TargetFilter::Any, false),
+        _ => (1, false, None, TargetFilter::Any, false, None),
     };
 
     // CR 400.7 + CR 603.7c + CR 603.7b: a delayed discard whose pinned referent
@@ -381,8 +385,9 @@ pub fn resolve(
     // an unrelated card whenever hand size happened to equal the discard
     // count. The one bit those four PLAYER-scoped shapes never carry, and
     // that Thoughtseize's empty-reveal case DOES, is a
-    // `parent_target_missing_reason` of `RevealHandChoice` — stamped ONLY by
-    // `apply_parent_chain_context` immediately after a `RevealHand`
+    // `parent_target_missing_reason` of `RevealHandChoice` — stamped at a
+    // parent->child hand-off (see `ResolvedAbility::parent_target_missing_reason`)
+    // immediately after a `RevealHand`
     // reveal-choice whose eligible set was empty (see
     // `GameState::last_parent_target_missing_reason`). So: enter the specific-
     // targets loop (a no-op when `specific_targets` is empty, which IS the
@@ -396,6 +401,35 @@ pub fn resolve(
     if (!specific_targets.is_empty() && (declared_target_discard || object_bound_discard))
         || (object_bound_discard && parent_reveal_choice_found_nothing)
     {
+        // CR 608.2c: Apply `card_filter` to object-bound / declared-target hand
+        // discards before proposing any discard. Done inside this branch so a
+        // live hand-object target that fails `card_filter` resolves as a no-op
+        // instead of emptying `specific_targets` before the branch gate and
+        // falling through to the generic player-hand path.
+        let specific_targets: Vec<_> = match &card_filter {
+            Some(filter) => {
+                // CR 608.2c: "their hand" in the filter is the hand the card is
+                // in — its owner's (CR 400.3) — so bind each card's owner.
+                let filtered: Vec<_> = specific_targets
+                    .into_iter()
+                    .filter(|id| {
+                        state.objects.get(id).is_some_and(|obj| {
+                            discard_card_filter_matches(
+                                state,
+                                &discard_filter_scope(ability, obj.owner),
+                                *id,
+                                filter,
+                            )
+                        })
+                    })
+                    .collect();
+                if filtered.is_empty() && !up_to {
+                    state.cost_payment_failed_flag = true;
+                }
+                filtered
+            }
+            None => specific_targets,
+        };
         // Discard specific targeted cards
         for (index, obj_id) in specific_targets.iter().copied().enumerate() {
             let obj = state
@@ -467,7 +501,8 @@ pub fn resolve(
                                     EffectKind::from(&ability.effect),
                                     pin_paused_occurrence(state, obj_id),
                                     discard_frame,
-                                    events[events_before_self..].to_vec(),
+                                    events,
+                                    events_before_self,
                                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                                 );
                                 return Ok(());
@@ -526,7 +561,8 @@ pub fn resolve(
                         EffectKind::from(&ability.effect),
                         pin_paused_occurrence(state, obj_id),
                         discard_frame,
-                        events[events_before_self..].to_vec(),
+                        events,
+                        events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                     );
                     return Ok(());
@@ -587,6 +623,20 @@ pub fn resolve(
             .iter()
             .copied()
             .collect();
+        // CR 608.2c + CR 201.2a: "discards a card with that name" restricts which
+        // cards in the hand can satisfy the instruction. A player with no such
+        // card can't discard, so the instruction does nothing (the empty pool
+        // takes the same no-op path as an empty hand).
+        let hand_cards: Vec<ObjectId> = match &card_filter {
+            Some(filter) => {
+                let scoped = discard_filter_scope(ability, discard_player);
+                hand_cards
+                    .into_iter()
+                    .filter(|id| discard_card_filter_matches(state, &scoped, *id, filter))
+                    .collect()
+            }
+            None => hand_cards,
+        };
 
         // CR 701.9b: For "up to N" discards, present the full N to the player.
         // The available cards list naturally constrains actual selection.
@@ -637,7 +687,8 @@ pub fn resolve(
                     EffectKind::from(&ability.effect),
                     paused_card,
                     discard_frame,
-                    events[events_before_self..].to_vec(),
+                    events,
+                    events_before_self,
                     crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                 );
                 return Ok(());
@@ -677,7 +728,8 @@ pub fn resolve(
                         // CR 400.7: the pause parks the pre-move occurrence.
                         pin_paused_occurrence(state, *obj_id),
                         discard_frame,
-                        events[events_before_self..].to_vec(),
+                        events,
+                        events_before_self,
                         crate::types::game_state::PendingDiscardBatchCompletion::Standard,
                     );
                     return Ok(());
@@ -707,6 +759,30 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2c + CR 109.5: bind the discarding player as the scoped "they" for a
+/// discard's card filter. "Target player discards a card with the greatest mana
+/// value among cards in their hand" (Draconic Fealty, Intruder's Inquisition)
+/// compares against the DISCARDING player's hand, not the caster's; the
+/// controller stays the ability's controller, so "you" is unchanged.
+fn discard_filter_scope(ability: &ResolvedAbility, discard_player: PlayerId) -> ResolvedAbility {
+    let mut scoped = ability.clone();
+    scoped.scoped_player = Some(discard_player);
+    scoped
+}
+
+/// CR 608.2c + CR 201.2a: whether `card` satisfies the discard's card filter
+/// ("a card with that name", "a nonland card with the greatest mana value ...")
+/// evaluated against the recipient-scoped ability from [`discard_filter_scope`].
+fn discard_card_filter_matches(
+    state: &GameState,
+    scoped: &ResolvedAbility,
+    card: ObjectId,
+    filter: &TargetFilter,
+) -> bool {
+    let ctx = crate::game::filter::FilterContext::from_ability(scoped);
+    crate::game::filter::matches_target_filter(state, card, filter, &ctx)
 }
 
 /// CR 207.2c + CR 118.12a: Discard a card as part of an ability cost (Channel).
@@ -1557,10 +1633,10 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, DiscardedCardResult,
-        EffectOutcomeSignal, LibraryPosition, QuantityExpr, ReplacementCondition,
-        ReplacementDefinition, ReplacementMode, ResolvedAbility, SubAbilityLink, TargetFilter,
-        TypedFilter,
+        AbilityCondition, AbilityDefinition, AbilityKind, CardSelectionMode, ChosenAttribute,
+        ControllerRef, DiscardedCardResult, EffectOutcomeSignal, LibraryPosition, QuantityExpr,
+        ReplacementCondition, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+        SubAbilityLink, TargetFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::counter::CounterType;
@@ -1674,6 +1750,7 @@ mod tests {
                     target: TargetFilter::ParentTarget,
                     count: QuantityExpr::Fixed { value: 1 },
                     position: LibraryPosition::Top,
+                    arranger: None,
                 },
             ))
     }
@@ -3133,5 +3210,82 @@ mod tests {
             "the land must be left alone"
         );
         assert_eq!(state.players[0].life, 18);
+    }
+
+    #[test]
+    fn object_bound_discard_applies_card_filter_without_player_hand_fallback() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Stack,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Shock".into()));
+
+        let p0_shock = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Shock".into(),
+            Zone::Hand,
+        );
+        let p1_opt = create_object(&mut state, CardId(2), PlayerId(1), "Opt".into(), Zone::Hand);
+        let p1_shock = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Shock".into(),
+            Zone::Hand,
+        );
+
+        // Object-bound discard pointing at `p1_opt` (which does NOT match "Shock"):
+        // must discard nothing and set `cost_payment_failed_flag` rather than
+        // discarding `p1_opt` or falling through to a player-hand discard.
+        let miss = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                filter: Some(TargetFilter::HasChosenName),
+                unless_filter: None,
+            },
+            vec![TargetRef::Object(p1_opt)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &miss, &mut events).unwrap();
+        assert!(state.players[0].hand.contains(&p0_shock));
+        assert!(state.players[1].hand.contains(&p1_opt));
+        assert!(state.players[1].hand.contains(&p1_shock));
+        assert!(state.cost_payment_failed_flag);
+
+        // Object-bound discard pointing at `p1_shock` (which DOES match "Shock"):
+        // must discard `p1_shock`.
+        state.cost_payment_failed_flag = false;
+        let hit = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+                selection: CardSelectionMode::Chosen,
+                filter: Some(TargetFilter::HasChosenName),
+                unless_filter: None,
+            },
+            vec![TargetRef::Object(p1_shock)],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &hit, &mut events).unwrap();
+        assert!(!state.players[1].hand.contains(&p1_shock));
+        assert!(state.players[1].graveyard.contains(&p1_shock));
+        assert!(state.players[1].hand.contains(&p1_opt));
+        assert!(state.players[0].hand.contains(&p0_shock));
     }
 }

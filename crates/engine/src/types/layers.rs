@@ -314,10 +314,7 @@ mod tests {
                     prepare_face: None,
                     name_origin: Default::default(),
                 }),
-                display_source: crate::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }
             .layer(),
             Layer::Copy

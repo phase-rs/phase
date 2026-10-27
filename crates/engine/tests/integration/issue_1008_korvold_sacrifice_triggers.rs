@@ -99,6 +99,7 @@ fn korvold_triggers_once_per_cost_sacrifice() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce activated ability");
     let hand_before = runner.state().players[0].hand.len();

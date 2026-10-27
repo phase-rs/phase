@@ -14,6 +14,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::{
     DebugAction, DebugTokenRequest, ReplacementAutoChoice, MAX_DEBUG_CREATE_COUNT,
+    MAX_DEBUG_LIFE_AMOUNT,
 };
 use engine::types::counter::{CounterMatch, CounterType};
 use engine::types::game_state::{
@@ -334,6 +335,35 @@ fn rejects_debug_create_count_above_engine_ceiling() {
 
     let err = guard_game_action_payload(&action).unwrap_err();
     assert!(err.contains("Debug.CreateTokenCopy.count"));
+}
+
+#[test]
+fn rejects_debug_life_change_amount_above_engine_ceiling() {
+    let gain = |amount| {
+        GameAction::Debug(DebugAction::GainLife {
+            player_id: PlayerId(0),
+            amount,
+        })
+    };
+    let lose = |amount| {
+        GameAction::Debug(DebugAction::LoseLife {
+            player_id: PlayerId(1),
+            amount,
+        })
+    };
+
+    guard_game_action_payload(&gain(MAX_DEBUG_LIFE_AMOUNT))
+        .expect("the engine ceiling itself is an accepted life-gain amount");
+    guard_game_action_payload(&lose(MAX_DEBUG_LIFE_AMOUNT))
+        .expect("the engine ceiling itself is an accepted life-loss amount");
+
+    for action in [
+        gain(MAX_DEBUG_LIFE_AMOUNT + 1),
+        lose(MAX_DEBUG_LIFE_AMOUNT + 1),
+    ] {
+        let err = guard_game_action_payload(&action).unwrap_err();
+        assert!(err.contains("Debug.LifeChange.amount"), "{err}");
+    }
 }
 
 #[test]

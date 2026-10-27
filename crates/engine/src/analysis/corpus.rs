@@ -640,6 +640,14 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         gated_on: None,
         deferral: None,
     },
+    ComboRow {
+        name: "Displacer Kitten + Blazing Firesinger",
+        cards: &["Displacer Kitten", "Blazing Firesinger"],
+        family: ResourceFamily::Mana,
+        win_kind: WinKind::Advantage,
+        gated_on: None,
+        deferral: None,
+    },
 ];
 
 #[cfg(test)]
@@ -781,6 +789,7 @@ pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
         60,
         ComboDriver::Offline(drive_archaeomancer_time_warp_offer),
     ),
+    (61, ComboDriver::Offline(drive_kitten_firesinger_offer)),
 ];
 
 /// Number of rows in the corpus.
@@ -803,7 +812,7 @@ pub fn row(idx: usize) -> &'static ComboRow {
 pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) -> RowStatus {
     match outcome {
         Some(cert)
-            if cert.win_kind == row.win_kind
+            if cert.win_kind == Some(row.win_kind)
                 && cert
                     .unbounded
                     .iter()
@@ -811,7 +820,7 @@ pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) 
         {
             RowStatus::Confirmed {
                 unbounded: cert.unbounded,
-                win_kind: cert.win_kind,
+                win_kind: row.win_kind,
             }
         }
         Some(cert) => RowStatus::Failed {
@@ -1268,6 +1277,7 @@ pub(crate) fn activate_and_resolve(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
     {
@@ -1628,6 +1638,7 @@ fn drive_ballista_ping(probe: &mut LoopProbe, ballista: ObjectId, ability_index:
         .act(GameAction::ActivateAbility {
             source_id: ballista,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Ballista remove-counter ability");
     // The ability targets "any target"; choose the opponent.
@@ -2362,6 +2373,7 @@ fn drive_mana_outlet_offer(
             .act(GameAction::ActivateAbility {
                 source_id: outlet,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .ok()?;
         runner
@@ -2510,6 +2522,7 @@ pub(crate) fn drive_grove_marvin_offer(db: &CardDatabase) -> Option<LoopCertific
         runner.act(GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })?;
         if matches!(
             runner.state().waiting_for,
@@ -2660,6 +2673,7 @@ pub(crate) fn drive_najeela_urtet_offer(db: &CardDatabase) -> Option<LoopCertifi
                     Some(GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: activated(state, source, untapped.is_some())?,
+                        payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                     })
                 })
                 .unwrap_or(GameAction::PassPriority)
@@ -2756,6 +2770,50 @@ pub(crate) fn drive_archaeomancer_time_warp_offer(db: &CardDatabase) -> Option<L
             }
             _ => pass_or_decline(state),
         }
+    })
+}
+
+/// CR 722.3c + CR 603.2 + CR 400.7: Blazing Firesinger ("This creature enters prepared.") casts
+/// its prepared Seething Song copy ("Add {R}{R}{R}{R}{R}.") for {2}{R}, and Displacer Kitten
+/// ("Whenever you cast a noncreature spell, exile up to one target nonland permanent you control,
+/// then return that card to the battlefield under its owner's control.") blinks Firesinger, which
+/// re-enters prepared as a new object with a new copy in exile, cycle by cycle until the engine
+/// offers the loop. Firesinger is cast from hand onto six Mountains, so it enters prepared through
+/// its own replacement.
+pub(crate) fn drive_kitten_firesinger_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Displacer Kitten", Zone::Battlefield, db);
+    let firesinger = scenario.add_real_card(P0, "Blazing Firesinger", Zone::Hand, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    let card_id = runner.state().objects.get(&firesinger)?.card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: firesinger,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: Default::default(),
+        })
+        .ok()?;
+    answer_to_offer(&mut runner, 400, |state| match &state.waiting_for {
+        WaitingFor::Priority { player }
+            if *player == P0
+                && state.stack.is_empty()
+                && state
+                    .objects
+                    .get(&firesinger)
+                    .is_some_and(|object| object.prepared.is_some()) =>
+        {
+            GameAction::CastPreparedCopy { source: firesinger }
+        }
+        WaitingFor::TriggerTargetSelection { .. } => GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(firesinger)),
+        },
+        _ => pass_or_decline(state),
     })
 }
 

@@ -8,6 +8,7 @@ on:
       - 'client/**'
       - 'lobby-worker/**'
       - 'scripts/**'
+      - 'protocol/**'
       - 'Cargo.*'
       - '.cargo/**'
       - 'Dockerfile'
@@ -35,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
     # retain a bounded job while leaving room for the remaining lint gates.
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -299,7 +300,9 @@ jobs:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Archive downloads can consume over 10 minutes before tests begin.
+    # Keep a bounded job with time for each shard to finish its tests.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -1048,7 +1051,9 @@ jobs:
       # read the pinned client/Tauri/workflow/crate files, none of which need
       # client/node_modules.
       - name: Test
-        run: bun test scripts/card-bot
+        run: |
+          bun scripts/protocol-versions.mjs generate
+          bun test scripts/card-bot
 
   frontend:
     name: Frontend (lint, type-check, test)
@@ -1056,6 +1061,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1066,6 +1073,39 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Protocol product tests
+        run: node --test scripts/protocol-versions.test.mjs scripts/engine-fingerprint.test.mjs
+
+      - name: Protocol integration history
+        env:
+          PROTOCOL_EVENT: ${{ github.event_name }}
+          PROTOCOL_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PROTOCOL_MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          PROTOCOL_PUSH_BASE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          node scripts/protocol-versions.mjs generate
+          case "$PROTOCOL_EVENT" in
+            pull_request) base="$PROTOCOL_PR_BASE" ;;
+            merge_group) base="$PROTOCOL_MERGE_BASE" ;;
+            push) base="$PROTOCOL_PUSH_BASE" ;;
+            *) echo "Unsupported protocol event: $PROTOCOL_EVENT" >&2; exit 1 ;;
+          esac
+          if [[ "$PROTOCOL_EVENT" == push && "$base" == 0000000000000000000000000000000000000000 ]]; then
+            echo "Branch creation has no predecessor; checking protocol ownership without history"
+            node scripts/check-protocol-version.mjs
+          else
+            if [[ ! "$base" =~ ^[0-9a-fA-F]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
+              echo "Invalid protocol base for $PROTOCOL_EVENT: $base" >&2
+              exit 1
+            fi
+            if ! git rev-parse --verify --end-of-options "$base^{commit}" >/dev/null 2>&1; then
+              git fetch --no-tags origin "$base"
+            fi
+            git rev-parse --verify --end-of-options "$base^{commit}" >/dev/null
+            node scripts/check-protocol-version.mjs --base "$base"
+          fi
 
       - name: Install dependencies
         run: cd client && pnpm install --frozen-lockfile

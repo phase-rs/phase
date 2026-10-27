@@ -659,10 +659,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: source_id },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             )

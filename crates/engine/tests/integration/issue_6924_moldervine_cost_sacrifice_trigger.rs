@@ -109,6 +109,7 @@ fn sacrifice_a_creature_with(outlet: Outlet, victim_kind: Victim, observer: Obse
         .act(GameAction::ActivateAbility {
             source_id: outlet_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("reach-guard: the outlet's sacrifice ability must be activatable");
 

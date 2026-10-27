@@ -1,10 +1,10 @@
-use crate::parser::oracle_nom::error::{OracleError, OracleResult};
+use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::character::complete::{alpha1, multispace0, multispace1};
+use nom::character::complete::{alpha1, multispace0, multispace1, satisfy};
 use nom::combinator::{map, map_opt, not, opt, peek, rest, success, value};
-use nom::multi::fold_many1;
-use nom::sequence::{delimited, preceded, terminated};
+use nom::multi::{fold_many1, many_till};
+use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -40,7 +40,9 @@ use super::oracle_ir::trigger::{
 };
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition as nom_condition;
-use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
+use super::oracle_nom::primitives::{
+    self as nom_primitives, scan_at_word_boundaries, scan_preceded,
+};
 use super::oracle_quantity::parse_cda_quantity;
 #[cfg(test)]
 use super::oracle_static::parse_static_line;
@@ -2477,7 +2479,7 @@ pub(super) fn strip_ability_word_with_name(line: &str) -> Option<(String, String
 /// branch re-validates via `has_trigger_prefix`. The 6-word ceiling bounds how
 /// far an em-dash sentence may be treated as a label on that path.
 ///
-/// The activated-ability cost-label path uses the wider
+/// The activated-ability cost-label path and the additional-cost line use the wider
 /// `FLAVOR_WORD_COST_LABEL_MAX_WORDS` instead — see that constant for why a word
 /// count is the wrong guard there.
 ///
@@ -2494,6 +2496,11 @@ pub(super) const FLAVOR_WORD_MAX_WORDS: usize = 6;
 /// arbitrarily long ("I've Come Up with a New Recipe!", 7 words — Ignis
 /// Scientia; "The Most Important Punch in History", 6 words — Duggan), so this
 /// path is uncapped and leans entirely on `cost_prefix_is_activated`.
+///
+/// The additional-cost line (`oracle_casting::additional_cost_line_text`) uses
+/// the same uncapped split for the same reason: its remainder is re-validated
+/// by the "as an additional cost to cast this spell" opener, and the label by
+/// `label_names_rules_term`.
 pub(super) const FLAVOR_WORD_COST_LABEL_MAX_WORDS: usize = usize::MAX;
 
 pub(super) fn strip_flavor_word_with_name(line: &str) -> Option<(String, String)> {
@@ -2619,6 +2626,378 @@ pub(super) fn parse_known_ability_word_name(
         "",
         nom::error::ErrorKind::Fail,
     )))
+}
+
+/// CR 701: the keyword actions the Comprehensive Rules list (CR 701.2–701.71, rules effective
+/// September 25, 2026), lowercase; CR 701.26 gives "tap" and "untap". Regenerate from
+/// `docs/MagicCompRules.txt` (fetch it with `scripts/fetch-comp-rules.sh`): every `701.N.` heading
+/// with N ≥ 2, lowercased. A keyword the CR adds after these rules is read past until it is added
+/// here.
+const KEYWORD_ACTION_NAMES: &[&str] = &[
+    "activate",
+    "attach",
+    "behold",
+    "cast",
+    "counter",
+    "create",
+    "destroy",
+    "discard",
+    "double",
+    "triple",
+    "exchange",
+    "exile",
+    "fight",
+    "goad",
+    "investigate",
+    "mill",
+    "play",
+    "regenerate",
+    "reveal",
+    "sacrifice",
+    "scry",
+    "search",
+    "shuffle",
+    "surveil",
+    "tap",
+    "untap",
+    "transform",
+    "convert",
+    "fateseal",
+    "clash",
+    "planeswalk",
+    "set in motion",
+    "abandon",
+    "proliferate",
+    "detain",
+    "populate",
+    "monstrosity",
+    "vote",
+    "bolster",
+    "manifest",
+    "support",
+    "meld",
+    "exert",
+    "explore",
+    "assemble",
+    "adapt",
+    "amass",
+    "learn",
+    "venture into the dungeon",
+    "connive",
+    "open an attraction",
+    "roll to visit your attractions",
+    "incubate",
+    "the ring tempts you",
+    "face a villainous choice",
+    "time travel",
+    "discover",
+    "cloak",
+    "collect evidence",
+    "suspect",
+    "forage",
+    "manifest dread",
+    "endure",
+    "harness",
+    "airbend",
+    "earthbend",
+    "waterbend",
+    "blight",
+    "heal",
+    "recruit",
+    "empower jace",
+];
+
+/// CR 702: the keyword abilities the Comprehensive Rules list (CR 702.2–702.195, rules effective
+/// September 25, 2026), lowercase; CR 702.145 gives "daybound" and "nightbound", and CR 702.186a
+/// writes infinity as "∞". Regenerate from `docs/MagicCompRules.txt` (fetch it with
+/// `scripts/fetch-comp-rules.sh`): every `702.N.` heading with N ≥ 2, lowercased. A keyword the CR
+/// adds after these rules is read past until it is added here.
+const KEYWORD_ABILITY_NAMES: &[&str] = &[
+    "deathtouch",
+    "defender",
+    "double strike",
+    "enchant",
+    "equip",
+    "first strike",
+    "flash",
+    "flying",
+    "haste",
+    "hexproof",
+    "indestructible",
+    "intimidate",
+    "landwalk",
+    "lifelink",
+    "protection",
+    "reach",
+    "shroud",
+    "trample",
+    "vigilance",
+    "ward",
+    "banding",
+    "rampage",
+    "cumulative upkeep",
+    "flanking",
+    "phasing",
+    "buyback",
+    "shadow",
+    "cycling",
+    "echo",
+    "horsemanship",
+    "fading",
+    "kicker",
+    "flashback",
+    "madness",
+    "fear",
+    "morph",
+    "amplify",
+    "provoke",
+    "storm",
+    "affinity",
+    "entwine",
+    "modular",
+    "sunburst",
+    "bushido",
+    "soulshift",
+    "splice",
+    "offering",
+    "ninjutsu",
+    "epic",
+    "convoke",
+    "dredge",
+    "transmute",
+    "bloodthirst",
+    "haunt",
+    "replicate",
+    "forecast",
+    "graft",
+    "recover",
+    "ripple",
+    "split second",
+    "suspend",
+    "vanishing",
+    "absorb",
+    "aura swap",
+    "delve",
+    "fortify",
+    "frenzy",
+    "gravestorm",
+    "poisonous",
+    "transfigure",
+    "champion",
+    "changeling",
+    "evoke",
+    "hideaway",
+    "prowl",
+    "reinforce",
+    "conspire",
+    "persist",
+    "wither",
+    "retrace",
+    "devour",
+    "exalted",
+    "unearth",
+    "cascade",
+    "annihilator",
+    "level up",
+    "rebound",
+    "umbra armor",
+    "infect",
+    "battle cry",
+    "living weapon",
+    "undying",
+    "miracle",
+    "soulbond",
+    "overload",
+    "scavenge",
+    "unleash",
+    "cipher",
+    "evolve",
+    "extort",
+    "fuse",
+    "bestow",
+    "tribute",
+    "dethrone",
+    "hidden agenda",
+    "outlast",
+    "prowess",
+    "dash",
+    "exploit",
+    "menace",
+    "renown",
+    "awaken",
+    "devoid",
+    "ingest",
+    "myriad",
+    "surge",
+    "skulk",
+    "emerge",
+    "escalate",
+    "melee",
+    "crew",
+    "fabricate",
+    "partner",
+    "undaunted",
+    "improvise",
+    "aftermath",
+    "embalm",
+    "eternalize",
+    "afflict",
+    "ascend",
+    "assist",
+    "jump-start",
+    "mentor",
+    "afterlife",
+    "riot",
+    "spectacle",
+    "escape",
+    "companion",
+    "mutate",
+    "encore",
+    "boast",
+    "foretell",
+    "demonstrate",
+    "daybound",
+    "nightbound",
+    "disturb",
+    "decayed",
+    "cleave",
+    "training",
+    "compleated",
+    "reconfigure",
+    "blitz",
+    "casualty",
+    "enlist",
+    "read ahead",
+    "ravenous",
+    "squad",
+    "space sculptor",
+    "visit",
+    "prototype",
+    "living metal",
+    "more than meets the eye",
+    "for mirrodin!",
+    "toxic",
+    "backup",
+    "bargain",
+    "craft",
+    "disguise",
+    "solved",
+    "plot",
+    "saddle",
+    "spree",
+    "freerunning",
+    "gift",
+    "offspring",
+    "impending",
+    "exhaust",
+    "max speed",
+    "start your engines!",
+    "harmonize",
+    "mobilize",
+    "job select",
+    "tiered",
+    "station",
+    "warp",
+    "∞",
+    "mayhem",
+    "web-slinging",
+    "firebending",
+    "sneak",
+    "increment",
+    "paradigm",
+    "power-up",
+    "teamwork",
+    "storied",
+];
+
+const RULES_LABEL_TERMS: &[&str] = &[
+    // CR 702.37b, CR 702.33c, CR 702.106f, CR 702.124k, CR 702.22b, CR 702.89b and CR 701.49d:
+    // variant names that contain no heading word.
+    "megamorph",
+    "multikicker",
+    "double agenda",
+    "choose a background",
+    "bands with other",
+    "totem armor",
+    "venture into",
+    // CR 702.124i: the "partner—[text]" ability names.
+    "character select",
+    "father & son",
+    "friends forever",
+    "survivors",
+    // CR 702.159b: "Prize" opens the second paragraph of an Attraction's visit ability.
+    "prize",
+    // CR 719.3a: "To solve — [Condition]" is a Case's solve trigger.
+    "to solve",
+    // CR 711.2 + CR 716.2a: the level symbol and a Class's "Level N —".
+    "level",
+    // CR 700.2 + CR 614.12c: a bullet opens a mode or an anchor-word ability.
+    "•",
+    // Keywords the engine models that the CR does not list (`Keyword::Augment`,
+    // `Keyword::DoubleTeam`, `Keyword::Specialize`, `Keyword::StartingIntensity`).
+    "augment",
+    "double team",
+    "specialize",
+    "starting intensity",
+];
+
+/// A listed term at the start of `input`, ending at a word boundary.
+fn parse_listed_rules_term(input: &str) -> OracleResult<'_, ()> {
+    KEYWORD_ACTION_NAMES
+        .iter()
+        .chain(KEYWORD_ABILITY_NAMES)
+        .chain(RULES_LABEL_TERMS)
+        .find_map(|term| {
+            value(
+                (),
+                terminated(
+                    tag::<_, _, OracleError<'_>>(*term),
+                    not(satisfy(char::is_alphanumeric)),
+                ),
+            )
+            .parse(input)
+            .ok()
+        })
+        .ok_or_else(|| oracle_err(input))
+}
+
+/// CR 702.29e + CR 702.14a: a "[type]cycling" or "[type]walk" word.
+fn parse_type_compound_keyword(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        pair(
+            satisfy(|c: char| c.is_ascii_lowercase()),
+            many_till(
+                satisfy(|c: char| c.is_ascii_lowercase()),
+                terminated(
+                    alt((tag("cycling"), tag("walk"))),
+                    not(satisfy(char::is_alphanumeric)),
+                ),
+            ),
+        ),
+    )
+    .parse(input)
+}
+
+fn parse_rules_label_term(input: &str) -> OracleResult<'_, ()> {
+    alt((parse_listed_rules_term, parse_type_compound_keyword)).parse(input)
+}
+
+/// CR 207.2c + CR 207.2d: whether an em-dash label contains a keyword term. The terms are a keyword
+/// action (CR 701) or keyword ability (CR 702) name, a variant name, label word or engine-modeled
+/// keyword in `RULES_LABEL_TERMS`, and a "[type]cycling" or "[type]walk" word.
+///
+/// A term matches at the label's start or after a space. It must end at the label's end or before a
+/// non-alphanumeric character.
+///
+/// A label that contains a keyword term may be a keyword with a parameter or a variant ("Commander
+/// ninjutsu", "Protection from red"), so it is never read past as an ability word or flavor word.
+/// No CR 207.2c ability word contains a keyword term.
+///
+/// The check is fail-closed: a flavor word that contains a keyword term ("Echo of the Lost"
+/// contains "echo") also answers `true`, and its line keeps its other route. `label` is lowercase.
+pub(super) fn label_names_rules_term(label: &str) -> bool {
+    scan_at_word_boundaries(label, parse_rules_label_term).is_some()
 }
 
 /// Pattern A (CR 207.2c): Detect a line of the form `<ability-word> (<body>)`
@@ -5543,5 +5922,55 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
             TargetFilter::ParentTarget,
             "a mode-internal referent preceding the pronoun outranks the pin"
         );
+    }
+
+    #[test]
+    fn label_names_rules_term_finds_every_listed_term_at_a_word_boundary() {
+        let mut mismatches = Vec::new();
+        for term in KEYWORD_ACTION_NAMES
+            .iter()
+            .chain(KEYWORD_ABILITY_NAMES)
+            .chain(RULES_LABEL_TERMS)
+        {
+            for label in [term.to_string(), format!("old {term} 4")] {
+                if !label_names_rules_term(&label) {
+                    mismatches.push(label);
+                }
+            }
+        }
+        for label in [
+            "swampcycling",
+            "desertwalk",
+            "legendary landwalk",
+            "goblin offering",
+        ] {
+            if !label_names_rules_term(label) {
+                mismatches.push(label.to_string());
+            }
+        }
+        // "increment" is a CR 702.191 keyword the table lists.
+        let ability_words = ABILITY_WORD_NAMES
+            .iter()
+            .filter(|w| **w != "increment")
+            .copied();
+        for label in [
+            "wind walk",
+            "fallen warrior",
+            "frenzied metabolism",
+            "titanic",
+            "wardens unite",
+            "flashpoint",
+            "echoing call",
+            "one two three four five",
+            "grant an advantage",
+        ]
+        .into_iter()
+        .chain(ability_words)
+        {
+            if label_names_rules_term(label) {
+                mismatches.push(format!("not a term: {label}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:?}");
     }
 }

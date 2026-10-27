@@ -1879,8 +1879,8 @@ pub(crate) fn parse_pronoun_becomes_type_static(
     }
 
     // CR 205.1a: an effect that sets an object's card type replaces its existing
-    // card types unless it retains them (CR 205.1b). A pure non-creature
-    // card-type change with no retention marker therefore REPLACES — Arixmethes,
+    // card types unless it retains them (CR 205.1b). A card-type change with
+    // no retention exception therefore REPLACES — Arixmethes,
     // Slumbering Isle's "it's a land. (It's not a creature.)" must stop the
     // Kraken from being a creature, not leave it a "Creature Land" (issue #5213).
     let mut modifications = maybe_replace_card_types(modifications, body.lower);
@@ -1925,21 +1925,12 @@ pub(crate) fn parse_pronoun_becomes_type_static(
 
 /// CR 205.1a / CR 205.1b: Decide whether a self type-change is a REPLACEMENT or
 /// an additive grant. A set of `AddType` modifications is replaced by a single
-/// `SetCardTypes` (which removes the object's prior card types, CR 205.1a) only
-/// when ALL of these hold:
-///   - every modification is an `AddType` (a pure card-type change — no P/T,
-///     subtype, keyword, color, or supertype, which would signal an animation
-///     that retains its card type),
-///   - none of the added types is `Creature` (creature forms retain via CR
-///     205.1b's "artifact creature" rule and P/T-bearing animations),
-///   - the body carries no CR 205.1b retention marker ("in addition to" /
-///     "still a[n]").
-///
-/// Otherwise the additive modifications are returned unchanged. This makes
-/// Arixmethes' "it's a land" strip the Creature type while leaving creature
-/// animations (Gideon Blackblade, Midnight Mangler, Circle of the Moon Druid)
-/// on their additive path.
-fn maybe_replace_card_types(
+/// `SetCardTypes` when the descriptor explicitly names a core type, unless the
+/// text retains prior types or makes an artifact creature. Creature inferred
+/// from a subtype/P/T descriptor is not an instruction to replace card types.
+/// Replacement precedes subtype additions so the new subtypes survive removal
+/// of subtypes incompatible with the prior card types.
+pub(super) fn maybe_replace_card_types(
     modifications: Vec<ContinuousModification>,
     body_lower: &str,
 ) -> Vec<ContinuousModification> {
@@ -1948,21 +1939,42 @@ fn maybe_replace_card_types(
     {
         return modifications;
     }
-    let mut core_types = Vec::new();
-    for modification in &modifications {
-        match modification {
-            ContinuousModification::AddType { core_type } if *core_type != CoreType::Creature => {
-                core_types.push(*core_type);
-            }
-            // Anything else (P/T, subtype, keyword, an added Creature type, …)
-            // keeps the additive form.
-            _ => return modifications,
-        }
-    }
-    if core_types.is_empty() {
+    let core_types: Vec<_> = modifications
+        .iter()
+        .filter_map(|modification| match modification {
+            ContinuousModification::AddType { core_type } => Some(*core_type),
+            _ => None,
+        })
+        .collect();
+    if core_types.is_empty()
+        || (core_types.contains(&CoreType::Artifact) && core_types.contains(&CoreType::Creature))
+    {
         return modifications;
     }
-    vec![ContinuousModification::SetCardTypes { core_types }]
+    let descriptor = super::oracle_effect::animation::split_animation_conjunct_clause(body_lower)
+        .map_or(body_lower, |(descriptor, _)| descriptor);
+    let descriptor = nom_primitives::scan_split_at_phrase(descriptor, |input| {
+        alt((tag("with "), tag("where "))).parse(input)
+    })
+    .map_or(descriptor, |(descriptor, _)| descriptor);
+    if nom_primitives::scan_at_word_boundaries(descriptor, |input| {
+        terminated(
+            nom_primitives::parse_core_type,
+            alt((space1, eof, tag("."), tag(","))),
+        )
+        .parse(input)
+    })
+    .is_none()
+    {
+        return modifications;
+    }
+    std::iter::once(ContinuousModification::SetCardTypes { core_types })
+        .chain(
+            modifications.into_iter().filter(|modification| {
+                !matches!(modification, ContinuousModification::AddType { .. })
+            }),
+        )
+        .collect()
 }
 
 /// CR 205.2 + CR 613.1d + CR 613.4b + CR 611.3a: "Each noncreature <T> [you control]

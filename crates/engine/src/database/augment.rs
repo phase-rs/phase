@@ -3,7 +3,7 @@
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, CombineSource,
-    ControllerRef, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, Effect, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::Supertype;
@@ -87,7 +87,7 @@ fn synthesize_augment_half(face: &mut CardFace, oracle: &str) {
         costs: vec![
             AbilityCost::Mana { cost },
             AbilityCost::Reveal {
-                count: 1,
+                count: QuantityExpr::Fixed { value: 1 },
                 filter: Some(TargetFilter::SelfRef),
             },
         ],

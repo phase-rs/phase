@@ -244,8 +244,9 @@ pub(crate) fn links_for_reader(
 
 /// CR 607.2a + CR 607.2b + CR 113.7a + CR 400.7: The linked-exile LKI piles the
 /// incarnation `reader` may read (see `linked_exile_incarnation`), filtered to
-/// cards still in exile so stale entries (cards that later left exile)
-/// contribute nothing. `None` admits every entry (the source no longer exists).
+/// cards still in exile as the object the entry captured (CR 400.7), so a card
+/// that left exile contributes nothing, even if it was exiled again. `None`
+/// admits every entry (the source no longer exists).
 pub(crate) fn lki_snapshots_for_reader(
     state: &GameState,
     source_id: ObjectId,
@@ -258,12 +259,7 @@ pub(crate) fn lki_snapshots_for_reader(
         .flatten()
         .filter(move |lki| reader.is_none_or(|incarnation| lki.admits(incarnation)))
         .flat_map(|lki| &lki.snapshot)
-        .filter(|snap| {
-            state
-                .objects
-                .get(&snap.exiled_id)
-                .is_some_and(|obj| obj.zone == Zone::Exile)
-        })
+        .filter(|snap| snap.is_still_exiled(state))
 }
 
 /// CR 607.2a + CR 113.7a: Whether `exiled_id` was exiled by the acting
@@ -299,6 +295,7 @@ pub(crate) fn exiled_card_snapshot(
             // CR 202.3d + CR 709.4b: the exiled card is off the stack, so a
             // split card records its combined mana value.
             mana_value: obj.effective_mana_value(),
+            incarnation: obj.incarnation,
         })
 }
 
@@ -459,7 +456,16 @@ fn record_departed_linked_exile(
     };
     let entries = state.linked_exile_lki.entry(source_id).or_default();
     match entries.iter_mut().find(|lki| lki.admits(creator)) {
-        Some(lki) if lki.snapshot.iter().any(|snap| snap.exiled_id == exiled_id) => false,
+        // CR 400.7: a card exiled again is a new object, so it is recorded even
+        // when an earlier incarnation of it is already in the pile (readers drop
+        // that stale entry).
+        Some(lki)
+            if lki.snapshot.iter().any(|snap| {
+                snap.exiled_id == snapshot.exiled_id && snap.incarnation == snapshot.incarnation
+            }) =>
+        {
+            false
+        }
         Some(lki) => {
             lki.snapshot.push(snapshot);
             true
@@ -638,23 +644,10 @@ pub(crate) fn record_exiling_player(state: &mut GameState, exiled_id: ObjectId, 
     }
 }
 
-// CR 611.2a + CR 607.2a: Source-linked durations expire when that same source
-// exiles another card, whether stored as a play permission or a transient effect.
+/// CR 611.2a + CR 607.2a: Source-linked durations expire when that same source
+/// exiles another card, whether stored as a play permission or a transient effect.
 fn expire_until_source_exiles_another_card_durations(state: &mut GameState, source_id: ObjectId) {
-    for (_, object) in state.objects.iter_mut() {
-        // CR 611.2a: read the lifetime through `CastingPermission::lifetime`,
-        // the single place that knows which variants carry one. The hand-written
-        // `PlayFromExile`-only pattern that stood here ended the duration on one
-        // variant while `layers::casting_permission_duration_is_enforceable`
-        // reported it enforceable for all of them — the same split between "who
-        // may hold this lifetime" and "who ends it" that this change removes for
-        // the turn-boundary seams.
-        object.casting_permissions.retain(|permission| {
-            let lifetime = permission.lifetime();
-            !(lifetime.duration == Some(&Duration::UntilSourceExilesAnotherCard)
-                && lifetime.source_id == Some(source_id))
-        });
-    }
+    expire_source_exile_linked_casting_permissions(state, source_id);
 
     let before = state.transient_continuous_effects.len();
     state.transient_continuous_effects.retain(|effect| {
@@ -664,6 +657,31 @@ fn expire_until_source_exiles_another_card_durations(state: &mut GameState, sour
     if state.transient_continuous_effects.len() != before {
         state.layers_dirty.mark_full();
     }
+}
+
+/// Removes every casting permission whose duration lasts until `source_id`
+/// exiles another card and that is linked to that source. This is the
+/// permission half of `expire_until_source_exiles_another_card_durations`, its
+/// only caller. Objects holding no casting permission are not written, so they
+/// stay shared with clones of the state.
+fn expire_source_exile_linked_casting_permissions(state: &mut GameState, source_id: ObjectId) {
+    state.objects.update_where(
+        |_, object| !object.casting_permissions.is_empty(),
+        |_, object| {
+            // CR 611.2a: read the lifetime through `CastingPermission::lifetime`,
+            // the single place that knows which variants carry one. The hand-written
+            // `PlayFromExile`-only pattern that stood here ended the duration on one
+            // variant while `layers::casting_permission_duration_is_enforceable`
+            // reported it enforceable for all of them — the same split between "who
+            // may hold this lifetime" and "who ends it" that this change removes for
+            // the turn-boundary seams.
+            object.casting_permissions.retain(|permission| {
+                let lifetime = permission.lifetime();
+                !(lifetime.duration == Some(&Duration::UntilSourceExilesAnotherCard)
+                    && lifetime.source_id == Some(source_id))
+            });
+        },
+    );
 }
 
 pub(crate) fn ability_contains_linked_exile_consumer(ability: &ResolvedAbility) -> bool {
@@ -917,7 +935,7 @@ mod tests {
                 source_id: Some(source),
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             },
@@ -939,6 +957,7 @@ mod tests {
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
         );
@@ -968,7 +987,7 @@ mod tests {
                 source_id: Some(other_source),
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             },
@@ -1116,6 +1135,7 @@ mod tests {
             single_use: false,
             cast_cost_modifier: None,
             alt_ability_cost: None,
+            without_paying_mana_cost: false,
             land_enter_tapped: EtbTapState::Unspecified,
             invalidation: None,
         }
@@ -2325,6 +2345,62 @@ mod tests {
         assert!(!state.linked_exile_lki.contains_key(&source));
     }
 
+    /// CR 400.7 + CR 607.2a: a card the departed incarnation exiles, which then
+    /// leaves exile and is exiled again by that same incarnation, is a new
+    /// object, so it is recorded again and its pile reads it.
+    #[test]
+    fn a_card_the_departed_incarnation_exiles_again_is_recorded_again() {
+        // Stamped 4, live 6.
+        let (mut state, source) = departed_creator_fixture();
+        let card = exile_card(&mut state);
+        push_tracked_by_source(&mut state, card, source);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+        crate::game::zones::move_to_zone(&mut state, card, Zone::Exile, &mut events);
+        push_tracked_by_source(&mut state, card, source);
+
+        let pile: Vec<ObjectId> =
+            crate::game::players::linked_exile_cards_for_source(&state, source)
+                .iter()
+                .map(|snap| snap.exiled_id)
+                .collect();
+        assert_eq!(pile, vec![card], "the card exiled again is in the pile");
+        assert!(
+            state.linked_exile_lki[&source]
+                .iter()
+                .any(|lki| lki.snapshot.contains(&snapshot_of(&state, card))),
+            "the LKI records the card as the object now in exile"
+        );
+    }
+
+    /// CR 400.7: a snapshot saved before snapshots carried an incarnation cannot
+    /// prove which object it named, so it decodes to the legacy sentinel and
+    /// never matches a live card (fail-closed, like `CostPaidObjectSnapshot`).
+    #[test]
+    fn a_legacy_linked_exile_snapshot_matches_no_live_card() {
+        let mut state = GameState::new_two_player(7);
+        let card = exile_card(&mut state);
+        let current = snapshot_of(&state, card);
+        assert!(
+            current.is_still_exiled(&state),
+            "positive: a captured snapshot names the card in exile"
+        );
+
+        let mut legacy = serde_json::to_value(&current).expect("the snapshot serializes");
+        legacy
+            .as_object_mut()
+            .expect("the snapshot is a JSON object")
+            .remove("incarnation")
+            .expect("the snapshot serializes its incarnation");
+        let legacy: LinkedExileSnapshot =
+            serde_json::from_value(legacy).expect("a legacy snapshot decodes");
+        assert_eq!(
+            legacy.incarnation,
+            crate::types::identifiers::LEGACY_INCARNATION
+        );
+        assert!(!legacy.is_still_exiled(&state));
+    }
+
     /// CR 610.3 + CR 400.7 + CR 113.7a: an "until it leaves" exile made by an
     /// ability of a departed incarnation installs no return link and no per-turn
     /// ledger entry; the card is kept in that incarnation's linked-exile LKI. Made
@@ -2505,5 +2581,132 @@ mod tests {
             live_reading,
             "the live links are the live object's reading"
         );
+    }
+}
+
+/// Per-site tests for `expire_source_exile_linked_casting_permissions`: a
+/// sharing witness, a targeted test and a reference-equality test against the
+/// BASE-shaped unguarded loop, plus the call-site pin through
+/// `expire_until_source_exiles_another_card_durations`.
+#[cfg(test)]
+mod object_sweep_sharing_tests {
+    use super::*;
+    use crate::types::ability::CastingPermission;
+    use crate::types::object_map::sweep_test_support::{
+        assert_sweep_keeps_store_shared, assert_sweep_matches_reference, object_mut,
+        run_sweep_targeting, state_with_objects,
+    };
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    /// Three exiled cards and the source (on the battlefield) that exiled them.
+    fn exiled_fixture() -> (GameState, Vec<ObjectId>) {
+        state_with_objects(&[
+            (P0, Zone::Exile),
+            (P1, Zone::Exile),
+            (P0, Zone::Exile),
+            (P0, Zone::Battlefield),
+        ])
+    }
+
+    /// A "play from exile" permission with the given lifetime and source.
+    fn play_from_exile(duration: Duration, source_id: ObjectId) -> CastingPermission {
+        CastingPermission::PlayFromExile {
+            provenance: crate::types::ability::PlayFromExileProvenance::Impulse,
+            mode: crate::types::ability::CardPlayMode::Play,
+            duration,
+            granted_to: P0,
+            frequency: crate::types::statics::CastFrequency::Unlimited,
+            source_id: Some(source_id),
+            invalidation: None,
+            exiled_by_ability_controller: None,
+            mana_spend_permission: None,
+            card_filter: None,
+            single_use_group: None,
+            single_use: false,
+            cast_cost_modifier: None,
+            alt_ability_cost: None,
+            without_paying_mana_cost: false,
+            land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        }
+    }
+
+    /// The permission that ends when `source` exiles another card.
+    fn linked(source: ObjectId) -> CastingPermission {
+        play_from_exile(Duration::UntilSourceExilesAnotherCard, source)
+    }
+
+    /// Adds `permission` to the casting permissions of `id`.
+    fn grant(state: &mut GameState, id: ObjectId, permission: CastingPermission) {
+        object_mut(state, id).casting_permissions.push(permission);
+    }
+
+    /// BASE-shaped unguarded sweep.
+    fn reference_expire_linked_permissions(state: &mut GameState, source_id: ObjectId) {
+        for (_, object) in state.objects.iter_mut() {
+            object.casting_permissions.retain(|permission| {
+                let lifetime = permission.lifetime();
+                !(lifetime.duration == Some(&Duration::UntilSourceExilesAnotherCard)
+                    && lifetime.source_id == Some(source_id))
+            });
+        }
+    }
+
+    /// Sharing witness: no object holds a casting permission.
+    #[test]
+    fn linked_permission_expiry_without_permissions_keeps_store_shared() {
+        let (state, ids) = exiled_fixture();
+        let source = ids[3];
+        assert_sweep_keeps_store_shared(state, |state| {
+            expire_source_exile_linked_casting_permissions(state, source)
+        });
+    }
+
+    /// Targeted test: only the holder of the linked permission is copied.
+    #[test]
+    fn linked_permission_expiry_copies_only_the_holder() {
+        let (mut state, ids) = exiled_fixture();
+        let source = ids[3];
+        grant(&mut state, ids[1], linked(source));
+        let (before, after) = run_sweep_targeting(state, ids[1], |state| {
+            expire_source_exile_linked_casting_permissions(state, source)
+        });
+        assert_eq!(before.objects[&ids[1]].casting_permissions.len(), 1);
+        assert!(after.objects[&ids[1]].casting_permissions.is_empty());
+    }
+
+    /// Reference equality, including a permission linked to another source
+    /// and one with a different lifetime from the same source.
+    #[test]
+    fn linked_permission_expiry_matches_unguarded_sweep() {
+        let (mut state, ids) = exiled_fixture();
+        let source = ids[3];
+        grant(&mut state, ids[0], linked(source));
+        grant(&mut state, ids[1], linked(source));
+        grant(&mut state, ids[1], linked(ids[0]));
+        // Needs the sweep (holds a permission) but keeps it.
+        grant(
+            &mut state,
+            ids[2],
+            play_from_exile(Duration::UntilEndOfTurn, source),
+        );
+        assert_sweep_matches_reference(
+            &state,
+            &[ids[0], ids[1]],
+            |state| expire_source_exile_linked_casting_permissions(state, source),
+            |state| reference_expire_linked_permissions(state, source),
+        );
+    }
+
+    /// Call-site pin: the enclosing duration expiry still removes the linked
+    /// permission.
+    #[test]
+    fn source_exile_duration_expiry_removes_linked_casting_permissions() {
+        let (mut state, ids) = exiled_fixture();
+        let source = ids[3];
+        grant(&mut state, ids[0], linked(source));
+        expire_until_source_exiles_another_card_durations(&mut state, source);
+        assert!(state.objects[&ids[0]].casting_permissions.is_empty());
     }
 }

@@ -158,9 +158,8 @@ pub fn resolve(
     // PARSE SHAPE, not by an end-to-end run — they are candidates the probe
     // above makes credible, not separately measured failures.
     //
-    // Deferred rather than fixed here: see the PR body's
-    // `## Deferred / known-remaining`, DW#2 (migrate `flip_permanent.rs` onto
-    // `targeting::resolved_targets` the same way this module now does).
+    // Resolved: `flip_permanent.rs` now migrates onto `targeting::resolved_targets`
+    // (via `super::resolved_effect_object_ids`) the same way this module does.
     let subject_came_from_declared_targets = subjects
         .iter()
         .all(|id| ability.targets.contains(&TargetRef::Object(*id)));

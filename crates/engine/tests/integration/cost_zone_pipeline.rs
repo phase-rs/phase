@@ -990,6 +990,7 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     state.waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -1932,6 +1933,7 @@ fn count_two_sacrifice_cost_resumes_at_second_object_and_activates_once() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin the count-two sacrifice activation");
 
@@ -1991,6 +1993,7 @@ fn paused_sacrifice_cost_stamps_cross_action_departures_and_collects_dies_once()
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin the observed count-two sacrifice activation");
     let initial = runner
@@ -2093,6 +2096,7 @@ fn target_activation_replacement_paused_sacrifice_stages_cost_triggers_until_com
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("targeted activation starts with target selection");
     runner
@@ -2166,6 +2170,7 @@ fn self_sacrifice_mana_cost_waits_for_replacement_before_producing_mana() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the self-sacrifice mana ability reaches its replacement choice");
     assert!(matches!(
@@ -2410,6 +2415,7 @@ fn selected_sacrifice_mana_cost_resumes_without_repaying_its_prefix() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("begin the selected-sacrifice mana ability");
     let initial = runner
@@ -2493,6 +2499,7 @@ fn mandatory_single_sacrifice_redirect_completes_without_a_pause() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the unambiguous sacrifice redirect must resolve synchronously");
     assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
@@ -3091,6 +3098,7 @@ fn self_exile_activation_cost_pauses_for_moved_redirect_without_pending_cast() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("announce self-exile activation");
 
@@ -3318,6 +3326,7 @@ fn self_return_activation_cost_pauses_for_moved_redirect_without_pending_cast() 
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("announce self-return activation");
 
@@ -3402,6 +3411,7 @@ fn composite_return_cost_resurfaces_each_return_leg() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate two-return witness");
     assert!(matches!(
@@ -3482,6 +3492,7 @@ fn return_cost_keeps_selected_move_while_residual_self_move_pauses() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate residual self-move witness");
     let result = runner
@@ -3565,6 +3576,7 @@ fn modal_activation_self_exile_cost_resumes_after_moved_redirect() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("announce modal activation");
     let result = runner
@@ -3617,6 +3629,7 @@ fn synthesized_plot_redirect_resumes_as_special_action() {
         .act(GameAction::ActivateAbility {
             source_id: plotted,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("start synthesized plot special action");
     assert!(matches!(
@@ -4367,6 +4380,7 @@ fn assert_repeated_interactive_activation_cost(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activation starts its interactive cost payment");
     if one_of {
@@ -4674,6 +4688,7 @@ fn mana_selected_exile_cost_redirect_resumes_after_the_paid_prefix_once() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("start the selected-exile mana ability");
     let initial = runner
@@ -4937,6 +4952,7 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         may_cost_paid: false,
         may_cost_remaining: None,
         delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     runner.state_mut().waiting_for = WaitingFor::ReplacementChoice {
         player: P0,
@@ -5526,6 +5542,7 @@ fn direct_priority_mana_root_suspends_its_parent_and_keeps_ledgers_disjoint() {
         .act(GameAction::ActivateAbility {
             source_id: source_a,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("A's {2} Mana component pays through B and pauses on its exile replacement");
 
@@ -5847,6 +5864,7 @@ fn direct_priority_mana_root_orders_the_ancestor_prefix_observer_with_both_refle
         .act(GameAction::ActivateAbility {
             source_id: source_a,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("A's {2} Mana component pays through B and pauses on its exile replacement");
     assert!(
@@ -5985,6 +6003,7 @@ fn masked_cast_root_mana_batch_stays_queued_until_the_spell_is_announced() {
         .act(GameAction::ActivateAbility {
             source_id: source_a,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("A is manually activated during the cast's mana payment");
     assert!(
@@ -6254,6 +6273,7 @@ fn masked_unless_payment_root_mana_batch_stays_queued_until_the_owner_settles() 
         .act(GameAction::ActivateAbility {
             source_id: source_a,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("A is manually activated during the unless payment (CR 118.12)");
     assert!(
@@ -6690,6 +6710,7 @@ fn direct_priority_no_pause_root_releases_its_reflexive_and_observer_as_one_grou
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
 
@@ -6764,6 +6785,7 @@ fn masked_cast_no_pause_root_queues_both_contexts_until_the_spell_is_announced()
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is manually activated during the cast's mana payment");
     assert!(
@@ -6856,6 +6878,7 @@ fn masked_resolution_no_pause_root_queues_both_contexts_until_the_owner_settles(
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is manually activated during the unless payment (CR 118.12)");
     assert!(
@@ -6991,6 +7014,7 @@ fn direct_priority_color_choice_root_releases_the_same_two_context_group() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N's AnyOneColor production opens the colour choice");
     assert!(
@@ -7058,6 +7082,7 @@ fn masked_cast_color_choice_root_releases_the_same_two_context_group() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is manually activated during the cast's mana payment");
     assert!(
@@ -7150,6 +7175,7 @@ fn masked_resolution_color_choice_root_releases_the_same_two_context_group() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is manually activated during the unless payment");
     assert!(
@@ -7489,6 +7515,7 @@ fn direct_priority_mana_added_bonus_resolves_inline_without_queue_or_stack() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
 
@@ -7588,6 +7615,7 @@ fn direct_priority_mana_added_nonmana_body_is_deferred_as_an_ordinary_trigger() 
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
 
@@ -7688,6 +7716,7 @@ fn masked_cast_mana_added_bonus_is_spendable_before_the_spell_is_announced() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is manually activated during the cast's mana payment");
     assert!(
@@ -7973,6 +8002,7 @@ fn synchronous_delayed_one_shot_taps_for_mana_joins_the_frame_batch_once() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
     assert_eq!(
@@ -8007,6 +8037,7 @@ fn synchronous_delayed_one_shot_taps_for_mana_joins_the_frame_batch_once() {
         .act(GameAction::ActivateAbility {
             source_id: source_n2,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N2 taps for mana with no delayed source installed");
     assert!(
@@ -8050,6 +8081,7 @@ fn duration_bearing_delayed_whenever_event_stays_installed_and_fires_again() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
     assert_eq!(
@@ -8073,6 +8105,7 @@ fn duration_bearing_delayed_whenever_event_stays_installed_and_fires_again() {
         .act(GameAction::ActivateAbility {
             source_id: source_n2,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N2 taps for mana while the duration-bearing source is still installed");
     assert!(
@@ -9717,6 +9750,7 @@ fn automatic_phyrexian_activation_retries_after_source_cost_redirect() {
         .act(GameAction::ActivateAbility {
             source_id: activator,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("automatic activation reaches the source-cost replacement choice");
     assert!(matches!(
@@ -9791,6 +9825,7 @@ fn automatic_ordinary_activation_retries_after_source_cost_redirect() {
         .act(GameAction::ActivateAbility {
             source_id: activator,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("ordinary activation reaches the source-cost replacement choice");
     assert!(matches!(
@@ -9870,6 +9905,7 @@ fn targeted_mana_tap_hand_exile_cost_retries_after_source_cost_redirect_without_
         .act(GameAction::ActivateAbility {
             source_id: activator,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the targeted activation announces before paying its costs");
     assert!(matches!(
@@ -10235,6 +10271,7 @@ fn mana_cost_proliferate_post_effect_serializes_until_answered_then_resumes_root
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real mana-ability action reaches its Proliferate post-effect");
     assert!(matches!(
@@ -10352,6 +10389,7 @@ fn optional_post_effect_settles_before_resuming_the_parked_mana_root() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the mana ability's mandatory redirect reaches its optional post-effect");
     assert!(
@@ -11812,6 +11850,7 @@ fn put_on_top_batch_redirects_and_preserves_chosen_order_without_redirects() {
             target: TargetFilter::Any,
             count: QuantityExpr::Fixed { value: 0 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![TargetRef::Object(first), TargetRef::Object(second)],
         source,
@@ -12668,6 +12707,7 @@ fn library_effect_placements_stay_synchronous_without_redirects() {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: engine::types::ability::LibraryPosition::Top,
+                arranger: None,
             },
             vec![TargetRef::Object(first), TargetRef::Object(second)],
             put_source,
@@ -13878,6 +13918,7 @@ fn effect_zone_put_on_top_hand_redirect_pauses_before_tail() {
             ),
             count: QuantityExpr::Fixed { value: 1 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![],
         source,
@@ -13990,6 +14031,7 @@ fn effect_zone_put_at_library_position_rejects_duplicate_selection() {
             ),
             count: QuantityExpr::Fixed { value: 2 },
             position: engine::types::ability::LibraryPosition::Top,
+            arranger: None,
         },
         vec![],
         source,
@@ -15530,6 +15572,7 @@ fn accepted_optional_mana_body_pauses_the_frame_and_resumes_it_on_accept() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
     assert_optional_pause_is_open_and_nothing_released(
@@ -15602,6 +15645,7 @@ fn accepted_optional_mana_body_declined_still_resumes_the_frame_once() {
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
     assert_optional_pause_is_open_and_nothing_released(
@@ -15678,6 +15722,7 @@ fn accepted_opponent_may_mana_body_pauses_on_the_nonactivator_and_resumes_the_fr
         .act(GameAction::ActivateAbility {
             source_id: source_n,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("N is activated directly from Priority");
     let WaitingFor::OpponentMayChoice { player, .. } = paused.waiting_for else {

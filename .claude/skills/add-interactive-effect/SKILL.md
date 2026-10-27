@@ -7,13 +7,13 @@ description: Use when adding any effect or ability that requires player input mi
 
 Interactive effects pause game resolution to wait for player input, then resume. Examples: Scry (choose top/bottom), Dig (choose cards to keep), Surveil (choose graveyard/library), Search (choose from library), Reveal+Choose (pick opponent's card).
 
-The core mechanism is the **continuation pattern**: `resolve_ability_chain()` detects a waiting state, stashes remaining sub-abilities in `pending_continuation`, and returns. When the player responds, `engine.rs` resumes the chain.
+The core mechanism is the **continuation pattern**: `resolve_ability_chain()` parks remaining instructions in typed frames on `GameState::resolution_stack`. A public action completes the choice, then the shared resume path drains the owning frame until completion or another prompt.
 
 **Before you start:** Trace Scry end-to-end as the simplest example:
 - Resolver: `effects/scry.rs` — sets `WaitingFor::ScryChoice`
-- Engine handler: `engine.rs` — `(WaitingFor::ScryChoice, GameAction::SelectCards)` arm
-- Continuation: `pending_continuation` resumed after player selects
-- AI: `legal_actions.rs` — generates legal card selections
+- Engine handler: `engine_resolution_choices.rs::handle_resolution_choice` — `(WaitingFor::ScryChoice, GameAction::SelectCards)` arm
+- Continuation: `finish_with_continuation` → `engine::resume_pending_continuation_if_priority`
+- AI: `ai_support/candidates.rs` — generates legal card selections
 - Frontend: `CardChoiceModal` → `ScryModal`
 
 > **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 701.x and 702.x numbers are arbitrary sequential assignments that LLMs consistently hallucinate. Run `grep -n "^701.22" docs/MagicCompRules.txt` (etc.) for every number. If you cannot find it, do not write the annotation.
@@ -28,70 +28,29 @@ This is the most important architectural concept for interactive effects.
 
 A card says "Scry 2, then draw a card." This is parsed as `Scry { count: 2 }` with `sub_ability: Draw { count: 1 }`. But Scry requires player input — the engine can't just barrel through to Draw.
 
-### Solution: `pending_continuation`
+### Owners and APIs
 
-```
-resolve_ability_chain(ability) called:
-    ↓
-resolve_effect(Scry) → sets state.waiting_for = ScryChoice
-    ↓
-resolve_ability_chain detects waiting state:
-    Has sub_ability (Draw)?
-        YES → store as state.pending_continuation
-        Return Ok(()) — chain paused
-    ↓
-[Player makes scry selection via GameAction::SelectCards]
-    ↓
-engine.rs handler processes the selection
-    ↓
-Check state.pending_continuation.take():
-    Some(continuation) → resolve_ability_chain(continuation)
-    None → return to Priority
-```
+Read the live implementations below rather than copying a hand-written continuation:
 
-### Key code: `resolve_ability_chain()` — `crates/engine/src/game/effects/mod.rs`
+| Responsibility | Existing authority |
+|---|---|
+| Recognize a resolution pause and retain the remaining instructions | `game/effects/mod.rs::waits_for_resolution_choice` and `resolve_ability_chain` |
+| Capture continuation context | `types/game_state.rs::PendingContinuation::new` |
+| Park or inspect the active continuation | `GameState::park_ability_continuation`, `active_ability_continuation`, `active_ability_continuation_frame_mut` |
+| Preserve an existing parent/child nesting relationship | The `append_to_pending_continuation` and `prepend_to_pending_continuation` paths in `game/effects/mod.rs`; trace the analogous caller before choosing a frame operation |
+| Validate and deliver a resolution choice | `game/engine_resolution_choices.rs::handle_resolution_choice` |
+| Resume after that choice settles | `finish_with_continuation` → `engine::resume_pending_continuation_if_priority` → `effects::drain_pending_continuation` / `resume_resolution_frames` |
 
-```rust
-// After resolve_effect() returns, check if we entered a waiting state
-if matches!(state.waiting_for,
-    WaitingFor::ScryChoice { .. }
-    | WaitingFor::DigChoice { .. }
-    | WaitingFor::SurveilChoice { .. }
-    | WaitingFor::RevealChoice { .. }
-    | WaitingFor::SearchChoice { .. }
-    | WaitingFor::DiscoverChoice { .. }
-    | WaitingFor::TriggerTargetSelection { .. }
-    | WaitingFor::NamedChoice { .. }
-    // ← ADD YOUR NEW VARIANT HERE
-) {
-    // Stash remaining chain as continuation
-    let mut sub_clone = sub.as_ref().clone();
-    if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
-        sub_clone.targets = ability.targets.clone();  // propagate parent targets
-    }
-    state.pending_continuation = Some(Box::new(sub_clone));
-    return Ok(());
-}
-```
+These are paths under `crates/engine/src/`. An active continuation accessor only sees the owning top frame; a buried parent is not a fallback lookup. Preserve target bindings, producer identity, trigger context and parent event bookkeeping through the existing constructor and chain helpers. Do not recreate a `state.pending_continuation` slot or manually copy parent targets around these authorities.
 
-**If you skip adding your variant to this match, sub-abilities after your interactive effect will execute immediately, bypassing the player choice entirely. This is the #1 source of bugs for interactive effects.**
+### Completion paths
 
-### `pending_continuation` storage — `crates/engine/src/types/game_state.rs`
+- **Immediate:** an effect may finish without a prompt. Trace its normal delivery and event publication; do not manufacture a waiting state merely to share the prompted path.
+- **Paused:** the choice handler validates and publishes its result before invoking the shared resume path. Return the resulting waiting state; the continuation may have opened another prompt.
+- **Empty or declined:** complete the same owning choice and publish its empty/declined result when a downstream consumer exists. Pending and completed-empty are different states; an old producer's result must not survive as the new result.
+- **Nested or paused again:** preserve the parent frame while the child finishes. Do not take an outer continuation or reset priority to bypass the child. The Scry handler also demonstrates preserving observer events produced by a continuation that pauses again.
 
-```rust
-pub pending_continuation: Option<PendingContinuation>,
-
-pub struct PendingContinuation {
-    pub chain: Box<ResolvedAbility>,
-    pub parent_kind: Option<EffectKind>, // used to re-emit parent EffectResolved on drain
-}
-```
-
-The `parent_kind` field is set when the continuation is stashed so that draining the continuation re-emits the parent `EffectResolved` event (see commit `e69173e2f` — required for fight / `DamageAll` / `DamageEachPlayer` paths that pause mid-delivery).
-
-### Target propagation
-
-When the continuation is created, parent targets propagate down if the sub-ability has no targets of its own. This allows chains like "Exile target creature. Its controller gains life equal to its power" to work — the sub-ability receives the creature target from the parent.
+For executable examples, use the named production-entry recipes in [card-test](../card-test/SKILL.md#choose-the-production-entry-point). These examples guide the existing continuation tests below; they add no separate gate.
 
 ---
 
@@ -100,7 +59,7 @@ When the continuation is created, parent targets propagate down if the sub-abili
 ### Phase 1 — WaitingFor + GameAction
 
 - [ ] **`crates/engine/src/types/game_state.rs` — `WaitingFor` enum**
-  Add a variant carrying enough data for the frontend to render the choice UI:
+  Reuse or parameterize an existing choice when its semantics fit. If a distinct choice is needed, add a variant carrying enough data for the frontend to render it:
   ```rust
   YourChoice {
       player: PlayerId,
@@ -123,56 +82,17 @@ When the continuation is created, parent targets propagate down if the sub-abili
 ### Phase 2 — Effect Resolver
 
 - [ ] **`crates/engine/src/game/effects/<name>.rs` — resolver**
-  The resolver does three things:
-  1. Compute the choices available to the player
-  2. Set `state.waiting_for = WaitingFor::YourChoice { ... }`
-  3. Emit `GameEvent::EffectResolved`
-
-  Pattern (from `effects/scry.rs`):
-  ```rust
-  pub fn resolve(state: &mut GameState, ability: &ResolvedAbility, events: &mut Vec<GameEvent>) -> Result<(), EffectError> {
-      let player = ability.controller;
-      // 1. Compute choices
-      let cards = /* ... */;
-      // 2. Set waiting state
-      state.waiting_for = WaitingFor::YourChoice { player, cards };
-      // 3. Emit event
-      events.push(GameEvent::EffectResolved { kind: EffectKind::from(&*ability.effect), source_id: ability.source_id });
-      Ok(())
-  }
-  ```
+  Compute legal choices and either deliver immediately or set the appropriate `WaitingFor`. Trace `effects/scry.rs::resolve` for replacement-aware delivery and pause handling. Keep completion events at the analogous delivery/completion authority; opening a prompt is not proof that its action completed.
 
 - [ ] **`crates/engine/src/game/effects/mod.rs` — wire resolver + continuation match**
   Two changes:
   1. Add `Effect::YourEffect { .. } => your_module::resolve(state, ability, events)` to `resolve_effect()`
-  2. **Add `WaitingFor::YourChoice { .. }` to the continuation match in `resolve_ability_chain()`** — this is critical
+  2. Classify the new pause in `waits_for_resolution_choice` and trace the applicable `resolve_ability_chain` parking branch. Reuse its frame/context handling rather than adding a parallel continuation slot.
 
 ### Phase 3 — Engine Handler
 
-- [ ] **`crates/engine/src/game/engine.rs` — `apply()` match arm**
-  Add a `(WaitingFor::YourChoice { .. }, GameAction::YourResponse { .. })` arm:
-
-  ```rust
-  (WaitingFor::YourChoice { player, cards, .. }, GameAction::YourResponse { selection }) => {
-      // 1. Validate the response
-      // 2. Apply the choice to game state
-      // 3. Resume continuation if present:
-      if let Some(continuation) = state.pending_continuation.take() {
-          // Optionally inject the chosen card/target into continuation's targets:
-          // continuation.targets = vec![TargetRef::Object(chosen_id)];
-          effects::resolve_ability_chain(state, &continuation, &mut events, 0)
-              .map_err(|e| EngineError::InvalidAction(format!("{:?}", e)))?;
-      }
-      // 4. Return next waiting state (usually Priority, unless continuation set a new one)
-      if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-          state.waiting_for.clone()
-      } else {
-          WaitingFor::Priority { player: state.active_player }
-      }
-  }
-  ```
-
-  **Key detail**: After resuming the continuation, check `state.waiting_for` — the continuation might have entered another interactive state (chained choices).
+- [ ] **`crates/engine/src/game/engine_resolution_choices.rs` — resolution-choice dispatch and handler**
+  Add the new waiting state to `handles(waiting_for)`, which `engine.rs` consults before dispatching to this module. Follow the Scry arm in `handle_resolution_choice`: validate the public response, deliver the choice, then finish through the shared completion path. Keep resolution-choice logic in this handler module. Preserve any subsequent prompt and observer events, including when delivery itself pauses on a replacement.
 
 ### Phase 4 — AI Legal Actions
 
@@ -193,14 +113,8 @@ When the continuation is created, parent targets propagate down if the sub-abili
 
 ### Phase 5 — Multiplayer Routing
 
-- [ ] **`crates/server-core/src/session.rs` — `acting_player()`**
-  Add a match arm extracting the `player` field from your `WaitingFor` variant:
-
-  ```rust
-  WaitingFor::YourChoice { player, .. } => Some(*player),
-  ```
-
-  This ensures the server only accepts actions from the correct player.
+- [ ] **`crates/engine/src/types/game_state.rs` — `WaitingFor::acting_player()` / `acting_players()`**
+  Include the new choice's semantic actor in the existing engine query. `game/turn_control.rs::authorized_submitter` / `authorized_submitters` maps that actor to the authorized decision maker; `server-core/src/session.rs` delegates to those authorities. Do not add a second routing match in the server.
 
 ### Phase 6 — Frontend
 
@@ -220,23 +134,19 @@ When the continuation is created, parent targets propagate down if the sub-abili
 
 ### Phase 7 — Multiplayer State Filtering (if hidden info)
 
-- [ ] **`crates/server-core/src/filter.rs` — `filter_state_for_player()`**
-  If your interactive effect reveals hidden information (opponent's hand, library cards, face-down cards):
-  1. Track revealed cards via `state.revealed_cards` during the choice
-  2. Clear revealed status after the choice is made
-  3. Ensure `filter_state_for_player()` respects the revealed set
+- [ ] **`crates/engine/src/game/visibility.rs` — `filter_state_for_viewer()`**
+  Trace the analogous choice's visibility and cleanup through this engine authority. Distinguish private "look at" information from public reveals; do not put every choice's cards in `state.revealed_cards`. `server-core/src/filter.rs::filter_state_for_player` is a thin delegate. Verify the intended viewer and an unauthorized opponent during and after the choice.
 
 ### Phase 8 — Tests
 
 - [ ] Resolver test: effect sets correct `WaitingFor` with expected choices
-- [ ] Engine round-trip test: set up waiting state → submit action → verify state change
-- [ ] Production setup test: when correctness depends on how the waiting state is produced, enter `WaitingFor` through the real effect / cast / ability / replacement path before submitting the action. A manually constructed waiting state is not enough for that claim.
+- [ ] Production round-trip test: enter `WaitingFor` through the real effect / cast / ability / replacement path, assert the required prompt, submit the action, and verify the effect and completion boundary using [card-test](../card-test/SKILL.md#observe-the-intended-completion-boundary). A manually constructed waiting state can supplement this as a handler unit test.
 - [ ] Continuation test: effect with sub_ability → interactive pause → resume → sub_ability executes
 - [ ] Empty/decline test: for optional choices or "up to" selections, submit the empty choice through the real `GameAction` path and verify tracked sets, continuations, and final `waiting_for` state are correct.
 - [ ] Tracked-set test: if the choice feeds "those", "them", "this way", or a downstream tracked-set consumer, publish or clear a fresh tracked set on first choice resolution, including all-decline/empty paths, or prove no tracked-set consumer exists.
 - [ ] Resume-state test: verify downstream continuations execute and priority / next waiting state is restored; do not only assert that the pending queue was cleared.
 - [ ] AI test: `get_legal_actions()` returns valid options for the waiting state
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify through the caller's existing workflow. Under `engine-implementer`, use its executor's preparatory checks and Step 5 candidate checks; standalone, use [project-reference](../project-reference/SKILL.md) for the applicable verification commands and Tilt ownership. Do not run an additional full build from this checklist.
 
 ---
 
@@ -250,7 +160,7 @@ The `NamedChoice` system is a well-contained interactive pattern with low blast 
 |---|------|---------------|
 | 1 | `crates/engine/src/types/ability.rs` — `ChoiceType` enum | Add variant with typed fields |
 | 2 | `crates/engine/src/game/effects/choose.rs` — `compute_options()` | Add match arm to generate options for the new variant |
-| 3 | `crates/engine/src/game/engine.rs` — `ChooseOption` handler | May need custom validation (e.g., NumberRange validates parsed u8 in range) |
+| 3 | `crates/engine/src/game/engine_resolution_choices.rs` — `ChooseOption` handler | May need custom validation (e.g., NumberRange validates parsed u8 in range) |
 | 4 | `client/src/adapter/types.ts` | Already generic (`choice_type: string`, `options: string[]`) — **no change needed** |
 | 5 | `client/src/components/modal/NamedChoiceModal.tsx` | Add rendering branch only if the existing button grid / card-name search is insufficient |
 | 6 | `client/src/components/modal/NamedChoiceModal.tsx` — `CHOICE_TYPE_TITLE_KEYS` | Map the new ChoiceType key → an i18n leaf (e.g. `Keyword: "keyword"`). The title renders via `t(\`namedChoice.title.${leaf}\`)`, so also add `namedChoice.title.<leaf>` to `client/src/i18n/locales/en/game.json`. Never hardcode the label. |
@@ -370,15 +280,15 @@ Note how many effects reuse `GameAction::SelectCards` — only create a new `Gam
 
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
-| **Missing continuation match in `resolve_ability_chain()`** | Sub-abilities after your effect execute immediately, bypassing player choice | Add your `WaitingFor` variant to the match block in `effects/mod.rs` |
-| Missing `acting_player()` arm in `session.rs` | Server rejects all actions for this state in multiplayer | Add the match arm |
+| **Missing pause or handler classification** | The chain bypasses the choice, or its response never reaches the handler | Update `waits_for_resolution_choice` for parking and `engine_resolution_choices::handles` for action dispatch |
+| Missing engine actor-query coverage | Multiplayer cannot authorize the choice correctly | Update `WaitingFor::acting_player()` / `acting_players()`; keep server routing delegated |
 | Missing AI legal actions | AI hangs forever waiting for a response it can't generate | Add match arm in `engine/src/ai_support/candidates.rs` |
-| Not clearing revealed state after choice | Opponent's hidden cards remain visible permanently | Clear `state.revealed_cards` in the engine handler |
+| Wrong visibility or missing reveal cleanup | Private choices leak, or revealed cards remain visible too long | Follow the analogous reveal lifetime and engine visibility authority |
 | Testing only a manually constructed `WaitingFor` | Bypasses bugs in the real effect/cast/ability path that creates the choice | Add at least one production setup test that reaches the waiting state naturally |
-| Resuming continuation without checking `state.waiting_for` | Continuation might set another interactive state, but you overwrite it with Priority | Check waiting_for after `resolve_ability_chain` returns |
+| Overwriting the resumed waiting state | A continuation's next prompt disappears | Return the state produced by the shared completion/resume path |
 | Clearing pending state without testing downstream continuation | The prompt disappears but the rest of the ability never resolves | Assert the continuation's effect and final waiting state |
 | Empty choice leaves an old tracked set bound | "Those/them/this way" can refer to a prior producer instead of the empty choice | Publish/clear a fresh tracked set even for all-decline paths when a consumer exists |
-| Not propagating targets to continuation | Sub-ability can't reference the chosen card | Copy parent targets when `sub_clone.targets.is_empty()` |
+| Reconstructing continuation bindings manually | A child reads the wrong target, producer or trigger context | Reuse the constructor and chain helpers at the analogous owning site |
 | Creating new `GameAction` when `SelectCards` works | Unnecessary type proliferation | Reuse `SelectCards` unless response shape is genuinely different |
 
 ---
@@ -395,13 +305,15 @@ After completing work using this skill:
 
 ```bash
 rg -q "fn resolve_ability_chain" crates/engine/src/game/effects/mod.rs && \
-rg -q "pending_continuation" crates/engine/src/types/game_state.rs && \
+rg -q "pub fn park_ability_continuation" crates/engine/src/types/game_state.rs && \
+rg -q "fn finish_with_continuation" crates/engine/src/game/engine_resolution_choices.rs && \
+rg -q "fn resume_pending_continuation_if_priority" crates/engine/src/game/engine.rs && \
 rg -q "fn resolve_effect" crates/engine/src/game/effects/mod.rs && \
 rg -q "fn legal_actions" crates/engine/src/ai_support/mod.rs && \
 rg -q "fn acting_player" crates/server-core/src/session.rs && \
 rg -q "enum WaitingFor" crates/engine/src/types/game_state.rs && \
 rg -q "enum GameAction" crates/engine/src/types/actions.rs && \
 rg -q "ScryChoice" crates/engine/src/game/effects/mod.rs && \
-echo "✓ add-interactive-effect skill references valid" || \
+echo "✓ referenced symbols exist; read their callers to verify the recipe" || \
 echo "✗ STALE — update skill references"
 ```

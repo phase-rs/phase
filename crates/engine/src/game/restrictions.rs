@@ -928,6 +928,31 @@ fn effective_activation_limit(
     activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
 }
 
+/// CR 606.3 + CR 611.3a: The loyalty-activation cap's static term — the max
+/// `new_limit` over `ModifyActivationLimit { keyword: "loyalty" }` statics
+/// (Oath of Teferi class) whose controller is `player` and whose affected
+/// filter matches the planeswalker `source_id`. Base limit 1; max semantics
+/// (multiple Oaths do not stack, per the card's ruling). Read live at
+/// activation time — nothing is latched. Fills `None` gates via the O(1)
+/// presence index.
+pub(crate) fn loyalty_activation_cap_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    gates: Option<&ActivationRestrictionStaticGates>,
+) -> u32 {
+    match gates {
+        Some(gates) => activation_limit_from_statics(state, player, source_id, "loyalty", gates),
+        None => activation_limit_from_statics(
+            state,
+            player,
+            source_id,
+            "loyalty",
+            &ActivationRestrictionStaticGates::compute(state),
+        ),
+    }
+}
+
 /// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
 /// raise the activation cap for `keyword`-tagged abilities on `source_id`. The
 /// static is scope-agnostic (it reads no per-turn/per-game counter), so both the
@@ -1814,9 +1839,9 @@ fn evaluate_condition_for_granter(
         ParsedCondition::IsOpponentsTurn => {
             super::players::is_opponent(state, player, state.active_player)
         }
-        // CR 503.1: The game is currently in the upkeep step. Player scope, if
-        // any, is composed by the caller via `And([IsOpponentsTurn, ..])`.
-        ParsedCondition::IsDuringUpkeep => state.phase == Phase::Upkeep,
+        // CR 500.1 + CR 602.5: the game is in one of the named steps; player
+        // scope, if any, is composed by the caller via `And`.
+        ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -3773,7 +3798,7 @@ mod tests {
         state.phase = Phase::Upkeep;
         assert!(allowed(&state), "opponent's upkeep must permit activation");
 
-        // Opponent's turn, non-upkeep step -> denied (IsDuringUpkeep false).
+        // Opponent's turn, non-upkeep step -> denied (CurrentPhaseIs false).
         state.phase = Phase::PreCombatMain;
         assert!(
             !allowed(&state),

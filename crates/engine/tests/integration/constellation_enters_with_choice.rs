@@ -217,3 +217,108 @@ fn as_enters_choice_creature_fires_soul_warden() {
         "Soul Warden must gain 1 life when an as-enters-choice creature enters (#830)"
     );
 }
+
+// Broken Bond (verbatim Oracle): an optional mid-resolution put of a land from
+// hand — the route that answers its "you may" through `OptionalEffectChoice`
+// while the spell is still resolving.
+const BROKEN_BOND: &str = "Destroy target artifact or enchantment. You may put a land card from your hand onto the battlefield.";
+
+/// E1 — CR 614.12a + CR 603.2c: an optional mid-resolution put (Broken Bond)
+/// of an as-enters-choice enchantment land (Valgavoth's Lair) fires Doomwake
+/// Giant's constellation EXACTLY ONCE.
+///
+/// The entry pauses on the color choice while the spell is resolving, so its
+/// entry event is parked in `deferred_entry_events` for the replay that scans
+/// it against the realized land (CR 603.10). The paused-resolution observer
+/// collector run by the `OptionalEffectChoice` accept must not ALSO collect
+/// that same occurrence — "An ability triggers only once each time its trigger
+/// event occurs" (CR 603.2c).
+///
+/// Revert-failing assertion: with the paused collector also collecting the
+/// parked entry, constellation fires twice, the Bear is 0/0 and dies to SBA
+/// (toughness check fails / Bear not on the battlefield). The paired positive
+/// `as_enters_choice_land_fires_constellation` proves the instrument fires
+/// once through the PlayLand route.
+#[test]
+fn optional_put_of_an_as_enters_choice_land_fires_constellation_once() {
+    use engine::types::zones::Zone;
+
+    let mut scenario = GameScenario::new_n_player(2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    scenario
+        .add_creature_from_oracle(P0, "Doomwake Giant", 4, 6, DOOMWAKE)
+        .as_enchantment();
+    let opp_creature = scenario.add_creature(P1, "Opponent Bear", 2, 2).id();
+    let artifact = scenario
+        .add_artifact_from_oracle(P1, "Target Artifact", "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Broken Bond", false, BROKEN_BOND)
+        .id();
+    // Exactly one land in hand: the single-eligible put needs no card pick.
+    let lair = {
+        let mut b = scenario.add_land_to_hand(P0, "Valgavoth's Lair");
+        b.from_oracle_text(VALGAVOTHS_LAIR).as_enchantment();
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+    let _ = runner.cast(spell).target_objects(&[artifact]).commit();
+
+    let mut optional_seen = false;
+    let mut named_choice_seen = false;
+    for _ in 0..60 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                optional_seen = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the optional land put");
+            }
+            WaitingFor::NamedChoice { options, .. } => {
+                named_choice_seen = true;
+                let color = options.first().expect("color options").clone();
+                runner
+                    .act(GameAction::ChooseOption { choice: color })
+                    .expect("choose the color");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt while resolving Broken Bond: {other:?}"),
+        }
+    }
+    runner.advance_until_stack_empty();
+
+    // Reach-guards: every upstream short-circuit was passed.
+    assert!(optional_seen, "reach-guard: the optional put was offered");
+    assert!(
+        named_choice_seen,
+        "reach-guard: the Lair's entry paused on its color choice"
+    );
+    assert_eq!(
+        runner.state().objects[&lair].zone,
+        Zone::Battlefield,
+        "reach-guard: Valgavoth's Lair entered"
+    );
+    assert_eq!(
+        runner.state().objects[&artifact].zone,
+        Zone::Graveyard,
+        "reach-guard: Broken Bond destroyed its target"
+    );
+
+    // THE fix assertions: one constellation trigger, not two.
+    let bear = &runner.state().objects[&opp_creature];
+    assert_eq!(
+        bear.zone,
+        Zone::Battlefield,
+        "CR 603.2c: a double fire makes the Bear 0/0 and it dies to SBA"
+    );
+    assert_eq!(
+        bear.toughness,
+        Some(1),
+        "CR 603.2c: Doomwake's constellation fires exactly once for the Lair's entry"
+    );
+}

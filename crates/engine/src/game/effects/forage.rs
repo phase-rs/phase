@@ -18,9 +18,10 @@
 
 use crate::game::ability_utils::{append_to_sub_chain, build_resolved_from_def};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, EffectError, EffectKind,
-    EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter, QuantityExpr,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator, ControllerRef, Effect,
+    EffectError, EffectKind, EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter,
+    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+    TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -188,6 +189,7 @@ pub(crate) fn resolve(
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
                 vec![TargetRef::Player(controller)],
                 ability.source_id,

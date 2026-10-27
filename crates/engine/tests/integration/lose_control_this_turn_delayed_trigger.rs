@@ -33,7 +33,7 @@ use engine::types::game_state::DelayedTrigger;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::triggers::TriggerMode;
+use engine::types::triggers::{ControlChangeSide, TriggerMode};
 use engine::types::zones::Zone;
 
 /// Make `id` a noncreature artifact so it neither dies to the 0-toughness SBA
@@ -97,7 +97,9 @@ fn install_lose_control_draw(
             .get(&source)
             .expect("delayed trigger source"),
     ));
-    let mut trig = TriggerDefinition::new(TriggerMode::ChangesController);
+    let mut trig = TriggerDefinition::new(TriggerMode::ChangesController {
+        side: ControlChangeSide::Loses,
+    });
     trig.valid_card = Some(TargetFilter::SpecificObject { id: scoped_obj });
     trig.execute = None;
     runner
@@ -123,7 +125,9 @@ fn install_lose_control_draw(
 /// above (`SpecificObject`, `source_id != object_id`), this exercises the
 /// `source_id == object_id` branch of `match_changes_controller`.
 fn install_selfref_lose_control_draw(runner: &mut GameRunner, obj: ObjectId) {
-    let mut trig = TriggerDefinition::new(TriggerMode::ChangesController);
+    let mut trig = TriggerDefinition::new(TriggerMode::ChangesController {
+        side: ControlChangeSide::Loses,
+    });
     trig.valid_card = Some(TargetFilter::SelfRef);
     trig.execute = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,

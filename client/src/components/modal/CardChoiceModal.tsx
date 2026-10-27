@@ -464,6 +464,9 @@ export function CardChoiceModal() {
       );
     case "ChooseObjectsSelection":
       if (!canActForWaitingState) return null;
+      // CR 608.2d: a single pick is answered on the board via TargetingOverlay;
+      // only multi-pick selections need the list.
+      if (waitingFor.data.max === 1) return null;
       return (
         <ProliferateModal data={waitingFor.data} variant="chooseObjects" />
       );
@@ -1011,13 +1014,24 @@ function ChooseFromZoneModal({ data }: { data: ChooseFromZoneChoice["data"] }) {
   const selectionRule = data.constraint;
   const selectionValid =
     !!objects &&
-    (!selectionRule ||
-      (selectionRule.type === "DistinctCardTypes" &&
-        canAssignDistinctCardTypes(
-          objects,
-          selectedIds,
-          selectionRule.categories,
-        )));
+    (() => {
+      if (!selectionRule) return true;
+      switch (selectionRule.type) {
+        case "DistinctCardTypes":
+          return canAssignDistinctCardTypes(
+            objects,
+            selectedIds,
+            selectionRule.categories,
+          );
+        case "TotalManaValue":
+          // The engine validates the selected set's total mana value on submission.
+          return true;
+        default: {
+          const exhaustive: never = selectionRule;
+          return exhaustive;
+        }
+      }
+    })();
   const countValid = data.up_to
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
@@ -1306,11 +1320,15 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
   const isAttachChoice = data.effect_kind === "Attach";
+  // The engine's `effect_kind` names a resolution-time cast pick (a linked
+  // exile pool, a hand or a looked-at library); it casts, it moves nothing.
+  const isCastChoice = data.effect_kind === "CastFromZone";
   const isSacrifice =
     data.zone === "Battlefield" &&
     data.destination == null &&
     !isAttachChoice &&
-    !isTapUntapChoice;
+    !isTapUntapChoice &&
+    !isCastChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
@@ -1345,6 +1363,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
       : "Tap"
     : isAttachChoice
       ? "Attach"
+    : isCastChoice
+      ? "Cast"
     : isSacrifice
       ? "Sacrifice"
       : isTopdeck

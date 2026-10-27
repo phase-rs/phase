@@ -137,6 +137,25 @@ pub struct DecisionTemplate {
     pub key: DecisionGroupKey,
 }
 
+impl DecisionTemplate {
+    /// CR 732.2a: this template as a declaration of `count` states it — a `Piecewise` segment
+    /// starting at or past `count` names no repetition the count reaches, so it is dropped.
+    pub(crate) fn cut_schedules_at(&mut self, count: &IterationCount) {
+        let IterationCount::Fixed(count) = *count else {
+            return;
+        };
+        for decision in &mut self.decisions {
+            if let PinnedDecision::Targets { targets, .. } = decision {
+                for pin in targets {
+                    if let TargetPin::Scheduled(TargetSchedule::Piecewise(steps)) = pin {
+                        steps.retain(|(start, _)| *start < count);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// CR 732.2a: WHICH CHOICE a [`DecisionSlot`] names, typed rather than numbered. One
 /// variant per choice point a producer constructs a slot for, and the set is closed by
 /// [`pin_answers_point`]'s exhaustive, wildcard-free ([`PinnedDecision`] x
@@ -357,10 +376,13 @@ pub enum PinnedDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutDecisionSchema {
     /// CR 732.1b: the proposed repeat mode. `UntilLethal` for a determinate CR 704.5a /
-    /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop.
+    /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop, and is
+    /// the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
+    /// [`ShortcutDecisionSchema::suggested_declaration`].
     pub iteration_count: IterationCount,
     /// CR 732.2a: the repetition bound this offer's producer MEASURED — the CR 704 threshold
-    /// crossing or, for a turn-cycle period, the cleanup hand bound (CR 514.1) — a LEGALITY
+    /// crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the repetitions
+    /// the counting replay performed (CR 118.3) — a LEGALITY
     /// CEILING, what SOME legal declaration may specify, never a count every declaration
     /// reaches. `game::engine::bounded_offer_tail` takes the LARGER of two
     /// declaration-relative cascades: the cascade's count under the offer's own published
@@ -403,6 +425,27 @@ pub struct ShortcutDecisionSchema {
     /// re-deriving it (display-layer purity). Sum of each `ConvokeTaps.tappable.len()`.
     #[serde(default)]
     pub convoke_tappable_count: usize,
+    /// CR 732.2a: the declaration this offer SUGGESTS, where it drives further than the
+    /// published one. The three count roles:
+    ///
+    /// * the published declaration (`WaitingFor::LoopShortcut.declaration`) is the OBSERVATION
+    ///   the charge model reads; its `replay` stamp is its OWN count — how far it drives, clamped
+    ///   to [`ShortcutDecisionSchema::deliverable_capacity`] — and it is validated at that count;
+    /// * this declaration is the witness `game::engine::bounded_offer_tail` builds, stamped and
+    ///   validated at [`ShortcutDecisionSchema::iteration_count`]: the most repetitions of it the
+    ///   proposer survives (its whole cascade, or one short of the proposer's own crossing —
+    ///   CR 704.5a / CR 704.5b / CR 704.5c), capped at the capacity. Published only when that count exceeds the own
+    ///   count and the witness conforms there;
+    /// * [`ShortcutDecisionSchema::iteration_count`] is this declaration's count when one is
+    ///   published, else the published declaration's own count.
+    #[serde(default)]
+    pub suggested_declaration: Option<DecisionTemplate>,
+    /// CR 603.3d + CR 601.2c: when the top stack entry at the offer is a published target slot's
+    /// trigger, the seat it latched — the aim its first repetition resolves. A
+    /// snapshot for `game::interaction`, which reads no `GameState`; the engine's own seams
+    /// re-read it off the board they ask about (`game::engine::leading_announcement_aims`).
+    #[serde(default)]
+    pub leading_aims: Vec<(DecisionSlot, PlayerId)>,
 }
 
 /// A schema deserialized from a pre-bound snapshot carries no capacity. The
@@ -432,11 +475,22 @@ impl Default for ShortcutDecisionSchema {
             deliverable_capacity: default_deliverable_capacity(),
             points: Vec::new(),
             convoke_tappable_count: 0,
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
         }
     }
 }
 
 impl ShortcutDecisionSchema {
+    /// CR 732.2a: the declaration a declarer who overrides nothing takes — the suggested
+    /// declaration, else `published`.
+    pub fn suggestion<'a>(
+        &'a self,
+        published: Option<&'a DecisionTemplate>,
+    ) -> Option<&'a DecisionTemplate> {
+        self.suggested_declaration.as_ref().or(published)
+    }
+
     /// CR 732.2a: `true` iff this offer's producer MEASURED a CR 704.5a / CR 704.5c /
     /// CR 104.3c repetition threshold inside the loop. A producer that measured none
     /// publishes the absence, so an unnarrowed offer is NOT bounded in this sense.
@@ -1606,7 +1660,7 @@ pub struct AimContext<'a> {
     pub proposer: PlayerId,
     /// The certified period the crossings are measured from. `None` is a typed absence, not a
     /// default: an offer stating no per-period signature measured no crossing to outlive.
-    pub per_cycle: Option<&'a crate::analysis::resource::PeriodicDelta>,
+    pub per_cycle: Option<&'a crate::analysis::resource::PeriodSignature>,
     /// The declaration the offer published, snapshotted at offer construction and expiring with
     /// the window.
     pub published: Option<&'a DecisionTemplate>,
@@ -1615,9 +1669,9 @@ pub struct AimContext<'a> {
 /// CR 732.2a + CR 102.1: why a declared aim is not a choice this sequence can contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AimViolation {
-    /// At `repetition` the declaration names `seat`, whom the cascade taken under that same
-    /// declaration removes at `departure` — strictly earlier, so CR 102.1 leaves nobody for the
-    /// choice to name and CR 732.2a's "may be legally taken" is not met.
+    /// At `repetition` the declaration's aim at `seat` resolves, and the cascade taken under that
+    /// same declaration removes `seat` at `departure` — strictly earlier, so CR 102.1 leaves
+    /// nobody for the choice to name and CR 732.2a's "may be legally taken" is not met.
     AimsAtDepartedSeat {
         repetition: u32,
         seat: PlayerId,
@@ -1646,12 +1700,13 @@ pub enum AimViolation {
 /// takes. A departure BEFORE it is not: the choice cannot be made, which is the conditional
 /// action CR 732.2a forbids.
 ///
-/// Repetitions are counted from 1 and read at iteration index `repetition - 1` with no announced
-/// lead ([`crate::analysis::resource::AnnouncedLead::None`]), the convention
-/// `truncate_to_declared_seats` shares. The consumption seam's re-derivation instead states which
-/// charged slots lead on the board the drive starts from, because it is matched against the
-/// departures a drive realizes; this conjunct decides which declarations may be specified and
-/// states none.
+/// Repetitions are counted from 1 and read at iteration index `repetition - 1`, the convention
+/// `truncate_to_declared_seats` shares. The board's own lead
+/// (`game::engine::leading_announcement_aims`, the same one the consumption seam reads) decides
+/// where an aim LANDS: a slot whose trigger is on top of the stack resolves its declared aim at
+/// `repetition` one repetition later (CR 603.3d + CR 601.2c), and CR 608.2b re-checks the target
+/// there, so the seat must survive to that landing — or, for an aim the count never resolves, to
+/// the count's last repetition.
 ///
 /// Monotone in `validated_range`: a shorter range walks a prefix of the repetitions and the
 /// cascade does not depend on the range, so a CR 732.2b shortening can never turn a conforming
@@ -1666,11 +1721,16 @@ pub fn aims_survive_the_crossings(
     // No certified period, so no crossing to outlive. The same posture
     // `game::engine::ConsumptionDerivation::Unsigned` takes at the drive, stated at its own arm
     // rather than folded into the absence below.
-    let Some(per_cycle) = aim.per_cycle else {
-        return Ok(());
+    let per_cycle = match aim.per_cycle {
+        None => return Ok(()),
+        Some(crate::analysis::resource::PeriodSignature::EveryRepetition(per_cycle)) => per_cycle,
+        // CR 732.2a: a counted take's replay refuses an aim at a departed seat, whole, so no
+        // crossing is predicted here.
+        Some(crate::analysis::resource::PeriodSignature::OneRepetition(_)) => return Ok(()),
     };
     // The reduction consumed no living seat, so it measured no threshold and no aim can outlive
     // one. The two absences answer alike; they are kept apart because their grounds differ.
+    let leading = crate::game::engine::leading_announcement_aims(state, aim.proposer);
     let Some(cascade) = per_cycle.elimination_cascade(
         state,
         aim.proposer,
@@ -1678,7 +1738,7 @@ pub fn aims_survive_the_crossings(
         aim.published,
         points,
         crate::analysis::resource::ChargeBound::Attributable,
-        crate::analysis::resource::AnnouncedLead::None,
+        crate::analysis::resource::AnnouncedLead::LeadingRepetition(&leading),
     ) else {
         return Ok(());
     };
@@ -1700,19 +1760,23 @@ pub fn aims_survive_the_crossings(
             continue;
         };
         for decision in &decisions {
-            let ConcreteDecision::Targets { targets, .. } = decision else {
+            let ConcreteDecision::Targets { targets, slot } = decision else {
                 continue;
             };
+            let lead = crate::analysis::resource::AnnouncedLead::LeadingRepetition(&leading)
+                .repetitions(slot);
             for target in targets {
                 // CR 400.7 + CR 608.2b: an object aim is not a seat, and its identity is re-bound
                 // per index by the drive's own `resolve`.
                 let ConcreteTarget::Player(seat) = target else {
                     continue;
                 };
+                let landing = repetition + lead;
                 if let Some(&departure) = departures.get(seat) {
-                    if departure < repetition {
+                    // CR 608.2b: the target is re-checked where it resolves.
+                    if departure < landing.min(validated_range) {
                         return Err(AimViolation::AimsAtDepartedSeat {
-                            repetition,
+                            repetition: landing,
                             seat: *seat,
                             departure,
                         });
@@ -1848,6 +1912,8 @@ mod tests {
     #[test]
     fn shortcut_decision_schema_round_trips_and_defaults() {
         let schema = ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::UntilLethal,
             // BOTH published answers, each deliberately distinct from its own default: a
             // round-trip carrying a default would pass even if that field were dropped from
@@ -1889,6 +1955,8 @@ mod tests {
         assert_eq!(
             ShortcutDecisionSchema::default(),
             ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(0),
                 measured_repetition_bound: None,
                 deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
@@ -3463,6 +3531,8 @@ mod tests {
         );
 
         let schema = ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(1),
             measured_repetition_bound: Some(1),
             deliverable_capacity: 1,

@@ -1,12 +1,13 @@
-//! Issue #6435: Mosswort Bridge hideaway "play the exiled card" must
-//! actually grant face-down exile look/play authority (CR 406.6 / 607.1 /
-//! 607.2a / 702.75a) and allow both:
-//! - casting the hidden spell without paying mana cost
-//! - playing the hidden land as a land drop
+//! Issue #6435: Mosswort Bridge hideaway "play the exiled card" must play the
+//! face-down hidden card (CR 406.6 / 607.1 / 607.2a / 702.75a), both as:
+//! - a hidden spell cast without paying its mana cost
+//! - a hidden land played as a land drop
 //!
-//! Root cause: `Effect::CastFromZone { mode: Play, ... }` currently granted
-//! only `CastingPermission::ExileWithAltCost` and missed the `PlayFromExile`
-//! authority needed for face-down exile actions.
+//! "You may play the exiled card without paying its mana cost" states no
+//! duration, so the card is played AS THE ABILITY RESOLVES (CR 701.18b +
+//! CR 608.2g + CR 305.2a): the spell is cast during the resolution and the land
+//! enters during it, with no separate `CastSpell` / `PlayLand` action and no
+//! permission left behind.
 
 use std::collections::BTreeSet;
 
@@ -24,6 +25,13 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+
+/// Mosswort Bridge, verbatim Oracle text. Built from its text rather than the
+/// committed card fixture so the play ability is lowered by the live parser.
+const MOSSWORT_BRIDGE: &str = "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)
+This land enters tapped.
+{T}: Add {G}.
+{G}, {T}: You may play the exiled card without paying its mana cost if creatures you control have total power 10 or greater.";
 
 fn fund_green(runner: &mut GameRunner) {
     let dummy = ObjectId(0);
@@ -81,6 +89,7 @@ fn activate_mosswort_second_ability(
     let activate = runner.act(GameAction::ActivateAbility {
         source_id: mosswort,
         ability_index: 1,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     if let Err(e) = &activate {
         panic!(
@@ -103,6 +112,14 @@ fn activate_mosswort_second_ability(
                     .act(GameAction::DecideOptionalEffect { accept })
                     .expect("deciding the optional offer must succeed");
             }
+            // The hidden Shock, cast during the resolution, chooses its target.
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("choose Shock's target");
+            }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
                     break;
@@ -115,6 +132,14 @@ fn activate_mosswort_second_ability(
         }
     }
     saw_optional
+}
+
+fn assert_no_permissions(runner: &GameRunner, id: ObjectId) {
+    assert!(
+        runner.state().objects[&id].casting_permissions.is_empty(),
+        "no permission outlives the resolution, got {:?}",
+        runner.state().objects[&id].casting_permissions
+    );
 }
 
 fn hidden_is_face_down_exiled_linked_to_source(
@@ -144,7 +169,10 @@ fn mosswort_bridge_hideaway_free_casts_hidden_spell_when_total_power_ge_10() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let mosswort = scenario.add_real_card(P0, "Mosswort Bridge", Zone::Hand, db);
+    let mosswort = scenario
+        .add_land_to_hand(P0, "Mosswort Bridge")
+        .from_oracle_text(MOSSWORT_BRIDGE)
+        .id();
     let hidden_spell = scenario.add_real_card(P0, "Shock", Zone::Library, db);
     // Hideaway 4 looks at the top 4 cards; seed enough so P0 doesn't lose
     // from an empty library after the hideaway exile removes the chosen card.
@@ -201,74 +229,12 @@ fn mosswort_bridge_hideaway_free_casts_hidden_spell_when_total_power_ge_10() {
     }
 
     fund_green(&mut runner);
+    let life_before = runner.state().players[1].life;
 
-    // Activate, accept the optional "you may play" offer.
+    // Activate, accept the optional "you may play" offer: the hidden Shock is
+    // cast during the resolution (CR 608.2g) — no separate `CastSpell`.
     let saw_optional = activate_mosswort_second_ability(&mut runner, mosswort, true);
     assert!(saw_optional, "power>=10 must surface the optional offer");
-
-    // The hidden spell must have both the free-cast permission and the
-    // face-down exile look/play authority.
-    let obj = runner.state().objects.get(&hidden_spell).unwrap();
-    assert!(
-        obj.casting_permissions.iter().any(|p| matches!(
-            p,
-            CastingPermission::ExileWithAltCost {
-                cost,
-                granted_to: Some(P0),
-                duration: None,
-                ..
-            } if *cost == ManaCost::zero()
-        )),
-        "Mosswort must stamp a zero-cost ExileWithAltCost permission on the hidden spell"
-    );
-    assert!(
-        obj.casting_permissions.iter().any(|p| matches!(
-            p,
-            CastingPermission::PlayFromExile {
-                granted_to,
-                exiled_by_ability_controller,
-                card_filter,
-                source_id: Some(src),
-                ..
-            } if *granted_to == P0
-                && *exiled_by_ability_controller == Some(P0)
-                && card_filter.is_none()
-                && *src == mosswort
-        )),
-        "Mosswort must also stamp PlayFromExile so the player can look/cast the face-down exiled spell"
-    );
-
-    let life_before = runner.state().players[1].life;
-    let mana_before = runner.state().players[0].mana_pool.total();
-
-    let hidden_card_id = obj.card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: hidden_spell,
-            card_id: hidden_card_id,
-            targets: vec![],
-            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
-        })
-        .expect("cast of the face-down exiled hidden spell must be accepted");
-
-    // Drive target selection / stack settlement.
-    for _ in 0..128 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: Some(engine::types::ability::TargetRef::Player(P1)),
-                    })
-                    .expect("choose shock target");
-            }
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected waiting state while settling hidden spell cast: {other:?}"),
-        }
-    }
-    runner.advance_until_stack_empty();
 
     assert_eq!(
         runner.state().players[1].life,
@@ -277,9 +243,15 @@ fn mosswort_bridge_hideaway_free_casts_hidden_spell_when_total_power_ge_10() {
     );
     assert_eq!(
         runner.state().players[0].mana_pool.total(),
-        mana_before,
-        "casting the hidden spell without paying mana cost must not drain mana pool"
+        0,
+        "only {{G}} was spent (on the activation); the hidden spell was free"
     );
+    assert_eq!(
+        runner.state().objects[&hidden_spell].zone,
+        Zone::Graveyard,
+        "the cast Shock resolved into its owner's graveyard"
+    );
+    assert_no_permissions(&runner, hidden_spell);
 }
 
 #[test]
@@ -291,7 +263,10 @@ fn mosswort_bridge_hideaway_free_plays_hidden_land_when_total_power_ge_10() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let mosswort = scenario.add_real_card(P0, "Mosswort Bridge", Zone::Hand, db);
+    let mosswort = scenario
+        .add_land_to_hand(P0, "Mosswort Bridge")
+        .from_oracle_text(MOSSWORT_BRIDGE)
+        .id();
     let hidden_land = scenario.add_real_card(P0, "Forest", Zone::Library, db);
     scenario.add_real_card(P0, "Island", Zone::Library, db);
     scenario.add_real_card(P0, "Mountain", Zone::Library, db);
@@ -339,22 +314,16 @@ fn mosswort_bridge_hideaway_free_plays_hidden_land_when_total_power_ge_10() {
     }
 
     fund_green(&mut runner);
-    let saw_optional = activate_mosswort_second_ability(&mut runner, mosswort, true);
-    assert!(saw_optional, "power>=10 must surface the optional offer");
-
-    let hidden_card_id = runner.state().objects[&hidden_land].card_id;
     assert!(
         runner.state().objects[&hidden_land].face_down,
         "reach-guard: the hidden land is still face down before playing it"
     );
     let lands_before = runner.state().lands_played_this_turn;
 
-    runner
-        .act(GameAction::PlayLand {
-            object_id: hidden_land,
-            card_id: hidden_card_id,
-        })
-        .expect("playing the face-down exiled hidden land must be accepted");
+    // CR 305.2a: the hidden land is played during the resolution — no
+    // separate `PlayLand` action.
+    let saw_optional = activate_mosswort_second_ability(&mut runner, mosswort, true);
+    assert!(saw_optional, "power>=10 must surface the optional offer");
 
     assert_eq!(
         runner.state().objects[&hidden_land].zone,
@@ -370,6 +339,7 @@ fn mosswort_bridge_hideaway_free_plays_hidden_land_when_total_power_ge_10() {
         lands_before + 1,
         "playing the hidden land consumes exactly one land play action"
     );
+    assert_no_permissions(&runner, hidden_land);
 }
 
 #[test]
@@ -381,7 +351,10 @@ fn mosswort_bridge_hideaway_with_power_lt_10_offers_nothing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let mosswort = scenario.add_real_card(P0, "Mosswort Bridge", Zone::Hand, db);
+    let mosswort = scenario
+        .add_land_to_hand(P0, "Mosswort Bridge")
+        .from_oracle_text(MOSSWORT_BRIDGE)
+        .id();
     let hidden_spell = scenario.add_real_card(P0, "Shock", Zone::Library, db);
     scenario.add_real_card(P1, "Island", Zone::Library, db);
     scenario.add_real_card(P0, "Forest", Zone::Library, db);
@@ -640,6 +613,7 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
         .act(GameAction::ActivateAbility {
             source_id: mosswort,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Mosswort Bridge's second ability");
     assert!(

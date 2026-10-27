@@ -586,7 +586,7 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
 
 use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 use phase_ai::{
-    choose_action_with_session, score_candidates_for_parallel_worker,
+    choose_action_with_issued_contract, score_candidates_for_parallel_worker,
     select_safe_action_from_scores, AiSession, SessionCache,
 };
 thread_local! {
@@ -2060,6 +2060,231 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }
 }
 
+thread_local! {
+    /// AI seats' click schedules for the contest in progress (Eye to Eye / Mouth to
+    /// Mouth). Per-thread like the game state; cleared whenever no contest runs.
+    static AI_CONTESTANTS: RefCell<phase_ai::contest::AiContestants> =
+        RefCell::new(phase_ai::contest::AiContestants::default());
+}
+
+/// One click the local host collected, stamped with its own clock and addressed to
+/// the contest it was made in.
+#[derive(serde::Deserialize)]
+struct ContestClickInput {
+    contest: u64,
+    player: u8,
+    seq: u32,
+    at_ms: f64,
+}
+
+/// Most clicks one drive call will consider. The JS host drains its buffer every
+/// ~50ms, so a legitimate batch is a handful; the bound keeps a flooding peer from
+/// turning one tick into unbounded work.
+const MAX_CONTEST_CLICKS_PER_DRIVE: usize = 256;
+
+/// Decode the host's click batch entry by entry. A malformed entry (a negative,
+/// fractional or oversized sequence, an unknown seat, a non-finite stamp) is dropped
+/// on its own — it must never abort the batch, because the same call also advances
+/// the contest clock and a batch that fails to decode would freeze the contest.
+/// Valid entries are returned oldest stamp first, so earlier input is applied before
+/// later input regardless of delivery order.
+fn decode_contest_clicks(clicks: JsValue) -> Vec<ContestClickInput> {
+    if clicks.is_undefined() || clicks.is_null() {
+        return Vec::new();
+    }
+    let mut decoded: Vec<ContestClickInput> = js_sys::Array::from(&clicks)
+        .iter()
+        .take(MAX_CONTEST_CLICKS_PER_DRIVE)
+        .filter_map(|entry| serde_wasm_bindgen::from_value::<ContestClickInput>(entry).ok())
+        .filter(|click| click.at_ms.is_finite())
+        .collect();
+    decoded.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms));
+    decoded
+}
+
+/// What a `drive_contest_js` call did, for the JS driver to decide whether to
+/// refresh the store. `step` mirrors `engine::game::contest::ContestStep`.
+#[derive(serde::Serialize)]
+struct ContestDriveOutcome {
+    step: &'static str,
+    events: Vec<engine::types::events::GameEvent>,
+    log_entries: Vec<engine::types::log::GameLogEntry>,
+    /// The contest still running after this call (identity and seats), if any.
+    contest: Option<RunningContest>,
+}
+
+#[derive(serde::Serialize)]
+struct RunningContest {
+    id: u64,
+    players: [PlayerId; 2],
+}
+
+fn contest_step_label(step: engine::game::contest::ContestStep) -> &'static str {
+    use engine::game::contest::ContestStep;
+    match step {
+        ContestStep::NotInContest => "NotInContest",
+        ContestStep::Unchanged => "Unchanged",
+        ContestStep::Updated => "Updated",
+        ContestStep::Settled => "Settled",
+    }
+}
+
+/// Host the running Eye to Eye / Mouth to Mouth contest locally (single-player and
+/// P2P-host engines have no server to stamp time). The JS driver passes its own
+/// monotonic `now_ms` (`performance.now()`), the seats that are AI, and any clicks it
+/// collected since the last call — each stamped with its own `at_ms`. Clicks are
+/// applied in order, then the clock is advanced to `now_ms`, exactly as the server
+/// does; the engine's state machine decides everything.
+///
+/// A contest's real-time result cannot be replayed from a recorded action list, so
+/// the first drive call invalidates an in-progress replay recording (the same
+/// treatment debug actions get).
+#[wasm_bindgen]
+pub fn drive_contest_js(
+    now_ms: f64,
+    ai_players: Vec<u8>,
+    away_players: Vec<u8>,
+    clicks: JsValue,
+) -> JsValue {
+    let clicks = decode_contest_clicks(clicks);
+    let ai_players: Vec<PlayerId> = ai_players.into_iter().map(PlayerId).collect();
+    let away_players: Vec<PlayerId> = away_players.into_iter().map(PlayerId).collect();
+    let now = now_ms.max(0.0) as u64;
+    let outcome = with_state_mut(|state| {
+        if matches!(
+            state.waiting_for,
+            engine::types::game_state::WaitingFor::PhysicalContest { .. }
+        ) {
+            REPLAY_LOG.with(|cell| cell.set(None));
+        }
+        AI_CONTESTANTS.with(|cell| {
+            run_contest_drive(
+                state,
+                now,
+                &ai_players,
+                &away_players,
+                clicks,
+                &mut cell.borrow_mut(),
+                &mut rand::rng(),
+            )
+        })
+    });
+    match outcome {
+        Ok(outcome) => {
+            if outcome.step != "NotInContest" && outcome.step != "Unchanged" {
+                invalidate_ai_proposals();
+            }
+            to_js(&outcome)
+        }
+        Err(error) => error,
+    }
+}
+
+/// One host tick of a locally hosted contest, everything `drive_contest_js` does to the
+/// engine once its arguments are decoded (extracted so a native test drives the same
+/// ordering production runs).
+///
+/// Input is processed in the order it happened: buffered clicks first, each at its own
+/// stamp (the host cannot have stamped one later than its own tick); then the seats'
+/// connectivity, an edge the host can only observe at `now`; then the clock itself.
+/// Running the connectivity report or the clock first would judge a click against
+/// deadlines that expired only because the tick was delivered late, rejecting an
+/// on-time click and deciding the contest from the stale deadlines.
+fn run_contest_drive(
+    state: &mut GameState,
+    now: u64,
+    ai_players: &[PlayerId],
+    away_players: &[PlayerId],
+    clicks: Vec<ContestClickInput>,
+    ai: &mut phase_ai::contest::AiContestants,
+    rng: &mut impl rand::Rng,
+) -> ContestDriveOutcome {
+    use engine::game::contest::{
+        advance_contest, contest_click, set_contest_connection, start_contest, ContestStep,
+    };
+    let mut events = Vec::new();
+    let mut strongest = ContestStep::NotInContest;
+    let mut note = |step: ContestStep| {
+        let rank = |s: ContestStep| match s {
+            ContestStep::NotInContest => 0,
+            ContestStep::Unchanged => 1,
+            ContestStep::Updated => 2,
+            ContestStep::Settled => 3,
+        };
+        if rank(step) > rank(strongest) {
+            strongest = step;
+        }
+    };
+    let config = engine::types::contest::ContestConfig::default();
+    // A repeated start is a no-op that does not observe `now`, so buffered clicks
+    // below are still applied at their own stamps, before the tick's time.
+    note(start_contest(state, config, now, &mut events));
+    // Delivery order is not chronological order (the decoder sorts, but a caller may
+    // not): earlier input must be applied before later input.
+    let mut clicks = clicks;
+    clicks.sort_by(|a, b| a.at_ms.total_cmp(&b.at_ms));
+    for click in clicks {
+        let (_, step) = contest_click(
+            state,
+            click.contest,
+            PlayerId(click.player),
+            click.seq,
+            // The host cannot have stamped a click later than its own tick.
+            (click.at_ms.max(0.0) as u64).min(now),
+            &mut events,
+        );
+        note(step);
+    }
+    // The host's live seat connectivity, reported every tick (idempotent in the
+    // engine): a seat that dropped pauses the contest clock and starts its
+    // reconnect grace; one that returned resumes it.
+    let contestants = match &state.waiting_for {
+        engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
+            Some(contest.players())
+        }
+        _ => None,
+    };
+    for player in contestants.into_iter().flatten() {
+        let connected = !away_players.contains(&player);
+        note(set_contest_connection(
+            state,
+            player,
+            connected,
+            now,
+            &mut events,
+        ));
+    }
+    note(advance_contest(state, now, &mut events));
+    let mut ai_steps = Vec::new();
+    ai.click_due(state, ai_players, now, rng, |step, step_events| {
+        ai_steps.push((step, step_events))
+    });
+    for (step, step_events) in ai_steps {
+        events.extend(step_events);
+        note(step);
+    }
+    let log_entries = if events.is_empty() {
+        Vec::new()
+    } else {
+        engine::game::log::resolve_log_entries(&events, state, state)
+    };
+    let contest = match &state.waiting_for {
+        engine::types::game_state::WaitingFor::PhysicalContest { contest, .. } => {
+            Some(RunningContest {
+                id: contest.id,
+                players: contest.players(),
+            })
+        }
+        _ => None,
+    };
+    ContestDriveOutcome {
+        step: contest_step_label(strongest),
+        events,
+        log_entries,
+        contest,
+    }
+}
+
 /// Submit one opaque, engine-authored interaction response. The browser never
 /// materializes a `GameAction`; only a successful engine reducer result exposes
 /// the exact action to the replay recorder.
@@ -2908,6 +3133,62 @@ fn load_minimal_test_card_database() {
     });
 }
 
+/// Shared native/WASM fixture for a serialized legacy Resolve All Ready state.
+#[cfg(test)]
+fn legacy_ready_state() -> GameState {
+    use engine::types::actions::ResolveAllScope;
+    use engine::types::game_state::{
+        ResolveAllConsentParticipant, ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry,
+        StackEntryKind, StackResolutionBudget,
+    };
+
+    let mut state = GameState::new_two_player(7);
+    const EPOCH: u64 = 70_200;
+    let source = ObjectId(EPOCH);
+    let controller = PlayerId(1);
+    state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
+    state.priority_player = PlayerId(0);
+    state.stack.push_back(StackEntry {
+        id: source,
+        source_id: source,
+        controller,
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::NoOp,
+                vec![],
+                source,
+                controller,
+            )),
+        },
+    });
+    state.resolve_all_consent_run = Some(ResolveAllConsentRun {
+        epoch: EPOCH,
+        max_resolutions: StackResolutionBudget::default(),
+        scope: ResolveAllScope::Shared,
+        priority_snapshot: ResolveAllPrioritySnapshot {
+            waiting_player: PlayerId(0),
+            priority_player: PlayerId(0),
+            priority_pass_count: 0,
+            priority_passes: Default::default(),
+        },
+        participants: vec![
+            ResolveAllConsentParticipant {
+                representative: PlayerId(0),
+                authorized_submitter: PlayerId(0),
+                granted: true,
+            },
+            ResolveAllConsentParticipant {
+                representative: PlayerId(1),
+                authorized_submitter: PlayerId(1),
+                granted: true,
+            },
+        ],
+        auto_pass_baseline: None,
+    });
+    state
+}
+
 /// Restore the game state from a JSON string.
 /// Uses serde_json which handles string-keyed maps (from localStorage round-trip)
 /// correctly deserializing into HashMap<ObjectId, V>.
@@ -2941,6 +3222,9 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     state.debug_mode = true;
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, false);
     bind_interaction_session(&mut state);
+    // A contest's timestamps belong to the host clock that stamped them; this restore
+    // may be an import from another page or worker (see the engine function).
+    engine::game::contest::cancel_contest_after_restore(&mut state);
     GAME_STATE.with(|cell| cell.set(Some(state)));
     // Restoring (undo, or resuming a save from a fresh worker that never saw
     // `initialize_game`) invalidates any in-progress recording — the restored
@@ -2980,7 +3264,7 @@ fn resume_loaded_stack_automation(
         let mut state = cell.take().ok_or_else(|| NOT_INITIALIZED_ERR.to_string())?;
         let resumed = resume_restored_stack_automation(&mut state);
         cell.set(Some(state));
-        Ok::<_, String>(resumed)
+        resumed.map_err(|error| error.to_string())
     })?;
     let changed = !matches!(
         resumed.presentation.outcome,
@@ -3069,18 +3353,50 @@ fn resume_multiplayer_host_state_inner(
     backfill_legacy_debug_permissions(&mut state, restored.debug_permitted_was_serialized, true);
 
     bind_interaction_session(&mut state);
+    // The host clock that stamped a saved contest does not survive the reload; see
+    // `restore_game_state_inner`.
+    engine::game::contest::cancel_contest_after_restore(&mut state);
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
     MULTIPLAYER_MODE.with(|cell| cell.set(true));
     // The fresh RNG state is installed before the engine evaluates the saved
     // session, and no caller can observe the hosted snapshot until this
     // returns its bounded engine presentation.
-    resume_loaded_stack_automation(true)
+    resume_loaded_stack_automation(true).inspect_err(|_| {
+        clear_game_state();
+        set_multiplayer_mode(false);
+    })
 }
 
 #[cfg(test)]
 mod restored_card_db_requirements_tests {
     use super::*;
+
+    fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
+        let mut state = legacy_ready_state();
+        state.players[0].life_gained_this_turn = life_gained_this_turn;
+        let entry = state
+            .stack
+            .front_mut()
+            .expect("legacy Ready has a stack entry");
+        let source = entry.source_id;
+        entry.controller = PlayerId(0);
+        entry.kind = engine::types::game_state::StackEntryKind::ActivatedAbility {
+            source_id: source,
+            ability: Box::new(engine::types::ability::ResolvedAbility::new(
+                engine::types::ability::Effect::GainLife {
+                    amount: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    player: engine::types::ability::TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )),
+        };
+        state.capture_rng_word_pos();
+        serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+            .expect("trusted host state serializes")
+    }
 
     #[test]
     fn decoded_restore_requires_a_card_database_before_state_mutation() {
@@ -3194,6 +3510,96 @@ mod restored_card_db_requirements_tests {
         );
         assert!(!game_state_present());
         assert!(!is_multiplayer_mode());
+    }
+
+    #[test]
+    fn multiplayer_host_resume_clears_failed_automation_install_and_allows_retry() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let cached_state = legacy_ready_state();
+        let cached_before = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&cached_state);
+            cell.set(cache);
+            session
+        });
+        REPLAY_LOG.with(|cell| {
+            cell.set(Some(ReplayLog::new(ReplayHeader {
+                format_config: FormatConfig::standard(),
+                match_config: MatchConfig::default(),
+                player_count: 2,
+                first_player: Some(0),
+                seed: 7,
+                deck_data: None,
+            })));
+        });
+        let token = AI_PROPOSALS.with(|registry| {
+            registry.borrow_mut().insert(AiDecisionContract {
+                semantic_owner: PlayerId(0),
+                authorized_actor: PlayerId(0),
+                state_revision: 0,
+                candidates: Vec::new(),
+            })
+        });
+        let generation_before = AI_PROPOSALS.with(|registry| registry.borrow().generation);
+        assert!(has_replay_recording());
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_some()));
+
+        let overflow = legacy_ready_gain_state_json(u32::MAX);
+        let error = resume_multiplayer_host_state_inner(&overflow)
+            .expect_err("host automation must return the life-counter overflow");
+        assert_eq!(
+            error,
+            "Life change is not representable for player PlayerId(0)"
+        );
+        assert!(
+            !game_state_present(),
+            "failed host state install is cleared"
+        );
+        assert!(!is_multiplayer_mode(), "failed host claim is released");
+        assert!(
+            !has_replay_recording(),
+            "the abandoned recording is cleared"
+        );
+        assert!(AI_PROPOSALS.with(|registry| registry.borrow().proposal(&token).is_none()));
+        assert_eq!(
+            AI_PROPOSALS.with(|registry| registry.borrow().generation),
+            generation_before.wrapping_add(1),
+            "failed host installation invalidates outstanding proposals"
+        );
+        let cached_after = AI_SESSION_CACHE.with(|cell| {
+            let mut cache = cell.take();
+            let session = cache.get_or_build(&cached_state);
+            cell.set(cache);
+            session
+        });
+        assert!(
+            !std::sync::Arc::ptr_eq(&cached_before, &cached_after),
+            "failed host installation clears the cached AI session"
+        );
+
+        // A second fresh-host attempt must work without an intervening clear/reset.
+        let representable = legacy_ready_gain_state_json(u32::MAX - 1);
+        let presentation = resume_multiplayer_host_state_inner(&representable)
+            .expect("the representable saved automation can retry immediately");
+        assert_eq!(
+            presentation.outcome,
+            RestoredStackAutomationOutcome::Progressed
+        );
+        assert!(game_state_present());
+        assert!(is_multiplayer_mode());
+        with_state(|state| {
+            assert_eq!(state.players[0].life_gained_this_turn, u32::MAX);
+            assert_eq!(state.players[0].life, 21);
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        })
+        .expect("successful retry leaves the host game installed");
+
+        clear_game_state();
+        set_multiplayer_mode(false);
     }
 }
 
@@ -3408,6 +3814,419 @@ mod legacy_debug_permission_restore_tests {
     }
 }
 
+#[cfg(test)]
+mod pre_entry_onset_restore_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{WaitingFor, ABILITY_ONSET_RECORD_FIELD};
+
+    /// Rise from the Grave {4}{B} Sorcery — verbatim Oracle text.
+    const RISE_FROM_THE_GRAVE: &str = "Put target creature card from a graveyard onto the \
+         battlefield under your control. That creature is a black Zombie in addition to its \
+         other colors and types.";
+
+    /// Rise from the Grave paused at its entrant's as-enters colour choice (Voice of All's
+    /// clause, verbatim): the parked continuation holds the "is" rider stamped `WithEntry`.
+    fn rise_paused_at_entry_choice() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+        let chooser = scenario
+            .add_creature_to_graveyard(P1, "Color Chooser", 2, 2)
+            .from_oracle_text("As this creature enters, choose a color.")
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Rise from the Grave", false, RISE_FROM_THE_GRAVE)
+            .id();
+        let mut runner = scenario.build();
+        let mut commit = runner.cast(spell).target_object(chooser).commit();
+        for _ in 0..10 {
+            match &commit.state().waiting_for {
+                WaitingFor::NamedChoice { .. } => return commit.state().clone(),
+                WaitingFor::Priority { .. } => {
+                    commit
+                        .act(GameAction::PassPriority)
+                        .expect("priority passes");
+                }
+                other => panic!("unexpected prompt {other:?}"),
+            }
+        }
+        panic!("the resolution did not pause at the entry choice");
+    }
+
+    /// The same save as a pre-onset engine wrote it: no record and no `entry_onset` keys.
+    fn as_pre_onset_writer(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(object) => {
+                object.remove(ABILITY_ONSET_RECORD_FIELD);
+                object.remove("entry_onset");
+                object.values_mut().for_each(as_pre_onset_writer);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(as_pre_onset_writer),
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => {}
+        }
+    }
+
+    /// R4 — CR 611.2e: the engine-wasm restore surfaces the persisted onset refusal for a save
+    /// written before onsets were recorded; the same save written now decodes.
+    #[test]
+    fn pre_onset_save_is_refused_by_the_wasm_restore() {
+        let current =
+            serde_json::to_value(PersistedGameState::capture(rise_paused_at_entry_choice()))
+                .expect("the persisted save serializes");
+        decode_restored_game_state(&current.to_string()).expect("the current save decodes");
+
+        let mut legacy = current;
+        as_pre_onset_writer(&mut legacy);
+        let error = decode_restored_game_state(&legacy.to_string())
+            .expect_err("the pre-onset save is refused");
+        assert!(
+            error.contains("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_attack_authority_restore_tests {
+    use super::*;
+    use engine::game::combat::AttackTarget;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
+    use engine::game::zones;
+    use engine::types::actions::GameAction;
+    use engine::types::counter::CounterType;
+    use engine::types::events::GameEvent;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const SPHERE: &str = "When this creature enters, create four 1/1 colorless Myr artifact creature tokens.\nWhenever this creature attacks, you may tap X untapped Myr you control. If you do, this creature gets +X/+0 until end of turn and deals X damage to the player or planeswalker it's attacking.";
+
+    fn paused_sphere(pay: bool, blink: bool) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        for _ in 0..10 {
+            sc.add_card_to_library_top(P0, "Plains");
+            sc.add_card_to_library_top(P1, "Plains");
+        }
+        let sphere = sc
+            .add_creature_from_oracle(P0, "Myr Battlesphere", 4, 7, SPHERE)
+            .with_subtypes(vec!["Myr", "Construct"])
+            .id();
+        let myr: Vec<_> = (0..4)
+            .map(|_| {
+                sc.add_creature(P0, "Myr", 1, 1)
+                    .with_subtypes(vec!["Myr"])
+                    .id()
+            })
+            .collect();
+        let walker = sc
+            .add_planeswalker_from_oracle(P1, "Test Walker", "Test", 5, "+1: You gain 1 life.")
+            .as_planeswalker_with_loyalty("Test", 5)
+            .id();
+        let mut r = sc.build();
+        assert_eq!(r.state().objects[&walker].base_loyalty, Some(5));
+        assert_eq!(r.state().objects[&walker].loyalty, Some(5));
+        assert_eq!(
+            r.state().objects[&walker].counters[&CounterType::Loyalty],
+            5
+        );
+        r.advance_to_combat();
+        r.declare_attackers(&[(sphere, AttackTarget::Planeswalker(walker))])
+            .unwrap();
+        let pin = r.state().combat.as_ref().unwrap().attacked_permanents[&sphere];
+        assert_eq!(pin.object_id, walker);
+        if blink {
+            // Typed lifecycle fixture; real printed Flicker casting/retirement
+            // is covered by the engine integration cases before this boundary.
+            blink_through_zone_pipeline(r.state_mut(), walker);
+            assert_ne!(r.state().objects[&walker].incarnation, pin.incarnation);
+            assert_eq!(r.state().objects[&walker].base_loyalty, Some(5));
+            assert_eq!(r.state().objects[&walker].loyalty, Some(5));
+            assert_eq!(
+                r.state().objects[&walker].counters[&CounterType::Loyalty],
+                5
+            );
+            assert!(r
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attacked_permanents
+                .is_empty());
+        }
+        let mut optional_seen = false;
+        for _ in 0..24 {
+            match r.state().waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    optional_seen = true;
+                    if !pay {
+                        break;
+                    }
+                    r.act(GameAction::DecideOptionalEffect { accept: true })
+                        .unwrap();
+                }
+                WaitingFor::PayCost { .. } if pay => break,
+                WaitingFor::Priority { .. } => {
+                    r.act(GameAction::PassPriority).unwrap();
+                }
+                ref other => panic!("expected printed optional/tap pause: {other:?}"),
+            }
+        }
+        assert!(optional_seen);
+        assert!(if pay {
+            matches!(r.state().waiting_for, WaitingFor::PayCost { .. })
+        } else {
+            matches!(
+                r.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            )
+        });
+        (r.state().clone(), sphere, walker, myr)
+    }
+
+    /// CR 400.7 + CR 122.2 + CR 306.5b: Exile and return `id` through the
+    /// replacement-aware zone pipeline. The raw zone primitive clears counters
+    /// without applying the intrinsic entry replacement, so only this path gives
+    /// the returned new object loyalty counters equal to its printed loyalty.
+    fn blink_through_zone_pipeline(state: &mut GameState, id: ObjectId) {
+        let mut events = Vec::new();
+        assert!(!move_object_for_test(
+            state,
+            ZoneMoveRequest::effect(id, Zone::Exile, id),
+            &mut events,
+        ));
+        assert!(!move_object_for_test(
+            state,
+            ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+            &mut events,
+        ));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+    }
+
+    fn wire(state: &GameState, trusted: bool) -> String {
+        serde_json::to_string(&if trusted {
+            PersistedGameState::capture(state.clone())
+        } else {
+            PersistedGameState::Raw(Box::new(state.clone()))
+        })
+        .unwrap()
+    }
+
+    fn finish(
+        mut r: GameRunner,
+        sphere: ObjectId,
+        walker: ObjectId,
+        myr: &[ObjectId],
+        blink: bool,
+    ) {
+        let mut events = Vec::new();
+        for _ in 0..24 {
+            let result = match r.state().waiting_for.clone() {
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    r.act(GameAction::DecideOptionalEffect { accept: true })
+                }
+                WaitingFor::PayCost { choices, .. } => {
+                    assert_eq!(choices.len(), 4);
+                    r.act(GameAction::SelectCards {
+                        cards: myr[..2].to_vec(),
+                    })
+                }
+                WaitingFor::Priority { .. } if r.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => r.act(GameAction::PassPriority),
+                other => panic!("unexpected restored resolution: {other:?}"),
+            };
+            events.extend(result.unwrap().events);
+        }
+        assert_eq!(
+            myr.iter()
+                .filter(|id| r.state().objects[*id].tapped)
+                .count(),
+            2
+        );
+        if r.state().objects[&sphere].zone == Zone::Battlefield {
+            assert_eq!(r.state().objects[&sphere].power, Some(6));
+        } else {
+            assert_eq!(r.state().objects[&sphere].zone, Zone::Graveyard);
+        }
+        assert_eq!(
+            r.state().objects[&walker].counters[&CounterType::Loyalty],
+            if blink { 5 } else { 3 }
+        );
+        assert_eq!(
+            (r.state().players[0].life, r.state().players[1].life),
+            (20, 20)
+        );
+        let damage: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    target,
+                    amount,
+                    ..
+                } if *source_id == sphere => Some((target.clone(), *amount)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            damage,
+            if blink {
+                vec![]
+            } else {
+                vec![(engine::types::ability::TargetRef::Object(walker), 2)]
+            }
+        );
+        assert!(events.iter().any(|event| matches!(event, GameEvent::EffectResolved { source_id, kind: engine::types::ability::EffectKind::DealDamage, .. } if *source_id == sphere)));
+        assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn raw_and_trusted_restore_printed_optional_and_tap_payment_then_resolve() {
+        for pay in [false, true] {
+            for blink in [false, true] {
+                let (state, sphere, walker, myr) = paused_sphere(pay, blink);
+                for trusted in [false, true] {
+                    let json = wire(&state, trusted);
+                    let restored = decode_restored_game_state(&json)
+                        .expect("exact attack authority is playable");
+                    assert_eq!(
+                        restored.state.combat.as_ref().unwrap().attacked_permanents,
+                        state.combat.as_ref().unwrap().attacked_permanents
+                    );
+                    finish(
+                        GameRunner::from_state(restored.state),
+                        sphere,
+                        walker,
+                        &myr,
+                        blink,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn production_restore_preserves_the_paid_attack_recipient() {
+        let (state, sphere, walker, myr) = paused_sphere(true, false);
+        for trusted in [false, true] {
+            clear_game_state();
+            set_multiplayer_mode(false);
+            load_minimal_test_card_database();
+            restore_game_state_inner(&wire(&state, trusted))
+                .expect("production restore finalizes with database");
+            let restored = with_state(Clone::clone).unwrap();
+            finish(
+                GameRunner::from_state(restored),
+                sphere,
+                walker,
+                &myr,
+                false,
+            );
+            clear_game_state();
+        }
+    }
+
+    #[test]
+    fn restore_refuses_missing_attack_map_without_guessing_a_live_pin() {
+        let (state, _, _, _) = paused_sphere(true, false);
+        for trusted in [false, true] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&wire(&state, trusted)).unwrap();
+            let payload = if trusted {
+                &mut value["state"]
+            } else {
+                &mut value
+            };
+            payload["combat"]
+                .as_object_mut()
+                .unwrap()
+                .remove("attacked_permanents");
+            let error = decode_restored_game_state(&value.to_string())
+                .expect_err("unproven authority is refused");
+            assert!(error.contains("exact attack authority"));
+            assert!(
+                decode_restored_game_state(&wire(&state, trusted)).is_ok(),
+                "populated positive uses the same ingress/prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn departed_source_restore_keeps_departure_time_recipient_through_both_tap_pauses() {
+        for pay in [false, true] {
+            for timing in 0..4 {
+                let (mut state, sphere, walker, myr) = paused_sphere(pay, false);
+                // Typed lifetime setup around a real printed optional/payment
+                // pause. Engine integration tests independently cast the actual
+                // control-change and blink spells in these orderings.
+                if timing == 2 {
+                    let object = state.objects.get_mut(&walker).unwrap();
+                    object.controller = P0;
+                    object.base_controller = Some(P0);
+                    engine::game::effects::remove_from_combat::remove_object_from_combat(
+                        &mut state, walker,
+                    );
+                }
+                zones::move_to_zone(&mut state, sphere, Zone::Graveyard, &mut Vec::new());
+                let departure = state
+                    .zone_changes_this_turn
+                    .iter()
+                    .rev()
+                    .find(|row| row.object_id == sphere && row.from_zone == Some(Zone::Battlefield))
+                    .unwrap()
+                    .combat_status;
+                assert_eq!(departure.attack_target_identity.is_none(), timing == 2);
+                if timing == 1 {
+                    blink_through_zone_pipeline(&mut state, walker);
+                    assert_ne!(
+                        state.objects[&walker].incarnation,
+                        departure.attack_target_identity.unwrap().incarnation
+                    );
+                    assert_eq!(state.objects[&walker].base_loyalty, Some(5));
+                    assert_eq!(state.objects[&walker].loyalty, Some(5));
+                    assert_eq!(state.objects[&walker].counters[&CounterType::Loyalty], 5);
+                } else if timing == 3 {
+                    let object = state.objects.get_mut(&walker).unwrap();
+                    object.controller = P0;
+                    object.base_controller = Some(P0);
+                    engine::game::effects::remove_from_combat::remove_object_from_combat(
+                        &mut state, walker,
+                    );
+                }
+                assert_eq!(
+                    state
+                        .zone_changes_this_turn
+                        .iter()
+                        .rev()
+                        .find(|row| row.object_id == sphere
+                            && row.from_zone == Some(Zone::Battlefield))
+                        .unwrap()
+                        .combat_status,
+                    departure,
+                    "later recipient changes never edit departure LKI"
+                );
+                for trusted in [false, true] {
+                    let restored = decode_restored_game_state(&wire(&state, trusted))
+                        .expect("exact departure is playable across either ingress");
+                    finish(
+                        GameRunner::from_state(restored.state),
+                        sphere,
+                        walker,
+                        &myr,
+                        timing == 1 || timing == 2,
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ── Replay system ───────────────────────────────────────────────────────
 //
 // Recording: `initialize_game` auto-starts a `ReplayLog` (REPLAY_LOG) and
@@ -3560,7 +4379,7 @@ pub fn get_ai_action_proposal(difficulty: &str, player_id: u8) -> Result<JsValue
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let Some(action) =
-            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+            choose_action_with_issued_contract(state, &config, &mut rng, &session, &contract)
         else {
             return Ok(JsValue::NULL);
         };
@@ -3595,7 +4414,7 @@ pub fn get_ai_tactical_action_proposal(
         let mut rng = rand::rng();
         let session = ai_session_for(state);
         let Some(action) =
-            choose_action_with_session(state, semantic_owner, &config, &mut rng, &session)
+            choose_action_with_issued_contract(state, &config, &mut rng, &session, &contract)
         else {
             return Ok(JsValue::NULL);
         };
@@ -3625,13 +4444,8 @@ pub fn get_ai_action_proposal_with_diagnostics(
             create_config_for_players(ai_difficulty, Platform::Wasm, state.players.len() as u8);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
-        let selection = choose_action_with_session_diagnostic(
-            state,
-            semantic_owner,
-            &config,
-            &mut rng,
-            &session,
-        );
+        let selection =
+            choose_action_with_session_diagnostic(state, &config, &mut rng, &session, &contract);
         let Some(action) = selection.action else {
             return Ok(JsValue::NULL);
         };
@@ -3667,13 +4481,8 @@ pub fn get_ai_tactical_action_proposal_with_diagnostics(
         config.search.time_budget_ms = Some(0);
         let mut rng = rand::rng();
         let session = ai_session_for(state);
-        let selection = choose_action_with_session_diagnostic(
-            state,
-            semantic_owner,
-            &config,
-            &mut rng,
-            &session,
-        );
+        let selection =
+            choose_action_with_session_diagnostic(state, &config, &mut rng, &session, &contract);
         let Some(action) = selection.action else {
             return Ok(JsValue::NULL);
         };
@@ -4265,15 +5074,14 @@ mod tests {
         ContinuousModification, Duration, Effect, QuantityExpr, QuantityRef, ResolvedAbility,
         TargetFilter, TargetRef,
     };
-    use engine::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
+    use engine::types::actions::ResolveAllConsentDecision;
     use engine::types::card::CardFace;
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::counter::{CounterMatch, CounterType};
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, NamedChoiceSource, NamedChoiceSourceBinding,
-        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, ResolveAllConsentParticipant,
-        ResolveAllConsentRun, ResolveAllPrioritySnapshot, StackEntry, StackEntryKind,
-        StackResolutionBudget, WaitingFor,
+        OpponentGuessOwner, OpponentGuessSource, PromptSourceBinding, StackEntry, StackEntryKind,
+        WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::Keyword;
@@ -4617,10 +5425,10 @@ mod tests {
             source: OpponentGuessSource {
                 prompt: PromptSourceBinding::from_trigger_source(&context),
             },
-            owner: Some(OpponentGuessOwner {
+            owner: Some(Box::new(OpponentGuessOwner {
                 context,
                 committed_choice: Some(ChosenAttribute::Number(7)),
-            }),
+            })),
             proposition_truth: Some(true),
         };
         state
@@ -4761,6 +5569,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: x_walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("real [-X] activation must issue an X prompt");
@@ -4802,6 +5611,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: target_walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("real targeted loyalty activation must issue a target prompt");
@@ -5249,6 +6059,7 @@ mod tests {
             GameAction::ActivateAbility {
                 source_id: walker,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("real loyalty activation must issue a target continuation");
@@ -5338,7 +6149,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == walker
+                    GameAction::ActivateAbility { source_id, ability_index: 0, .. } if source_id == walker
                 )
             })
             .expect("real issuer must offer the plus loyalty ability")
@@ -5375,7 +6186,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::ActivateAbility { source_id, ability_index: 0 } if source_id == minus_walker
+                    GameAction::ActivateAbility { source_id, ability_index: 0, .. } if source_id == minus_walker
                 )
             })
             .expect("real issuer must offer the affordable targeted minus")
@@ -5504,54 +6315,9 @@ mod tests {
         load_card_database(&json).unwrap();
     }
 
-    fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
-        let object_id = ObjectId(id);
-        StackEntry {
-            id: object_id,
-            source_id: object_id,
-            controller,
-            kind: StackEntryKind::ActivatedAbility {
-                source_id: object_id,
-                ability: ResolvedAbility::new(Effect::NoOp, vec![], object_id, controller),
-            },
-        }
-    }
-
     fn legacy_ready_state_json() -> String {
-        let mut state = GameState::new_two_player(7);
+        let state = legacy_ready_state();
         const EPOCH: u64 = 70_200;
-        state.waiting_for = WaitingFor::ResolveAllReady { epoch: EPOCH };
-        state.priority_player = PlayerId(0);
-        state
-            .stack
-            .push_back(no_op_stack_entry(70_200, PlayerId(1)));
-        state.resolve_all_consent_run = Some(ResolveAllConsentRun {
-            epoch: EPOCH,
-            max_resolutions: StackResolutionBudget::default(),
-            // A table-wide run: both seats are participants and both granted.
-            scope: ResolveAllScope::Shared,
-            priority_snapshot: ResolveAllPrioritySnapshot {
-                waiting_player: PlayerId(0),
-                priority_player: PlayerId(0),
-                priority_pass_count: 0,
-                priority_passes: Default::default(),
-            },
-            participants: vec![
-                ResolveAllConsentParticipant {
-                    representative: PlayerId(0),
-                    authorized_submitter: PlayerId(0),
-                    granted: true,
-                },
-                ResolveAllConsentParticipant {
-                    representative: PlayerId(1),
-                    authorized_submitter: PlayerId(1),
-                    granted: true,
-                },
-            ],
-            // `None` and the empty live preference map identify the real
-            // persisted Ready representation, not a contemporary consent run.
-            auto_pass_baseline: None,
-        });
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ResolveAllReady { epoch } if epoch == EPOCH
@@ -7553,6 +8319,7 @@ mod settlement_election_host_resume_tests {
             GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
         )
         .expect("the activation starts");
@@ -7640,5 +8407,234 @@ mod settlement_election_host_resume_tests {
             resumed, expected,
             "the resumed host locks and places the same activation"
         );
+    }
+}
+
+/// A contest in flight when a state is imported from another page or worker: its
+/// deadlines belong to a host clock that does not survive, and `observe` never moves
+/// backwards, so continuing it would freeze it until the new clock caught up. Both
+/// restore authorities settle it as cancelled instead, through the ordinary
+/// settlement, so the game resumes with the parked continuation run exactly once.
+#[cfg(test)]
+mod contest_restore_tests {
+    use super::*;
+    use engine::game::contest::{advance_contest, contest_click, start_contest};
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::contest::ContestConfig;
+    use engine::types::game_state::{TrustedGameStateEnvelope, WaitingFor};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const EYE_TO_EYE: &str = "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+    /// A host clock far ahead of any fresh `performance.now()`.
+    const OLD_EPOCH_MS: u64 = 4_000_000_000;
+
+    /// A REAL Eye to Eye cast, parked on its contest and mid-click on an old clock.
+    fn exported_contest(phase_to_reach: &str) -> (String, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_vanilla(P1, 2, 2);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_objects(&[victim]).resolve();
+        let mut state = runner.state().clone();
+
+        let config = ContestConfig::default();
+        let mut events = Vec::new();
+        start_contest(&mut state, config, OLD_EPOCH_MS, &mut events);
+        if phase_to_reach == "Active" {
+            advance_contest(&mut state, OLD_EPOCH_MS + config.countdown_ms, &mut events);
+            let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+                panic!("reach guard: still in the contest");
+            };
+            let id = contest.id;
+            contest_click(
+                &mut state,
+                id,
+                P0,
+                1,
+                OLD_EPOCH_MS + config.countdown_ms + 10,
+                &mut events,
+            );
+        }
+        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+            panic!("reach guard: the contest must be in flight when exported");
+        };
+        assert!(
+            contest.clock_ms >= OLD_EPOCH_MS,
+            "reach guard: the contest carries the old epoch"
+        );
+        state.capture_rng_word_pos();
+        (
+            serde_json::to_string(&TrustedGameStateEnvelope::capture(state))
+                .expect("the host exports its state"),
+            victim,
+        )
+    }
+
+    fn assert_settled_as_cancelled(victim: ObjectId) {
+        with_state(|state| {
+            assert!(
+                !matches!(state.waiting_for, WaitingFor::PhysicalContest { .. }),
+                "the imported contest must not be left waiting on a dead clock"
+            );
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "the game must carry on: {:?}",
+                state.waiting_for
+            );
+            // Cancelled is not a win: the rider's consequence does not fire, and it
+            // does not fire twice either.
+            assert_eq!(state.objects[&victim].zone, Zone::Battlefield);
+            assert!(state.stack.is_empty());
+        })
+        .expect("a live game");
+    }
+
+    #[test]
+    fn a_trusted_import_cancels_an_in_flight_contest_through_both_restore_owners() {
+        for phase in ["Preparing", "Active"] {
+            let (json, victim) = exported_contest(phase);
+
+            clear_game_state();
+            set_multiplayer_mode(false);
+            load_minimal_test_card_database();
+            restore_game_state_inner(&json).expect("the local restore imports");
+            assert_settled_as_cancelled(victim);
+
+            clear_game_state();
+            set_multiplayer_mode(false);
+            load_minimal_test_card_database();
+            resume_multiplayer_host_state_inner(&json).expect("the P2P host resumes");
+            assert_settled_as_cancelled(victim);
+
+            clear_game_state();
+            set_multiplayer_mode(false);
+        }
+    }
+}
+
+/// The local contest host's per-tick ordering, driven through the same
+/// `run_contest_drive` that `drive_contest_js` runs. `#[cfg(test)]`, not
+/// `wasm32`-gated: the JS marshalling around it cannot run natively, the engine
+/// ordering inside it can.
+#[cfg(test)]
+mod contest_drive_tests {
+    use super::*;
+    use engine::types::contest::{
+        ContestConfig, ContestKind, ContestLossReason, ContestOutcome, ContestResult, ContestState,
+    };
+    use engine::types::game_state::WaitingFor;
+
+    const CONTEST: u64 = 7;
+    const CONTROLLER: PlayerId = PlayerId(0);
+    const OPPONENT: PlayerId = PlayerId(1);
+
+    fn parked_contest() -> GameState {
+        let mut state = GameState::new_two_player(1);
+        state.waiting_for = WaitingFor::PhysicalContest {
+            contest: Box::new(ContestState::new(
+                CONTEST,
+                ContestKind::Staring,
+                CONTROLLER,
+                OPPONENT,
+                ContestConfig::default(),
+            )),
+            source_id: ObjectId(1),
+        };
+        state
+    }
+
+    fn tick(
+        state: &mut GameState,
+        now: u64,
+        away: &[PlayerId],
+        clicks: Vec<ContestClickInput>,
+    ) -> ContestDriveOutcome {
+        run_contest_drive(
+            state,
+            now,
+            &[],
+            away,
+            clicks,
+            &mut phase_ai::contest::AiContestants::default(),
+            &mut ChaCha20Rng::seed_from_u64(1),
+        )
+    }
+
+    fn click(player: PlayerId, seq: u32, at_ms: f64) -> ContestClickInput {
+        ContestClickInput {
+            contest: CONTEST,
+            player: player.0,
+            seq,
+            at_ms,
+        }
+    }
+
+    fn resolved(outcome: &ContestDriveOutcome) -> Option<ContestResult> {
+        outcome.events.iter().find_map(|event| match event {
+            GameEvent::PhysicalContestResolved { result, .. } => Some(*result),
+            _ => None,
+        })
+    }
+
+    /// GO at 3000, both deadlines at 5000. The controller's click is stamped 4999, but
+    /// the host's tick is delivered at 5151 — past the opponent's recovery window and,
+    /// judged against the OLD deadlines, past the controller's too. Processed in the
+    /// order it happened, the click extends the controller's deadline and only the
+    /// opponent has lapsed; judging the tick first would tie the contest and reject the
+    /// click.
+    #[test]
+    fn a_click_stamped_before_a_delayed_tick_is_judged_before_that_tick() {
+        let mut state = parked_contest();
+        tick(&mut state, 0, &[], vec![]);
+        tick(&mut state, 3_000, &[], vec![]);
+
+        let outcome = tick(&mut state, 5_151, &[], vec![click(CONTROLLER, 1, 4_999.0)]);
+
+        assert_eq!(outcome.step, "Settled");
+        assert_eq!(
+            resolved(&outcome),
+            Some(ContestResult::Outcome(ContestOutcome::Decided {
+                winner: CONTROLLER,
+                loser: OPPONENT,
+                reason: ContestLossReason::Inactivity,
+            })),
+            "the on-time click must win the contest, not be rejected into a tie"
+        );
+    }
+
+    /// Reach guard for the discriminator above: with no click the same delayed tick
+    /// IS a tie, so the click is what changed the result.
+    #[test]
+    fn the_same_delayed_tick_without_the_click_is_a_tie() {
+        let mut state = parked_contest();
+        tick(&mut state, 0, &[], vec![]);
+        tick(&mut state, 3_000, &[], vec![]);
+
+        let outcome = tick(&mut state, 5_151, &[], vec![]);
+
+        assert_eq!(
+            resolved(&outcome),
+            Some(ContestResult::Outcome(ContestOutcome::Tie))
+        );
+    }
+
+    /// A real disconnect edge is still observed at the tick and pauses the contest.
+    #[test]
+    fn a_seat_reported_away_pauses_the_contest() {
+        let mut state = parked_contest();
+        tick(&mut state, 0, &[], vec![]);
+        tick(&mut state, 3_000, &[], vec![]);
+
+        let outcome = tick(&mut state, 3_500, &[OPPONENT], vec![]);
+
+        assert_eq!(outcome.step, "Updated");
+        let WaitingFor::PhysicalContest { contest, .. } = &state.waiting_for else {
+            panic!("the contest is still running while a seat is away");
+        };
+        assert!(contest.paused_since_ms.is_some());
     }
 }

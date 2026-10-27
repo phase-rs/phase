@@ -51,7 +51,7 @@ use crate::types::definitions::Definitions;
 use crate::types::game_state::{
     CastPaymentMode, CastingPermissionIndex, GameState, PendingCast, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
@@ -152,6 +152,9 @@ impl CandidateFilter for SimulationFilter {
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }
+        if super::structurally_valid_named_choice_answer(state, &candidate.action) {
+            return true;
+        }
         if structurally_valid_priority_activation(state, &candidate.action) {
             return true;
         }
@@ -174,6 +177,9 @@ impl CandidateFilter for SimulationFilter {
             return true;
         }
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
+            return true;
+        }
+        if super::structurally_valid_named_choice_answer(state, &candidate.action) {
             return true;
         }
         if structurally_valid_priority_activation(state, &candidate.action) {
@@ -351,6 +357,7 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         },
     ) = (&state.waiting_for, action)
     else {
@@ -360,8 +367,16 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     // CR 602.2 + CR 602.5: `can_activate_ability_now` is the engine's
     // structural authority for beginning an activation. Avoid re-simulating the
     // same priority activation just to enter target selection and discard the
-    // clone.
-    crate::game::casting::can_activate_ability_now(state, *player, *source_id, *ability_index)
+    // clone. CR 602.2b + CR 601.2g: judged in the action's own payment mode, so
+    // an automatic activation is accepted only when the automatic payer can
+    // complete it.
+    crate::game::casting::can_activate_ability_now_with_payment_mode(
+        state,
+        *player,
+        *source_id,
+        *ability_index,
+        *payment_mode,
+    )
 }
 
 // CR 117.1a + CR 601.2: a player may cast a spell when they have priority;
@@ -580,6 +595,15 @@ struct ObjectFingerprint {
     is_commander: bool,
     loyalty: Option<u32>,
     loyalty_activations_this_turn: u32,
+    /// CR 606.3 + CR 101.1: the per-permanent extra-activation grant raises the
+    /// loyalty-ability cap `planeswalker::loyalty_activation_cap` reads, so the
+    /// legality verdict depends on it.
+    extra_loyalty_activations_this_turn: u32,
+    /// CR 613.1f: the cap read above applies only to a characteristic loyalty
+    /// ability, decided by where the ability index sits against this boundary
+    /// (`GameObject::activated_ability_provenance`). `Eq`-only: the `Hash` impl
+    /// stays a subset of `PartialEq`.
+    granted_abilities_from: Option<usize>,
     abilities: Arc<Vec<AbilityDefinition>>,
     trigger_definitions: Definitions<TriggerDefinition>,
     replacement_definitions: Definitions<ReplacementDefinition>,
@@ -712,6 +736,8 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         is_commander: obj.is_commander,
         loyalty: obj.loyalty,
         loyalty_activations_this_turn: obj.loyalty_activations_this_turn,
+        extra_loyalty_activations_this_turn: obj.extra_loyalty_activations_this_turn,
+        granted_abilities_from: obj.granted_abilities_from,
         abilities: obj.abilities.clone(),
         trigger_definitions: obj
             .trigger_definitions
@@ -812,6 +838,10 @@ struct LegalityKey {
     /// DeclareBlocker only: the blocked attacker's interned fingerprint id plus
     /// its ring-bearer designation (CR 701.54c/e). `None` for other classes.
     counterpart: Option<(u32, bool)>,
+    /// ActivateAbility only: the payment mode the activation is judged in
+    /// (CR 602.2b + CR 601.2g — a manual payment's life is judged after the
+    /// mana-ability window). `None` for other classes.
+    payment_mode: Option<CastPaymentMode>,
 }
 
 impl LegalityKey {
@@ -830,15 +860,19 @@ impl LegalityKey {
             is_blocked: false,
             attack_target: None,
             counterpart: None,
+            payment_mode: None,
         }
     }
 }
 
-/// SORTED mode indices recorded for `id` in a `(ObjectId, mode_index)` set.
-fn sorted_modes(set: &HashSet<(ObjectId, usize)>, id: ObjectId) -> Vec<usize> {
+/// SORTED mode indices recorded for `source` in a `(source, mode_index)` set.
+fn sorted_modes(
+    set: &HashSet<(ObjectIncarnationRef, usize)>,
+    source: ObjectIncarnationRef,
+) -> Vec<usize> {
     let mut v: Vec<usize> = set
         .iter()
-        .filter(|(oid, _)| *oid == id)
+        .filter(|(recorded, _)| *recorded == source)
         .map(|(_, m)| *m)
         .collect();
     v.sort_unstable();
@@ -962,6 +996,10 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         // CR 701.15b: A live designation may come from a TCE or printed source
         // outside the candidate fingerprint.
         | FilterProp::Goaded
+        // CR 722.3a: prepared reads `obj.prepared`, which the candidate
+        // fingerprint does not capture at all (unlike `is_suspected` /
+        // `is_renowned`); memoizing it is unsound — POISON for memoization.
+        | FilterProp::Prepared
         | FilterProp::PowerGTSource
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
@@ -970,6 +1008,12 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::AttachedTo { to: AttachmentReferent::Player { .. } }
         // CR 601.2c: reads the declared target slot's object — another object by id.
         | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
+        // CR 701.3a + CR 603.7c: the filter-matched host axis resolves a live
+        // host SET (the resolving chain's targets, the creation snapshot, or the
+        // trigger event) — not the candidate fingerprint.
+        | FilterProp::AttachedTo {
+            to: AttachmentReferent::Host { .. },
+        }
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::HasKeywordKind { .. }
@@ -1115,8 +1159,8 @@ fn condition_reads_only_memo_safe_state(c: &ParsedCondition) -> bool {
         // (via `game::commander`), like the other `YouControl*` predicates — reads no
         // combat/damage/pending-cast history, so it is memo-safe.
         | ParsedCondition::ControlsCommander { .. }
-        // CR 503.1: reads only `state.phase`, apply()-constant global state.
-        | ParsedCondition::IsDuringUpkeep
+        // CR 500.1: reads only `state.phase`, apply()-constant global state.
+        | ParsedCondition::CurrentPhaseIs { .. }
         // CR 102.2 / CR 102.3: reads `state.active_player` plus team topology,
         // both apply()-constant like `IsYourTurn`.
         | ParsedCondition::IsOpponentsTurn
@@ -1413,6 +1457,7 @@ fn legality_equivalence_key(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode,
         } => {
             if poison.has_activation {
                 return None;
@@ -1420,6 +1465,7 @@ fn legality_equivalence_key(
             let fp = interner.intern(state, *source_id)?;
             let mut key = LegalityKey::new(LegalityClass::ActivateAbility, fp);
             key.ability_index = Some(*ability_index);
+            key.payment_mode = Some(*payment_mode);
             key.activations_this_turn = state
                 .activated_abilities_this_turn
                 .get(&(*source_id, *ability_index))
@@ -1431,8 +1477,13 @@ fn legality_equivalence_key(
                 .copied()
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(source_id);
-            key.chosen_modes_turn = sorted_modes(&state.modal_modes_chosen_this_turn, *source_id);
-            key.chosen_modes_game = sorted_modes(&state.modal_modes_chosen_this_game, *source_id);
+            // CR 400.7: an activated ability's mode history is the live source's.
+            let history_source =
+                crate::game::ability_utils::live_modal_history_source(state, *source_id);
+            key.chosen_modes_turn =
+                sorted_modes(&state.modal_modes_chosen_this_turn, history_source);
+            key.chosen_modes_game =
+                sorted_modes(&state.modal_modes_chosen_this_game, history_source);
             key.is_attacking = crate::game::restrictions::is_source_attacking(state, *source_id);
             key.is_blocking = crate::game::restrictions::is_source_blocking(state, *source_id);
             key.is_blocked = crate::game::restrictions::is_source_blocked(state, *source_id);
@@ -1494,10 +1545,10 @@ fn legality_equivalence_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_support::candidate_actions;
+    use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
-    use crate::types::game_state::TransientContinuousEffectBindings;
+    use crate::types::game_state::{ActivationTargetSelection, TransientContinuousEffectBindings};
     use crate::types::identifiers::ObjectIncarnationRef;
 
     /// Matrix rows 9a + 9b — the mana-role POISON scan is a PURE EXTENSION.
@@ -2073,15 +2124,16 @@ mod tests {
     use crate::game::combat::{AttackTarget, CombatState};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Comparator, ContinuousModification, Duration,
-        Effect, FilterProp, ParitySource, ParsedCondition, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, Comparator,
+        ContinuousModification, Duration, Effect, FilterProp, NumberDistinctness, ParitySource,
+        ParsedCondition, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterMatch;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaCost;
+    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -2275,10 +2327,12 @@ mod tests {
             cand(GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
             cand(GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
         ];
         crate::game::perf_counters::reset();
@@ -2324,10 +2378,12 @@ mod tests {
             cand(GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
             cand(GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             }),
         ];
         crate::game::perf_counters::reset();
@@ -2392,6 +2448,52 @@ mod tests {
         );
     }
 
+    /// CR 606.3 + CR 613.1f: every input the loyalty-activation cap reads is part of
+    /// the fingerprint, so two otherwise-equal planeswalkers that differ in any of
+    /// them never share a memoized legality verdict. The control (two fresh equal
+    /// planeswalkers) compares equal, which is the reach-guard that each pair
+    /// below differs only in the named field.
+    #[test]
+    fn fingerprint_membership_guards_loyalty_cap_inputs() {
+        let mut s = GameState::new_two_player(4);
+        let a = make_object(&mut s, 100, 0, "Probe Walker");
+        let b = make_object(&mut s, 100, 0, "Probe Walker");
+        assert_eq!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "control: two fresh equal planeswalkers share a fingerprint"
+        );
+
+        s.objects.get_mut(&b).unwrap().loyalty_activations_this_turn = 1;
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the loyalty-activation count must be in the fingerprint"
+        );
+        s.objects.get_mut(&b).unwrap().loyalty_activations_this_turn = 0;
+
+        s.objects
+            .get_mut(&b)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the per-permanent extra grant must be in the fingerprint"
+        );
+        s.objects
+            .get_mut(&b)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 0;
+
+        s.objects.get_mut(&b).unwrap().granted_abilities_from = Some(1);
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "the gained-ability boundary must be in the fingerprint"
+        );
+    }
+
     /// #9: per-(source, ability) activation count is folded into the key.
     #[test]
     fn activation_count_is_folded_into_key() {
@@ -2412,6 +2514,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2421,6 +2524,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2453,6 +2557,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: a,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2462,6 +2567,7 @@ mod tests {
             &GameAction::ActivateAbility {
                 source_id: b,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &poison,
             &mut interner,
@@ -2823,5 +2929,383 @@ mod tests {
         evaluate_layers(runner.state_mut());
         assert!(runner.state().objects[&host].goaded_by.is_empty());
         assert!(LegalityPoisonGates::compute(runner.state()).has_declare_attacker);
+    }
+
+    // ------------------------------------------------------------------
+    // `structurally_valid_named_choice_answer` — the sixth structural hatch.
+    //
+    // Soundness condition, as for the pass-priority hatch above:
+    //
+    //   structurally_valid_named_choice_answer(state, action) == true
+    //     ⇒ fallback_simulation(state, candidate) == true
+    //
+    // asserted against `pass_oracle_accepts`, `fallback_simulation`'s body.
+    // ------------------------------------------------------------------
+
+    /// Distant Melody ("Choose a creature type. Draw a card for each permanent
+    /// you control of that type."), cast and resolved up to its CR 608.2d
+    /// resolution-time creature-type prompt. The answer persists on the
+    /// resolving spell, so the prompt is `ExactObjectAndResolution`-bound.
+    fn distant_melody_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Distant Melody",
+            false,
+            "Choose a creature type. Draw a card for each permanent you control of that type.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Blue],
+        });
+        let melody = builder.id();
+        let mut pool: Vec<ManaUnit> = (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, melody, false, vec![]))
+            .collect();
+        pool.push(ManaUnit::new(ManaType::Blue, melody, false, vec![]));
+        scenario.with_mana_pool(PlayerId(0), pool);
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(melody).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+            ),
+            "Distant Melody must halt on its source-bound creature-type prompt"
+        );
+        state
+    }
+
+    /// Brave the Elements ("Choose a color. White creatures you control gain
+    /// protection from the chosen color until end of turn."), cast and resolved
+    /// up to its CR 608.2d color prompt. Its `Choose` does not persist, so the
+    /// prompt carries no source.
+    fn brave_the_elements_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Brave the Elements",
+            true,
+            "Choose a color. White creatures you control gain protection from the chosen color until end of turn.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let brave = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(ManaType::White, brave, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(brave).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: None, .. }
+            ),
+            "Brave the Elements must halt on its source-less color prompt"
+        );
+        state
+    }
+
+    /// Thriving Grove, played up to its CR 614.12a pre-entry color prompt
+    /// (a `PendingEntry`-bound source with a live parked entry).
+    fn thriving_grove_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let grove = scenario
+            .add_land_to_hand(PlayerId(0), "Thriving Grove")
+            .from_oracle_text(
+                "This land enters tapped. As it enters, choose a color other than green.\n{T}: Add {G} or one mana of the chosen color.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let card_id = runner.state().objects[&grove].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: grove,
+                card_id,
+            })
+            .expect("playing the land must start its entry");
+        let state = runner.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
+            ),
+            "Thriving Grove must halt on its pre-entry color prompt"
+        );
+        state
+    }
+
+    /// Stave Off ("Target creature gains protection from the color of your
+    /// choice until end of turn."), cast at a creature and resolved up to its
+    /// CR 608.2d color prompt. The answer persists on the resolving spell, so
+    /// the prompt is `ExactObjectAndResolution`-bound with a matching context.
+    fn stave_off_named_choice_state() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let bear = scenario
+            .add_creature(PlayerId(0), "Grizzly Bears", 2, 2)
+            .id();
+        let mut builder = scenario.add_spell_to_hand_from_oracle(
+            PlayerId(0),
+            "Stave Off",
+            true,
+            "Target creature gains protection from the color of your choice until end of turn.",
+        );
+        builder.with_mana_cost(ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White],
+        });
+        let stave_off = builder.id();
+        scenario.with_mana_pool(
+            PlayerId(0),
+            vec![ManaUnit::new(ManaType::White, stave_off, false, vec![])],
+        );
+        let mut runner = scenario.build();
+        runner.state_mut().active_player = PlayerId(0);
+        runner.state_mut().priority_player = PlayerId(0);
+        let outcome = runner.cast(stave_off).target_object(bear).resolve();
+        let state = outcome.state().clone();
+        assert!(
+            matches!(
+                &state.waiting_for,
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding
+                        == crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                        && source.has_matching_context()
+            ),
+            "Stave Off must halt on its source-bound color prompt"
+        );
+        state
+    }
+
+    fn named_choice_candidates(state: &GameState) -> Vec<CandidateAction> {
+        candidate_actions(state)
+            .into_iter()
+            .filter(|candidate| matches!(candidate.action, GameAction::ChooseOption { .. }))
+            .collect()
+    }
+
+    fn choose(choice: &str) -> GameAction {
+        GameAction::ChooseOption {
+            choice: choice.to_string(),
+        }
+    }
+
+    fn first_named_option(state: &GameState) -> String {
+        match &state.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => options
+                .first()
+                .cloned()
+                .expect("the prompt must enumerate its domain"),
+            other => panic!("expected a NamedChoice prompt, got {other:?}"),
+        }
+    }
+
+    /// U1. Every enumerated answer the hatch admits is one the real reducer
+    /// admits — for a source-less prompt (Brave the Elements), a `PendingEntry`
+    /// prompt (Thriving Grove) and `ExactObjectAndResolution` prompts (Distant
+    /// Melody, Stave Off). The `true` assertion is the positive reach guard;
+    /// `pass_oracle_accepts` is the soundness check.
+    #[test]
+    fn named_choice_hatch_is_sound_against_the_reducer() {
+        for state in [
+            brave_the_elements_named_choice_state(),
+            distant_melody_named_choice_state(),
+            thriving_grove_named_choice_state(),
+            stave_off_named_choice_state(),
+        ] {
+            let candidates = named_choice_candidates(&state);
+            assert!(
+                !candidates.is_empty(),
+                "the prompt must enumerate ChooseOption candidates"
+            );
+            for candidate in &candidates {
+                assert!(
+                    crate::ai_support::structurally_valid_named_choice_answer(
+                        &state,
+                        &candidate.action
+                    ),
+                    "the hatch must admit enumerated answer {:?}",
+                    candidate.action
+                );
+                assert!(
+                    pass_oracle_accepts(&state, candidate),
+                    "the reducer must accept enumerated answer {:?}",
+                    candidate.action
+                );
+            }
+        }
+    }
+
+    /// U2. Each row changes exactly one input from an accepted premise and the
+    /// hatch must then refuse (`false` costs only a simulation).
+    #[test]
+    fn named_choice_hatch_refuses_what_the_reducer_or_cost_payment_refuses() {
+        let melody = distant_melody_named_choice_state();
+        let melody_option = first_named_option(&melody);
+        assert!(hatch(&melody, &choose(&melody_option)), "premise: accepted");
+
+        // (a) An answer outside the enumerated domain.
+        assert!(!hatch(&melody, &choose("Not A Creature Type")));
+
+        let grove = thriving_grove_named_choice_state();
+        let grove_option = first_named_option(&grove);
+        assert!(hatch(&grove, &choose(&grove_option)), "premise: accepted");
+
+        // (b) A source-bound prompt without its matching context
+        // (`has_matching_context` is false — the viewer-projection shape).
+        let mut no_context = grove.clone();
+        if let WaitingFor::NamedChoice {
+            source: Some(source),
+            ..
+        } = &mut no_context.waiting_for
+        {
+            source.context = None;
+        }
+        assert!(!hatch(&no_context, &choose(&grove_option)));
+
+        // (c) CR 614.12a: a `PendingEntry` prompt whose parked entry is gone.
+        let mut no_entry = grove.clone();
+        no_entry.pending_replacement = None;
+        assert!(!hatch(&no_entry, &choose(&grove_option)));
+
+        // (d) CR 107.1a/b + CR 201.4: free-entry and card-name prompts are validated by
+        // rule, not by membership — even an answer that IS in `options`.
+        for choice_type in [
+            ChoiceType::NumberRange {
+                min: 0,
+                max: None,
+                distinctness: NumberDistinctness::Repeatable,
+            },
+            ChoiceType::CardName,
+        ] {
+            let mut by_rule = melody.clone();
+            if let WaitingFor::NamedChoice {
+                choice_type: prompt_type,
+                ..
+            } = &mut by_rule.waiting_for
+            {
+                *prompt_type = choice_type;
+            }
+            assert!(!hatch(&by_rule, &choose(&melody_option)));
+        }
+
+        // (e) CR 601.2f + CR 601.2h + CR 602.2b: the engine's only cast-time
+        // `NamedChoice` constructor (a non-mana "Pay X speed" activation). This
+        // is ROUTING evidence only: every speed answer is payable by
+        // construction, so it shows the hatch declines while an activation is
+        // pending, not that an unpayable answer is excluded.
+        let mut paying = GameState::new_two_player(42);
+        paying.players[0].speed = Some(2);
+        let source_id = ObjectId(1);
+        paying.waiting_for = casting::begin_variable_speed_payment(
+            &mut paying,
+            PlayerId(0),
+            source_id,
+            ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            ),
+            AbilityCost::PaySpeed {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+            0,
+            ActivationTargetSelection::Pending,
+            None,
+            None,
+            CastPaymentMode::Auto,
+        );
+        assert!(paying.withholds_priority(), "premise: activation pending");
+        let speed_options = match &paying.waiting_for {
+            WaitingFor::NamedChoice { options, .. } => options.clone(),
+            other => panic!("expected the speed prompt, got {other:?}"),
+        };
+        assert_eq!(speed_options, ["0", "1", "2"]);
+        for option in &speed_options {
+            assert!(
+                !hatch(&paying, &choose(option)),
+                "the hatch must decline answer {option} while an activation is pending"
+            );
+            let mut not_paying = paying.clone();
+            not_paying.pending_cast = None;
+            assert!(
+                hatch(&not_paying, &choose(option)),
+                "only the pending activation refuses answer {option}"
+            );
+        }
+
+        // The existing simulation still runs for the pending-activation answer.
+        let candidate = CandidateAction {
+            action: choose(&speed_options[0]),
+            metadata: crate::ai_support::ActionMetadata::for_actor(
+                Some(PlayerId(0)),
+                crate::ai_support::TacticalClass::Selection,
+            ),
+        };
+        crate::game::perf_counters::reset();
+        let _ = SimulationFilter.accept(&paying, &candidate);
+        assert!(
+            crate::game::perf_counters::snapshot().raw_validation_state_clones >= 1,
+            "a pending-activation answer must reach the clone-and-apply simulation"
+        );
+    }
+
+    /// U3. The hatch must be wired into BOTH `accept` and `accept_with_probe`;
+    /// the integration tests only reach `accept_with_probe`. The verdict
+    /// asserts are reach guards; the per-method zero counters are the evidence.
+    #[test]
+    fn named_choice_hatch_is_wired_into_both_accept_methods() {
+        for state in [
+            brave_the_elements_named_choice_state(),
+            distant_melody_named_choice_state(),
+        ] {
+            let candidate = named_choice_candidates(&state)
+                .into_iter()
+                .next()
+                .expect("the prompt must enumerate ChooseOption candidates");
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept(&state, &candidate));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept` must answer an enumerated named choice without cloning"
+            );
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept_with_probe` must answer an enumerated named choice without cloning"
+            );
+        }
     }
 }
