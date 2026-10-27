@@ -1208,8 +1208,11 @@ impl ChoiceType {
         matches!(self, Self::CardPredicateGuess { .. })
     }
 
+    /// CR 608.2d: a named card is announced while applying the effect, so a
+    /// dependent instruction ("discards a card with that name") reads it from
+    /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. })
+        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -38559,6 +38562,21 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.update_trigger_source_context_in_resolution_segment(source);
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: Publish a name announced while applying this
+    /// effect to every later instruction of the same resolution, including
+    /// independent sequential siblings ("Choose a card name. Target player
+    /// discards a card with that name."), which the segment-scoped update
+    /// above deliberately skips.
+    pub fn update_trigger_source_context_through_chain(&mut self, source: TriggerSourceContext) {
+        self.trigger_source = Some(source.clone());
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.update_trigger_source_context_through_chain(source.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.update_trigger_source_context_through_chain(source);
         }
     }
 

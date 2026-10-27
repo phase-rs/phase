@@ -501,6 +501,44 @@ pub struct CopyTokenSpec {
     pub donor: Option<ObjectIncarnationRef>,
 }
 
+/// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
+/// event's own batch, or one a replacement added ("those tokens plus …",
+/// "instead create one of each"). An added batch is part of the same modified
+/// event, so every replacement applied afterwards applies to it too (to each
+/// batch it matches) under the affected player's single CR 616.1 ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBatch {
+    pub owner: PlayerId,
+    pub spec: Box<TokenSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<Box<CopyTokenSpec>>,
+    #[serde(default)]
+    pub enter_tapped: EtbTapState,
+    pub count: u32,
+}
+
+impl TokenBatch {
+    /// This batch as a single-batch `CreateToken` event carrying `applied`.
+    pub fn into_event(self, applied: HashSet<AppliedReplacementKey>) -> ProposedEvent {
+        let TokenBatch {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+        } = self;
+        ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            appended: Vec::new(),
+            applied,
+        }
+    }
+}
+
 /// CR 701.31 + CR 901.9c + CR 701.31c: Which rules path is proposing a
 /// planeswalk event. Scoped replacements (Fixed Point in Time) match only
 /// [`PlanarDie`]; generic "if you would planeswalk" replacements (Susan Foreman)
@@ -800,6 +838,15 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
+        /// CR 614.1a + CR 616.1f + CR 614.5: batches this event's own
+        /// replacements added ("those tokens plus that many 1/1 green Squirrel
+        /// creature tokens", "instead create one of each"), in event order.
+        /// "Instead" yields one modified event, so they are not separate events:
+        /// they share this event's `applied` set, every replacement the affected
+        /// player applies afterwards applies to each batch it matches, and the
+        /// whole event is delivered (and its created referent published) as one.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        appended: Vec<TokenBatch>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -1183,6 +1230,204 @@ impl ProposedEvent {
         self.applied_set_mut().insert(key);
     }
 
+    /// CR 614.1a: whether this is a CreateToken event a replacement has
+    /// already added batches to (a compound token event).
+    pub fn has_appended_token_batches(&self) -> bool {
+        matches!(self, ProposedEvent::CreateToken { appended, .. } if !appended.is_empty())
+    }
+
+    /// The number of tokens a `CreateToken` event (or one batch view of a
+    /// compound one) creates; `None` for any other event.
+    pub fn create_token_count(&self) -> Option<u32> {
+        match self {
+            ProposedEvent::CreateToken { count, .. } => Some(*count),
+            ProposedEvent::ZoneChange { .. }
+            | ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. } => None,
+        }
+    }
+
+    /// CR 616.1f + CR 616.2: one single-batch `CreateToken` view per batch of a
+    /// compound token event — the event's own batch first, then each appended
+    /// batch in event order — each carrying the event's `applied` set (CR 614.5:
+    /// the batches are one event). `None` for anything that is not a compound
+    /// token event.
+    pub fn token_batch_views(&self) -> Option<Vec<ProposedEvent>> {
+        if !self.has_appended_token_batches() {
+            return None;
+        }
+        Some(self.clone().into_token_batch_views())
+    }
+
+    /// The consuming form of [`Self::token_batch_views`]. Any other event —
+    /// including a CreateToken with no appended batch — is its own only view.
+    pub fn into_token_batch_views(self) -> Vec<ProposedEvent> {
+        match self {
+            ProposedEvent::CreateToken {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count,
+                appended,
+                applied,
+            } => {
+                let mut views = Vec::with_capacity(appended.len() + 1);
+                views.push(ProposedEvent::CreateToken {
+                    owner,
+                    spec,
+                    copy,
+                    enter_tapped,
+                    count,
+                    appended: Vec::new(),
+                    applied: applied.clone(),
+                });
+                views.extend(
+                    appended
+                        .into_iter()
+                        .map(|batch| batch.into_event(applied.clone())),
+                );
+                views
+            }
+            event @ (ProposedEvent::ZoneChange { .. }
+            | ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. }) => vec![event],
+        }
+    }
+
+    /// CR 614.1a + CR 614.5: reassemble one compound token event from its batch
+    /// views. The first view is the event's own batch; the rest become its
+    /// appended batches in order, each immediately followed by any batches its
+    /// own replacement application appended. The `applied` set is the union of
+    /// the views' sets. `None` for an empty list or a non-CreateToken view.
+    pub fn from_token_batch_views(views: Vec<ProposedEvent>) -> Option<ProposedEvent> {
+        let mut views = views.into_iter();
+        let ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            mut appended,
+            mut applied,
+        } = views.next()?
+        else {
+            return None;
+        };
+        for view in views {
+            let ProposedEvent::CreateToken {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count,
+                appended: view_appended,
+                applied: view_applied,
+            } = view
+            else {
+                return None;
+            };
+            appended.push(TokenBatch {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count,
+            });
+            appended.extend(view_appended);
+            applied.extend(view_applied);
+        }
+        Some(ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            appended,
+            applied,
+        })
+    }
+
+    /// CR 614.1a + CR 111.1: every batch of a CreateToken event in event order
+    /// (position 0 is the event's own batch, then its appended batches). `None`
+    /// for any other event.
+    pub fn into_token_batches(self) -> Option<Vec<TokenBatch>> {
+        let ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            appended,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let mut batches = Vec::with_capacity(appended.len() + 1);
+        batches.push(TokenBatch {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+        });
+        batches.extend(appended);
+        Some(batches)
+    }
+
     pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
         match self {
             // CR 614.12 + CR 109.4: A permanent entering under another player's
@@ -1551,6 +1796,153 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::step_end_mana(2)));
         assert!(!applied.contains(&AppliedReplacementKey::floating(2)));
+    }
+
+    fn batch_spec(name: &str) -> Box<TokenSpec> {
+        Box::new(TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: name.to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![name.to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: name.to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        })
+    }
+
+    fn batch(name: &str, count: u32) -> TokenBatch {
+        TokenBatch {
+            owner: PlayerId(0),
+            spec: batch_spec(name),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count,
+        }
+    }
+
+    fn applied_with(index: usize) -> HashSet<AppliedReplacementKey> {
+        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index)])
+    }
+
+    fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {
+        ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: batch_spec(primary),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 2,
+            appended,
+            applied: applied_with(0),
+        }
+    }
+
+    /// SHAPE (serialized compatibility): a compound CreateToken round-trips with
+    /// its appended batches, and a plain one omits the key entirely.
+    #[test]
+    fn create_token_appended_serde_roundtrip() {
+        let event = compound("Plant", vec![batch("Squirrel", 2)]);
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json["CreateToken"].get("appended").is_some());
+        let back: ProposedEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(event, back);
+
+        let plain = compound("Plant", Vec::new());
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json["CreateToken"].get("appended").is_none());
+        let back: ProposedEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(plain, back);
+    }
+
+    /// A CreateToken persisted before `appended` existed deserializes with no
+    /// appended batch.
+    #[test]
+    fn create_token_without_appended_key_deserializes_empty() {
+        let mut json = serde_json::to_value(compound("Plant", Vec::new())).unwrap();
+        json["CreateToken"]
+            .as_object_mut()
+            .expect("CreateToken payload object")
+            .remove("appended");
+        let back: ProposedEvent = serde_json::from_value(json).unwrap();
+        let ProposedEvent::CreateToken { appended, .. } = &back else {
+            panic!("expected CreateToken");
+        };
+        assert!(appended.is_empty());
+        assert!(!back.has_appended_token_batches());
+        assert!(back.token_batch_views().is_none());
+    }
+
+    /// CR 614.1a + CR 614.5: splitting a compound event into batch views and
+    /// joining them back is the identity; every view carries the event's
+    /// applied set and no view is itself compound.
+    #[test]
+    fn token_batch_views_split_then_join_is_identity() {
+        let event = compound("Plant", vec![batch("Squirrel", 2), batch("Food", 1)]);
+        let views = event.token_batch_views().expect("compound event has views");
+        assert_eq!(views.len(), 3);
+        for view in &views {
+            assert!(!view.has_appended_token_batches());
+            assert_eq!(view.applied_set(), event.applied_set());
+        }
+        assert_eq!(
+            ProposedEvent::from_token_batch_views(views),
+            Some(event.clone())
+        );
+        assert_eq!(event.clone().into_token_batch_views().len(), 3);
+        assert_eq!(ProposedEvent::from_token_batch_views(Vec::new()), None);
+    }
+
+    /// CR 614.1a: a batch a view's own application appended is placed right
+    /// after that view, and the applied sets are unioned.
+    #[test]
+    fn from_token_batch_views_flattens_view_appended_after_its_view() {
+        let primary = compound("Treasure", vec![batch("Clue", 1)]);
+        let mut second = batch("Squirrel", 1).into_event(applied_with(1));
+        if let ProposedEvent::CreateToken { appended, .. } = &mut second {
+            appended.push(batch("Food", 1));
+        }
+        let joined = ProposedEvent::from_token_batch_views(vec![primary, second])
+            .expect("CreateToken views join");
+        let ProposedEvent::CreateToken {
+            appended, applied, ..
+        } = &joined
+        else {
+            panic!("expected CreateToken");
+        };
+        let names: Vec<_> = appended
+            .iter()
+            .map(|b| b.spec.characteristics.display_name.as_str())
+            .collect();
+        assert_eq!(names, ["Clue", "Squirrel", "Food"]);
+        assert_eq!(applied.len(), 2);
+    }
+
+    /// CR 614.1a + CR 111.1: the event's batches come out primary first, then
+    /// the appended batches in event order.
+    #[test]
+    fn into_token_batches_is_event_ordered() {
+        let event = compound("Plant", vec![batch("Squirrel", 3), batch("Food", 1)]);
+        let batches = event.into_token_batches().expect("CreateToken has batches");
+        let shape: Vec<_> = batches
+            .iter()
+            .map(|b| (b.spec.characteristics.display_name.as_str(), b.count))
+            .collect();
+        assert_eq!(shape, [("Plant", 2), ("Squirrel", 3), ("Food", 1)]);
+        assert!(ProposedEvent::begin_turn(PlayerId(0), false)
+            .into_token_batches()
+            .is_none());
     }
 
     #[test]

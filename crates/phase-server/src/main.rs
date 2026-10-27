@@ -355,7 +355,9 @@ fn finish_restored_full_startup(
             .expect("restored session is private to this startup handoff");
         session.full_runtime = Some(runtime.clone());
 
-        let resumed = session.resume_restored_stack_automation();
+        let resumed = session
+            .resume_restored_stack_automation()
+            .map_err(|error| format!("failed to resume restored Full session: {error}"))?;
         if let engine::types::game_state::WaitingFor::GameOver { winner } =
             &session.state.waiting_for
         {
@@ -17783,7 +17785,12 @@ mod issue_4548_full_create_tests {
             .await;
             assert_eq!(created_code(reply), "BOTRS2");
 
-            assert!(!app_state.connections.lock().await["BOTRS2"].contains_key(&PlayerId(1)));
+            assert!(app_state
+                .connections
+                .lock()
+                .await
+                .get("BOTRS2")
+                .is_none_or(|routes| !routes.contains_key(&PlayerId(1))));
         })
         .await;
         server.abort();

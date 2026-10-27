@@ -123,6 +123,13 @@ pub enum EngineError {
         player: PlayerId,
         pending: Box<crate::types::game_state::PendingCast>,
     },
+    /// A life change in this action proved unrepresentable (the final amount,
+    /// the life total, or the per-turn gained/lost counter does not fit the
+    /// engine's `i32`/`u32` storage). Representability is an engine limit, not
+    /// a game rule; the action boundary rejects the whole action and restores
+    /// its pre-action snapshot rather than silently skipping the change.
+    #[error("Life change is not representable for player {player:?}")]
+    LifeChangeUnrepresentable { player: PlayerId },
 }
 
 /// Converts an engine error into stable client-facing metadata without ever
@@ -139,6 +146,9 @@ pub(crate) fn action_rejection_for_engine_error(
         EngineError::ActionNotAllowed(_)
         | EngineError::ActivationReversed { .. }
         | EngineError::SpellCastReversed { .. } => ActionRejectionCode::ActionNotAllowed,
+        // Representability is an engine limit, not a distinct client action
+        // class: expose the existing safe code without the diagnostic payload.
+        EngineError::LifeChangeUnrepresentable { .. } => ActionRejectionCode::InvalidAction,
     };
     ActionRejection::from_code(code, related_object_ids)
 }
@@ -1042,7 +1052,8 @@ pub fn resolve_all_ready_prefix_with_rejection(
             vec![],
         ));
     }
-    Ok(resolve_all_ready_prefix(state, requester))
+    resolve_all_ready_prefix(state, requester)
+        .map_err(|error| action_rejection_for_engine_error(&error, Vec::new()))
 }
 
 /// Explicit-actor simulation apply: [`apply`] for throwaway forward-projection
@@ -1469,6 +1480,27 @@ impl ProspectiveSimulationOutcome {
     }
 }
 
+/// Closes this boundary's life window and restores the window that was open
+/// before it. Returns the player whose life change failed inside the boundary.
+fn close_ingress_window(
+    state: &mut GameState,
+    prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
+) -> Option<PlayerId> {
+    let window = state.ingress_life_window.take();
+    state.ingress_life_window = prior.take();
+    window.and_then(|window| window.failed_player)
+}
+
+/// The player whose life change inside the current action proved
+/// unrepresentable, if any. An open ingress window records the first failure;
+/// the enclosing action boundary turns it into a rejection and restores its
+/// pre-action snapshot.
+fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
+    state
+        .ingress_life_window
+        .and_then(|window| window.failed_player)
+}
+
 fn apply_action_boundary_core(
     state: &mut GameState,
     authenticated_actor: PlayerId,
@@ -1606,6 +1638,12 @@ fn apply_action_boundary_core(
             lifecycle,
         });
     }
+    // A life change this action resolves must be representable: open the
+    // ingress window after transient cleanup (which clears any prior window)
+    // and close it before returning a `RawActionApplication`. Every ordinary
+    // life settlement records a failure here instead of silently treating the
+    // change as zero, so the boundary rejects the whole action atomically.
+    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
     // carrier is held by `announcement_triggers` for this action. The boundary
     // snapshot above still holds it on its `PendingCast`, so every restore path
@@ -1633,18 +1671,27 @@ fn apply_action_boundary_core(
         }
         Err(EngineError::SpellCastReversed { player, pending }) => {
             if records_cast_cost {
-                super::engine_casting::record_spell_cast_undo(
+                if let Err(error) = super::engine_casting::record_spell_cast_undo(
                     state,
                     &boundary_snapshot,
                     journal_start,
                     None,
-                )?;
+                ) {
+                    let failure = boundary_life_change_failure(state);
+                    lifecycle.discard();
+                    *state = cast_undo_boundary.restore(boundary_snapshot);
+                    return Err(failure.map_or(error, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
+                }
             }
             if boundary_snapshot.spell_cast_reversal.is_none() {
+                let failure = boundary_life_change_failure(state);
                 lifecycle.discard();
                 *state = cast_undo_boundary.restore(boundary_snapshot);
-                return Err(EngineError::ActionNotAllowed(
-                    "Cannot pay required additional cost".into(),
+                return Err(failure.map_or_else(
+                    || EngineError::ActionNotAllowed("Cannot pay required additional cost".into()),
+                    |player| EngineError::LifeChangeUnrepresentable { player },
                 ));
             }
             let settlement = (|| {
@@ -1665,9 +1712,12 @@ fn apply_action_boundary_core(
             let (events, waiting) = match settlement {
                 Ok(settled) => settled,
                 Err(error) => {
+                    let failure = boundary_life_change_failure(state);
                     lifecycle.discard();
                     *state = cast_undo_boundary.restore(boundary_snapshot);
-                    return Err(error);
+                    return Err(failure.map_or(error, |player| {
+                        EngineError::LifeChangeUnrepresentable { player }
+                    }));
                 }
             };
             state.waiting_for = waiting.clone();
@@ -1675,9 +1725,14 @@ fn apply_action_boundary_core(
             ActionResult::applied(events, waiting)
         }
         Err(err) => {
+            let failure = boundary_life_change_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(err);
+            return Err(
+                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                    player,
+                }),
+            );
         }
     };
     // CR 602.2b + CR 601.2h: an activation whose elected total cannot be paid is
@@ -1688,6 +1743,11 @@ fn apply_action_boundary_core(
     // `finish_action_boundary` then runs no auto-pass, resolves no log entries
     // and discards the lifecycle frame for a reversed result.
     if !result.disposition.is_applied() {
+        if let Some(player) = boundary_life_change_failure(state) {
+            lifecycle.discard();
+            *state = cast_undo_boundary.restore(boundary_snapshot);
+            return Err(EngineError::LifeChangeUnrepresentable { player });
+        }
         let reversal = result.waiting_for.clone();
         *state = boundary_snapshot.as_ref().clone();
         state.waiting_for = reversal;
@@ -1739,8 +1799,14 @@ fn apply_action_boundary_core(
         }
         Ok(None) => false,
         Err(err) => {
+            let failure = boundary_life_change_failure(state);
+            lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(err);
+            return Err(
+                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                    player,
+                }),
+            );
         }
     };
     let realized_token_entry =
@@ -1758,8 +1824,14 @@ fn apply_action_boundary_core(
         || owed_spell_final_part_is_due
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
+            let failure = boundary_life_change_failure(state);
+            lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(err);
+            return Err(
+                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                    player,
+                }),
+            );
         }
     }
     // CR 603.2 + CR 603.3: events this action emitted while the announcement
@@ -1771,6 +1843,14 @@ fn apply_action_boundary_core(
     let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
     super::announcement_triggers::end_action(state, &result.events);
     result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
+    if let Some(player) = boundary_life_change_failure(state) {
+        lifecycle.discard();
+        *state = cast_undo_boundary.restore(boundary_snapshot);
+        return Err(EngineError::LifeChangeUnrepresentable { player });
+    }
+    // Do not carry the core's window into finalization: that pass owns its own
+    // scope over convergence, auto-pass, and re-convergence.
+    state.ingress_life_window = None;
     Ok(RawActionApplication {
         result,
         journal_start,
@@ -2305,14 +2385,24 @@ fn finish_action_boundary_with_lifecycle(
         preserve_interaction,
         lifecycle,
     } = raw;
+    // Finalization owns the remainder of the action (convergence, auto-pass,
+    // reconvergence), so it needs its own ingress window: the core boundary
+    // closed its window before handing the raw application over.
+    let mut prior_window = state.ingress_life_window.take();
+    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     if let Err(err) = reconcile_terminal_result_completing_resolution(
         state,
         &mut result,
         reconcile_terminal_result,
     ) {
+        let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(err);
+        return Err(
+            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                player,
+            }),
+        );
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -2330,7 +2420,17 @@ fn finish_action_boundary_with_lifecycle(
     let auto_pass_advanced = if is_actor_scoped_preference || suppress_auto_pass_once || reversed {
         false
     } else {
-        run_auto_pass_loop(state, &mut result)
+        match run_auto_pass_loop(state, &mut result) {
+            Ok(advanced) => advanced,
+            Err(error) => {
+                let life_failure = close_ingress_window(state, &mut prior_window);
+                lifecycle.discard();
+                *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+                return Err(life_failure.map_or(error, |player| {
+                    EngineError::LifeChangeUnrepresentable { player }
+                }));
+            }
+        }
     };
     // CR 732.2a: a drive that did not advance re-runs only the terminal half.
     let reconcile: fn(&mut GameState, &mut ActionResult) = if auto_pass_advanced {
@@ -2340,9 +2440,14 @@ fn finish_action_boundary_with_lifecycle(
     };
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
+        let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(err);
+        return Err(
+            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
+                player,
+            }),
+        );
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -2378,10 +2483,17 @@ fn finish_action_boundary_with_lifecycle(
         )
         .is_err()
         {
+            let life_failure = close_ingress_window(state, &mut prior_window);
             lifecycle.discard();
             *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-            return Err(EngineError::InvalidAction(
-                "Unable to allocate interaction authority for the resulting decision".to_string(),
+            return Err(life_failure.map_or_else(
+                || {
+                    EngineError::InvalidAction(
+                        "Unable to allocate interaction authority for the resulting decision"
+                            .to_string(),
+                    )
+                },
+                |player| EngineError::LifeChangeUnrepresentable { player },
             ));
         }
     }
@@ -2413,9 +2525,19 @@ fn finish_action_boundary_with_lifecycle(
         Ok::<_, EngineError>(())
     })();
     if let Err(error) = recording {
+        let life_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(error);
+        return Err(
+            life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
+                player,
+            }),
+        );
+    }
+    if let Some(player) = close_ingress_window(state, &mut prior_window) {
+        lifecycle.discard();
+        *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
+        return Err(EngineError::LifeChangeUnrepresentable { player });
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -5617,7 +5739,7 @@ fn apply_confirmed_shortcut(
     state: &mut GameState,
     result: &mut ActionResult,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
-) {
+) -> Result<(), EngineError> {
     // CR 104.3a / CR 104.2a / CR 800.4a: re-validate the proposer and any latched winner at
     // consumption. `GameAction::Concede` (and a board-mutating `Debug`) bypass the WaitingFor
     // dispatch, so either authority can leave during the APNAP window. A departed proposer
@@ -5701,7 +5823,7 @@ fn apply_confirmed_shortcut(
         let holder = living_priority_seat(state);
         state.waiting_for = WaitingFor::Priority { player: holder };
         result.waiting_for = state.waiting_for.clone();
-        return;
+        return Ok(());
     }
     match proposal.count {
         crate::analysis::decision_template::IterationCount::UntilLethal => {
@@ -5734,7 +5856,7 @@ fn apply_until_lethal_shortcut(
     state: &mut GameState,
     result: &mut ActionResult,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
-) {
+) -> Result<(), EngineError> {
     // The board is unchanged since the offer (apply_confirmed_shortcut doc): `committed` is
     // the fully-committed pre-drive state to roll back to on any non-crown.
     let committed = state.clone();
@@ -5779,8 +5901,12 @@ fn apply_until_lethal_shortcut(
                 &mut Vec::new(),
             ) {
                 Ok(()) => w,
+                Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                }
                 Err(_) => {
-                    return until_lethal_fallback(state, result, committed, proposal.proposer);
+                    until_lethal_fallback(state, result, committed, proposal.proposer);
+                    return Ok(());
                 }
             }
         }
@@ -5808,7 +5934,7 @@ fn apply_until_lethal_shortcut(
                         .as_ref()
                         .map(crate::analysis::resource::PeriodSignature::frames_per_period),
                     DepartureStop::EndsRepetition,
-                ) {
+                )? {
                     CycleOutcome::Recurred { state: s, .. } => running = *s,
                     CycleOutcome::CrossLethal {
                         state: s,
@@ -5830,7 +5956,7 @@ fn apply_until_lethal_shortcut(
                         } else {
                             until_lethal_fallback(state, result, committed, proposal.proposer);
                         }
-                        return;
+                        return Ok(());
                     }
                     // CR 800.4a + CR 732.2a: a removal mid-drive gets this route's standard
                     // non-crown disposition — discard the drive, restore the offer board, clear
@@ -5845,7 +5971,8 @@ fn apply_until_lethal_shortcut(
                     // restored board and the players may take it manually, so ELISION ≡
                     // PERFORMANCE is untouched.
                     CycleOutcome::SeatLeft { .. } | CycleOutcome::Abort => {
-                        return until_lethal_fallback(state, result, committed, proposal.proposer);
+                        until_lethal_fallback(state, result, committed, proposal.proposer);
+                        return Ok(());
                     }
                 }
             }
@@ -5881,6 +6008,7 @@ fn apply_until_lethal_shortcut(
         }
         _ => until_lethal_fallback(state, result, committed, proposal.proposer),
     }
+    Ok(())
 }
 
 /// The faller partition of a measured per-cycle `delta`, over the living players of
@@ -6174,7 +6302,7 @@ fn drive_one_shortcut_cycle(
     cycle_beat_cap: usize,
     frames_per_period: Option<u32>,
     departure: DepartureStop,
-) -> CycleOutcome {
+) -> Result<CycleOutcome, EngineError> {
     let mut work = committed.clone();
     priority::reset_priority(&mut work);
     work.waiting_for = WaitingFor::Priority {
@@ -6191,24 +6319,31 @@ fn drive_one_shortcut_cycle(
     loop {
         beat += 1;
         if beat > cycle_beat_cap {
-            return CycleOutcome::Abort; // runaway backstop
+            return Ok(CycleOutcome::Abort); // runaway backstop
         }
         let ring_back_before = work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
         // A FRESH per-beat buffer (see the former inline note): reusing one growing buffer
         // would make `run_post_action_pipeline` re-scan prior beats' events and re-fire
         // already-consumed triggers.
         let mut beat_events: Vec<GameEvent> = Vec::new();
-        match pass_priority_once_with_pipeline(&mut work, &mut beat_events, None) {
+        let pipeline = pass_priority_once_with_pipeline(&mut work, &mut beat_events, None);
+        // CR 732.2a: the driven beat runs on a private work clone, but its life-ingress marker
+        // belongs to the enclosing public Accept action. A low-level life settle may record the
+        // failure while returning `Ok`; do not let a later `Abort`/fallback discard that marker.
+        if let Some(player) = boundary_life_change_failure(&work) {
+            return Err(EngineError::LifeChangeUnrepresentable { player });
+        }
+        match pipeline {
             // Cross-lethal: COMMIT + STOP. The GameOver event + transition are already in
             // `work`/`beat_events`. The record is read because a best-of-three's match
             // transition has already replaced the wait.
             Ok(_) if work.game_end.is_some() => {
                 ev.append(&mut beat_events);
-                return CycleOutcome::CrossLethal {
+                return Ok(CycleOutcome::CrossLethal {
                     winner: work.game_end.and_then(|end| end.winner),
                     state: Box::new(work),
                     events: ev,
-                };
+                });
             }
             // CR 732.2a ENDING POINT: a seat left the game and the game continued. CR 704.3 +
             // CR 117.5 perform state-based actions every time a player would get priority, so
@@ -6240,10 +6375,10 @@ fn drive_one_shortcut_cycle(
                 && seats_in_game(&work) < seats_at_entry =>
             {
                 ev.append(&mut beat_events);
-                return CycleOutcome::SeatLeft {
+                return Ok(CycleOutcome::SeatLeft {
                     state: Box::new(work),
                     events: ev,
-                };
+                });
             }
             // Active-player settle beat: cycle complete iff the board recurred (constant-depth
             // equal-modulo-resources OR ω-covering growth) or the published period's worth of
@@ -6266,10 +6401,10 @@ fn drive_one_shortcut_cycle(
                     || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, &norm)
                     || published_period_elapsed(frames_this_cycle, frames_per_period)
                 {
-                    return CycleOutcome::Recurred {
+                    return Ok(CycleOutcome::Recurred {
                         state: Box::new(work),
                         events: ev,
-                    };
+                    });
                 }
                 continue; // active beat, not yet recurred ⇒ keep driving within the cap
             }
@@ -6287,17 +6422,24 @@ fn drive_one_shortcut_cycle(
                 waiting_for: other, ..
             }) => {
                 ev.append(&mut beat_events);
-                match inject_pinned_answer(&mut work, template, iteration, &other) {
+                let answer = inject_pinned_answer(&mut work, template, iteration, &other);
+                // The injector's low-level action can also have recorded an unrepresentable life
+                // change in this work clone without returning an error. Preserve it at the same
+                // public-cycle seam before an ordinary injector refusal maps to `Abort`.
+                if let Some(player) = boundary_life_change_failure(&work) {
+                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                }
+                match answer {
                     Ok(mut answer_events) => {
                         // CR 704.5a + CR 104.1: an answer can let the state-based sweep end the
                         // game, and nothing is performed after it.
                         if work.game_end.is_some() {
                             ev.append(&mut answer_events);
-                            return CycleOutcome::CrossLethal {
+                            return Ok(CycleOutcome::CrossLethal {
                                 winner: work.game_end.and_then(|end| end.winner),
                                 state: Box::new(work),
                                 events: ev,
-                            };
+                            });
                         }
                         let ring_back_after =
                             work.loop_detect_ring.back().map(std::sync::Arc::as_ptr);
@@ -6305,17 +6447,18 @@ fn drive_one_shortcut_cycle(
                             frames_this_cycle += 1;
                         }
                         if published_period_elapsed(frames_this_cycle, frames_per_period) {
-                            return CycleOutcome::Recurred {
+                            return Ok(CycleOutcome::Recurred {
                                 state: Box::new(work),
                                 events: ev,
-                            };
+                            });
                         }
                         continue;
                     }
-                    Err(RecastAbort) => return CycleOutcome::Abort,
+                    Err(RecastAbort) => return Ok(CycleOutcome::Abort),
                 }
             }
-            Err(_) => return CycleOutcome::Abort, // engine error ⇒ abort to manual
+            Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => return Err(error),
+            Err(_) => return Ok(CycleOutcome::Abort), // engine error ⇒ abort to manual
         }
     }
 }
@@ -6786,7 +6929,7 @@ fn materialize_fixed_shortcut(
     result: &mut ActionResult,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
     n: u32,
-) {
+) -> Result<(), EngineError> {
     // CR 732.2c: on the mark route, record the count the shortcut was ACCEPTED at. "Once the last player has
     // either accepted or shortened the shortcut proposal, the shortcut is taken" — its ending
     // point is fixed at N, so the CR 500.5 boundary collapse prompt may only offer `0..=N`.
@@ -6833,14 +6976,14 @@ fn materialize_fixed_shortcut(
                 n,
                 derivation.predicted(),
                 &mut result.events,
-            );
+            )?;
             // CR 104.2a: a predicted crossing that ended the game ends the take with it.
             if state.game_end.is_some() {
                 result.waiting_for = state.waiting_for.clone();
-                return;
+                return Ok(());
             }
             end_shortcut_at_priority(state, result, proposal, delivered == n);
-            return;
+            return Ok(());
         }
         TakeRoute::Mark(growth) => {
             let stashed_before = state
@@ -6860,7 +7003,7 @@ fn materialize_fixed_shortcut(
                     .and_modify(|bound| *bound = (*bound).min(n))
                     .or_insert(n);
             }
-            return;
+            return Ok(());
         }
         TakeRoute::Ring => {}
     }
@@ -6951,7 +7094,7 @@ fn materialize_fixed_shortcut(
             } else {
                 DepartureStop::CompletesRepetition
             },
-        ) {
+        )? {
             CycleOutcome::Recurred {
                 state: s,
                 mut events,
@@ -7066,7 +7209,7 @@ fn materialize_fixed_shortcut(
                 *state = *s;
                 result.events.append(&mut events);
                 result.waiting_for = state.waiting_for.clone();
-                return;
+                return Ok(());
             }
             // CR 732.2a ENDING POINT: a seat left the game and the game continued. Commit the
             // cycle ONLY when this departure is one the bound predicted; every other exit here
@@ -7239,6 +7382,7 @@ fn materialize_fixed_shortcut(
     // this point instead (CR 732.2b/c), decided by the same authority the elided route calls.
     *state = committed;
     end_shortcut_at_priority(state, result, proposal, committed_cycles == n);
+    Ok(())
 }
 
 /// PR-7 Phase 4d-ii: the injector aborted a driven recast cycle ⇒ fall closed to manual
@@ -8342,7 +8486,7 @@ pub(crate) fn drive_persistent_axis_collapse(
     n: u32,
     predicted: Option<&[crate::analysis::resource::PredictedDeparture]>,
     events: &mut Vec<GameEvent>,
-) -> u32 {
+) -> Result<u32, EngineError> {
     let _guard = SimulationProbeGuard::enter(); // held across the whole drive
     #[cfg(feature = "test-support")]
     let mut take_cost = crate::game::perf_counters::TakeCostRecorder::begin(n);
@@ -8367,9 +8511,20 @@ pub(crate) fn drive_persistent_axis_collapse(
         reseed(state);
         let before = predicted.map(|_| state.clone());
         let mut cycle_events = Vec::new();
-        let performed =
-            super::period_confirm::perform_cycle(state, period, controller, &mut cycle_events)
-                .is_ok();
+        let performed = match super::period_confirm::perform_cycle(
+            state,
+            period,
+            controller,
+            &mut cycle_events,
+        ) {
+            Ok(()) => true,
+            Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                *state = snapshot;
+                events.truncate(committed_events);
+                return Err(EngineError::LifeChangeUnrepresentable { player });
+            }
+            Err(_) => false,
+        };
         let verdict = before
             .as_ref()
             .zip(predicted)
@@ -8387,7 +8542,7 @@ pub(crate) fn drive_persistent_axis_collapse(
         }
         if !performed || verdict == Some(DepartureVerdict::Unpredicted) {
             // Commit the successful prefix; the caller hands priority back.
-            *state = snapshot;
+            *state = snapshot.clone();
             events.truncate(committed_events);
             // CR 732.2a: a counted period is taken at the count declared or not at all.
             let prefix = match period.replayed_departures() {
@@ -8397,11 +8552,15 @@ pub(crate) fn drive_persistent_axis_collapse(
             delivered = 0;
             for _ in 0..prefix {
                 reseed(state);
-                if super::period_confirm::perform_cycle(state, period, controller, events).is_err()
-                {
-                    break;
+                match super::period_confirm::perform_cycle(state, period, controller, events) {
+                    Ok(()) => delivered += 1,
+                    Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                        *state = snapshot;
+                        events.truncate(committed_events);
+                        return Err(EngineError::LifeChangeUnrepresentable { player });
+                    }
+                    Err(_) => break,
                 }
-                delivered += 1;
             }
             break;
         }
@@ -8416,7 +8575,7 @@ pub(crate) fn drive_persistent_axis_collapse(
         append_take_end_digest(state, delivered);
     }
     // `_guard` drops HERE — before the caller hands back priority — so that beat is offer-eligible.
-    delivered
+    Ok(delivered)
 }
 
 /// Appends `<thread name> delivered=<d> digest=<hex>` to the file `PHASE_TAKE_END_DIGEST_FILE`
@@ -8772,7 +8931,7 @@ fn handle_declare_shortcut(
         result.waiting_for = state.waiting_for.clone();
     } else {
         // CR 732.2c: nobody else to poll ⇒ take the shortcut.
-        apply_confirmed_shortcut(state, &mut result, &proposal);
+        apply_confirmed_shortcut(state, &mut result, &proposal)?;
     }
     Ok(result)
 }
@@ -8882,7 +9041,7 @@ fn handle_respond_to_shortcut(
             } else {
                 // CR 732.2c: the last living opponent accepted ⇒ take the shortcut
                 // (F1 re-validates the proposer's own liveness before crowning).
-                apply_confirmed_shortcut(state, &mut result, &proposal);
+                apply_confirmed_shortcut(state, &mut result, &proposal)?;
             }
         }
         crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration } => {
@@ -8907,10 +9066,10 @@ fn handle_respond_to_shortcut(
                 // this same proposal. Eliding the rest of the poll is that outcome rather than a
                 // policy. What it gives up is a window in which a queued concession could land
                 // before consumption, inert for a count that materializes nothing.
-                (0, _) => apply_confirmed_shortcut(state, &mut result, &proposal),
+                (0, _) => apply_confirmed_shortcut(state, &mut result, &proposal)?,
                 // CR 732.2c: "Once the last player has either accepted or shortened the shortcut
                 // proposal, the shortcut is taken."
-                (_, None) => apply_confirmed_shortcut(state, &mut result, &proposal),
+                (_, None) => apply_confirmed_shortcut(state, &mut result, &proposal)?,
                 (_, Some(next)) => {
                     state.waiting_for = WaitingFor::RespondToShortcut {
                         player: next,
@@ -10339,51 +10498,68 @@ pub(crate) fn take_and_restore_stack_resolution_session(state: &mut GameState) -
 /// Restore itself deliberately does not call this: deserialization must remain
 /// a pure state reconstruction. The explicit restore-resume entry point
 /// validates the saved authorization before selecting this lifecycle seam.
-pub(crate) fn resume_stack_resolution_session_runner(state: &mut GameState) -> ActionResult {
+pub(crate) fn resume_stack_resolution_session_runner(
+    state: &mut GameState,
+) -> Result<ActionResult, EngineError> {
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
-    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-
-    // This seam has no error channel: a failed convergence restores the
-    // seam's entry state and reports it unchanged. The owed carrier is then
-    // still found by `stack::resolve_top`'s net at the next pass.
-    if reconcile_terminal_result_completing_resolution(
-        state,
-        &mut result,
-        reconcile_terminal_result,
-    )
-    .is_err()
-    {
-        *state = boundary_snapshot;
-        return ActionResult::applied(Vec::new(), state.waiting_for.clone());
+    // This seam bypasses `finish_action_boundary`, so it owns its own life
+    // window. A representability failure rejects the whole restore-resume and
+    // restores its entry state; it is never reported as unchanged progress.
+    let prior_window = state.ingress_life_window.take();
+    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    let outcome = (|| -> Result<ActionResult, EngineError> {
+        let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
+        reconcile_terminal_result_completing_resolution(
+            state,
+            &mut result,
+            reconcile_terminal_result,
+        )?;
+        bump_state_revision(state);
+        sync_waiting_for(state, &result.waiting_for);
+        // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+        let reconcile: fn(&mut GameState, &mut ActionResult) =
+            if run_auto_pass_loop(state, &mut result)? {
+                reconcile_terminal_result
+            } else {
+                reconcile_terminal_sba
+            };
+        reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)?;
+        if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
+            take_and_restore_stack_resolution_session(state);
+        }
+        super::mana_payment::refill_infinite_mana(state);
+        remember_public_reveals(state, &result.events, journal_start);
+        mark_public_state_from_events(state, &result.events);
+        finalize_rules_state(state);
+        result.waiting_for = state.waiting_for.clone();
+        finalize_display_state(state);
+        result.log_entries =
+            super::log::resolve_log_entries(&result.events, &boundary_snapshot, state);
+        interaction::ensure_interaction_authority(state);
+        #[cfg(debug_assertions)]
+        debug_assert_runtime_resolution_invariants(state);
+        Ok(result)
+    })();
+    let window = state.ingress_life_window.take();
+    state.ingress_life_window = prior_window;
+    let life_failure = window.and_then(|window| window.failed_player);
+    match outcome {
+        Ok(result) if life_failure.is_none() => Ok(result),
+        Ok(_) => {
+            let player = life_failure.expect("the failure predicate just proved Some");
+            *state = boundary_snapshot;
+            Err(EngineError::LifeChangeUnrepresentable { player })
+        }
+        Err(error) => {
+            *state = boundary_snapshot;
+            Err(
+                life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
+                    player,
+                }),
+            )
+        }
     }
-    bump_state_revision(state);
-    sync_waiting_for(state, &result.waiting_for);
-    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
-    let reconcile: fn(&mut GameState, &mut ActionResult) = if run_auto_pass_loop(state, &mut result)
-    {
-        reconcile_terminal_result
-    } else {
-        reconcile_terminal_sba
-    };
-    if reconcile_terminal_result_completing_resolution(state, &mut result, reconcile).is_err() {
-        *state = boundary_snapshot;
-        return ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    }
-    if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
-        take_and_restore_stack_resolution_session(state);
-    }
-    super::mana_payment::refill_infinite_mana(state);
-    remember_public_reveals(state, &result.events, journal_start);
-    mark_public_state_from_events(state, &result.events);
-    finalize_rules_state(state);
-    result.waiting_for = state.waiting_for.clone();
-    finalize_display_state(state);
-    result.log_entries = super::log::resolve_log_entries(&result.events, &boundary_snapshot, state);
-    interaction::ensure_interaction_authority(state);
-    #[cfg(debug_assertions)]
-    debug_assert_runtime_resolution_invariants(state);
-    result
 }
 
 #[derive(Clone, Copy)]
@@ -10662,7 +10838,15 @@ fn priority_pass_will_close_window(state: &GameState) -> bool {
 
 /// Auto-pass loop: when a player has an auto-pass flag and receives priority,
 /// automatically pass for them until the goal condition is met or interrupted.
-fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool {
+///
+/// Returns the typed action-ingress life failure when a pass settled a life
+/// change the engine cannot represent: the caller restores its boundary
+/// snapshot and rejects the action. Every other error keeps the established
+/// policy (restore the iteration checkpoint and stop the drive).
+fn run_auto_pass_loop(
+    state: &mut GameState,
+    result: &mut ActionResult,
+) -> Result<bool, EngineError> {
     // CR 732.2: per-dispatch resource ceilings for a runaway mandatory cascade.
     // Sized above the largest legitimate single-dispatch burst (a Scute Swarm
     // landfall copies every Scute in one resolution — tested boards reach ~2,936
@@ -10763,6 +10947,13 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                 };
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
+                        // Check the life failure BEFORE aggregating this
+                        // iteration's events or starting the next one: the
+                        // action boundary restores its snapshot, so none of
+                        // these events may escape into the result.
+                        if let Some(player) = boundary_life_change_failure(state) {
+                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        }
                         advanced = true;
                         let stack_empty_or_grew =
                             finish_completed_or_interrupted_until_stack_empty_sessions(state);
@@ -10781,7 +10972,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                                 > MAX_OBJECT_GROWTH
                         {
                             emit_resolution_halt(state, result);
-                            return advanced;
+                            return Ok(advanced);
                         }
 
                         // CR 104.4b: detect a repeating mandatory loop. Every
@@ -10810,7 +11001,7 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                                 // while format_config.range_of_influence is None.
                                 super::elimination::end_game(state, None, &mut result.events);
                                 result.waiting_for = state.waiting_for.clone();
-                                return advanced;
+                                return Ok(advanced);
                             }
 
                             // PR-3 (Option C): the NET-PROGRESS mandatory-loop WIN
@@ -10848,7 +11039,16 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
                             break;
                         }
                     }
-                    Err(_) => {
+                    Err(error) => {
+                        // A typed representability failure outranks the
+                        // established restore-and-stop policy: the whole action
+                        // is rejected, not merely this drive.
+                        if let Some(player) = boundary_life_change_failure(state) {
+                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        }
+                        if matches!(error, EngineError::LifeChangeUnrepresentable { .. }) {
+                            return Err(error);
+                        }
                         if let Some((checkpoint, event_start)) = checkpoint {
                             *state = checkpoint;
                             events.truncate(event_start);
@@ -10923,7 +11123,10 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
             _ => break,
         }
     }
-    advanced
+    if let Some(player) = boundary_life_change_failure(state) {
+        return Err(EngineError::LifeChangeUnrepresentable { player });
+    }
+    Ok(advanced)
 }
 
 /// CR 117.3d + CR 117.4: continues a live auto-pass preference after Resolve
@@ -10933,49 +11136,68 @@ fn run_auto_pass_loop(state: &mut GameState, result: &mut ActionResult) -> bool 
 pub(crate) fn resume_auto_pass_after_resolve_all(
     state: &mut GameState,
     batch: &mut super::engine_resolve_batch::ResolveAllFastForwardResult,
-) {
+) -> Result<(), EngineError> {
     let before = state.clone();
-    let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    // CR 704.3: mirror the ordinary action-boundary reconciliation on both
-    // sides of the internal auto-pass drive. The resume seam bypasses
-    // `finish_action_boundary`, so without this a loss created by its final
-    // resolution could remain at Priority instead of becoming GameOver.
-    // This seam has no error channel: a failed convergence restores the
-    // seam's entry state and leaves `batch` untouched. The owed carrier is then
-    // still found by `stack::resolve_top`'s net at the next pass.
-    if reconcile_terminal_result_completing_resolution(
-        state,
-        &mut result,
-        reconcile_terminal_result,
-    )
-    .is_err()
-    {
-        *state = before;
-        return;
-    }
-    // CR 732.2a: a drive that did not advance re-runs only the terminal half.
-    let reconcile: fn(&mut GameState, &mut ActionResult) = if run_auto_pass_loop(state, &mut result)
-    {
-        reconcile_terminal_result
-    } else {
-        reconcile_terminal_sba
-    };
-    if reconcile_terminal_result_completing_resolution(state, &mut result, reconcile).is_err() {
-        *state = before;
-        return;
-    }
+    let batch_before = batch.clone();
+    // This seam bypasses `finish_action_boundary`, so it owns its own life
+    // window: a life change settled by its drive must reject the resume rather
+    // than be reported as a successful (or unchanged) outcome.
+    let prior_window = state.ingress_life_window.take();
+    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    let outcome = (|| -> Result<(), EngineError> {
+        let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
+        // CR 704.3: mirror the ordinary action-boundary reconciliation on both
+        // sides of the internal auto-pass drive. The resume seam bypasses
+        // `finish_action_boundary`, so without this a loss created by its final
+        // resolution could remain at Priority instead of becoming GameOver.
+        reconcile_terminal_result_completing_resolution(
+            state,
+            &mut result,
+            reconcile_terminal_result,
+        )?;
+        // CR 732.2a: a drive that did not advance re-runs only the terminal half.
+        let reconcile: fn(&mut GameState, &mut ActionResult) =
+            if run_auto_pass_loop(state, &mut result)? {
+                reconcile_terminal_result
+            } else {
+                reconcile_terminal_sba
+            };
+        reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)?;
 
-    let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
-    batch.items_resolved = batch.items_resolved.saturating_add(
-        result
-            .events
-            .iter()
-            .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
-            .count() as u32,
-    );
-    batch.events.extend(result.events);
-    batch.log_entries.extend(log_entries);
-    batch.waiting_for = state.waiting_for.clone();
+        let log_entries = super::log::resolve_log_entries(&result.events, &before, state);
+        batch.items_resolved = batch.items_resolved.saturating_add(
+            result
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::StackResolved { .. }))
+                .count() as u32,
+        );
+        batch.events.extend(result.events);
+        batch.log_entries.extend(log_entries);
+        batch.waiting_for = state.waiting_for.clone();
+        Ok(())
+    })();
+    let window = state.ingress_life_window.take();
+    state.ingress_life_window = prior_window;
+    let life_failure = window.and_then(|window| window.failed_player);
+    match outcome {
+        Ok(()) if life_failure.is_none() => Ok(()),
+        Ok(()) => {
+            let player = life_failure.expect("the failure predicate just proved Some");
+            *state = before;
+            *batch = batch_before;
+            Err(EngineError::LifeChangeUnrepresentable { player })
+        }
+        Err(error) => {
+            *state = before;
+            *batch = batch_before;
+            Err(
+                life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
+                    player,
+                }),
+            )
+        }
+    }
 }
 
 /// CR 732.2: settle a runaway mandatory cascade gracefully. Pauses resolution,
@@ -17196,6 +17418,23 @@ pub fn preflight_debug_action(
     action
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
+    action
+        .validate_life_change_amount()
+        .map_err(EngineError::InvalidAction)?;
+
+    // CR 616.1: a sandbox life change is a real event whose replacements can
+    // park a replacement-order choice for the affected player. Only a settled
+    // Priority boundary can own that choice; admitting a second event under an
+    // open prompt would replace the outstanding proposal before it resolves.
+    if matches!(
+        action,
+        DebugAction::GainLife { .. } | DebugAction::LoseLife { .. }
+    ) && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        return Err(EngineError::InvalidAction(
+            "Debug::GainLife / Debug::LoseLife require a Priority window".into(),
+        ));
+    }
 
     if let DebugAction::CreateCard {
         owner,
@@ -22070,6 +22309,169 @@ mod stage2_injector_tests {
         (committed, boundary, template, cap)
     }
 
+    /// Park a test offer with the shared certificate and caller-provided schema and road.
+    fn park_on_shortcut_offer(
+        state: &mut GameState,
+        schema: crate::analysis::decision_template::ShortcutDecisionSchema,
+        road: crate::analysis::loop_check::OfferRoad,
+    ) {
+        use crate::analysis::loop_check::{LoopCertificate, WinKind};
+        use crate::analysis::resource::BoardDelta;
+
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer: P0,
+            predicted_winner: None,
+            certificate: LoopCertificate {
+                unbounded: Vec::new(),
+                win_kind: Some(WinKind::LethalDamage),
+                win_kind_at: None,
+                mandatory: false,
+                residual_board_delta: BoardDelta::default(),
+                per_cycle: None,
+            },
+            schema,
+            declaration: None,
+            road,
+            period: Default::default(),
+        };
+    }
+
+    /// Attach a ring-road proposal to the existing real two-drainer board and keep all
+    /// declaration validation live by publishing the template's two target points.
+    fn two_drainer_ring_offer() -> (GameState, DecisionTemplate) {
+        use crate::analysis::decision_template::{DecisionPoint, DecisionPointKind};
+        use crate::types::ability::TargetRef;
+
+        let (mut state, _, template, _) = two_drainer_rig();
+        let points = template
+            .decisions
+            .iter()
+            .map(|decision| match decision {
+                PinnedDecision::Targets { slot, .. } => DecisionPoint {
+                    slot: slot.clone(),
+                    kind: DecisionPointKind::Targets {
+                        legal_targets: vec![TargetRef::Player(P1), TargetRef::Player(P2)],
+                        min_targets: 1,
+                        max_targets: 1,
+                        ordered: false,
+                    },
+                },
+                other => panic!("the two-drainer fixture only publishes targets: {other:?}"),
+            })
+            .collect();
+        park_on_shortcut_offer(
+            &mut state,
+            build_shortcut_schema(points, IterationCount::Fixed(3), None),
+            crate::analysis::loop_check::OfferRoad::Ring,
+        );
+        (state, template)
+    }
+
+    /// The real two-drainer ring board's representable lethal take is the reach guard. The
+    /// hostile public take has one less unit of loss-counter headroom than that cycle consumes,
+    /// probing whether a work-clone failure can be lost through an Abort/fallback. This is a
+    /// single-cycle probe; later-cycle whole-action rollback is covered by the recorded Replay row.
+    #[test]
+    fn public_ring_take_rejects_unrepresentable_life_before_fallback() {
+        fn declare(state: &mut GameState, template: DecisionTemplate, count: u32) {
+            apply(
+                state,
+                P0,
+                GameAction::DeclareShortcut {
+                    count: IterationCount::Fixed(count),
+                    template: Some(template),
+                },
+            )
+            .expect("the published target points admit the fixture's declaration");
+            let WaitingFor::RespondToShortcut { proposal, .. } = &state.waiting_for else {
+                panic!("the declaration reaches the real public response window");
+            };
+            assert!(matches!(
+                take_route(state, proposal, count),
+                TakeRoute::Ring
+            ));
+            assert!(proposal.period.is_empty());
+        }
+
+        fn accept_until_done(state: &mut GameState) -> Result<(), EngineError> {
+            for _ in 0..4 {
+                let player = match &state.waiting_for {
+                    WaitingFor::RespondToShortcut { player, .. } => *player,
+                    _ => return Ok(()),
+                };
+                apply(
+                    state,
+                    player,
+                    GameAction::RespondToShortcut {
+                        response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                    },
+                )?;
+            }
+            panic!("the three-opponent response window must finish within four accepts")
+        }
+
+        let (mut control, control_template) = two_drainer_ring_offer();
+        let p2_life_before = life(&control, P2);
+        let p2_counter_before = control
+            .players
+            .iter()
+            .find(|player| player.id == P2)
+            .unwrap()
+            .life_lost_this_turn;
+        declare(&mut control, control_template, 1);
+        accept_until_done(&mut control).expect("the real lethal ring cycle is representable");
+        let p2_life_lost = u32::try_from(p2_life_before - life(&control, P2))
+            .expect("the positive control loses a nonnegative amount");
+        let p2_counter_delta = control
+            .players
+            .iter()
+            .find(|player| player.id == P2)
+            .unwrap()
+            .life_lost_this_turn
+            - p2_counter_before;
+        assert!(p2_life_lost > 0, "reach guard: the real cycle drains P2");
+        assert_eq!(
+            p2_counter_delta, p2_life_lost,
+            "reach guard: the positive cycle records its P2 life loss in the per-turn counter"
+        );
+
+        let (mut hostile, hostile_template) = two_drainer_ring_offer();
+        hostile
+            .players
+            .iter_mut()
+            .find(|player| player.id == P2)
+            .unwrap()
+            .life_lost_this_turn = u32::MAX - (p2_counter_delta - 1);
+        declare(&mut hostile, hostile_template, 1);
+        let mut rejection = None;
+        for _ in 0..4 {
+            let player = match &hostile.waiting_for {
+                WaitingFor::RespondToShortcut { player, .. } => *player,
+                _ => break,
+            };
+            let entry = hostile.clone();
+            match apply(
+                &mut hostile,
+                player,
+                GameAction::RespondToShortcut {
+                    response: crate::analysis::loop_check::ShortcutResponse::Accept,
+                },
+            ) {
+                Ok(_) => {}
+                Err(error @ EngineError::LifeChangeUnrepresentable { player: P2 }) => {
+                    assert_eq!(hostile, entry, "the final public Accept restores its entry");
+                    rejection = Some(error);
+                    break;
+                }
+                Err(error) => panic!("expected typed P2 loss-counter rejection, got {error:?}"),
+            }
+        }
+        assert!(
+            rejection.is_some(),
+            "reach guard: the public ring drive must reject rather than fall back when its P2 loss exceeds the remaining headroom"
+        );
+    }
+
     /// Test F (production-path twin, item 4): drive a primed 3p targeted loop through the REAL
     /// `drive_one_shortcut_cycle` and confirm its `Ok(other)` arm routes to the injector.
     ///
@@ -22113,7 +22515,8 @@ mod stage2_injector_tests {
             cap,
             None,
             DepartureStop::EndsRepetition,
-        );
+        )
+        .expect("the fixture's shortcut cycle is representable");
         let CycleOutcome::SeatLeft { state, .. } = outcome else {
             panic!(
                 "CR 800.4a: a staggered wipe stops at the FIRST removal, not at the second; \
@@ -22186,7 +22589,8 @@ mod stage2_injector_tests {
             cap,
             None,
             DepartureStop::EndsRepetition,
-        );
+        )
+        .expect("the fixture's shortcut cycle is representable");
         let CycleOutcome::SeatLeft { state: driven, .. } = outcome else {
             panic!("reach-guard: this rig's drive must remove a seat, or (b) proves nothing");
         };
@@ -22219,7 +22623,8 @@ mod stage2_injector_tests {
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
-        apply_until_lethal_shortcut(&mut state, &mut result, &proposal);
+        apply_until_lethal_shortcut(&mut state, &mut result, &proposal)
+            .expect("the fixture's shortcut is representable");
 
         assert_eq!(
             state
@@ -22313,7 +22718,8 @@ mod stage2_injector_tests {
             cap,
             None,
             DepartureStop::EndsRepetition,
-        ) else {
+        )
+        .expect("the fixture's shortcut cycle is representable") else {
             panic!("reach-guard: the respelled pins must drive the sibling row's removal")
         };
         let gone: Vec<PlayerId> = driven
@@ -22345,7 +22751,8 @@ mod stage2_injector_tests {
             cap,
             None,
             DepartureStop::EndsRepetition,
-        );
+        )
+        .expect("the fixture's shortcut cycle is representable");
         assert!(
             matches!(follow, CycleOutcome::CrossLethal { winner: Some(w), .. } if w == P0),
             "reach-guard: driving on past the removal reaches the crown that (d) says this \
@@ -22371,7 +22778,8 @@ mod stage2_injector_tests {
         };
         let mut result =
             crate::types::game_state::ActionResult::applied(Vec::new(), state.waiting_for.clone());
-        apply_until_lethal_shortcut(&mut state, &mut result, &proposal);
+        apply_until_lethal_shortcut(&mut state, &mut result, &proposal)
+            .expect("the fixture's shortcut is representable");
 
         assert_eq!(
             state
@@ -24789,20 +25197,9 @@ mod stage2_injector_tests {
         use crate::analysis::decision_template::{
             DecisionPoint, DecisionPointKind, ShortcutDecisionSchema,
         };
-        use crate::analysis::loop_check::{LoopCertificate, WinKind};
-        use crate::analysis::resource::BoardDelta;
-        state.waiting_for = WaitingFor::LoopShortcut {
-            proposer: P0,
-            predicted_winner: None,
-            certificate: LoopCertificate {
-                unbounded: vec![],
-                win_kind: Some(WinKind::LethalDamage),
-                win_kind_at: None,
-                mandatory: false,
-                residual_board_delta: BoardDelta::default(),
-                per_cycle: None,
-            },
-            schema: ShortcutDecisionSchema {
+        park_on_shortcut_offer(
+            state,
+            ShortcutDecisionSchema {
                 points: vec![DecisionPoint {
                     slot: DecisionSlot {
                         source: this_object(src),
@@ -24813,10 +25210,8 @@ mod stage2_injector_tests {
                 }],
                 ..ShortcutDecisionSchema::default()
             },
-            declaration: None,
-            road: crate::analysis::loop_check::OfferRoad::RecordedPeriod,
-            period: Default::default(),
-        };
+            crate::analysis::loop_check::OfferRoad::RecordedPeriod,
+        );
     }
 
     /// R28 arm (b) — **the DRIVE seam cannot see a `template.owner` the engine never bound; the

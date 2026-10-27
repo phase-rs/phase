@@ -147,6 +147,53 @@ fn source_lki_for_context(
         })
 }
 
+/// Digital-only Alchemy: the intensity of the resolving ability's source, read
+/// for the exact source incarnation the ability belongs to. CR 608.2h: while
+/// that incarnation is still in its public zone, its current intensity; once
+/// it has left, its last known information — the exit snapshot of that
+/// incarnation (Jarsyl removed in response to its trigger; Great Desert
+/// Hellion's leaves-the-battlefield draw; a sacrificed Drix Interlacer), so an
+/// intensify after the trigger and before the departure counts, and an
+/// intensify of the moved card does not (CR 400.7). A triggered ability's
+/// incarnation is the one its trigger observed — with no exit record left, its
+/// trigger-time snapshot; an activated one's is the one announced (CR 602.2a),
+/// read the way `AbilityCondition::SourceMatchesFilter` reads it — with no exit
+/// record left, 0, never another incarnation's record. A read with neither
+/// epoch (a spell asking about itself, a static) reads the live object.
+fn source_intensity(
+    state: &GameState,
+    ctx: &QuantityContext,
+    ability: Option<&ResolvedAbility>,
+) -> u32 {
+    let exit_intensity = |object_id: ObjectId, incarnation: u64| {
+        crate::game::filter::exit_lki_for_incarnation(state, object_id, incarnation)
+            .map(|lki| lki.intensity)
+    };
+    if let Some(source) = ctx.trigger_source.as_ref() {
+        return match source.source_read(state) {
+            crate::types::game_state::TriggerSourceRead::ExactLive(object) => object.intensity,
+            crate::types::game_state::TriggerSourceRead::Latched(context) => exit_intensity(
+                context.identity.reference.object_id,
+                context.identity.reference.incarnation,
+            )
+            .unwrap_or(context.lki.intensity),
+        };
+    }
+    let live = state.objects.get(&ctx.source);
+    match ability.and_then(|ability| {
+        ability
+            .announced_source_incarnation
+            .or(ability.source_incarnation)
+    }) {
+        Some(incarnation) => live
+            .filter(|object| object.incarnation == incarnation)
+            .map(|object| object.intensity)
+            .or_else(|| exit_intensity(ctx.source, incarnation)),
+        None => live.map(|object| object.intensity),
+    }
+    .unwrap_or(0)
+}
+
 /// Returns a live source only when it is the exact observed trigger source.
 /// Non-triggered quantities retain their normal current-operation source read.
 fn source_object_for_context<'a>(
@@ -5467,10 +5514,9 @@ fn resolve_ref(
             |obj| obj.layer_base_power.or(obj.base_power),
             |lki| lki.base_power,
         ),
-        // Digital-only Alchemy: read the object's current intensity. The reader
-        // is the source itself (a spell on the stack or a permanent reading its
-        // own intensity), so the live object carries it; LKI does not track
-        // intensity, so it has no fallback.
+        QuantityRef::Intensity {
+            scope: ObjectScope::Source,
+        } => i32::try_from(source_intensity(state, &ctx, ability)).unwrap_or(i32::MAX),
         QuantityRef::Intensity { scope } => resolve_object_pt(
             state,
             *scope,
@@ -5478,7 +5524,8 @@ fn resolve_ref(
             targets,
             ability,
             |obj| Some(i32::try_from(obj.intensity).unwrap_or(i32::MAX)),
-            |_lki| None,
+            // CR 608.2h: a referent that has left reads its last known intensity.
+            |lki| Some(i32::try_from(lki.intensity).unwrap_or(i32::MAX)),
         ),
         QuantityRef::Toughness { scope } => resolve_object_pt(
             state,
@@ -11291,6 +11338,7 @@ mod tests {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         };
 
         state.attacker_declarations_this_turn = vec![
@@ -22275,6 +22323,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         state.current_trigger_event = Some(crate::types::events::GameEvent::CreatureDestroyed {
@@ -22342,6 +22391,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -22494,6 +22544,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -22577,6 +22628,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -22658,6 +22710,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -22725,6 +22778,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         };
@@ -22789,6 +22843,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -22846,6 +22901,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         };
@@ -22926,6 +22982,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         };
@@ -23636,6 +23693,7 @@ mod tests {
                 is_suspected: false,
                 was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         assert!(!state.lki_cache.is_empty());
@@ -24460,6 +24518,7 @@ mod tests {
                     is_suspected: false,
                     was_prepared: false,
                     attachments: Vec::new(),
+                    intensity: 0,
                 },
             );
             state.exile_links.push(ExileLink {
@@ -26554,6 +26613,80 @@ mod exile_card_population_tests {
                 qualities: vec![SharedQuality::Name],
             },
             1,
+        );
+    }
+}
+
+#[cfg(test)]
+mod intensity_tests {
+    use super::*;
+
+    /// CR 608.2h: a latched trigger source with no surviving exit record reads
+    /// its trigger-time intensity — never the later incarnation at the same id.
+    #[test]
+    fn latched_intensity_without_an_exit_record_reads_the_trigger_time_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().intensity = 3;
+        let context = state.objects[&id]
+            .snapshot_for_zone_change(
+                id,
+                Some(crate::types::zones::Zone::Battlefield),
+                crate::types::zones::Zone::Battlefield,
+            )
+            .trigger_source_context
+            .expect("snapshot carries a trigger context");
+        let moved = state.objects.get_mut(&id).unwrap();
+        moved.incarnation += 1;
+        moved.intensity = 7;
+        state.lki_by_incarnation.clear();
+        let ctx = QuantityContext::for_trigger_source(Some(&context));
+        assert_eq!(source_intensity(&state, &ctx, None), 3);
+    }
+
+    /// CR 608.2h: a non-source referent that has left (a sacrificed cost-paid
+    /// object) reads the intensity its last known information recorded.
+    #[test]
+    fn departed_referent_intensity_reads_its_last_known_information() {
+        let mut state = GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Sacrificed".to_string(),
+            crate::types::zones::Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().intensity = 4;
+        let lki = state.objects[&id].snapshot_public_characteristics();
+        state.objects.remove(&id);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(crate::types::ability::CostPaidObjectSnapshot {
+            object_id: id,
+            lki,
+            incarnation: 0,
+        });
+        let intensity = QuantityExpr::Ref {
+            qty: QuantityRef::Intensity {
+                scope: ObjectScope::CostPaidObject,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &intensity, &ability),
+            4
         );
     }
 }

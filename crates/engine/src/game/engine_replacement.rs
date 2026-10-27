@@ -11,7 +11,8 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, WaitingFor,
+    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -28,8 +29,8 @@ use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext}
 use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
-    apply_life_gain_after_replacement, apply_life_loss_after_replacement,
-    drain_pending_life_total_assignment,
+    drain_pending_life_total_assignment, settle_life_gain_after_choice,
+    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeUnrepresentable,
 };
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
@@ -187,7 +188,26 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
-    let waiting_for = handle_replacement_choice_inner(state, index, events)?;
+    // A record stamped for rejection came from an action-ingress life change.
+    // Resume it inside an ingress window so every life settlement the handler
+    // reaches (a substitute's drain, post-replacement continuations, nested
+    // parks) is held to the same rule; the window closes before the combat
+    // lifelink batch resumes.
+    let parked_for_rejection = state.pending_replacement.as_ref().is_some_and(|pending| {
+        pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
+    });
+    let waiting_for = if parked_for_rejection {
+        let (inner, window) = within_ingress_life_window(state, |state| {
+            handle_replacement_choice_inner(state, index, events)
+        });
+        let waiting_for = inner?;
+        if let Some(player) = window.failed_player {
+            return Err(LifeChangeUnrepresentable { player }.into());
+        }
+        waiting_for
+    } else {
+        handle_replacement_choice_inner(state, index, events)?
+    };
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
@@ -297,6 +317,13 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.lifelink_bonus)
         .unwrap_or(0);
+    // The life-change policy the parked record was stamped with, captured with
+    // the file's other `parked_*` reads before `continue_replacement` consumes it.
+    let parked_life_policy = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| pending.unrepresentable_life_change)
+        .unwrap_or_default();
     // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
     // sacrifice was accepted. The resumed payload is only a ZoneChange, so
     // capture the enclosing sacrifice before `continue_replacement` consumes
@@ -774,17 +801,21 @@ fn handle_replacement_choice_inner(
                         return Ok(state.waiting_for.clone());
                     }
                 }
-                // CR 119.1: Life gain accepted after replacement choice.
+                // CR 119.3: Life gain accepted after replacement choice. The
+                // parked record's policy decides an unrepresentable final edit:
+                // `Reject` fails the answer (the boundary restores the record and
+                // its prompt), `IgnoreImpossible` skips the change and resumes.
                 gain @ ProposedEvent::LifeGain { .. } => {
-                    apply_life_gain_after_replacement(state, gain, events);
+                    settle_life_gain_after_choice(state, gain, parked_life_policy, events)?;
                 }
-                // CR 120.3: Life loss accepted after replacement choice.
+                // CR 119.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { player_id, .. } => {
                     // An empty-pool loss that deferred here never returns to
                     // the phase-transition drain, so this is the only place
                     // its cause can still be named (a mana burn would
                     // otherwise land as an unexplained life change).
-                    let actual = apply_life_loss_after_replacement(state, loss, events);
+                    let actual =
+                        settle_life_loss_after_choice(state, loss, parked_life_policy, events)?;
                     crate::game::turns::note_empty_pool_life_loss_resolved(
                         state, player_id, actual, events,
                     );
@@ -928,25 +959,10 @@ fn handle_replacement_choice_inner(
                 // — the `spec` field carries the full self-describing token
                 // characteristics. Delegate to the shared helper.
                 create @ ProposedEvent::CreateToken { .. } => {
-                    let is_copy =
-                        matches!(create, ProposedEvent::CreateToken { copy: Some(_), .. });
+                    // CR 614.1a + CR 608.2c: the delivery authority publishes this
+                    // event's whole referent, and hands it to a resident CopyToken
+                    // frame, whose drain below assigns the ledger.
                     let completed = apply_create_token_after_replacement(state, create, events);
-                    // CR 614.1a + CR 608.2c: the created referent includes any
-                    // batch a replacement appended to this event; the window
-                    // spans the chosen replacement's application and the apply.
-                    //
-                    // Known residual: a copy event is left as is. A replacement-appended
-                    // batch is never in the CopyToken frame's created ids. On a
-                    // liminal-immediate copy the apply drains the frame and resolves the
-                    // effect's riders inside the apply, so publishing here would rewrite
-                    // the ledger after the riders read it; otherwise the frame's later
-                    // drain overwrites the ledger with the frame's ids.
-                    if !is_copy {
-                        effects::token::publish_replacement_appended_tokens(
-                            state,
-                            &events[replacement_action_event_start..],
-                        );
-                    }
                     if !completed {
                         return Ok(state.waiting_for.clone());
                     }
@@ -2851,13 +2867,9 @@ pub(super) fn handle_copy_target_choice(
                 }
             }
         }
-        let created_ids = state.last_created_token_ids.clone();
-        if let Some(pending) = state.active_copy_token_mut() {
-            pending.created_ids = created_ids;
-        }
-        if state.active_copy_token().is_some() {
-            super::effects::token_copy::drain_pending_copy_token_resolution(state, events);
-        }
+        // CR 614.1a + CR 608.2c: the batch is done; hand over to the rest of a
+        // compound token event parked over it, then to the CopyToken owner.
+        super::effects::token::finish_liminal_copy_token_batch(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(state.waiting_for.clone());
         }
@@ -4562,6 +4574,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
 
@@ -5239,6 +5252,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(PlayerId(0), &state);
         state.priority_player = PlayerId(0);
@@ -5837,6 +5851,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -5963,6 +5978,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -6124,6 +6140,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -6301,6 +6318,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
@@ -6457,6 +6475,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied,
         };
         assert!(
@@ -6597,6 +6616,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: std::collections::HashSet::new(),
         };
         let result = replacement_mod::replace_event(&mut state, proposed, &mut events);
