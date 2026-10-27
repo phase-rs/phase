@@ -16065,15 +16065,18 @@ impl AbilityCost {
     /// the whole cost belongs to, this keeps each payment separate: a
     /// `Composite` concatenates its children's components without
     /// deduplication, so "Sacrifice a creature, Sacrifice an enchantment" is
-    /// two `[SacrificesPermanent]` components, not one category. `PerCounter`
-    /// delegates to its base (the multiplier changes how much is paid, not
-    /// which payments there are). Every other variant is a single component,
-    /// including `OneOf` (only one of its branches is paid) and
-    /// `Behold`. Exhaustive match with no wildcard arm, so a new compositional
-    /// variant must decide how its payments split.
+    /// two `[SacrificesPermanent]` components, not one category. `OneOf`
+    /// contributes every branch's payment components, concatenated: any branch
+    /// may be the one paid, so this over-approximates the payments the cost
+    /// can make and an ambiguous reference declines (a branch paying two
+    /// sacrifices stays two components). `PerCounter` delegates to its base
+    /// (the multiplier changes how much is paid, not which payments there
+    /// are). Every other variant is a single component, including `Behold`.
+    /// Exhaustive match with no wildcard arm, so a new compositional variant
+    /// must decide how its payments split.
     pub fn component_categories(&self) -> Vec<Vec<CostCategory>> {
         match self {
-            AbilityCost::Composite { costs } => costs
+            AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => costs
                 .iter()
                 .flat_map(AbilityCost::component_categories)
                 .collect(),
@@ -16103,7 +16106,6 @@ impl AbilityCost {
             | AbilityCost::GetPlayerCounters { .. }
             | AbilityCost::Reveal { .. }
             | AbilityCost::Behold { .. }
-            | AbilityCost::OneOf { .. }
             | AbilityCost::Waterbend { .. }
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::EffectCost { .. }
@@ -45231,8 +45233,10 @@ mod tests {
         /// `component_categories` keeps one entry per payment component:
         /// `Composite` concatenates its children without deduplication (two
         /// sacrifices are two components even though `categories()` collapses
-        /// them to one category), `OneOf` is a single component holding every
-        /// branch's categories, and `PerCounter` delegates to its base.
+        /// them to one category), `OneOf` concatenates every branch's
+        /// components (any branch may be paid, so a branch paying two
+        /// sacrifices stays two components), and `PerCounter` delegates to its
+        /// base.
         #[test]
         fn component_categories_keeps_one_entry_per_payment() {
             let sacrifice = || AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
@@ -45288,10 +45292,45 @@ mod tests {
             };
             assert_eq!(
                 one_of.component_categories(),
-                vec![vec![
-                    CostCategory::Discards,
-                    CostCategory::SacrificesPermanent
-                ]]
+                vec![
+                    vec![CostCategory::Discards],
+                    vec![CostCategory::SacrificesPermanent],
+                ]
+            );
+
+            // A branch that pays two sacrifices keeps both payments, even
+            // though `categories()` on that branch collapses them to one.
+            let one_of_two_sacrifices_or_mana = AbilityCost::OneOf {
+                costs: vec![
+                    AbilityCost::Composite {
+                        costs: vec![sacrifice(), sacrifice()],
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    },
+                ],
+            };
+            assert_eq!(
+                one_of_two_sacrifices_or_mana.component_categories(),
+                vec![
+                    vec![CostCategory::SacrificesPermanent],
+                    vec![CostCategory::SacrificesPermanent],
+                    vec![CostCategory::ManaOnly],
+                ]
+            );
+
+            // A discard-or-mana choice still has one slot-binding component.
+            let one_of_discard_or_mana = AbilityCost::OneOf {
+                costs: vec![
+                    discard(),
+                    AbilityCost::Mana {
+                        cost: ManaCost::generic(3),
+                    },
+                ],
+            };
+            assert_eq!(
+                one_of_discard_or_mana.component_categories(),
+                vec![vec![CostCategory::Discards], vec![CostCategory::ManaOnly]]
             );
 
             let per_counter = AbilityCost::PerCounter {

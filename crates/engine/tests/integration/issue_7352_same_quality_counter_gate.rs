@@ -812,3 +812,80 @@ fn cost_participle_rider_under_two_same_kind_payments_is_not_claimed() {
         "two sacrifice payments make \"the sacrificed creature\" ambiguous: {ability:#?}"
     );
 }
+
+/// Whether `cost` is a `Composite` that pays exactly `n` sacrifices.
+fn is_composite_with_sacrifices(cost: &AbilityCost, n: usize) -> bool {
+    matches!(cost, AbilityCost::Composite { costs }
+        if costs
+            .iter()
+            .filter(|c| matches!(c, AbilityCost::Sacrifice(_)))
+            .count()
+            == n)
+}
+
+/// CR 608.2k: an alternative ("or") cost may pay any one of its
+/// branches, so every payment any branch could make counts toward the
+/// cost-paid slot. A branch that sacrifices twice ("Sacrifice a creature,
+/// Sacrifice an artifact or {R}, {T}") writes the one cost-paid slot twice, so
+/// "the sacrificed creature" has no unambiguous referent and the rider is not
+/// claimed as a `CostPaidObject` comparison. Paired positive: the same
+/// alternative cost with a single sacrifice in its sacrifice branch claims it.
+/// The declined text keeps its base lowering; this row asserts only the
+/// non-claim.
+#[test]
+fn cost_participle_rider_under_an_alternative_with_two_sacrifices_is_not_claimed() {
+    let types = ["Artifact".to_string()];
+    let rider = "Counter target spell if it has the same mana value as the sacrificed creature.";
+    let parse = |cost_text: &str| {
+        let text = format!("{cost_text}: {rider}");
+        let parsed = parse_oracle_text(&text, "Test Shard", &[], &types, &[]);
+        let ability = parsed
+            .abilities
+            .first()
+            .expect("the activated ability")
+            .clone();
+        (text, ability)
+    };
+
+    for (cost_text, sacrifices, claimed) in [
+        ("Sacrifice a creature or {R}, {T}", 1, true),
+        (
+            "Sacrifice a creature, Sacrifice an artifact or {R}, {T}",
+            2,
+            false,
+        ),
+    ] {
+        let (text, ability) = parse(cost_text);
+        let Some(AbilityCost::OneOf { costs }) = &ability.cost else {
+            panic!(
+                "reach guard: the cost is an alternative, got {:?} ({text})",
+                ability.cost
+            );
+        };
+        let sacrifice_branch_matches = match sacrifices {
+            1 => costs.iter().any(|c| matches!(c, AbilityCost::Sacrifice(_))),
+            n => costs.iter().any(|c| is_composite_with_sacrifices(c, n)),
+        };
+        assert!(
+            sacrifice_branch_matches,
+            "reach guard: one branch pays {sacrifices} sacrifice(s), got {costs:?} ({text})"
+        );
+        assert!(
+            costs
+                .iter()
+                .any(|c| matches!(c, AbilityCost::Composite { costs } if costs
+                    .iter()
+                    .any(|c| matches!(c, AbilityCost::Mana { .. })))),
+            "reach guard: the other branch pays mana, got {costs:?} ({text})"
+        );
+        assert!(
+            matches!(*ability.effect, Effect::Counter { .. }),
+            "reach guard: the counter instruction was parsed, got {ability:#?}"
+        );
+        assert_eq!(
+            chain_has_share_quality(&ability),
+            claimed,
+            "\"the sacrificed creature\" is claimed only when one sacrifice can be paid ({text}): {ability:#?}"
+        );
+    }
+}

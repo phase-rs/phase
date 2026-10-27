@@ -4188,9 +4188,11 @@ fn parse_same_quality_reference<'a>(
 /// is two sacrifice payments and "the sacrificed creature" is ambiguous. A
 /// component is slot-binding when any of its categories is, as classified by
 /// [`cost_category_binds_cost_paid_object`]; the sole slot-binding component
-/// must have no slot-binding category other than `kind` (a "discard or
-/// sacrifice" `OneOf` is one component whose payment kind is unknown at parse
-/// time). Any other shape is ambiguous and is declined (fail closed).
+/// must have no slot-binding category other than `kind` (a behold-and-exile
+/// cost is one component that both reveals and exiles). A `OneOf` contributes
+/// every branch's components, so a "discard or sacrifice" choice is two
+/// slot-binding components. Any other shape is ambiguous and is declined (fail
+/// closed).
 fn is_sole_slot_binding_cost_kind(kind: CostCategory, ctx: &ParseContext) -> bool {
     let binds = |category: &CostCategory| cost_category_binds_cost_paid_object(*category);
     let mut slot_binding_components = ctx
@@ -11781,9 +11783,10 @@ mod tests {
     /// counters, ...) overwrites, so with another such payment beside it —
     /// even a second payment of the same kind ("Sacrifice a creature,
     /// Sacrifice an enchantment") — the reference is ambiguous and the rider is
-    /// declined, text unchanged. A "discard or sacrifice" choice is one
-    /// component whose kind is unknown at parse time, so it is declined too.
-    /// Costs that reference no object (mana, tap self, life) do not make it
+    /// declined, text unchanged. A `OneOf` choice contributes every branch's
+    /// payments ("discard or sacrifice"; a branch that sacrifices twice), and
+    /// one component with two slot-binding kinds (behold-and-exile) is
+    /// ambiguous too, so both are declined. Costs that reference no object (mana, tap self, life) do not make it
     /// ambiguous. Each decline is paired with the same participle claimed
     /// under a cost with one payment of its own kind, and "the revealed card"
     /// stays claimed under every ambiguous context.
@@ -11868,14 +11871,31 @@ mod tests {
             ],
             Some(Zone::Graveyard),
         );
-        // "Discard a card or sacrifice a creature": one `OneOf` component
-        // whose paid kind is unknown at parse time.
+        // "Discard a card or sacrifice a creature": a `OneOf` contributes each
+        // branch's payment, since either may be the one paid.
         let discard_or_sacrifice = cost_ctx(
-            vec![vec![
-                CostCategory::Discards,
-                CostCategory::SacrificesPermanent,
-            ]],
+            vec![
+                vec![CostCategory::Discards],
+                vec![CostCategory::SacrificesPermanent],
+            ],
             None,
+        );
+        // "Sacrifice a creature, Sacrifice an artifact or {R}, {T}": the
+        // sacrifice branch pays two sacrifices into the one cost-paid slot.
+        let two_sacrifices_or_mana = cost_ctx(
+            vec![
+                vec![CostCategory::SacrificesPermanent],
+                vec![CostCategory::SacrificesPermanent],
+                vec![CostCategory::ManaOnly],
+                vec![CostCategory::TapsSelf],
+            ],
+            None,
+        );
+        // One payment component with two slot-binding kinds (a behold cost
+        // that exiles the beheld card both reveals and exiles).
+        let reveal_and_exile_component = cost_ctx(
+            vec![vec![CostCategory::Reveals, CostCategory::ExilesCards]],
+            Some(Zone::Graveyard),
         );
         let ambiguous = [
             &discard_and_sacrifice,
@@ -11887,6 +11907,8 @@ mod tests {
             &two_sacrifices,
             &two_exiles,
             &discard_or_sacrifice,
+            &two_sacrifices_or_mana,
+            &reveal_and_exile_component,
         ];
         let declined = [
             ("the discarded card", &discard_and_sacrifice),
@@ -11902,6 +11924,8 @@ mod tests {
             ("the exiled card", &two_exiles),
             ("the discarded card", &discard_or_sacrifice),
             ("the sacrificed creature", &discard_or_sacrifice),
+            ("the sacrificed creature", &two_sacrifices_or_mana),
+            ("the exiled card", &reveal_and_exile_component),
         ];
         for (reference_text, ctx) in declined {
             let text = rider(reference_text);
@@ -11962,6 +11986,28 @@ mod tests {
                         vec![CostCategory::TapsSelf],
                         vec![CostCategory::PaysLife],
                         vec![CostCategory::Discards],
+                    ],
+                    None,
+                ),
+            ),
+            // "Pay {3} or discard a card": the `OneOf`'s other branch pays
+            // only mana, so the discard is the one slot-binding payment.
+            (
+                "the discarded card",
+                cost_ctx(
+                    vec![vec![CostCategory::Discards], vec![CostCategory::ManaOnly]],
+                    None,
+                ),
+            ),
+            // "Sacrifice a creature or {R}, {T}": one sacrifice across the
+            // branches, the pair of `two_sacrifices_or_mana` above.
+            (
+                "the sacrificed creature",
+                cost_ctx(
+                    vec![
+                        vec![CostCategory::SacrificesPermanent],
+                        vec![CostCategory::ManaOnly],
+                        vec![CostCategory::TapsSelf],
                     ],
                     None,
                 ),
