@@ -28634,11 +28634,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     "{path}: incoherent selected damage-source capture and source predicate"
                 )),
             }
-        } else if !node
-            .as_object()
-            .unwrap()
-            .contains_key("selected_damage_source")
-            && node.get("event").and_then(Value::as_str) == Some("DamageDone")
+        } else if node.get("event").and_then(Value::as_str) == Some("DamageDone")
             && node.pointer("/expiry/type").and_then(Value::as_str) == Some("EndOfTurn")
             && !characteristic
             && (path.contains("/pending_damage_replacements/")
@@ -28652,7 +28648,19 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             // source predicates are cloned, while selected identities become
             // the identical SpecificObject (or And) predicate. Installation,
             // expiry and storage establish neither preimage on their own.
+            let explicit_native = node
+                .get("selected_damage_source")
+                .is_some_and(Value::is_null);
             match installed_owner(value, node) {
+                Ok(Some(Some(_))) if explicit_native => errors.push(format!(
+                    "{path}: incoherent explicit null selected damage-source capture contradicts retained selected-source owner"
+                )),
+                Err(error) if explicit_native => errors.push(format!(
+                    "{path}: incoherent explicit null selected damage-source capture and retained installed owner: {error}"
+                )),
+                // Current null remains determinate native evidence unless its
+                // actual retained original owner proves a selected source.
+                Ok(_) if explicit_native => {},
                 Ok(Some(capture)) => installed_updates.push((path.trim_start_matches('$').to_string(), capture)),
                 Ok(None) => errors.push(format!("{path}: unrecoverable damage source-origin ambiguity between native and selected-source materializers")),
                 Err(error) => errors.push(format!("{path}: {error}")),

@@ -2158,7 +2158,7 @@ fn paid_awe_whole_noncombat_gain_survives_first_later_and_final_recipient_and_ga
 fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip_owner() {
     use engine::game::scenario::GameRunner;
     use engine::types::ability::*;
-    use engine::types::game_state::RandomDraw;
+    use engine::types::game_state::{GameState, RandomDraw};
     use engine::types::resolution::ResolutionStateWire;
     use engine::types::zones::Zone;
     use rand::Rng;
@@ -2254,18 +2254,14 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
                 .reference,
             reference
         );
-        let mut old = if wire {
+        let current = if wire {
             serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
                 .unwrap()
         } else {
             serde_json::to_value(runner.state()).unwrap()
         };
-        old["pending_damage_replacements"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("selected_damage_source");
         assert!(
-            old["resolved_rules_journal"]["entries"]
+            current["resolved_rules_journal"]["entries"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -2275,6 +2271,71 @@ fn installed_legacy_selected_shield_recovers_only_from_its_original_lexical_flip
                     == Some("CoinFlip")),
             "the exact actual flip frame, not an arbitrary selected payload, is retained"
         );
+        let coherent: GameState = if wire {
+            serde_json::from_value::<ResolutionStateWire>(current.clone())
+                .unwrap()
+                .into_game_state()
+        } else {
+            serde_json::from_value(current.clone()).unwrap()
+        };
+        assert_eq!(coherent.pending_damage_replacements[0], expected);
+        for invalid_owned_capture in [false, true] {
+            let mut hostile = current.clone();
+            hostile["pending_damage_replacements"][0]["selected_damage_source"] =
+                serde_json::Value::Null;
+            if invalid_owned_capture {
+                let frame = hostile["resolved_rules_journal"]["entries"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find_map(|entry| {
+                        entry
+                            .pointer_mut("/command/FrameTransition/transition/Push/frame")
+                            .filter(|frame| frame["type"] == "CoinFlip")
+                    })
+                    .expect("the actual retained lexical flip owner");
+                let selected = &mut frame["data"]["branch_context"]["damage_source_choice"]
+                    ["source"]["identity"]["reference"];
+                assert_eq!(
+                    selected["object_id"],
+                    serde_json::json!(reference.object_id)
+                );
+                assert_eq!(
+                    selected["incarnation"],
+                    serde_json::json!(reference.incarnation)
+                );
+                selected["incarnation"] = serde_json::json!(0);
+            }
+            let input_bytes = serde_json::to_vec(&hostile).unwrap();
+            let game_before = serde_json::to_value(runner.state()).unwrap();
+            let error = if wire {
+                serde_json::from_value::<ResolutionStateWire>(hostile.clone())
+                    .unwrap_err()
+                    .to_string()
+            } else {
+                serde_json::from_value::<GameState>(hostile.clone())
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(
+                error.contains("pending_damage_replacements/0")
+                    && error.contains("incoherent explicit null selected damage-source capture")
+                    && error.contains("retained selected-source owner"),
+                "the actual installed lexical owner contradicts null: {error}"
+            );
+            if invalid_owned_capture {
+                assert!(error
+                    .contains("incoherent retained selected-source owner and installed predicate"));
+            }
+            assert!(!error.contains("source-origin ambiguity"));
+            assert_eq!(serde_json::to_vec(&hostile).unwrap(), input_bytes);
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), game_before);
+        }
+        let mut old = current;
+        old["pending_damage_replacements"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_damage_source");
         *runner.state_mut() = if wire {
             serde_json::from_value::<ResolutionStateWire>(old)
                 .unwrap()
