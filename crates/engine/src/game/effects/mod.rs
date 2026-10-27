@@ -14468,6 +14468,27 @@ fn permission_node_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> 
             .is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
 }
 
+/// CR 608.2c: Whether this node is one of several consecutive effects gated by
+/// the same "if [noun] was [verb]ed this way" clause and is directly followed by
+/// another such gated effect ("If a creature card is discarded this way, untap
+/// this creature, then transform it" — Civilized Scholar). The gate names the
+/// earlier instruction that moved the cards, not the gated effects between, so a
+/// gated node that itself moved nothing (the untap) must leave that instruction's
+/// ledger in place for the next gated node (the transform). The caller applies
+/// this only when the node moved no objects.
+fn gated_run_keeps_ledger_for_this_way_head(ability: &ResolvedAbility) -> bool {
+    let gated_by_this_way_head = |condition: Option<&AbilityCondition>| {
+        condition.is_some_and(|condition| condition.zone_changed_this_way_head().is_some())
+    };
+    gated_by_this_way_head(ability.condition.as_ref())
+        && gated_by_this_way_head(
+            ability
+                .sub_ability
+                .as_ref()
+                .and_then(|sub| sub.condition.as_ref()),
+        )
+}
+
 /// CR 603.12: Effect kinds whose reflexive "when you do" needs an actual move
 /// event even though their "if you do" (CR 118.12) treats a started-but-empty
 /// move as performed.
@@ -23550,7 +23571,9 @@ fn resolve_chain_body(
     // cards. A play permission over those cards ("You may play that card this
     // turn") directly followed by a "this way" head is not that instruction,
     // so it leaves the moving instruction's ledger in place for the head.
-    if !permission_node_keeps_ledger_for_this_way_head(ability) {
+    if !permission_node_keeps_ledger_for_this_way_head(ability)
+        && !(zone_changed_ids.is_empty() && gated_run_keeps_ledger_for_this_way_head(ability))
+    {
         state.last_zone_changed_ids = zone_changed_ids;
     }
     let linked_batch =
@@ -26444,6 +26467,49 @@ fn subject_dependent_condition_has_no_subject(
     }
 }
 
+/// CR 608.2c + CR 608.2k + CR 608.2h: the values of `quality` for one
+/// `ObjectsShareQuality` operand. A cost-paid referent ("the discarded card")
+/// is read from the information captured when the cost was paid — the same
+/// slot order the `ObjectScope::CostPaidObject` quantity ladder reads
+/// (`cost_paid_object`, then `effect_context_object`) — so a referent that has
+/// since left its zone still answers. Every other operand is its first object
+/// referent from `resolved_targets`, read live. `None` when the operand names
+/// no object.
+fn shared_quality_operand_values(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    operand: &TargetFilter,
+    quality: &SharedQuality,
+) -> Option<HashSet<String>> {
+    match operand {
+        TargetFilter::CostPaidObject => ability
+            .cost_paid_object
+            .as_ref()
+            .or(ability.effect_context_object.as_ref())
+            .map(|snapshot| {
+                crate::game::filter::lki_shared_quality_values(
+                    &snapshot.lki,
+                    quality,
+                    &state.all_creature_types,
+                )
+            }),
+        _ => crate::game::targeting::resolved_targets(ability, operand, state)
+            .into_iter()
+            .find_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .and_then(|id| state.objects.get(&id))
+            .map(|obj| {
+                crate::game::filter::object_shared_quality_values_public(
+                    obj,
+                    quality,
+                    &state.all_creature_types,
+                )
+            }),
+    }
+}
+
 /// CR 608.2c: Evaluate a condition against the current game state and ability context.
 /// Returns whether the condition is met. Handles all `AbilityCondition` variants as
 /// pure boolean evaluators — callers are responsible for any terminal control flow
@@ -26800,32 +26866,21 @@ pub(crate) fn evaluate_condition(
             };
             type_matches && subtype_matches && filter_matches
         }
-        // CR 608.2c + CR 201.2: "if it shares a [quality] with [reference]" —
-        // compare two anaphoric object references at resolution time.
+        // CR 608.2c + CR 201.2: "if it shares a [quality] with [reference]" /
+        // "if it has the same [quality] as [reference]" — compare two object
+        // references at resolution time. CR 608.2h: a cost-paid operand answers
+        // from the information captured when the cost was paid.
         AbilityCondition::ObjectsShareQuality {
             subject,
             reference,
             quality,
-        } => {
-            let subject_id = crate::game::targeting::resolved_targets(ability, subject, state)
-                .into_iter()
-                .find_map(|target| match target {
-                    TargetRef::Object(id) => Some(id),
-                    _ => None,
-                });
-            let reference_id = crate::game::targeting::resolved_targets(ability, reference, state)
-                .into_iter()
-                .find_map(|target| match target {
-                    TargetRef::Object(id) => Some(id),
-                    _ => None,
-                });
-            match (subject_id, reference_id) {
-                (Some(left), Some(right)) => {
-                    crate::game::filter::objects_share_quality(state, left, right, quality)
-                }
-                _ => false,
-            }
-        }
+        } => match (
+            shared_quality_operand_values(state, ability, subject, quality),
+            shared_quality_operand_values(state, ability, reference, quality),
+        ) {
+            (Some(left), Some(right)) => crate::game::filter::quality_sets_overlap(&left, &right),
+            _ => false,
+        },
         AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target } => {
             crate::game::targeting::resolved_targets(ability, target, state)
                 .into_iter()

@@ -33,7 +33,10 @@ new_fixture() {
     cp "$REPO_ROOT/scripts/lib/detect-residue-discards.py" \
        "$REPO_ROOT/scripts/lib/detect_residue_discards_tests.py" \
        "$REPO_ROOT/scripts/lib/detect-cross-product-alts.py" \
-       "$REPO_ROOT/scripts/lib/detect_cross_product_alts_tests.py" "$FIXTURE/scripts/lib/"
+       "$REPO_ROOT/scripts/lib/detect_cross_product_alts_tests.py" \
+       "$REPO_ROOT/scripts/lib/added-lines.sh" \
+       "$REPO_ROOT/scripts/lib/added-lines.py" \
+       "$REPO_ROOT/scripts/lib/added_lines_tests.py" "$FIXTURE/scripts/lib/"
     cp "$REPO_ROOT/crates/engine/src/game/mod.rs" "$FIXTURE/crates/engine/src/game/"
     cat > "$FIXTURE/crates/engine/src/parser/oracle.rs" <<'EOF'
 fn parse_oracle_ir() {

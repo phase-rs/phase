@@ -9295,12 +9295,12 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             scope: EffectScope::Single,
             ..
         } => {
-            // The parser today emits `ParentTarget` here — "transform it"
-            // refers back to the Untap target (the trigger source).
+            // CR 608.2c: "transform it" names the source the preceding
+            // "untap ~" named, so it binds to the source directly.
             assert_eq!(
                 *target,
-                TargetFilter::ParentTarget,
-                "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
+                TargetFilter::SelfRef,
+                "Transform.target must be SelfRef — 'transform it' names the Untap's source",
             );
         }
         other => panic!("nested sub_ability effect must be a single Transform, got {other:?}"),

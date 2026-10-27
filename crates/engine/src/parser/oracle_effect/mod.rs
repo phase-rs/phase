@@ -44770,6 +44770,22 @@ fn parse_effect_chain_ir_body(
         // <property> among <filter>" (Wretched Banquet class).
         let (superlative_target_cond, text) = strip_superlative_target_conditional(&text);
         let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
+        // CR 608.2c + CR 202.3: "<instruction> if it has the same <quality> as
+        // <object>" (Counterbalance, Hisoka). Only claimed when the final
+        // condition match below keeps it: never beside a leading general
+        // conditional (`guard_condition` keeps `condition` first), and under a
+        // reflexive connector only when that connector composes with a guard
+        // ("If you do" → `And`, a `When you do` marker → its guard). Any other
+        // reflexive ("If you don't", "if … this way") would be displaced by the
+        // rider, so the text keeps its base lowering instead.
+        let (same_quality_cond, text) = if condition.is_none()
+            && if_you_do.as_ref().is_none_or(|reflexive| {
+                reflexive.is_optional_effect_performed() || reflexive.has_when_you_do_marker()
+            }) {
+            strip_same_quality_as_conditional(&text, ctx)
+        } else {
+            (None, text)
+        };
         // A deferred `When you do, if <guard>, ...` retains its reflexive
         // marker in `if_you_do` while the ordered specialized parsers claim the
         // guard. Ordinary reflexive connectors still block these parsers, as
@@ -44782,6 +44798,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
         {
             strip_cast_from_zone_conditional(&text)
         } else {
@@ -44793,6 +44810,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
         {
             strip_card_type_conditional(&text)
@@ -44805,6 +44823,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
         {
@@ -44820,6 +44839,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44835,6 +44855,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44862,6 +44883,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44925,6 +44947,7 @@ fn parse_effect_chain_ir_body(
             && mv_cond.is_none()
             && superlative_target_cond.is_none()
             && target_supertype_cond.is_none()
+            && same_quality_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -44949,6 +44972,7 @@ fn parse_effect_chain_ir_body(
             .or(mv_cond)
             .or(superlative_target_cond)
             .or(target_supertype_cond)
+            .or(same_quality_cond)
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
@@ -45008,8 +45032,17 @@ fn parse_effect_chain_ir_body(
             (Some(reflexive), Some(guard)) if reflexive.has_when_you_do_marker() => {
                 Some(reflexive.with_when_you_do_guard(guard))
             }
-            // Preserve the established specialized-condition precedence for
-            // non-marker reflexive connectors (for example "if they don't").
+            // CR 118.12 + CR 608.2c: "If you do, <instruction> if <gate>" — the
+            // instruction happens only if the optional action was performed AND its
+            // own gate holds; neither displaces the other (Counterbalance).
+            (Some(reflexive), Some(guard)) if reflexive.is_optional_effect_performed() => {
+                Some(AbilityCondition::And {
+                    conditions: vec![reflexive, guard],
+                })
+            }
+            // Preserve the established specialized-condition precedence for the
+            // remaining non-marker reflexive connectors (for example "if they
+            // don't").
             (_, Some(guard)) => Some(guard),
             (Some(reflexive), None) => Some(reflexive),
             (None, None) => None,
@@ -45872,6 +45905,10 @@ fn parse_effect_chain_ir_body(
             // zone so a `"the exiled card"` anaphor in any effect chunk
             // disambiguates to `CostPaidObject` (Jhoira of the Ghitu).
             current_ability_exile_cost_zone: ctx.current_ability_exile_cost_zone,
+            // CR 608.2k: likewise the enclosing ability's cost payment
+            // components, so "the discarded card" in any effect chunk names the
+            // card discarded for the cost (Hisoka, Minamo Sensei).
+            current_ability_cost_components: ctx.current_ability_cost_components.clone(),
             parent_target_available,
             // CR 406.6 + CR 607.2a: whether an EARLIER clause in this same
             // chain already produces an exile, so a later singular "the
@@ -47166,9 +47203,25 @@ fn parse_effect_chain_ir_body(
                     }
                 )
             });
+        // CR 608.2c + CR 701.27a: "untap ~, then transform it" (Civilized
+        // Scholar, Cecil, Dark Knight's class) — the bare "it" of a transform
+        // clause names the source object the prior clause named via `~`. Left as
+        // `ParentTarget`, it resolves to whatever the chain carries down (for
+        // Civilized Scholar the discarded card, now in the graveyard), so the
+        // permanent never transforms. Rebinding to the source is rules-correct
+        // for every such chain; with no carried target the source was already the
+        // fallback subject, so those cards are unchanged.
+        let transform_anaphor_after_self_ref_clause = matches!(
+            &clause.effect,
+            Effect::Transform {
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        );
         if (typed_trigger_subject
             || exile_then_return_transformed
-            || attach_anaphor_after_self_ref_transform)
+            || attach_anaphor_after_self_ref_transform
+            || transform_anaphor_after_self_ref_clause)
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && builder
                 .clauses()

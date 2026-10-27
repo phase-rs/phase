@@ -8213,6 +8213,15 @@ pub(crate) enum SpellCastUndo {
     },
 }
 
+impl SpellCastUndo {
+    /// The serialized-state path this inverse edit addresses.
+    pub(crate) fn path(&self) -> &[String] {
+        match self {
+            Self::Value { path, .. } | Self::Splice { path, .. } | Self::Hand { path, .. } => path,
+        }
+    }
+}
+
 /// CR 601.2b: the alternative-cost declaration belongs to this cast, rather
 /// than to whichever cost choice or granting permanent is live later.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -10827,6 +10836,58 @@ pub struct PlayerDeckPool {
     /// compatibility with saved states and test fixtures that omit the field.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+}
+
+impl PlayerDeckPool {
+    /// True when `other` holds every deck list in the same allocation with the
+    /// same seat and bracket, i.e. neither pool has written a list since one
+    /// was cloned from the other. Identity, not equality: true implies both
+    /// serialize identically; false says nothing about content.
+    pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
+        let Self {
+            player,
+            registered_main,
+            registered_sideboard,
+            current_main,
+            current_sideboard,
+            registered_companion,
+            current_companion,
+            registered_commander,
+            current_commander,
+            registered_signature_spell,
+            current_signature_spell,
+            registered_planar_deck,
+            registered_scheme_deck,
+            current_scheme_deck,
+            bracket_tier,
+        } = self;
+        // Named rather than written inline: `clippy::type_complexity` rejects the
+        // inline array-of-pairs type, and the alias is the lint's own suggested remedy.
+        type DeckList = Arc<Vec<DeckEntry>>;
+        let lists: [(&DeckList, &DeckList); 13] = [
+            (registered_main, &other.registered_main),
+            (registered_sideboard, &other.registered_sideboard),
+            (current_main, &other.current_main),
+            (current_sideboard, &other.current_sideboard),
+            (registered_companion, &other.registered_companion),
+            (current_companion, &other.current_companion),
+            (registered_commander, &other.registered_commander),
+            (current_commander, &other.current_commander),
+            (
+                registered_signature_spell,
+                &other.registered_signature_spell,
+            ),
+            (current_signature_spell, &other.current_signature_spell),
+            (registered_planar_deck, &other.registered_planar_deck),
+            (registered_scheme_deck, &other.registered_scheme_deck),
+            (current_scheme_deck, &other.current_scheme_deck),
+        ];
+        *player == other.player
+            && *bracket_tier == other.bracket_tier
+            && lists
+                .into_iter()
+                .all(|(mine, theirs)| Arc::ptr_eq(mine, theirs))
+    }
 }
 
 /// The authoritative source of a companion offered during pre-game setup.
@@ -36795,6 +36856,30 @@ mod tests {
         let back: PendingCounterPostAction =
             serde_json::from_str(&json).expect("cursor deserializes");
         assert_eq!(action, back);
+    }
+
+    /// A cloned pool shares its storage. A list rewritten without a content
+    /// change no longer does, although the pools stay equal; a different seat
+    /// never does.
+    #[test]
+    fn deck_pool_storage_identity_is_not_content_equality() {
+        let pool = PlayerDeckPool {
+            player: PlayerId(1),
+            ..Default::default()
+        };
+        let mut copy = pool.clone();
+        assert!(copy.shares_storage_with(&pool));
+
+        Arc::make_mut(&mut copy.current_main);
+        assert_eq!(copy, pool);
+        assert!(!copy.shares_storage_with(&pool));
+        assert!(!pool.shares_storage_with(&copy));
+
+        let other_seat = PlayerDeckPool {
+            player: PlayerId(2),
+            ..pool.clone()
+        };
+        assert!(!other_seat.shares_storage_with(&pool));
     }
 
     /// CR 602.1a + CR 602.2b: the record's bound activation cost survives

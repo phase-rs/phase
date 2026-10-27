@@ -12874,7 +12874,9 @@ fn object_shared_quality_values(
     )
 }
 
-fn lki_shared_quality_values(
+/// CR 608.2h: the values of `quality` read from an object's last known
+/// information.
+pub(crate) fn lki_shared_quality_values(
     lki: &LKISnapshot,
     quality: &SharedQuality,
     all_creature_types: &[String],
@@ -12895,7 +12897,10 @@ fn lki_shared_quality_values(
     )
 }
 
-fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
+/// CR 608.2c + CR 201.2a: two value sets share a quality only when both are
+/// non-empty and intersect. The comparator for every shared-quality test,
+/// including `AbilityCondition::ObjectsShareQuality`.
+pub(crate) fn quality_sets_overlap(left: &HashSet<String>, right: &HashSet<String>) -> bool {
     !left.is_empty() && !right.is_empty() && !left.is_disjoint(right)
 }
 
@@ -13338,26 +13343,6 @@ fn most_prevalent_creature_types_in_zone(
 /// For "creature type": all objects must share at least one creature subtype.
 /// For "color": all objects must share at least one color.
 /// For "card type": all objects must share at least one card type.
-/// CR 608.2c + CR 201.2: True when two objects share at least one value of the
-/// named quality. Used by `AbilityCondition::ObjectsShareQuality`.
-pub fn objects_share_quality(
-    state: &GameState,
-    left: ObjectId,
-    right: ObjectId,
-    quality: &SharedQuality,
-) -> bool {
-    let Some(left_obj) = state.objects.get(&left) else {
-        return false;
-    };
-    let Some(right_obj) = state.objects.get(&right) else {
-        return false;
-    };
-    let left_vals = object_shared_quality_values(left_obj, quality, &state.all_creature_types);
-    let right_vals = object_shared_quality_values(right_obj, quality, &state.all_creature_types);
-    !left_vals.is_disjoint(&right_vals)
-}
-
-/// CR 608.2b: Validate that all targeted objects share at least one value of the named quality.
 pub fn validate_shares_quality(
     state: &GameState,
     targets: &[TargetRef],
@@ -18885,17 +18870,24 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c + CR 201.2: the comparator `AbilityCondition::ObjectsShareQuality`
+    /// uses, over per-object quality values.
     #[test]
-    fn objects_share_quality_matches_shared_card_type() {
+    fn quality_sets_overlap_matches_shared_card_type() {
+        let card_types = |state: &GameState, id: ObjectId| {
+            super::object_shared_quality_values(
+                &state.objects[&id],
+                &SharedQuality::CardType,
+                &state.all_creature_types,
+            )
+        };
         let mut state = setup();
         let creature_a = add_creature(&mut state, PlayerId(0), "Creature A");
         let creature_b = add_creature(&mut state, PlayerId(0), "Creature B");
 
-        assert!(super::objects_share_quality(
-            &state,
-            creature_a,
-            creature_b,
-            &SharedQuality::CardType,
+        assert!(super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, creature_b),
         ));
         let instant = create_object(
             &mut state,
@@ -18925,17 +18917,13 @@ mod tests {
             .card_types
             .core_types
             .push(CoreType::Land);
-        assert!(!super::objects_share_quality(
-            &state,
-            creature_a,
-            land,
-            &SharedQuality::CardType,
+        assert!(!super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, land),
         ));
-        assert!(!super::objects_share_quality(
-            &state,
-            creature_a,
-            instant,
-            &SharedQuality::CardType,
+        assert!(!super::quality_sets_overlap(
+            &card_types(&state, creature_a),
+            &card_types(&state, instant),
         ));
     }
 
