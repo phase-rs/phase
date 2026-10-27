@@ -1987,7 +1987,7 @@ pub(crate) fn extract_keyword_clause(text: &str) -> Option<&str> {
             )));
         }
         let offset = lower.len() - candidate.len();
-        if text[..offset].chars().filter(|c| *c == '"').count() % 2 != 0 {
+        if !nom_primitives::ends_outside_double_quotes(&text[..offset]) {
             return Err(nom::Err::Error(OracleError::new(
                 candidate,
                 nom::error::ErrorKind::Fail,
@@ -2898,6 +2898,28 @@ pub(crate) fn try_parse_cost_floor(text: &str, lower: &str) -> Option<StaticDefi
 #[cfg(test)]
 mod tests {
     use super::promote_nested_ability_quotes;
+
+    #[test]
+    fn keyword_clause_extraction_skips_quoted_verbs_and_keeps_original_suffix() {
+        assert_eq!(
+            super::extract_keyword_clause("has \"İ has flying.\""),
+            Some("\"İ has flying.\"")
+        );
+        assert_eq!(
+            super::extract_keyword_clause(
+                "has base power 3 and \"This creature has flying.\" and gains Ward {U}"
+            ),
+            Some("Ward {U}")
+        );
+        assert_eq!(
+            super::extract_keyword_clause("\"This creature has flying.\""),
+            None
+        );
+        assert_eq!(
+            super::extract_keyword_clause("\"This creature has flying and gains Ward {U}"),
+            None
+        );
+    }
 
     #[test]
     fn retained_type_phrase_accepts_shared_subtype_vocabulary_without_trailing_amnesty() {

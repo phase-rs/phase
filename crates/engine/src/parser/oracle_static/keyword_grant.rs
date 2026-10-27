@@ -2226,14 +2226,7 @@ fn complete_continuous_members(
                         ))
                         .parse(candidate)?;
                         let offset = body.len() - candidate.len();
-                        if offset == 0
-                            || body.original[..offset]
-                                .chars()
-                                .filter(|character| *character == '"')
-                                .count()
-                                % 2
-                                != 0
-                        {
+                        if offset == 0 || !body.is_outside_quotes_at(offset) {
                             return Err(nom::Err::Error(OracleError::new(
                                 candidate,
                                 nom::error::ErrorKind::Fail,
@@ -2265,43 +2258,16 @@ fn complete_continuous_members(
             }
         }
     }
-    let mut scan = tp;
-    loop {
-        let (_, prefix) = recognize(many0(alt((
-            recognize(nom::sequence::delimited(
-                tag::<_, _, OracleError<'_>>("\""),
-                take_until("\""),
-                tag("\""),
-            )),
-            recognize(preceded(
-                not(alt((tag(", and "), tag(" and "), tag(", ")))),
-                nom::character::complete::anychar,
-            )),
-        ))))
-        .parse(scan.lower)
-        .ok()?;
-        let connector = &scan.lower[prefix.len()..];
-        let (after, _) = alt((
-            tag::<_, _, OracleError<'_>>(", and "),
-            tag(" and "),
-            tag(", "),
-        ))
-        .parse(connector)
-        .ok()?;
-        let offset = tp.len() - connector.len();
-        let right_offset = tp.len() - after.len();
-        if let Some((mut left, verb)) =
-            complete_continuous_members(&text[..offset], where_x, inherited_verb)
-        {
-            if let Some((right, verb)) =
-                complete_continuous_members(&text[right_offset..], where_x, verb)
-            {
-                left.extend(right);
-                return Some((left, verb));
-            }
-        }
-        scan = tp.slice(right_offset, tp.len());
-    }
+    tp.scan_around_outside_quotes(
+        |input| alt((tag(", and "), tag(" and "), tag(", "))).parse(input),
+        |left, _, right| {
+            let (mut left, verb) =
+                complete_continuous_members(left.original, where_x, inherited_verb)?;
+            let (right, verb) = complete_continuous_members(right.original, where_x, verb)?;
+            left.extend(right);
+            Some((left, verb))
+        },
+    )
 }
 
 /// Extract only a wholly recipient-relative typed predicate. Ordinary board
@@ -2981,91 +2947,70 @@ fn complete_modification_sequence(
     let tp = TextPair::new(text, &lower);
     // Try every OUTSIDE-QUOTE connector transactionally. A failed split leaves
     // the original predicate intact, including all intervening semantic text.
-    let mut scan = tp;
-    loop {
-        let (_, prefix) = recognize(many0(alt((
-            recognize(nom::sequence::delimited(
-                tag::<_, _, OracleError<'_>>("\""),
-                take_until("\""),
-                tag("\""),
-            )),
-            recognize(preceded(
-                not(alt((tag(", and "), tag(" and "), tag(", ")))),
-                nom::character::complete::anychar,
-            )),
-        ))))
-        .parse(scan.lower)
-        .ok()?;
-        let connector_input = &scan.lower[prefix.len()..];
-        let (after, _) = alt((
-            tag::<_, _, OracleError<'_>>(", and "),
-            tag(" and "),
-            tag(", "),
-        ))
-        .parse(connector_input)
-        .ok()?;
-        let offset = tp.lower.len() - connector_input.len();
-        let right_offset = tp.lower.len() - after.len();
-        let left = tp.original[..offset].trim();
-        let right = tp.original[right_offset..].trim();
-        // CR 205.1b: a final retention sentence qualifies the animation even
-        // when a keyword member intervenes. Offer that same complete sentence
-        // to the left transaction rather than attaching it to the keyword.
-        let right_lower = right.to_lowercase();
-        let retained_left =
-            super::split_type_retention_clause(&right_lower).and_then(|(before, _)| {
-                let tail = &right[before.len()..];
-                let tail_lower = tail.to_lowercase();
-                all_consuming(terminated(
-                    super::parse_type_retention_clause,
-                    opt(tag(".")),
-                ))
-                .parse(tail_lower.as_str())
-                .ok()?;
-                Some((
-                    format!("{left}. {tail}"),
-                    right[..before.len()].trim().trim_end_matches('.').trim(),
-                ))
-            });
-        // CR 613.1f: a bare keyword keeps the preceding explicit operation.
-        // Carry the left transaction's final verb into the right transaction;
-        // publish neither vector if the complete right clause is unsupported.
-        for (left, right) in std::iter::once((left, right)).chain(
-            retained_left
-                .as_ref()
-                .map(|(left, right)| (left.as_str(), *right)),
-        ) {
-            if let Some((mut first, left_verb)) =
-                complete_modification_clause(left, where_x, inherited_verb)
-            {
-                if let Some((mut last, final_verb)) =
-                    complete_modification_clause(right, where_x, left_verb)
+    tp.scan_around_outside_quotes(
+        |input| alt((tag(", and "), tag(" and "), tag(", "))).parse(input),
+        |left, _, right| {
+            let left = left.original.trim();
+            let right = right.original.trim();
+            // CR 205.1b: a final retention sentence qualifies the animation even
+            // when a keyword member intervenes. Offer that same complete sentence
+            // to the left transaction rather than attaching it to the keyword.
+            let right_lower = right.to_lowercase();
+            let retained_left =
+                super::split_type_retention_clause(&right_lower).and_then(|(before, _)| {
+                    let tail = &right[before.len()..];
+                    let tail_lower = tail.to_lowercase();
+                    all_consuming(terminated(
+                        super::parse_type_retention_clause,
+                        opt(tag(".")),
+                    ))
+                    .parse(tail_lower.as_str())
+                    .ok()?;
+                    Some((
+                        format!("{left}. {tail}"),
+                        right[..before.len()].trim().trim_end_matches('.').trim(),
+                    ))
+                });
+            // CR 613.1f: a bare keyword keeps the preceding explicit operation.
+            // Carry the left transaction's final verb into the right transaction;
+            // publish neither vector if the complete right clause is unsupported.
+            for (left, right) in std::iter::once((left, right)).chain(
+                retained_left
+                    .as_ref()
+                    .map(|(left, right)| (left.as_str(), *right)),
+            ) {
+                if let Some((mut first, left_verb)) =
+                    complete_modification_clause(left, where_x, inherited_verb)
                 {
-                    // CR 613.1f: "loses all other abilities" preserves abilities
-                    // granted by this same complete instruction. Remove the older
-                    // abilities before publishing the instruction's own grants.
-                    // The complete right transaction above still owns every tail.
-                    let right_lower = right.to_lowercase();
-                    if preceded(
-                        alt((tag::<_, _, OracleError<'_>>("loses "), tag("lose "))),
-                        tag("all other abilities"),
-                    )
-                    .parse(right_lower.as_str())
-                    .is_ok()
+                    if let Some((mut last, final_verb)) =
+                        complete_modification_clause(right, where_x, left_verb)
                     {
-                        if let Some(index) = last.iter().position(|modification| {
-                            matches!(modification, ContinuousModification::RemoveAllAbilities)
-                        }) {
-                            first.insert(0, last.remove(index));
+                        // CR 613.1f: "loses all other abilities" preserves abilities
+                        // granted by this same complete instruction. Remove the older
+                        // abilities before publishing the instruction's own grants.
+                        // The complete right transaction above still owns every tail.
+                        let right_lower = right.to_lowercase();
+                        if preceded(
+                            alt((tag::<_, _, OracleError<'_>>("loses "), tag("lose "))),
+                            tag("all other abilities"),
+                        )
+                        .parse(right_lower.as_str())
+                        .is_ok()
+                        {
+                            if let Some(index) = last.iter().position(|modification| {
+                                matches!(modification, ContinuousModification::RemoveAllAbilities)
+                            }) {
+                                first.insert(0, last.remove(index));
+                            }
                         }
+                        first.extend(last);
+                        return Some((first, final_verb));
                     }
-                    first.extend(last);
-                    return Some((first, final_verb));
                 }
             }
-        }
-        scan = tp.slice(right_offset, tp.len());
-    }
+            None
+        },
+    )
 }
 
 fn complete_keyword_list_parts(text: &str) -> Option<Vec<Cow<'_, str>>> {
@@ -3570,5 +3515,78 @@ pub(crate) fn with_protection_does_not_remove(
     match parse_protection_does_not_remove(text) {
         Some(exemption) => def.protection_does_not_remove(exemption),
         None => def,
+    }
+}
+
+#[cfg(test)]
+mod quote_authority_tests {
+    use super::*;
+
+    #[test]
+    fn complete_sequence_retries_after_a_failed_right_transaction() {
+        let left =
+            complete_modification_clause("has protection from Red", None, ContinuousVerb::Unbound)
+                .expect("the first candidate has a valid left clause");
+        assert!(complete_modification_clause("from Blue and gets +1/+1", None, left.1).is_none());
+        let (mods, verb) = complete_modification_sequence(
+            "has protection from Red and from Blue and gets +1/+1",
+            None,
+            ContinuousVerb::Unbound,
+        )
+        .expect("the later split preserves the complete protection list");
+        assert!(matches!(verb, ContinuousVerb::Pump));
+        assert_eq!(mods.len(), 4);
+        assert!(matches!(
+            &mods[..],
+            [
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_)
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Protection(_)
+                },
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]
+        ));
+    }
+
+    #[test]
+    fn complete_sequence_keeps_quoted_mana_body_and_refuses_unowned_tails() {
+        let quoted = "{1}, {T}: Add {G}.";
+        let (mods, _) = complete_modification_sequence(
+            &format!("has \"{quoted}\" and gets +1/+1"),
+            None,
+            ContinuousVerb::Unbound,
+        )
+        .expect("the quoted cost comma is not a member boundary");
+        let expected = classify_quoted_inner(quoted);
+        assert!(!expected.is_empty());
+        assert_eq!(&mods[..expected.len()], expected.as_slice());
+        assert_eq!(mods.len(), expected.len() + 2);
+        for tail in [
+            "has \"{T}: Add {G} and gets +1/+1",
+            "has flying and unsupported tail",
+        ] {
+            assert!(complete_modification_sequence(tail, None, ContinuousVerb::Unbound).is_none());
+            assert!(complete_continuous_members(tail, None, ContinuousVerb::Unbound).is_none());
+        }
+    }
+
+    #[test]
+    fn complete_members_keep_inner_verbs_and_outer_member_gates_separate() {
+        let single = parse_complete_continuous_members(
+            "has \"This creature has flying.\" if you control a Swamp",
+        )
+        .expect("the inner has does not split the outer gate");
+        assert_eq!(single.len(), 1);
+        assert!(single[0].1.is_some());
+        let multiple = parse_complete_continuous_members(
+            "gets +1/+1 and has \"This creature has flying.\" if you control a Swamp",
+        )
+        .expect("the explicit later member owns its gate");
+        assert_eq!(multiple.len(), 2);
+        assert!(multiple[0].1.is_none());
+        assert!(multiple[1].1.is_some());
     }
 }

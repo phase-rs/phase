@@ -1128,6 +1128,68 @@ pub fn peek_clause_terminator(input: &str) -> OracleResult<'_, ()> {
 // boundaries.  All per-file `scan_*` functions should delegate to these
 // rather than re-implementing the scanning loop.
 
+/// Recognize one complete double-quoted span. Quotes have no escape syntax in
+/// this Oracle boundary model; each following quote closes the current span.
+fn parse_double_quoted_span(input: &str) -> OracleResult<'_, &str> {
+    recognize(delimited(tag("\""), take_until("\""), tag("\""))).parse(input)
+}
+
+/// Whether a prefix ends outside a double-quoted span, including empty spans.
+/// An unmatched opening quote refuses the boundary.
+pub(crate) fn ends_outside_double_quotes(input: &str) -> bool {
+    all_consuming(nom::multi::fold_many0(
+        alt((
+            parse_double_quoted_span,
+            recognize(nom::character::complete::none_of("\"")),
+        )),
+        || (),
+        |(), _| (),
+    ))
+    .parse(input)
+    .is_ok()
+}
+
+/// Try each separator outside complete double-quoted spans, in text order.
+/// `accept` receives its byte offset, parsed value, and unconsumed suffix. A
+/// rejected transaction retries after that separator, keeping offsets relative
+/// to the original input. Unlike word-boundary scans, punctuation is eligible.
+///
+/// A complete quoted span is skipped before testing a separator. An unmatched
+/// quote is consumed as ordinary text, preserving the complete-clause scanners'
+/// existing retry order; accepting a result still requires callers to validate
+/// both complete clauses. This operation does not certify balanced input.
+pub(crate) fn scan_outside_quotes_with_offset<'a, O, T, F, A>(
+    text: &'a str,
+    mut separator: F,
+    mut accept: A,
+) -> Option<T>
+where
+    F: FnMut(&'a str) -> OracleResult<'a, O>,
+    A: FnMut(usize, O, &'a str) -> Option<T>,
+{
+    let mut scan = text;
+    loop {
+        let (candidate, _) = recognize(many0(alt((
+            parse_double_quoted_span,
+            recognize(preceded(
+                not(|input| separator(input)),
+                nom::character::complete::anychar,
+            )),
+        ))))
+        .parse(scan)
+        .ok()?;
+        let (after, value) = separator(candidate).ok()?;
+        // Separators must consume input, just as the scanner's prefix does.
+        if after.len() == candidate.len() {
+            return None;
+        }
+        if let Some(result) = accept(text.len() - candidate.len(), value, after) {
+            return Some(result);
+        }
+        scan = after;
+    }
+}
+
 /// Try a nom combinator at every word boundary in `text`, returning the
 /// first successful match.  This is the generic primitive behind all
 /// `scan_for_*` helpers.
@@ -1579,6 +1641,58 @@ pub(crate) fn parse_property_keyword(input: &str) -> OracleResult<'_, ObjectProp
 mod tests {
     use super::*;
     use nom::bytes::complete::tag;
+
+    #[test]
+    fn outside_quote_scan_retries_consumed_separators_with_original_offsets() {
+        let text = "α \"one, and two and three, four\", first and second, and last";
+        let mut attempts = Vec::new();
+        let result = scan_outside_quotes_with_offset(
+            text,
+            |input| alt((tag(", and "), tag(" and "), tag(", "))).parse(input),
+            |offset, separator, after| {
+                attempts.push((&text[..offset], separator, after));
+                (after == "last").then_some(offset)
+            },
+        );
+        assert_eq!(
+            attempts,
+            vec![
+                (
+                    "α \"one, and two and three, four\"",
+                    ", ",
+                    "first and second, and last"
+                ),
+                (
+                    "α \"one, and two and three, four\", first",
+                    " and ",
+                    "second, and last"
+                ),
+                (
+                    "α \"one, and two and three, four\", first and second",
+                    ", and ",
+                    "last"
+                ),
+            ]
+        );
+        assert_eq!(result.map(|offset| &text[offset..]), Some(", and last"));
+    }
+
+    #[test]
+    fn outside_quote_scan_preserves_unmatched_quote_retry_order() {
+        let mut attempts = Vec::new();
+        let result: Option<()> = scan_outside_quotes_with_offset(
+            "\"unfinished and next, last",
+            |input| alt((tag(", and "), tag(" and "), tag(", "))).parse(input),
+            |_, separator, after| {
+                attempts.push((separator, after));
+                None
+            },
+        );
+        assert!(result.is_none());
+        assert_eq!(attempts, vec![(" and ", "next, last"), (", ", "last")]);
+        assert!(!ends_outside_double_quotes("\"unfinished and next"));
+        assert!(ends_outside_double_quotes("\"\" and \"closed\""));
+    }
 
     /// The total wrapper keeps `parse_period_sentence`'s contract (terminal '.'
     /// kept, leading whitespace excluded) and adds exactly one thing: the

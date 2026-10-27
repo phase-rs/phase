@@ -247,11 +247,45 @@ impl<'a> TextPair<'a> {
     /// behave this way, so this is a documented property rather than a
     /// deviation.
     ///
-    /// SINGLE AUTHORITY for that rule. Callers must not re-derive the quote
-    /// count.
+    /// Quote boundaries are owned here by [`Self::is_outside_quotes_at`] and
+    /// the shared nom primitives. Callers must not re-derive the quote count.
     pub(crate) fn split_around_outside_quotes(&self, sep: &str) -> Option<(Self, Self)> {
         self.split_around(sep)
-            .filter(|(body, _)| body.original.chars().filter(|&c| c == '"').count() % 2 == 0)
+            .filter(|(body, _)| self.is_outside_quotes_at(body.len()))
+    }
+
+    /// Test a boundary from this pair without re-deriving quoted-span rules.
+    pub(crate) fn is_outside_quotes_at(&self, offset: usize) -> bool {
+        nom_primitives::ends_outside_double_quotes(&self.original[..offset])
+    }
+
+    /// Try separator splits in order, preserving original-case halves. Unlike
+    /// [`Self::split_around_outside_quotes`], a rejected complete transaction
+    /// retries later separators. Both halves always refer to the full pair,
+    /// including text before previously rejected splits.
+    ///
+    /// See [`nom_primitives::scan_outside_quotes_with_offset`] for unmatched
+    /// quote handling; callers must validate both complete halves.
+    pub(crate) fn scan_around_outside_quotes<O, T, F, A>(
+        &self,
+        separator: F,
+        mut accept: A,
+    ) -> Option<T>
+    where
+        F: FnMut(&'a str) -> OracleResult<'a, O>,
+        A: FnMut(Self, O, Self) -> Option<T>,
+    {
+        nom_primitives::scan_outside_quotes_with_offset(
+            self.lower,
+            separator,
+            |offset, value, after| {
+                accept(
+                    self.slice(0, offset),
+                    value,
+                    self.slice(self.len() - after.len(), self.len()),
+                )
+            },
+        )
     }
 
     /// Find last `needle` in lowered text, return `(before, after)` excluding needle.
@@ -3371,6 +3405,31 @@ mod tests {
                 .is_none(),
             "first-occurrence semantics: refuse, do not scan on to the later separator"
         );
+    }
+
+    #[test]
+    fn transactional_quote_split_keeps_original_case_and_rejected_prefixes() {
+        let original = "Has \"{T}, {U}: Add {G} and {W}.\", First and Last";
+        let lower = original.to_lowercase();
+        let pair = TextPair::new(original, &lower);
+        let mut attempts = Vec::new();
+        let result = pair.scan_around_outside_quotes(
+            |input| alt((tag(", and "), tag(" and "), tag(", "))).parse(input),
+            |left, _, right| {
+                attempts.push((left.original, right.original));
+                (right.lower == "last").then_some((left.original, right.original))
+            },
+        );
+        assert_eq!(
+            attempts,
+            vec![
+                ("Has \"{T}, {U}: Add {G} and {W}.\"", "First and Last"),
+                ("Has \"{T}, {U}: Add {G} and {W}.\", First", "Last"),
+            ]
+        );
+        assert_eq!(result, attempts.last().copied());
+        assert!(!pair.is_outside_quotes_at("Has \"{T}".len()));
+        assert!(pair.is_outside_quotes_at("Has \"{T}, {U}: Add {G} and {W}.\"".len()));
     }
 
     fn parse_every_creature_type_prefix(input: &str) -> OracleResult<'_, ()> {
