@@ -2449,7 +2449,7 @@ pub(crate) fn target_player_from_ability_or_root(
 ) -> Option<PlayerId> {
     declared_target_player(state, ability).player()
 }
-/// [`filter_contains_filter_prop`] from a `QuantityExpr`: whether any
+/// `crate::types::ability::filter_contains_filter_prop` from a `QuantityExpr`: whether any
 /// `FilterProp` reachable through the quantity's counted populations and
 /// player filters is accepted by `predicate`.
 pub(crate) fn quantity_expr_contains_filter_prop(
@@ -3136,7 +3136,7 @@ fn quantity_expr_contains_input(
 
 /// EXHAUSTIVE, wildcard-free leaf classifier for
 /// [`quantity_expr_contains_input`]. Keep this arm-for-arm with
-/// [`rewrite_quantity_ref_filter_props`] so readers and rewriters reach the
+/// `crate::types::ability`'s `rewrite_quantity_ref_filter_props` so readers and rewriters reach the
 /// same dynamic quantity topology.
 #[allow(clippy::too_many_arguments)]
 fn quantity_ref_contains_input(
