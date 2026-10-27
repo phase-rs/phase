@@ -6970,6 +6970,13 @@ fn is_player_scope_local_continuation(
     if effect_has_iteration_bound_recipient(parent) && effect_has_iteration_bound_recipient(child) {
         return true;
     }
+    // CR 608.2c: a card selected by this player's zone choice belongs to this
+    // iteration. Its anaphoric consumer must run before the next player picks.
+    if matches!(parent, Effect::ChooseFromZone { .. })
+        && effect_consumes_parent_object_referent(child)
+    {
+        return true;
+    }
     let generic_local_continuation = matches!(
         (parent, child),
         (
@@ -16114,6 +16121,22 @@ pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effec
     link == SubAbilityLink::SequentialSibling && counter_tail_family_has_runtime_evidence(effect)
 }
 
+/// CR 608.2c: retire a completed search delivery before the following instruction.
+fn settle_search_delivery_after_zone_instruction(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) {
+    if matches!(ability.effect, Effect::ChangeZone { .. })
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && state.active_change_zone_frame().is_none()
+    {
+        crate::game::engine_resolution_choices::settle_pending_library_search_delivery(
+            state, events,
+        );
+    }
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -16129,6 +16152,10 @@ pub(crate) fn skip_instruction_and_dependents(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
+    // CR 101.3 + CR 608.2c: an impossible found-card delivery completes without
+    // moving anything. Retire its search through the ordinary completion seam
+    // before the next independently sequenced search starts.
+    settle_search_delivery_after_zone_instruction(state, ability, events);
     let mut cursor = ability.sub_ability.as_deref();
     while let Some(next) = cursor {
         if next.sub_link == SubAbilityLink::SequentialSibling {
@@ -18208,14 +18235,7 @@ fn resolve_chain_body(
         return Ok(());
     }
 
-    if matches!(ability.effect, Effect::ChangeZone { .. })
-        && matches!(state.waiting_for, WaitingFor::Priority { .. })
-        && state.active_change_zone_frame().is_none()
-    {
-        crate::game::engine_resolution_choices::settle_pending_library_search_delivery(
-            state, events,
-        );
-    }
+    settle_search_delivery_after_zone_instruction(state, ability, events);
 
     // CR 608.2c: Extract the numeric result emitted by this parent effect for
     // `QuantityRef::PreviousEffectAmount` / `EventContextAmount` in sub-abilities.
@@ -22849,7 +22869,8 @@ mod tests {
                                 Zone::Hand
                             } else {
                                 Zone::Graveyard
-                            }
+                            },
+                            "actor={actor:?}, family={family}, owner={player}"
                         );
                     }
                     assert_eq!(
@@ -40420,6 +40441,79 @@ mod tests {
             ),
             "no extra unless/discard prompts after both iterations"
         );
+    }
+
+    #[test]
+    fn player_scope_zone_choice_keeps_only_its_anaphoric_delivery_local() {
+        use crate::types::ability::CardSelectionMode;
+        for selection in [CardSelectionMode::Chosen, CardSelectionMode::Random] {
+            for (target, link, retained) in [
+                (
+                    TargetFilter::ParentTarget,
+                    SubAbilityLink::ContinuationStep,
+                    true,
+                ),
+                (
+                    TargetFilter::SpecificObject { id: ObjectId(9) },
+                    SubAbilityLink::ContinuationStep,
+                    false,
+                ),
+                (
+                    TargetFilter::ParentTarget,
+                    SubAbilityLink::SequentialSibling,
+                    false,
+                ),
+            ] {
+                let mut head = ResolvedAbility::new(
+                    Effect::ChooseFromZone {
+                        count: 1,
+                        zone: Zone::Graveyard,
+                        additional_zones: vec![],
+                        zone_owner: ZoneOwner::ScopedPlayer,
+                        filter: None,
+                        chooser: ZoneChoiceChooser::Controller,
+                        candidate_source: ZoneChoiceCandidateSource::Direct,
+                        reciprocal_role: None,
+                        up_to: false,
+                        constraint: None,
+                        selection,
+                    },
+                    vec![],
+                    ObjectId(1),
+                    P0,
+                );
+                head.player_scope = Some(PlayerFilter::All);
+                let mut child = ResolvedAbility::new(
+                    Effect::ChangeZone {
+                        origin: Some(Zone::Graveyard),
+                        destination: Zone::Hand,
+                        target,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                    vec![],
+                    ObjectId(1),
+                    P0,
+                );
+                child.sub_link = link;
+                head.sub_ability = Some(Box::new(child));
+                let (scoped, after_scope) = split_player_scope_chain(&head, &PlayerFilter::All);
+                assert_eq!(
+                    scoped.sub_ability.is_some(),
+                    retained,
+                    "{selection:?}, {link:?}"
+                );
+                assert_eq!(after_scope.is_none(), retained);
+            }
+        }
     }
 
     #[test]

@@ -1279,6 +1279,9 @@ mod tests {
                     if controller_head { 1 } else { 3 }
                 );
                 assert!(runner.state().pending_scoped_library_search.is_none());
+                assert!(runner.state().pending_library_search_delivery.is_none());
+                assert!(runner.state().active_library_searches.is_empty());
+                assert!(runner.state().active_search_decision_controls.is_empty());
                 assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), if prior_choice { 4 } else { 1 });
                 assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
                 assert!(runner.state().stack.is_empty());

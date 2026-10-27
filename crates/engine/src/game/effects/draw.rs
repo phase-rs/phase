@@ -2271,8 +2271,10 @@ mod tests {
                 } else {
                     cast.resolve().events().to_vec()
                 };
-                let missing =
-                    !prior_choice && matches!(actor, Some(ControllerRef::ChosenPlayer { .. }));
+                // CR 101.3 + CR 608.2c: target fan-out names draw recipients,
+                // but does not establish the scoped player acting on them.
+                let missing = (targeted && actor == Some(ControllerRef::ScopedPlayer))
+                    || (!prior_choice && matches!(actor, Some(ControllerRef::ChosenPlayer { .. })));
                 let optimized =
                     actor.is_none() || (!targeted && actor == Some(ControllerRef::ScopedPlayer));
                 if !missing {
@@ -2281,7 +2283,8 @@ mod tests {
                             runner.state().waiting_for,
                             WaitingFor::ReplacementChoice { player: P0, .. }
                         ),
-                        "ordinary draw reached the real replacement pause"
+                        "ordinary draw reached the real replacement pause: targeted={targeted}, actor={actor:?}, prior_choice={prior_choice}, wait={:?}",
+                        runner.state().waiting_for
                     );
                     let frame = runner
                         .state()
