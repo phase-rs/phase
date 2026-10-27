@@ -3249,7 +3249,7 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
-                        return_result_occurrence: None,
+                        return_result_occurrence: state.active_return_result_occurrence,
                         return_result_process: ability.return_result_process,
                         pending_return_result_producer,
                         logical_zone_change_group,
@@ -3319,7 +3319,7 @@ pub fn resolve_all(
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration(
                     crate::types::game_state::PendingChangeZoneIteration {
-                        return_result_occurrence: None,
+                        return_result_occurrence: state.active_return_result_occurrence,
                         return_result_process: ability.return_result_process,
                         pending_return_result_producer,
                         logical_zone_change_group,
