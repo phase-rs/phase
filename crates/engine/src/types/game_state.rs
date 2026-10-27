@@ -28537,133 +28537,79 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                         .map_err(|error| format!("legacy source prompt object: {error}"))
                 })
                 .collect::<Result<_, _>>()?;
-            let exits: Vec<ZoneChangeRecord> = value
-                .get("zone_changes_this_turn")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| format!("legacy source prompt exits: {error}"))?
-                .unwrap_or_default();
-            let mut available: Vec<TriggerSourceContext> = owner
-                .get("damage_source_candidates")
-                .cloned()
-                .map(serde_json::from_value)
-                .transpose()
-                .map_err(|error| format!("legacy source prompt captures: {error}"))?
-                .unwrap_or_default();
-            let mut capture = |reference: crate::types::identifiers::ObjectIncarnationRef| {
-                objects
+            // Retained exact candidate custody predates scalar recovery.
+            // Never widen or replace it with today's live occurrence of the
+            // same ObjectId.
+            let available: Vec<TriggerSourceContext> =
+                if let Some(candidates) = owner.get("damage_source_candidates") {
+                    serde_json::from_value(candidates.clone())
+                        .map_err(|error| format!("legacy source prompt captures: {error}"))?
+                } else {
+                    // The historical scalar writer enumerated only live battlefield,
+                    // stack-spell and face-up command objects. It never advertised
+                    // referred-only departures. A stale announced target therefore
+                    // cannot make that writer's current live option ambiguous.
+                    objects
+                        .iter()
+                        .filter(|object| {
+                            let actual_spell = value
+                                .get("stack")
+                                .and_then(Value::as_array)
+                                .into_iter()
+                                .flatten()
+                                .chain(value.get("resolving_stack_entry"))
+                                .any(|entry| {
+                                    entry.get("id").and_then(Value::as_u64) == Some(object.id.0)
+                                        && entry.pointer("/kind/type").and_then(Value::as_str)
+                                            == Some("Spell")
+                                });
+                            object.zone == crate::types::zones::Zone::Battlefield
+                                || (object.zone == crate::types::zones::Zone::Command
+                                    && !object.face_down)
+                                || actual_spell
+                        })
+                        .filter_map(|object| {
+                            object
+                                .snapshot_for_zone_change(object.id, Some(object.zone), object.zone)
+                                .trigger_source_context()
+                                .cloned()
+                        })
+                        .collect()
+                };
+            let candidates = if owner.get("damage_source_candidates").is_some() {
+                // An unanswered prompt has made no selection. The full ordered
+                // candidate domain can retain multiple births of one scalar id;
+                // recover all of them when the scalar projection agrees exactly.
+                let offered: Vec<_> = available
                     .iter()
-                    .find(|object| {
-                        object.id == reference.object_id
-                            && object.incarnation == reference.incarnation
-                    })
-                    .and_then(|object| {
-                        object
-                            .snapshot_for_zone_change(object.id, Some(object.zone), object.zone)
-                            .trigger_source_context()
-                            .cloned()
-                    })
-                    .or_else(|| {
-                        exits
-                            .iter()
-                            .rev()
-                            .filter_map(ZoneChangeRecord::trigger_source_context)
-                            .find(|source| source.identity.reference == reference)
-                            .cloned()
-                    })
-            };
-            for object in &objects {
-                let actual_spell = value
-                    .get("stack")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .chain(value.get("resolving_stack_entry"))
-                    .any(|entry| {
-                        entry.get("id").and_then(Value::as_u64) == Some(object.id.0)
-                            && entry.pointer("/kind/type").and_then(Value::as_str) == Some("Spell")
-                    });
-                if object.zone == crate::types::zones::Zone::Battlefield
-                    || (object.zone == crate::types::zones::Zone::Command && !object.face_down)
-                    || actual_spell
-                {
-                    available.extend(capture(
-                        crate::types::identifiers::ObjectIncarnationRef::of(
-                            object.id,
-                            object.incarnation,
-                        ),
-                    ));
-                }
-            }
-            let mut programs: Vec<&Value> = vec![&owner["chain"]];
-            for entry in value
-                .get("stack")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .chain(value.get("resolving_stack_entry"))
-            {
-                if let Some(program) = entry
-                    .pointer("/kind/data/ability")
-                    .filter(|program| !program.is_null())
-                {
-                    programs.push(program);
-                }
-            }
-            for trigger in value
-                .get("delayed_triggers")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                if let Some(program) = trigger.get("ability") {
-                    programs.push(program);
-                }
-            }
-            for frame in value
-                .pointer(&format!("/{frames_key}/frames"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                if frame.get("type").and_then(Value::as_str) == Some("AbilityContinuation") {
-                    if let Some(program) = frame.pointer("/data/pending/chain") {
-                        programs.push(program);
-                    }
-                }
-            }
-            for program in programs {
-                let mut program = program.clone();
-                crate::types::ability::normalize_legacy_damage_source_program(&mut program);
-                let program: crate::types::ability::ResolvedAbility =
-                    serde_json::from_value(program)
-                        .map_err(|error| format!("legacy source prompt owning program: {error}"))?;
-                crate::game::effects::choose_damage_source::referred_by_ability_with(
-                    &program,
-                    &mut available,
-                    &mut capture,
-                );
-            }
-            let mut candidates = Vec::new();
-            for id in old_options {
-                let id = id.as_u64().expect("checked scalar option");
-                let mut exact: Vec<_> = available
-                    .iter()
-                    .filter(|source| {
-                        source.identity.reference.object_id.0 == id
-                            && source.identity.reference.incarnation
-                                != crate::types::identifiers::LEGACY_INCARNATION
-                    })
-                    .cloned()
+                    .map(|source| Value::from(source.identity.reference.object_id.0))
                     .collect();
-                exact.sort_by_key(|source| source.identity.reference);
-                exact.dedup_by_key(|source| source.identity.reference);
-                if exact.len() != 1 {
-                    return Err("legacy damage source prompt option has unrecoverable exact identity in its typed referred domain".into());
+                if offered != old_options {
+                    return Err("legacy damage source prompt options disagree with retained exact candidate custody".into());
                 }
-                candidates.push(exact.pop().expect("one exact offered occurrence"));
-            }
+                available
+            } else {
+                let mut candidates = Vec::new();
+                for id in old_options {
+                    let id = id.as_u64().expect("checked scalar option");
+                    let mut exact: Vec<_> = available
+                        .iter()
+                        .filter(|source| {
+                            source.identity.reference.object_id.0 == id
+                                && source.identity.reference.incarnation
+                                    != crate::types::identifiers::LEGACY_INCARNATION
+                        })
+                        .cloned()
+                        .collect();
+                    exact.sort_by_key(|source| source.identity.reference);
+                    exact.dedup_by_key(|source| source.identity.reference);
+                    if exact.len() != 1 {
+                        return Err("legacy damage source prompt option has unrecoverable exact identity in its writer domain".into());
+                    }
+                    candidates.push(exact.pop().expect("one exact offered occurrence"));
+                }
+                candidates
+            };
             let options: Vec<_> = candidates
                 .iter()
                 .map(PromptSourceBinding::from_trigger_source)
@@ -59562,7 +59508,21 @@ mod damage_source_canonical_admission_tests {
     use crate::types::phase::Phase;
     use crate::types::zones::Zone;
 
-    fn paid_gambit_source_prompt(thumb: bool) -> (GameRunner, ObjectId, ObjectId) {
+    enum SourceHistory {
+        CurrentOnly,
+        BlinkedWithStaleReference,
+    }
+
+    enum SourcePayload {
+        Raw,
+        V1,
+        Wire,
+    }
+
+    fn paid_gambit_source_prompt(
+        thumb: bool,
+        source_history: SourceHistory,
+    ) -> (GameRunner, ObjectId, ObjectId) {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let source = scenario.add_creature(P0, "Selected source", 2, 2).id();
@@ -59576,7 +59536,77 @@ mod damage_source_canonical_admission_tests {
         let gambit = scenario.add_spell_to_hand_from_oracle(P0, "Desperate Gambit", true,
             "Choose a source you control and flip a coin. If you win the flip, the next time that source would deal damage this turn, it deals double that damage instead. If you lose the flip, the next time it would deal damage this turn, prevent that damage.")
             .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Red], generic: 0 }).id();
+        let blink = match source_history {
+            SourceHistory::CurrentOnly => None,
+            SourceHistory::BlinkedWithStaleReference => Some({
+                let sorcerer = scenario
+                    .add_creature_from_oracle(
+                        P0,
+                        "Vulshok Sorcerer",
+                        1,
+                        1,
+                        "Haste\n{T}: This creature deals 1 damage to any target.",
+                    )
+                    .id();
+                let blink = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true,
+                "Exile target creature you control, then return that card to the battlefield under your control.")
+                .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White], generic: 0 }).id();
+                (sorcerer, blink)
+            }),
+        };
         let mut runner = scenario.build();
+        if let Some((sorcerer, blink)) = blink {
+            let old = crate::types::identifiers::ObjectIncarnationRef::of(
+                source,
+                runner.state().objects[&source].incarnation,
+            );
+            let ability_index = runner.state().objects[&sorcerer]
+                .abilities
+                .iter()
+                .position(|ability| ability.cost.is_some())
+                .expect("Sorcerer's tap ability");
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: sorcerer,
+                    ability_index,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::TargetSelection { .. }
+            ));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(source)),
+                })
+                .unwrap();
+            assert_eq!(runner.state().stack.len(), 1);
+            runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+                ManaType::White,
+                ObjectId(0),
+                false,
+                vec![],
+            ));
+            runner.cast(blink).target_object(source).commit();
+            runner.resolve_top();
+            assert_eq!(runner.state().objects[&blink].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+            // CR 400.7: actual Cloudshift returned a new birth while the
+            // ordinary announced target remains pinned to the departed one.
+            assert_ne!(old.incarnation, runner.state().objects[&source].incarnation);
+            let StackEntryKind::ActivatedAbility { ability, .. } = &runner.state().stack[0].kind
+            else {
+                panic!("the announced Sorcerer ability still waits below Gambit");
+            };
+            assert!(ability.target_incarnations.contains(&old));
+            assert!(runner
+                .state()
+                .zone_changes_this_turn
+                .iter()
+                .filter_map(ZoneChangeRecord::trigger_source_context)
+                .any(|capture| capture.identity.reference == old));
+        }
         runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
             ManaType::Red,
             ObjectId(0),
@@ -59591,39 +59621,68 @@ mod damage_source_canonical_admission_tests {
         (runner, source, gambit)
     }
 
-    fn v1_source_choice_payload(state: &GameState) -> serde_json::Value {
+    fn legacy_source_choice_payload(
+        state: &GameState,
+        payload: SourcePayload,
+    ) -> serde_json::Value {
         // Use the same pending-payload projection as resolution.rs's existing
         // restore_v1_ability_fixture / restore_v1_coin_flip_fixture helpers.
-        let mut value = serde_json::to_value(state).unwrap();
-        for frame in state.resolution_stack.iter() {
-            match frame {
-                ResolutionFrame::AbilityContinuation(frame) => {
-                    assert!(frame.choose_zone_trigger_context.is_none());
-                    value["pending_continuation"] = serde_json::to_value(&frame.pending).unwrap();
+        let mut value = if matches!(payload, SourcePayload::Wire) {
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap()
+        } else {
+            serde_json::to_value(state).unwrap()
+        };
+        if matches!(payload, SourcePayload::V1) {
+            for frame in state.resolution_stack.iter() {
+                match frame {
+                    ResolutionFrame::AbilityContinuation(frame) => {
+                        assert!(frame.choose_zone_trigger_context.is_none());
+                        value["pending_continuation"] =
+                            serde_json::to_value(&frame.pending).unwrap();
+                    }
+                    ResolutionFrame::CoinFlip(frame) => {
+                        value["pending_coin_flip"] = serde_json::to_value(frame).unwrap();
+                        let flip = value["pending_coin_flip"].as_object_mut().unwrap();
+                        // Neither field existed on the base writer's PendingCoinFlip.
+                        flip.remove("return_result_occurrence");
+                        flip.remove("expected_return_result_process");
+                    }
+                    other => panic!("unexpected source-choice fixture frame: {other:?}"),
                 }
-                ResolutionFrame::CoinFlip(frame) => {
-                    value["pending_coin_flip"] = serde_json::to_value(frame).unwrap();
-                    let flip = value["pending_coin_flip"].as_object_mut().unwrap();
-                    // Neither field existed on the base writer's PendingCoinFlip.
-                    flip.remove("return_result_occurrence");
-                    flip.remove("expected_return_result_process");
-                }
-                other => panic!("unexpected source-choice fixture frame: {other:?}"),
             }
         }
         if let WaitingFor::DamageSourceChoice { options, .. } = &state.waiting_for {
             value["waiting_for"]["options"] = serde_json::to_value(
                 options
                     .iter()
+                    // BASE's scalar writer offered only its live domain,
+                    // not the current writer's additional referred births.
+                    .filter(|option| {
+                        let reference = option.identity.reference;
+                        let object = &state.objects[&reference.object_id];
+                        reference.is_current(state)
+                            && (object.zone == Zone::Battlefield
+                                || (object.zone == Zone::Command && !object.face_down)
+                                || state
+                                    .stack
+                                    .iter()
+                                    .chain(state.resolving_stack_entry.iter())
+                                    .any(|entry| {
+                                        entry.id == object.id
+                                            && matches!(entry.kind, StackEntryKind::Spell { .. })
+                                    }))
+                    })
                     .map(|option| option.identity.reference.object_id)
                     .collect::<Vec<_>>(),
             )
             .unwrap();
         }
         let object = value.as_object_mut().unwrap();
-        object.remove("resolution_stack");
+        if matches!(payload, SourcePayload::V1) {
+            object.remove("resolution_stack");
+            object.insert("resolution_state_version".into(), serde_json::json!(1));
+        }
         object.remove("resolved_rules_journal");
-        object.insert("resolution_state_version".into(), serde_json::json!(1));
         // Base 337d4d7 has scalar prompt options and no owned source captures,
         // chooser tags, or resolved coin-branch target bodies. Erase them from
         // every retained copy, including the resolving entry, before decoding.
@@ -59658,65 +59717,271 @@ mod damage_source_canonical_admission_tests {
 
     #[test]
     fn v1_scalar_source_prompt_restores_its_continuation_and_completes_public_choice() {
-        let (mut runner, source, gambit) = paid_gambit_source_prompt(false);
-        let expected = crate::types::identifiers::ObjectIncarnationRef::of(
-            source,
-            runner.state().objects[&source].incarnation,
-        );
-        let legacy = v1_source_choice_payload(runner.state());
-        assert!(legacy.get("pending_continuation").is_some());
-        assert!(legacy["waiting_for"]["options"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(serde_json::Value::is_u64));
-        *runner.state_mut() = serde_json::from_value::<ResolutionStateWire>(legacy)
-            .expect("a genuine unanswered scalar prompt has recoverable live options")
-            .into_game_state();
-        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
-            panic!("the restored continuation owns its source prompt");
-        };
-        assert!(options
-            .iter()
-            .any(|option| option.identity.reference == expected));
-        runner
-            .act(GameAction::ChooseDamageSource { source: expected })
+        for persisted in [false, true] {
+            for v1 in [false, true] {
+                for from_file in [false, true] {
+                    let (mut runner, source, gambit) =
+                        paid_gambit_source_prompt(false, SourceHistory::BlinkedWithStaleReference);
+                    let expected = crate::types::identifiers::ObjectIncarnationRef::of(
+                        source,
+                        runner.state().objects[&source].incarnation,
+                    );
+                    let WaitingFor::DamageSourceChoice { options, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!("the actual current prompt offers the complete referred domain");
+                    };
+                    let births: Vec<_> = options
+                        .iter()
+                        .filter(|option| option.identity.reference.object_id == source)
+                        .map(|option| option.identity.reference)
+                        .collect();
+                    assert_eq!(
+                        births.len(),
+                        2,
+                        "both the stale announced target and live birth are offered today"
+                    );
+                    assert!(births.contains(&expected));
+                    let legacy = legacy_source_choice_payload(
+                        runner.state(),
+                        if v1 {
+                            SourcePayload::V1
+                        } else if persisted {
+                            SourcePayload::Wire
+                        } else {
+                            SourcePayload::Raw
+                        },
+                    );
+                    if persisted && !v1 {
+                        // The actual canonical writer already used version 10
+                        // at BASE, so that version cannot date the source domain.
+                        assert_eq!(legacy["resolution_state_version"], 10);
+                    }
+                    assert_eq!(legacy.get("pending_continuation").is_some(), v1);
+                    assert_eq!(
+                        legacy["waiting_for"]["options"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter(|option| option.as_u64() == Some(source.0))
+                            .count(),
+                        1,
+                        "the historical live-only writer offered this id exactly once"
+                    );
+                    assert!(legacy["waiting_for"]["options"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(serde_json::Value::is_u64));
+                    let saved = serde_json::to_string(&legacy).unwrap();
+                    *runner.state_mut() = if from_file {
+                        let file = tempfile::NamedTempFile::new().unwrap();
+                        std::fs::write(file.path(), &saved).unwrap();
+                        let file = std::fs::File::open(file.path()).unwrap();
+                        if persisted {
+                            serde_json::from_reader::<_, PersistedGameState>(file)
+                                .unwrap()
+                                .into_game_state_unchecked()
+                        } else if v1 {
+                            serde_json::from_reader::<_, ResolutionStateWire>(file)
+                                .unwrap()
+                                .into_game_state()
+                        } else {
+                            serde_json::from_reader::<_, GameState>(file).unwrap()
+                        }
+                    } else if persisted {
+                        serde_json::from_str::<PersistedGameState>(&saved)
+                            .unwrap()
+                            .into_game_state_unchecked()
+                    } else if v1 {
+                        serde_json::from_str::<ResolutionStateWire>(&saved)
+                            .expect("the unanswered scalar prompt retains live identity")
+                            .into_game_state()
+                    } else {
+                        serde_json::from_str::<GameState>(&saved).expect(
+                            "the raw scalar prompt has the same historical live-only contract",
+                        )
+                    };
+                    assert_eq!(serde_json::to_string(&legacy).unwrap(), saved);
+                    let WaitingFor::DamageSourceChoice { options, .. } =
+                        &runner.state().waiting_for
+                    else {
+                        panic!("the restored continuation owns its source prompt");
+                    };
+                    assert_eq!(
+                        options
+                            .iter()
+                            .filter(|option| option.identity.reference.object_id == source)
+                            .map(|option| option.identity.reference)
+                            .collect::<Vec<_>>(),
+                        vec![expected]
+                    );
+                    runner
+                        .act(GameAction::ChooseDamageSource { source: expected })
+                        .unwrap();
+                    runner.advance_until_stack_empty();
+                    let installed: Vec<_> = runner
+                        .state()
+                        .pending_damage_replacements
+                        .iter()
+                        .chain(
+                            runner
+                                .state()
+                                .objects
+                                .values()
+                                .flat_map(|object| object.replacement_definitions.iter_all()),
+                        )
+                        .filter_map(|definition| definition.selected_damage_source.as_ref())
+                        .collect();
+                    assert_eq!(installed.len(), 1);
+                    assert_eq!(installed[0].identity.reference, expected);
+                    assert_eq!(runner.state().objects[&gambit].zone, Zone::Graveyard);
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(runner.state().stack.is_empty());
+                    assert!(runner.state().resolution_stack.is_empty());
+                    assert!(runner.state().owed_spell_final_part().is_none());
+                    let current = serde_json::to_value(ResolutionStateWire::from_game_state(
+                        runner.state().clone(),
+                    ))
+                    .unwrap();
+                    assert!(current.get("pending_continuation").is_none());
+                    assert!(current.get("pending_coin_flip").is_none());
+                    assert!(current.get("resolution_frames").is_some());
+                    // CR 608.2b: the old announced target is illegal after Cloudshift;
+                    // resolving that pending activation never damages the returned birth.
+                    assert_eq!(runner.state().objects[&source].damage_marked, 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn current_source_prompt_restores_owned_scalar_domain_and_refuses_missing_options() {
+        for wire in [false, true] {
+            let (mut runner, source, gambit) =
+                paid_gambit_source_prompt(false, SourceHistory::BlinkedWithStaleReference);
+            let live = crate::types::identifiers::ObjectIncarnationRef::of(
+                source,
+                runner.state().objects[&source].incarnation,
+            );
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("the real prompt must include both births");
+            };
+            let stale = options
+                .iter()
+                .map(|option| option.identity.reference)
+                .find(|reference| reference.object_id == source && *reference != live)
+                .expect("the announced stale target is an exact current-writer option");
+            let current = if wire {
+                serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .unwrap()
+            } else {
+                serde_json::to_value(runner.state()).unwrap()
+            };
+            let mut scalar = current.clone();
+            scalar["waiting_for"]["options"] = serde_json::to_value(
+                options
+                    .iter()
+                    .map(|option| option.identity.reference.object_id)
+                    .collect::<Vec<_>>(),
+            )
             .unwrap();
-        runner.advance_until_stack_empty();
-        let installed: Vec<_> = runner
-            .state()
-            .pending_damage_replacements
-            .iter()
-            .chain(
+            let mut missing_options = scalar.clone();
+            missing_options["waiting_for"]["options"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|id| id.as_u64() != Some(source.0));
+            assert!(
+                !missing_options["waiting_for"]["options"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "the inconsistent projection still reaches nonempty scalar admission"
+            );
+            let saved = serde_json::to_vec(&missing_options).unwrap();
+            let untouched = serde_json::to_value(runner.state()).unwrap();
+            let error = if wire {
+                serde_json::from_value::<ResolutionStateWire>(missing_options.clone())
+                    .unwrap_err()
+                    .to_string()
+            } else {
+                serde_json::from_value::<GameState>(missing_options.clone())
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(
+                error.contains("options disagree with retained exact candidate custody"),
+                "{error}"
+            );
+            assert_eq!(serde_json::to_vec(&missing_options).unwrap(), saved);
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), untouched);
+            // The scalar projection retains the entire ordered exact domain,
+            // including two births of the same id. No choice was made yet.
+            // CR 609.7a permits the referred departed birth to be selected.
+            *runner.state_mut() = if wire {
+                serde_json::from_value::<ResolutionStateWire>(scalar)
+                    .unwrap()
+                    .into_game_state()
+            } else {
+                serde_json::from_value::<GameState>(scalar).unwrap()
+            };
+            assert_eq!(
                 runner
                     .state()
-                    .objects
-                    .values()
-                    .flat_map(|object| object.replacement_definitions.iter_all()),
-            )
-            .filter_map(|definition| definition.selected_damage_source.as_ref())
-            .collect();
-        assert_eq!(installed.len(), 1);
-        assert_eq!(installed[0].identity.reference, expected);
-        assert_eq!(runner.state().objects[&gambit].zone, Zone::Graveyard);
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
-        assert!(runner.state().stack.is_empty());
-        assert!(runner.state().resolution_stack.is_empty());
-        assert!(runner.state().owed_spell_final_part().is_none());
-        let current =
-            serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .active_ability_continuation()
+                    .unwrap()
+                    .damage_source_candidates,
+                serde_json::from_value::<Vec<TriggerSourceContext>>(
+                    current[if wire {
+                        "resolution_frames"
+                    } else {
+                        "resolution_stack"
+                    }]["frames"]
+                        .as_array()
+                        .unwrap()
+                        .last()
+                        .unwrap()["data"]["pending"]["damage_source_candidates"]
+                        .clone()
+                )
+                .unwrap()
+            );
+            runner
+                .act(GameAction::ChooseDamageSource { source: stale })
                 .unwrap();
-        assert!(current.get("pending_continuation").is_none());
-        assert!(current.get("pending_coin_flip").is_none());
-        assert!(current.get("resolution_frames").is_some());
+            runner.advance_until_stack_empty();
+            assert!(runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .chain(
+                    runner
+                        .state()
+                        .objects
+                        .values()
+                        .flat_map(|object| object.replacement_definitions.iter_all())
+                )
+                .any(|definition| definition
+                    .selected_damage_source
+                    .as_ref()
+                    .is_some_and(|capture| capture.identity.reference == stale)));
+            assert_eq!(runner.state().objects[&gambit].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&source].damage_marked, 0);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().owed_spell_final_part().is_none());
+        }
     }
 
     #[test]
     fn v1_parked_selected_flip_without_historical_identity_refuses_and_preserves_input() {
-        let (mut runner, source, _) = paid_gambit_source_prompt(true);
+        let (mut runner, source, _) = paid_gambit_source_prompt(true, SourceHistory::CurrentOnly);
         let expected = crate::types::identifiers::ObjectIncarnationRef::of(
             source,
             runner.state().objects[&source].incarnation,
@@ -59728,7 +59993,7 @@ mod damage_source_canonical_admission_tests {
             runner.state().waiting_for,
             WaitingFor::CoinFlipKeepChoice { .. }
         ));
-        let legacy = v1_source_choice_payload(runner.state());
+        let legacy = legacy_source_choice_payload(runner.state(), SourcePayload::V1);
         assert!(legacy.get("pending_coin_flip").is_some());
         assert!(legacy["pending_coin_flip"]["branch_context"]
             .get("damage_source_choice")
