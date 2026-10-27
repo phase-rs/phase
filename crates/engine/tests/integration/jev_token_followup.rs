@@ -21,6 +21,275 @@ const JINNIE: &str = "If you would create one or more tokens, you may instead cr
 const DIVINE: &str = "If one or more creature tokens would be created under your control, that many 4/4 white Angel creature tokens with flying and vigilance are created instead.";
 const STIFLE: &str =
     "Counter target activated or triggered ability. (Mana abilities can't be targeted.)";
+
+fn delayed_scope_token(name: &str, count: i32) -> engine::types::ability::Effect {
+    // Explicitly synthetic typed composition: isolate resolution ownership,
+    // rather than claiming this combined instruction is a printed card.
+    serde_json::from_value(serde_json::json!({
+        "type": "Token", "name": name,
+        "power": {"type":"Fixed", "value":2},
+        "toughness": {"type":"Fixed", "value":3},
+        "types": ["Creature", "Soldier"], "colors": [], "keywords": [],
+        "count": {"type":"Fixed", "value":count},
+        "owner": {"type":"Controller"}
+    }))
+    .unwrap()
+}
+
+#[test]
+fn delayed_local_and_conditional_creation_keep_result_ownership_across_restore() {
+    use engine::types::ability::{
+        AbilityCondition, AbilityDefinition, AbilityKind, Comparator, DelayedTriggerCondition,
+        Effect, PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
+    };
+    for restore in [false, true] {
+        for local_kind in 0..5 {
+            let sacrifice = AbilityDefinition::new(
+                AbilityKind::Spell,
+                serde_json::from_value::<Effect>(serde_json::json!({
+                    "type":"Sacrifice", "target":{"type":"LastCreated"},
+                    "count":{"type":"Fixed", "value":1}
+                }))
+                .unwrap(),
+            );
+            let producer = match local_kind {
+                0 | 3 | 4 => delayed_scope_token("Local B", 1),
+                1 => serde_json::from_value::<Effect>(serde_json::json!({
+                    "type":"CopyTokenOf", "target":{"type":"LastCreated"},
+                    "owner":{"type":"Controller"},
+                    "count":{"type":"Fixed", "value":1}
+                }))
+                .unwrap(),
+                2 => delayed_scope_token("Local B", 0),
+                _ => unreachable!(),
+            };
+            let mut body =
+                AbilityDefinition::new(AbilityKind::Spell, producer).sub_ability(sacrifice.clone());
+            if local_kind >= 3 {
+                // The false alternative never executes the local creator, so
+                // its cleanup still imports A. The true branch creates B and
+                // its own continuation must consume B instead.
+                body = body
+                    .condition(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 20 },
+                    })
+                    .with_else_ability(sacrifice);
+            }
+            let delayed = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateDelayedTrigger {
+                    condition: DelayedTriggerCondition::AtNextPhase {
+                        phase: Phase::EndStep,
+                    },
+                    effect: Box::new(body),
+                    uses_tracked_set: false,
+                },
+            );
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_life(P0, if local_kind == 4 { 19 } else { 20 });
+            scenario.with_library_top(P0, &["Plains", "Plains"]);
+            scenario.with_library_top(P1, &["Plains", "Plains"]);
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic delayed local creation", false)
+                .with_ability_definition(
+                    AbilityDefinition::new(AbilityKind::Spell, delayed_scope_token("Outer A", 1))
+                        .sub_ability(delayed),
+                )
+                .id();
+            let unrelated = scenario
+                .add_spell_to_hand(P0, "Synthetic later unrelated creation", false)
+                .with_ability(delayed_scope_token("Unrelated C", 1))
+                .id();
+            let mut runner = scenario.build();
+            let cast = runner.cast(spell).resolve();
+            let outer = cast
+                .state()
+                .objects
+                .values()
+                .find(|object| object.name == "Outer A" && object.is_token)
+                .unwrap()
+                .id;
+            let installed = cast
+                .state()
+                .delayed_triggers
+                .iter()
+                .find(|trigger| trigger.source_id == spell)
+                .unwrap();
+            assert!(matches!(
+                installed.ability.sub_ability.as_deref().unwrap().effect,
+                Effect::Sacrifice {
+                    target: TargetFilter::LastCreated,
+                    ..
+                }
+            ));
+            if local_kind == 1 {
+                // The copy's INPUT imports A; its sacrifice's INPUT is local B.
+                assert!(matches!(installed.ability.effect,
+                    Effect::CopyTokenOf { target: TargetFilter::SpecificObject { id }, .. }
+                    if id == outer));
+            }
+            if local_kind >= 3 {
+                assert!(matches!(
+                    installed.ability.else_ability.as_deref().unwrap().effect,
+                    Effect::Sacrifice {
+                        target: TargetFilter::SpecificObject { id },
+                        ..
+                    } if id == outer
+                ));
+            }
+            creation_priority_to_caster(&mut runner);
+            runner.cast(unrelated).resolve();
+            if restore {
+                runner = GameRunner::from_state(
+                    serde_json::from_value::<GameState>(
+                        serde_json::to_value(runner.state()).unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
+            let mut reached = false;
+            for _ in 0..160 {
+                if runner
+                    .state()
+                    .stack
+                    .iter()
+                    .any(|entry| entry.source_id == spell)
+                {
+                    reached = true;
+                    break;
+                }
+                pass_creation_window(&mut runner);
+            }
+            assert!(
+                reached,
+                "delayed body must reach its public stack resolution"
+            );
+            let mut resolution_events = Vec::new();
+            for _ in 0..40 {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                resolution_events.extend(pass_creation_window(&mut runner));
+            }
+            assert!(runner.state().stack.is_empty());
+            if local_kind == 4 {
+                assert!(runner
+                    .state()
+                    .objects
+                    .get(&outer)
+                    .is_none_or(|object| object.zone != Zone::Battlefield));
+                assert!(
+                    resolution_events.iter().any(|event| matches!(event,
+                    GameEvent::PermanentSacrificed { object_id, .. } if *object_id == outer)),
+                    "the false branch must execute the imported-A cleanup"
+                );
+            } else {
+                assert_eq!(runner.state().objects[&outer].zone, Zone::Battlefield);
+            }
+            let unrelated = runner
+                .state()
+                .objects
+                .values()
+                .find(|object| object.name == "Unrelated C" && object.is_token)
+                .unwrap();
+            assert_eq!(unrelated.zone, Zone::Battlefield);
+            let expected_survivors = if local_kind == 1 {
+                "Outer A"
+            } else {
+                "Local B"
+            };
+            assert_eq!(
+                runner
+                    .state()
+                    .objects
+                    .values()
+                    .filter(|object| {
+                        object.is_token
+                            && object.name == expected_survivors
+                            && object.zone == Zone::Battlefield
+                    })
+                    .count(),
+                usize::from(local_kind == 1)
+            );
+            let local_births: Vec<_> = resolution_events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                local_births.len(),
+                usize::from(!matches!(local_kind, 2 | 4))
+            );
+            for local in local_births {
+                assert_ne!(local, outer);
+                assert!(
+                    resolution_events.iter().any(|event| matches!(event,
+                    GameEvent::PermanentSacrificed { object_id, .. } if *object_id == local)),
+                    "the local producer must run and its own product must be sacrificed"
+                );
+            }
+            assert!(runner
+                .state()
+                .delayed_triggers
+                .iter()
+                .all(|trigger| trigger.source_id != spell));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn broken_visage_imported_cleanup_stays_frozen_across_later_creation_and_restore() {
+    for restore in [false, true] {
+        let mut b = board(
+            FULL_BROKEN,
+            (7, 8),
+            false,
+            false,
+            "Create a 2/2 green Cat creature token.",
+        );
+        let births = full_broken_result(&mut b, 1);
+        creation_priority_to_caster(&mut b.runner);
+        let response = b.runner.cast(b.response).resolve();
+        let unrelated: Vec<_> = response
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unrelated.len(), 1);
+        if restore {
+            b.runner = GameRunner::from_state(
+                serde_json::from_value::<GameState>(
+                    serde_json::to_value(b.runner.state()).unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+        reach_cleanup_stack(&mut b.runner, b.spell);
+        b.runner.advance_until_stack_empty();
+        assert_original_births_left(&b.runner, &births);
+        assert_eq!(
+            b.runner.state().objects[&unrelated[0]].zone,
+            Zone::Battlefield
+        );
+        assert_eq!(b.runner.state().objects[&b.c].zone, Zone::Battlefield);
+    }
+}
 // Explicitly synthetic isolation: exactly Broken Visage's first four sentences.
 pub(super) const ORDINARY_CONSTRUCTION: &str = "Destroy target nonartifact attacking creature. It can't be regenerated. Create a black Spirit creature token. Its power is equal to that creature's power and its toughness is equal to that creature's toughness.";
 

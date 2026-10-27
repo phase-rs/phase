@@ -5118,17 +5118,18 @@ fn create_token_applier(
                 spec = Box::new(substitute_spec);
                 if let Some(seed) = instructions {
                     spec.tapped = seed.tapped.resolve(false);
-                    spec.enters_attacking = seed.enters_attacking;
+                    spec.enters_attacking = seed.attack_destination.is_some();
                 }
                 copy = None;
             }
         }
 
-        let seed =
-            instructions.unwrap_or(crate::types::proposed_event::TokenCreationInstructions {
-                tapped: EtbTapState::from_seeded_tapped(spec.tapped),
-                enters_attacking: spec.enters_attacking,
-            });
+        let seed = instructions.unwrap_or(
+            crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                EtbTapState::from_seeded_tapped(spec.tapped),
+                spec.enters_attacking,
+            ),
+        );
         let mut remaining_specs = None;
         if let Some(mut specs) = ensure_specs {
             // CR 111.10 + CR 614.6: “one of each” supplies every complete
@@ -5149,7 +5150,7 @@ fn create_token_applier(
                 selected.source_id = rid.source;
                 selected.controller = source_controller;
                 selected.tapped = seed.tapped.resolve(false);
-                selected.enters_attacking = seed.enters_attacking;
+                selected.enters_attacking = seed.attack_destination.is_some();
                 spec = Box::new(selected);
                 copy = None;
                 remaining_specs = Some(specs);
@@ -5186,10 +5187,12 @@ fn create_token_applier(
                 &applied,
                 TokenBatch {
                     creation_frame,
-                    instructions: Some(crate::types::proposed_event::TokenCreationInstructions {
-                        tapped: EtbTapState::from_seeded_tapped(extra.tapped),
-                        enters_attacking: extra.enters_attacking,
-                    }),
+                    instructions: Some(
+                        crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                            EtbTapState::from_seeded_tapped(extra.tapped),
+                            extra.enters_attacking,
+                        ),
+                    ),
                     owner,
                     spec: extra,
                     copy: None,
@@ -5230,10 +5233,10 @@ fn create_token_applier(
                     TokenBatch {
                         creation_frame,
                         instructions: Some(
-                            crate::types::proposed_event::TokenCreationInstructions {
-                                tapped: EtbTapState::from_seeded_tapped(extra.tapped),
-                                enters_attacking: extra.enters_attacking,
-                            },
+                            crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                                EtbTapState::from_seeded_tapped(extra.tapped),
+                                extra.enters_attacking,
+                            ),
                         ),
                         owner,
                         spec: Box::new(extra),

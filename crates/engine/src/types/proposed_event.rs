@@ -7,8 +7,8 @@ use crate::game::game_object::{AttachTarget, DisplayIdentity};
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
-    StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, EntryAttackDestination,
+    FaceDownProfile, StaticDefinition, TargetRef,
 };
 use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
@@ -23,10 +23,51 @@ pub use super::zones::{ChainReferentIntent, EtbTapState};
 
 /// Entry instructions fixed before replacement evaluation, separate from a token's body
 /// and from a later override on one particular entry event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct TokenCreationInstructions {
     pub tapped: EtbTapState,
-    pub enters_attacking: bool,
+    pub attack_destination: Option<EntryAttackDestination>,
+}
+
+impl TokenCreationInstructions {
+    /// Legacy token definitions express unrestricted attacking entry as a flag.
+    pub(crate) fn from_legacy(tapped: EtbTapState, enters_attacking: bool) -> Self {
+        Self {
+            tapped,
+            attack_destination: enters_attacking.then_some(EntryAttackDestination::AnyDefender),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TokenCreationInstructions {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Current {
+            tapped: EtbTapState,
+            #[serde(deserialize_with = "Option::<EntryAttackDestination>::deserialize")]
+            attack_destination: Option<EntryAttackDestination>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Legacy {
+            tapped: EtbTapState,
+            enters_attacking: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Current(Current),
+            Legacy(Legacy),
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Current(value) => Self {
+                tapped: value.tapped,
+                attack_destination: value.attack_destination,
+            },
+            Wire::Legacy(value) => Self::from_legacy(value.tapped, value.enters_attacking),
+        })
+    }
 }
 
 /// An accepted substitution's complete authority over its selected parent event.
@@ -1658,6 +1699,44 @@ impl ProposedEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn token_creation_instructions_preserve_typed_domains_and_exact_legacy_flags() {
+        use crate::game::combat::AttackTarget;
+        for destination in [
+            None,
+            Some(EntryAttackDestination::AnyDefender),
+            Some(EntryAttackDestination::PlayerOrPlaneswalker),
+            Some(EntryAttackDestination::Exact {
+                target: AttackTarget::Player(PlayerId(1)),
+            }),
+        ] {
+            let instructions = TokenCreationInstructions {
+                tapped: EtbTapState::Untapped,
+                attack_destination: destination,
+            };
+            let json = serde_json::to_value(instructions).unwrap();
+            assert!(json.get("enters_attacking").is_none());
+            assert_eq!(
+                serde_json::from_value::<TokenCreationInstructions>(json).unwrap(),
+                instructions
+            );
+        }
+        for flag in [false, true] {
+            let legacy = serde_json::json!({ "tapped": "Untapped", "enters_attacking": flag });
+            assert_eq!(
+                serde_json::from_value::<TokenCreationInstructions>(legacy).unwrap(),
+                TokenCreationInstructions::from_legacy(EtbTapState::Untapped, flag)
+            );
+        }
+        for bad in [
+            serde_json::json!({ "tapped": "Untapped" }),
+            serde_json::json!({ "tapped": "Untapped", "enters_attacking": true, "attack_destination": null }),
+            serde_json::json!({ "tapped": "Untapped", "attack_destination": {"type": "Exact"} }),
+        ] {
+            assert!(serde_json::from_value::<TokenCreationInstructions>(bad).is_err());
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -2006,18 +2085,18 @@ mod tests {
         } = &mut event
         {
             *creation_frame = Some(crate::types::identifiers::TokenCreationFrameId(11));
-            *instructions = Some(TokenCreationInstructions {
-                tapped: EtbTapState::Unspecified,
-                enters_attacking: true,
-            });
+            *instructions = Some(TokenCreationInstructions::from_legacy(
+                EtbTapState::Unspecified,
+                true,
+            ));
             for (index, batch) in appended.iter_mut().enumerate() {
                 batch.creation_frame = Some(crate::types::identifiers::TokenCreationFrameId(
                     20 + index as u64,
                 ));
-                batch.instructions = Some(TokenCreationInstructions {
-                    tapped: EtbTapState::Unspecified,
-                    enters_attacking: index == 0,
-                });
+                batch.instructions = Some(TokenCreationInstructions::from_legacy(
+                    EtbTapState::Unspecified,
+                    index == 0,
+                ));
             }
         }
         let views = event.token_batch_views().expect("compound event has views");

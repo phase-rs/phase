@@ -652,10 +652,10 @@ pub fn apply_debug_action(
                 attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
             };
             let body = Some(Box::new(spec.characteristics.clone()));
-            let instructions = crate::types::proposed_event::TokenCreationInstructions {
-                tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-            };
+            let instructions = crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                crate::types::zones::EtbTapState::Unspecified,
+                false,
+            );
             let work = std::collections::VecDeque::from([
                 crate::types::game_state::TokenCreationWork::Proposed(
                     crate::types::game_state::TokenCreationBatch {

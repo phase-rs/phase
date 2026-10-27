@@ -21688,7 +21688,7 @@ pub enum PermanentEntryMode {
 }
 
 /// CR 508.4a: Domain from which an attacking-entry destination is selected.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum EntryAttackDestination {
     /// Any defending player, planeswalker they control, or battle they protect.

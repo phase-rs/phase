@@ -2163,6 +2163,38 @@ pub(crate) type CompleteContinuousMember = (
     Option<crate::types::ability::Duration>,
 );
 
+/// Grammar tokens only: `If` additionally limits a suffix to its explicit
+/// member, while `AsLongAs` and `Unless` retain their existing gate ownership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContinuousConditionSeparator {
+    If,
+    AsLongAs,
+    Unless,
+}
+
+impl ContinuousConditionSeparator {
+    /// Preserve the incumbent marker-class priority when several classes occur.
+    pub(super) const PRIORITY: [Self; 3] = [Self::If, Self::AsLongAs, Self::Unless];
+
+    pub(super) fn parse(input: &str) -> OracleResult<'_, Self> {
+        alt((
+            value(Self::If, tag(" if ")),
+            value(Self::AsLongAs, tag(" as long as ")),
+            value(Self::Unless, tag(" unless ")),
+        ))
+        .parse(input)
+    }
+
+    pub(super) fn apply(self, condition: StaticCondition) -> StaticCondition {
+        match self {
+            Self::If | Self::AsLongAs => condition,
+            Self::Unless => StaticCondition::Not {
+                condition: Box::new(condition),
+            },
+        }
+    }
+}
+
 pub(crate) fn parse_complete_continuous_members(
     text: &str,
 ) -> Option<Vec<CompleteContinuousMember>> {
@@ -2202,19 +2234,23 @@ fn complete_continuous_members(
     // A complete leaf owns its own condition. If the prefix or suffix contains
     // another member this transaction fails and the connector recursion below
     // tries the next outside-quote boundary without publishing a prefix.
-    for (marker, negative) in [(" if ", false), (" as long as ", false), (" unless ", true)] {
-        if let Some((body, gate)) = tp.split_around_outside_quotes(marker) {
-            if let Some((members, verb)) =
-                complete_continuous_members(body.original, where_x, inherited_verb)
-            {
+    for marker in ContinuousConditionSeparator::PRIORITY {
+        if let Some(result) = tp.scan_around_outside_quotes(
+            ContinuousConditionSeparator::parse,
+            |body, separator, gate| {
+                if separator != marker {
+                    return None;
+                }
+                let (members, verb) =
+                    complete_continuous_members(body.original, where_x, inherited_verb)?;
                 // A condition belongs to one complete, previously ungated leaf.
                 // Its own duration must survive the same transaction as its mods.
                 let [(mods, None, None, duration)] = members.as_slice() else {
-                    continue;
+                    return None;
                 };
                 // A suffix "if" on a later explicit member cannot gate the
                 // preceding members. Bare keyword lists stay atomic.
-                if marker == " if "
+                if separator == ContinuousConditionSeparator::If
                     && nom_primitives::scan_at_word_boundaries(body.lower, |candidate| {
                         let (rest, _) = alt((
                             tag::<_, _, OracleError<'_>>("gets "),
@@ -2236,26 +2272,18 @@ fn complete_continuous_members(
                     })
                     .is_some()
                 {
-                    continue;
+                    return None;
                 }
                 let gate = gate.trim_start().trim_end().trim_end_matches('.');
-                let Some(condition) = parse_static_condition(gate.original) else {
-                    continue;
-                };
-                let condition = if negative {
-                    StaticCondition::Not {
-                        condition: Box::new(condition),
-                    }
-                } else {
-                    condition
-                };
-                if let Some((condition, recipient)) = partition_continuous_member_gate(condition) {
-                    return Some((
-                        vec![(mods.clone(), condition, recipient, duration.clone())],
-                        verb,
-                    ));
-                }
-            }
+                let condition = separator.apply(parse_static_condition(gate.original)?);
+                let (condition, recipient) = partition_continuous_member_gate(condition)?;
+                Some((
+                    vec![(mods.clone(), condition, recipient, duration.clone())],
+                    verb,
+                ))
+            },
+        ) {
+            return Some(result);
         }
     }
     tp.scan_around_outside_quotes(
@@ -3521,6 +3549,99 @@ pub(crate) fn with_protection_does_not_remove(
 #[cfg(test)]
 mod quote_authority_tests {
     use super::*;
+
+    #[test]
+    fn complete_members_skip_inner_condition_markers_and_keep_outer_duration() {
+        // Synthetic grammar compositions, not purported printed card text.
+        // Each quoted ability owns the first marker; the later marker gates
+        // the complete grant, including its independent duration.
+        for (marker, quoted, separator) in [
+            (
+                "if",
+                "This creature has flying if you control a Swamp.",
+                ContinuousConditionSeparator::If,
+            ),
+            (
+                "as long as",
+                "This creature has flying as long as it's attacking.",
+                ContinuousConditionSeparator::AsLongAs,
+            ),
+            (
+                "unless",
+                "This creature can't attack unless you control a Swamp.",
+                ContinuousConditionSeparator::Unless,
+            ),
+        ] {
+            let grant = format!("has \"{quoted}\" until end of turn");
+            let ungated = parse_complete_continuous_members(&grant)
+                .expect("the complete quoted grant reaches the ordinary member owner");
+            assert_eq!(ungated.len(), 1);
+            assert!(!ungated[0].0.is_empty());
+            assert!(ungated[0].1.is_none());
+            let gated = parse_complete_continuous_members(&format!(
+                "{grant} {marker} you control an Island"
+            ))
+            .expect("a quoted first occurrence cannot hide the complete outer gate");
+            assert_eq!(gated.len(), 1);
+            assert_eq!(gated[0].0, ungated[0].0);
+            assert_eq!(
+                gated[0].1,
+                Some(separator.apply(parse_static_condition("you control an Island").unwrap()))
+            );
+            assert!(gated[0].2.is_none());
+            assert_eq!(
+                gated[0].3,
+                Some(crate::types::ability::Duration::UntilEndOfTurn)
+            );
+        }
+    }
+
+    #[test]
+    fn complete_member_condition_scan_refuses_unowned_full_tails() {
+        let quoted = "This creature has flying if you control a Swamp.";
+        let complete = format!("has \"{quoted}\" if you control an Island");
+        assert!(parse_complete_continuous_members(&complete).is_some());
+        for incomplete in [
+            format!("{complete} and unsupported tail"),
+            format!("has \"{quoted}\" if unsupported tail"),
+            "has \"This creature has flying if you control a Swamp if you control an Island"
+                .to_owned(),
+        ] {
+            assert!(
+                parse_complete_continuous_members(&incomplete).is_none(),
+                "no complete prefix may publish from {incomplete:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn complete_member_condition_scan_preserves_explicit_member_ownership() {
+        // The quoted first `if` must not obscure the later member's own gate,
+        // or cause that gate or duration to attach to the preceding pump.
+        let members = parse_complete_continuous_members(
+            "gets +1/+1 and has \"This creature has flying if you control a Swamp.\" until end of turn if you control an Island",
+        )
+        .expect("both complete members retain their separate ownership");
+        assert_eq!(members.len(), 2);
+        assert!(matches!(
+            members[0].0.as_slice(),
+            [
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 }
+            ]
+        ));
+        assert!(members[0].1.is_none());
+        assert!(members[0].3.is_none());
+        assert!(!members[1].0.is_empty());
+        assert_eq!(
+            members[1].1,
+            parse_static_condition("you control an Island")
+        );
+        assert_eq!(
+            members[1].3,
+            Some(crate::types::ability::Duration::UntilEndOfTurn)
+        );
+    }
 
     #[test]
     fn complete_sequence_retries_after_a_failed_right_transaction() {

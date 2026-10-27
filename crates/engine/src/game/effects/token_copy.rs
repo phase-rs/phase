@@ -523,10 +523,10 @@ pub(crate) fn copy_batches_to_work(
         .into_iter()
         .map(|batch| {
             let spec = super::token::copy_probe_spec_for(&batch.copy, &state.all_creature_types);
-            let instructions = TokenCreationInstructions {
-                tapped: EtbTapState::from_seeded_tapped(batch.copy.tapped),
-                enters_attacking: batch.copy.enters_attacking,
-            };
+            let instructions = TokenCreationInstructions::from_legacy(
+                EtbTapState::from_seeded_tapped(batch.copy.tapped),
+                batch.copy.enters_attacking,
+            );
             TokenCreationWork::Proposed(TokenCreationBatch {
                 appended: Vec::new(),
                 owner: batch.owner,
@@ -595,7 +595,7 @@ pub(crate) fn install_creation(
             batch.instructions = parent.instructions;
             batch.enter_tapped = parent.enter_tapped;
             batch.spec.tapped = parent.instructions.tapped.resolve(false);
-            batch.spec.enters_attacking = parent.instructions.enters_attacking;
+            batch.spec.enters_attacking = parent.instructions.attack_destination.is_some();
             if let Some(copy) = batch.copy.as_mut() {
                 copy.tapped = batch.spec.tapped;
                 copy.enters_attacking = batch.spec.enters_attacking;
@@ -1316,30 +1316,6 @@ pub(crate) fn finalize_copied_token(
     resolve_predefined_token_display(state, copy_source_id, token_id);
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn apply_copy_token_after_replacement(
-    state: &mut GameState,
-    creation_frame: Option<TokenCreationFrameId>,
-    token_owner: crate::types::player::PlayerId,
-    copy: CopyTokenSpec,
-    enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
-    final_count: u32,
-    events: &mut Vec<GameEvent>,
-) -> CopyTokenApplyStatus {
-    apply_copy_token_after_replacement_with_created_ids(
-        state,
-        creation_frame,
-        token_owner,
-        copy,
-        enter_tapped,
-        enter_with_counters,
-        final_count,
-        Vec::new(),
-        events,
-    )
-}
-
 /// CR 306.5b + CR 707.2 + CR 707.9b: copy exceptions can replace starting
 /// loyalty; intrinsic self-entry counters and explicit entry counters all
 /// belong to the materializer's actual counter work.
@@ -1372,6 +1348,7 @@ pub(crate) fn copy_token_uses_liminal_entry(
 pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     state: &mut GameState,
     creation_frame: Option<TokenCreationFrameId>,
+    instructions: Option<TokenCreationInstructions>,
     token_owner: crate::types::player::PlayerId,
     copy: CopyTokenSpec,
     enter_tapped: EtbTapState,
@@ -1477,10 +1454,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 token_id,
                 LiminalEntry {
                     creation_frame,
-                    instructions: creation_frame.map(|_| TokenCreationInstructions {
-                        tapped: EtbTapState::from_seeded_tapped(tapped),
-                        enters_attacking,
-                    }),
+                    instructions,
                     // CR 111.1: the projection this entry will create is a
                     // token, carried as the witness the `TokenEntry` seam acts
                     // on rather than as a flag it has to trust.
@@ -1644,6 +1618,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                     PendingCounterPostAction::ContinueNonLiminalCopyTokenAfterEntryPayment {
                         object_id: token_id,
                         tail: Box::new(CopyTokenEntryTail {
+                            instructions,
                             creation_frame,
                             owner: token_owner,
                             copy: copy_spec.clone(),
@@ -1756,6 +1731,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         }
 
         let tail = CopyTokenEntryTail {
+            instructions,
             creation_frame,
             owner: token_owner,
             copy: copy_spec.clone(),
@@ -1889,6 +1865,7 @@ pub(crate) enum CopyTokenApplyCompletion {
 }
 
 struct CopyTokenFinalization {
+    instructions: Option<TokenCreationInstructions>,
     creation_frame: Option<TokenCreationFrameId>,
     name: String,
     enters_attacking: bool,
@@ -1968,7 +1945,9 @@ fn finish_non_liminal_copy_token_entry(
     let additional_modifications = copy_spec.additional_modifications.clone();
     let name = copy_spec.values.name.clone();
 
+    let instructions = tail.instructions;
     let finalization = CopyTokenFinalization {
+        instructions,
         creation_frame: tail.creation_frame,
         name: name.clone(),
         enters_attacking,
@@ -1987,6 +1966,7 @@ fn finish_non_liminal_copy_token_entry(
             super::counters::append_pending_counter_post_actions(
                 state,
                 vec![PendingCounterPostAction::ContinueCopyTokenCreation {
+                    instructions,
                     creation_frame: tail.creation_frame,
                     owner: token_owner,
                     copy: copy_spec.clone(),
@@ -2037,6 +2017,7 @@ fn finish_non_liminal_copy_token_entry(
                     source_id,
                     vec![
                         PendingCounterPostAction::FinalizeCopyTokenEntry {
+                            instructions,
                             creation_frame: tail.creation_frame,
                             object_id: token_id,
                             name: name.clone(),
@@ -2045,6 +2026,7 @@ fn finish_non_liminal_copy_token_entry(
                             controller,
                         },
                         PendingCounterPostAction::ContinueCopyTokenCreation {
+                            instructions,
                             creation_frame: tail.creation_frame,
                             owner: token_owner,
                             copy: copy_spec.clone(),
@@ -2060,10 +2042,39 @@ fn finish_non_liminal_copy_token_entry(
     }
 
     // CR 508.4: Uses shared helper for defending player resolution.
-    if enters_attacking {
-        crate::game::effects::token::apply_entry_attack_instruction(
-            state, token_id, source_id, controller,
+    if !super::token::apply_entry_attack_instruction(
+        state,
+        token_id,
+        instructions,
+        enters_attacking,
+    ) {
+        state.last_created_token_ids = sink.snapshot(state);
+        super::counters::stash_pending_counter_post_actions(
+            state,
+            EffectKind::CopyTokenOf,
+            source_id,
+            vec![
+                PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    instructions: super::token::settled_attack_instruction(instructions),
+                    creation_frame: tail.creation_frame,
+                    object_id: token_id,
+                    name,
+                    enters_attacking: false,
+                    source_id,
+                    controller,
+                },
+                PendingCounterPostAction::ContinueCopyTokenCreation {
+                    instructions,
+                    creation_frame: tail.creation_frame,
+                    owner: token_owner,
+                    copy: copy_spec.clone(),
+                    enter_tapped,
+                    enter_with_counters: enter_with_counters.clone(),
+                    remaining_count,
+                },
+            ],
         );
+        return false;
     }
 
     // CR 111.10: Predefined token abilities for known subtypes (Treasure, Food, etc.).
@@ -2126,6 +2137,7 @@ pub(crate) fn continue_copy_token_entry_after_aura_host(
     // stays in the referent.
     resume_copy_token_batch_remainder(
         state,
+        tail.instructions,
         tail.creation_frame,
         tail.owner,
         *tail.copy,
@@ -2330,6 +2342,7 @@ pub(crate) fn continue_copy_token_after_entry_payment(
     // `resume_copy_token_batch_remainder`.
     resume_copy_token_batch_remainder(
         state,
+        tail.instructions,
         tail.creation_frame,
         tail.owner,
         *tail.copy,
@@ -2365,6 +2378,7 @@ pub(crate) fn continue_copy_token_after_entry_payment(
 /// completed list starts with.
 pub(crate) fn resume_copy_token_batch_remainder(
     state: &mut GameState,
+    instructions: Option<TokenCreationInstructions>,
     creation_frame: Option<TokenCreationFrameId>,
     owner: crate::types::player::PlayerId,
     copy: CopyTokenSpec,
@@ -2390,6 +2404,7 @@ pub(crate) fn resume_copy_token_batch_remainder(
     let status = apply_copy_token_after_replacement_with_created_ids(
         state,
         creation_frame,
+        instructions,
         owner,
         copy,
         enter_tapped,
@@ -2411,6 +2426,7 @@ pub(crate) fn resume_copy_token_batch_remainder(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     state: &mut GameState,
+    instructions: Option<TokenCreationInstructions>,
     creation_frame: Option<TokenCreationFrameId>,
     token_id: ObjectId,
     name: String,
@@ -2422,6 +2438,7 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let finalization = CopyTokenFinalization {
+        instructions,
         creation_frame,
         name: name.clone(),
         enters_attacking,
@@ -2439,10 +2456,27 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
         return false;
     }
     finalize_copied_token(state, source_id, token_id);
-    if enters_attacking {
-        crate::game::effects::token::apply_entry_attack_instruction(
-            state, token_id, source_id, controller,
+    if !super::token::apply_entry_attack_instruction(
+        state,
+        token_id,
+        instructions,
+        enters_attacking,
+    ) {
+        super::counters::stash_pending_counter_post_actions(
+            state,
+            EffectKind::CopyTokenOf,
+            source_id,
+            vec![PendingCounterPostAction::FinalizeCopyTokenEntry {
+                instructions: super::token::settled_attack_instruction(instructions),
+                creation_frame,
+                object_id: token_id,
+                name,
+                enters_attacking: false,
+                source_id,
+                controller,
+            }],
         );
+        return false;
     }
     super::token::inject_predefined_token_abilities(state, token_id);
     crate::game::layers::mark_layers_entered(state, token_id);
@@ -2583,6 +2617,7 @@ fn apply_token_modifications(
                         finalization.source_id,
                         vec![
                             PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                                instructions: finalization.instructions,
                                 creation_frame: finalization.creation_frame,
                                 object_id: token_id,
                                 name: finalization.name.clone(),

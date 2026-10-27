@@ -46,10 +46,10 @@ pub fn resolve(
 
     // CR 701.71a + CR 111.2 + CR 614.1: the controller creates the Jace token,
     // and token-creation replacement effects apply to that event.
-    let instructions = crate::types::proposed_event::TokenCreationInstructions {
-        tapped: EtbTapState::Unspecified,
-        enters_attacking: false,
-    };
+    let instructions = crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+        EtbTapState::Unspecified,
+        false,
+    );
     let work =
         std::collections::VecDeque::from([crate::types::game_state::TokenCreationWork::Proposed(
             crate::types::game_state::TokenCreationBatch {

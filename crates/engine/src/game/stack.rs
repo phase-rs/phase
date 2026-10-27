@@ -11761,6 +11761,7 @@ mod tests {
             state.pending_liminal_entry_resume = None;
 
             state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+                instructions: None,
                 creation_frame: None,
                 object_id: ObjectId(94),
                 name: "checkpoint token".to_string(),

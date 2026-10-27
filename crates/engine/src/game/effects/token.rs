@@ -564,10 +564,10 @@ fn begin_token_creation_with_host(
             if let Some(host) = host_override {
                 spec.attach_to = host;
             }
-            let instructions = crate::types::proposed_event::TokenCreationInstructions {
-                tapped: EtbTapState::from_seeded_tapped(spec.tapped),
-                enters_attacking: spec.enters_attacking,
-            };
+            let instructions = crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                EtbTapState::from_seeded_tapped(spec.tapped),
+                spec.enters_attacking,
+            );
             crate::types::game_state::TokenCreationWork::Proposed(
                 crate::types::game_state::TokenCreationBatch {
                     appended: Vec::new(),
@@ -1184,6 +1184,7 @@ fn drive_token_event_delivery(
                 let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
                     state,
                     batch.creation_frame,
+                    batch.instructions,
                     batch.owner,
                     *copy,
                     batch.enter_tapped,
@@ -1372,14 +1373,16 @@ fn apply_create_token_batch(
     };
 
     if let Some(copy) = copy {
-        let status = super::token_copy::apply_copy_token_after_replacement(
+        let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
             creation_frame,
+            instructions,
             owner,
             *copy,
             enter_tapped,
             spec.enter_with_counters.clone(),
             final_count,
+            initial_created_ids,
             events,
         );
         let primary_ids = status.created_ids.clone();
@@ -1498,13 +1501,52 @@ fn apply_create_token_batch(
         }
 
         // CR 508.4: Token enters attacking — not declared as attacker.
-        if spec.enters_attacking {
-            crate::game::effects::token::apply_entry_attack_instruction(
-                state,
-                obj_id,
-                spec.source_id,
-                spec.controller,
-            );
+        if !apply_entry_attack_instruction(state, obj_id, instructions, spec.enters_attacking) {
+            state.last_created_token_ids = created_ids.clone();
+            let remaining_counters = spec
+                .enter_with_counters
+                .iter()
+                .filter(|(_, count)| *count > 0)
+                .map(|(counter_type, count)| {
+                    crate::types::game_state::PendingCounterAddition::Object {
+                        actor: owner,
+                        object_id: obj_id,
+                        counter_type: counter_type.clone(),
+                        count: *count,
+                    }
+                })
+                .collect();
+            let post_actions = vec![
+                PendingCounterPostAction::FinalizeTokenEntry {
+                    creation_frame,
+                    object_id: obj_id,
+                    name: spec.characteristics.display_name.clone(),
+                    attach_to: spec.attach_to.bound(),
+                    sacrifice_at: spec.sacrifice_at.clone(),
+                    source_id: spec.source_id,
+                    controller: spec.controller,
+                },
+                PendingCounterPostAction::ContinueTokenCreation {
+                    creation_frame,
+                    instructions,
+                    owner,
+                    spec: spec.clone(),
+                    enter_tapped,
+                    remaining_count: final_count.saturating_sub(index + 1),
+                },
+            ];
+            let completion = match pause_completion_event {
+                PendingEffectResolutionEvent::Emit => crate::types::game_state::PendingEffectResolved::with_post_actions(
+                    EffectKind::Token, effect_source, post_actions,
+                ),
+                PendingEffectResolutionEvent::Suppress => crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
+                    EffectKind::Token, effect_source, post_actions,
+                ),
+            };
+            super::counters::stash_pending_counter_additions(state, remaining_counters, completion);
+            return CreateTokenDelivery::Paused {
+                primary_ids: created_ids[prefix_len..].to_vec(),
+            };
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
@@ -2079,6 +2121,7 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
 
 #[derive(Clone)]
 pub(super) struct LiminalCopyTokenContinuation {
+    pub(super) instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
     pub(super) creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub(super) owner: PlayerId,
     pub(super) copy: Box<CopyTokenSpec>,
@@ -2097,6 +2140,7 @@ fn liminal_copy_token_continuation_for_event(
     let entry = state.liminal_entries.get(entry_ref)?;
     let copy = entry.copy_resume.clone()?;
     Some(LiminalCopyTokenContinuation {
+        instructions: entry.instructions,
         creation_frame: entry.creation_frame,
         owner: entry.object.projected().owner,
         copy,
@@ -2135,6 +2179,7 @@ fn continue_liminal_copy_token_batch(
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
             continuation.creation_frame,
+            continuation.instructions,
             continuation.owner,
             *continuation.copy,
             continuation.enter_tapped,
@@ -2189,6 +2234,7 @@ fn liminal_copy_token_continuation_post_action(
     continuation: LiminalCopyTokenContinuation,
 ) -> PendingCounterPostAction {
     PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+        instructions: continuation.instructions,
         creation_frame: continuation.creation_frame,
         owner: continuation.owner,
         copy: continuation.copy,
@@ -2549,7 +2595,10 @@ pub(crate) fn commit_liminal_token_entry_with_post_actions(
         }
     }
 
-    finalize_committed_liminal_token_entry_from_action(state, finalization, events);
+    if !finalize_committed_liminal_token_entry_from_action(state, finalization, events) {
+        super::counters::append_pending_counter_post_actions(state, post_actions_after_finalize);
+        return false;
+    }
     true
 }
 
@@ -2559,6 +2608,7 @@ fn liminal_token_entry_finalization_action(
     entry_events: TokenEntryEventEmission,
 ) -> PendingCounterPostAction {
     PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        instructions: entry.instructions,
         creation_frame: entry.creation_frame,
         object_id: entry_ref,
         name: entry.name.clone(),
@@ -2583,6 +2633,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+        instructions,
         creation_frame,
         object_id,
         name,
@@ -2599,6 +2650,32 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         return true;
     };
 
+    if matches!(entry_events, TokenEntryEventEmission::Emit)
+        && !apply_entry_attack_instruction(state, object_id, instructions, enters_attacking)
+    {
+        super::counters::stash_pending_counter_post_actions(
+            state,
+            EffectKind::Token,
+            source_id,
+            vec![
+                PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    instructions: settled_attack_instruction(instructions),
+                    creation_frame,
+                    object_id,
+                    name,
+                    source_id,
+                    controller,
+                    enters_attacking: false,
+                    attach_to,
+                    sacrifice_at,
+                    created_ids,
+                    ability_injection,
+                    entry_events,
+                },
+            ],
+        );
+        return false;
+    }
     match ability_injection {
         LiminalTokenAbilityInjection::PredefinedToken => {
             super::token_copy::finalize_copied_token(state, source_id, object_id);
@@ -2614,11 +2691,6 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     // the `Suppress` route) — recording it here too double-counts.
     crate::game::restrictions::record_token_created(state, object_id);
 
-    if enters_attacking {
-        crate::game::effects::token::apply_entry_attack_instruction(
-            state, object_id, source_id, controller,
-        );
-    }
     if let Some(host) = attach_to {
         match host {
             AttachTarget::Object(id) => {
@@ -2672,6 +2744,14 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
                 "CR 400.7: parking a token battlefield entry over a live pending one: {stranded:?}"
             );
             state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+                instructions: instructions.or_else(|| {
+                    enters_attacking.then(|| {
+                        crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+                            EtbTapState::Unspecified,
+                            true,
+                        )
+                    })
+                }),
                 creation_frame,
                 object_id,
                 name,
@@ -2828,29 +2908,66 @@ pub(crate) fn push_committed_token_entry_events(
 pub(crate) fn apply_entry_attack_instruction(
     state: &mut GameState,
     object_id: ObjectId,
-    source_id: ObjectId,
-    _creating_controller: PlayerId,
-) {
+    instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
+    legacy_enters_attacking: bool,
+) -> bool {
+    use crate::types::ability::EntryAttackDestination;
+    let destination = instructions.map_or_else(
+        || legacy_enters_attacking.then_some(EntryAttackDestination::AnyDefender),
+        |instruction| instruction.attack_destination,
+    );
+    let Some(destination) = destination else {
+        return true;
+    };
     let Some(object) = state.objects.get(&object_id) else {
-        return;
+        return true;
     };
     if object.zone != Zone::Battlefield
         || !object.card_types.core_types.contains(&CoreType::Creature)
         || object.card_types.core_types.contains(&CoreType::Battle)
     {
-        return;
+        return true;
     }
     let controller = object.controller;
-    if crate::game::combat::valid_entry_attack_targets(
-        state,
-        controller,
-        &crate::types::ability::EntryAttackDestination::AnyDefender,
-    )
-    .is_empty()
-    {
-        return;
+    // CR 508.4 + CR 508.4a: consume the instruction's exact domain, including
+    // a fixed destination that has become illegal. Never substitute a defender.
+    let valid_targets =
+        crate::game::combat::valid_entry_attack_targets(state, controller, &destination);
+    match valid_targets.as_slice() {
+        [] => true,
+        [target] => {
+            if let Some(defending_player) =
+                crate::game::combat::entry_attack_target_defender(state, controller, *target)
+            {
+                crate::game::combat::enter_attacking_at_target(
+                    state,
+                    object_id,
+                    defending_player,
+                    *target,
+                );
+            }
+            true
+        }
+        _ => {
+            state.waiting_for = WaitingFor::EntryAttackTargetChoice {
+                player: controller,
+                object_id,
+                valid_targets,
+            };
+            false
+        }
     }
-    crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+}
+
+/// A parked entry has already asked its attacking-destination question. Its
+/// remaining entry work must not ask it again after the public response.
+pub(crate) fn settled_attack_instruction(
+    instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
+) -> Option<crate::types::proposed_event::TokenCreationInstructions> {
+    instructions.map(|mut instructions| {
+        instructions.attack_destination = None;
+        instructions
+    })
 }
 
 /// CR 111.1: Publish a just-created token into `state.last_created_token_ids`, the THIRD
@@ -3010,6 +3127,24 @@ pub(crate) fn flush_pending_token_battlefield_entry(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    let Some(instructions) = state
+        .pending_token_battlefield_entry
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)
+        .map(|pending| pending.instructions)
+    else {
+        return false;
+    };
+    if !apply_entry_attack_instruction(state, object_id, instructions, false) {
+        // The public choice now owns the destination; the same entry remains
+        // parked and must not ask again after that choice is answered.
+        state
+            .pending_token_battlefield_entry
+            .as_mut()
+            .expect("parked entry")
+            .instructions = settled_attack_instruction(instructions);
+        return false;
+    }
     let Some(pending) = state
         .pending_token_battlefield_entry
         .take_if(|pending| pending.object_id == object_id)
@@ -6073,6 +6208,7 @@ mod tests {
         assert!(finalize_committed_liminal_token_entry_from_action(
             &mut state,
             PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                instructions: None,
                 creation_frame: None,
                 object_id,
                 name: "Record Probe".to_string(),
@@ -6116,6 +6252,7 @@ mod tests {
         assert_eq!(
             state.pending_token_battlefield_entry,
             Some(PendingTokenBattlefieldEntry {
+                instructions: None,
                 creation_frame: None,
                 object_id,
                 name: "Record Probe".to_string(),
@@ -6324,6 +6461,7 @@ mod tests {
     fn pending_token_battlefield_entry_round_trips() {
         let mut state = GameState::new_two_player(42);
         state.pending_token_battlefield_entry = Some(PendingTokenBattlefieldEntry {
+            instructions: None,
             creation_frame: None,
             object_id: ObjectId(7),
             name: "Record Probe".to_string(),

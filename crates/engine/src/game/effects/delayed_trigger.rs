@@ -692,8 +692,10 @@ pub fn resolve(
     // declared players no longer exist; carry them while that chain does.
     delayed_ability.context.outer_declared_players =
         crate::game::targeting::live_declared_players(state, ability);
-    delayed_ability.set_target_incarnations_recursive(target_pins);
-    delayed_ability.set_unpinned_targets(snapshot_targets);
+    if creation_result.is_none() {
+        delayed_ability.set_target_incarnations_recursive(target_pins);
+        delayed_ability.set_unpinned_targets(snapshot_targets);
+    }
     delayed_ability.context.token_creation_parent = None;
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
@@ -1097,10 +1099,9 @@ fn stamp_triggering_source_origins(effect: &mut Effect, expected: Zone) {
     }
 }
 
-/// CR 603.7c: Walk an effect (and any nested sub-ability
-/// definitions) looking for `TargetFilter::LastCreated` in a target position.
-/// Used by `resolve` to decide whether to snapshot `last_created_token_ids`
-/// into the delayed ability's `targets` at creation time.
+/// CR 603.7c + CR 608.2c: bind only the delayed instructions that import the
+/// installing resolution's created referent. A later instruction after a local
+/// publisher reads that publisher's result when the delayed ability resolves.
 pub(crate) fn freeze_created_result(
     ability: &mut ResolvedAbility,
     result: &crate::types::ability::ForwardedResultContext,
@@ -1130,37 +1131,58 @@ pub(crate) fn freeze_created_result(
             ability.set_unpinned_targets(result.targets.clone());
             ability.target_incarnations = result.object_incarnations.clone();
         }
-        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. }
-            if matches!(target, TargetFilter::LastCreated) =>
-        {
+        Effect::CopyTokenOf { target, .. } if matches!(target, TargetFilter::LastCreated) => {
+            // The copy-source axis is a context reference, so the shared
+            // stack-target accessor intentionally surfaces the owner instead.
             *target = filter;
             ability.set_unpinned_targets(result.targets.clone());
             ability.target_incarnations = result.object_incarnations.clone();
         }
-        _ => {}
+        effect => {
+            if let Some(target @ TargetFilter::LastCreated) = effect.target_filter_mut() {
+                *target = filter;
+                ability.set_unpinned_targets(result.targets.clone());
+                ability.target_incarnations = result.object_incarnations.clone();
+            }
+        }
     }
-    if let Some(next) = ability.sub_ability.as_mut() {
-        freeze_created_result(next, result);
-    }
+    // An else body runs instead of this effect, so it has not seen this
+    // effect's publication. Each alternative performs its own ordered walk.
     if let Some(next) = ability.else_ability.as_mut() {
         freeze_created_result(next, result);
+    }
+    // The shared own-resolution classifier includes inline branch publishers
+    // and excludes separately registered abilities. Reads by the publisher
+    // itself (for example copying LastCreated) were bound above, before its
+    // output becomes visible to the continuation.
+    if !ability.effect.publishes_created_referent() {
+        if let Some(next) = ability.sub_ability.as_mut() {
+            freeze_created_result(next, result);
+        }
     }
 }
 
 fn resolved_chain_references_last_created(ability: &ResolvedAbility) -> bool {
     effect_references_last_created(&ability.effect)
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(resolved_chain_references_last_created)
-        || ability
             .else_ability
             .as_deref()
             .is_some_and(resolved_chain_references_last_created)
+        || (!ability.effect.publishes_created_referent()
+            && ability
+                .sub_ability
+                .as_deref()
+                .is_some_and(resolved_chain_references_last_created))
 }
 
 fn effect_references_last_created(effect: &Effect) -> bool {
-    matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
+    matches!(
+        effect,
+        Effect::CopyTokenOf {
+            target: TargetFilter::LastCreated,
+            ..
+        }
+    ) || matches!(effect.target_filter(), Some(TargetFilter::LastCreated))
 }
 
 /// Every filter of `condition` that the creation-time binders rewrite, grouped
@@ -2155,6 +2177,95 @@ mod tests {
     use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::player::PlayerId;
     use crate::types::triggers::{PlaneswalkRole, TriggerMode};
+
+    #[test]
+    fn created_referent_freeze_respects_local_and_registered_publication_boundaries() {
+        fn effect(value: serde_json::Value) -> Effect {
+            serde_json::from_value(value).unwrap()
+        }
+        fn resolved(effect: Effect) -> ResolvedAbility {
+            ResolvedAbility::new(effect, vec![], ObjectId(7), PlayerId(0))
+        }
+        fn sacrifice() -> ResolvedAbility {
+            resolved(effect(serde_json::json!({
+                "type":"Sacrifice", "target":{"type":"LastCreated"},
+                "count":{"type":"Fixed", "value":1}
+            })))
+        }
+        let token = effect(serde_json::json!({
+            "type":"Token", "name":"Local B",
+            "count":{"type":"Fixed", "value":1}
+        }));
+        let result = crate::types::ability::ForwardedResultContext {
+            targets: vec![TargetRef::Object(ObjectId(41))],
+            object_incarnations: vec![crate::types::identifiers::ObjectIncarnationRef {
+                object_id: ObjectId(41),
+                incarnation: 3,
+            }],
+        };
+        // The false branch has not executed the true branch's token creator.
+        let mut branch = resolved(token.clone())
+            .sub_ability(sacrifice())
+            .else_ability(sacrifice());
+        assert!(resolved_chain_references_last_created(&branch));
+        freeze_created_result(&mut branch, &result);
+        assert_eq!(
+            branch.sub_ability.as_ref().unwrap().effect.target_filter(),
+            Some(&TargetFilter::LastCreated)
+        );
+        assert_eq!(
+            branch.else_ability.as_ref().unwrap().effect.target_filter(),
+            Some(&TargetFilter::SpecificObject { id: ObjectId(41) })
+        );
+        assert!(branch
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .target_incarnations
+            .is_empty());
+        assert_eq!(
+            branch.else_ability.as_ref().unwrap().target_incarnations,
+            result.object_incarnations
+        );
+
+        let local = resolved(token.clone()).sub_ability(sacrifice());
+        assert!(!resolved_chain_references_last_created(&local));
+        // Registered creation occurs in another resolution; it does not
+        // shadow the installing ability's following ordinary instruction.
+        let mut registered = resolved(Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::AtNextPhase {
+                phase: Phase::EndStep,
+            },
+            effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, token.clone())),
+            uses_tracked_set: false,
+        })
+        .sub_ability(sacrifice());
+        assert!(resolved_chain_references_last_created(&registered));
+        freeze_created_result(&mut registered, &result);
+        assert_eq!(
+            registered
+                .sub_ability
+                .as_ref()
+                .unwrap()
+                .effect
+                .target_filter(),
+            Some(&TargetFilter::SpecificObject { id: ObjectId(41) })
+        );
+
+        // The existing classifier descends inline selected bodies instead.
+        let inline = effect(serde_json::json!({
+            "type":"ChooseOneOf", "branches":[
+                serde_json::to_value(AbilityDefinition::new(AbilityKind::Spell, token)).unwrap()
+            ]
+        }));
+        let mut inline = resolved(inline).sub_ability(sacrifice());
+        assert!(!resolved_chain_references_last_created(&inline));
+        freeze_created_result(&mut inline, &result);
+        assert_eq!(
+            inline.sub_ability.as_ref().unwrap().effect.target_filter(),
+            Some(&TargetFilter::LastCreated)
+        );
+    }
 
     /// CR 603.7c (issue #8721): the over-fire guard covers `WhenNextEvent`, not
     /// only `WheneverEvent`.

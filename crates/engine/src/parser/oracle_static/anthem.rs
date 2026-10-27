@@ -455,27 +455,33 @@ pub(crate) fn parse_complete_continuous_predicate(
 ) -> Option<StaticDefinition> {
     let lower = predicate.to_lowercase();
     let tp = TextPair::new(predicate, &lower);
-    for (marker, negative) in [(" if ", false), (" as long as ", false), (" unless ", true)] {
-        if let Some((body, gate)) = tp.split_around_outside_quotes(marker) {
-            let condition = parse_affected_scoped_static_condition(
-                gate.original.trim().trim_end_matches('.'),
-                Some(&affected),
-            )?;
-            let mut def =
-                parse_complete_continuous_predicate(body.original, affected, description)?;
-            let condition = if negative {
-                StaticCondition::Not {
-                    condition: Box::new(condition),
+    use super::keyword_grant::ContinuousConditionSeparator;
+
+    for marker in ContinuousConditionSeparator::PRIORITY {
+        if let Some(def) = tp.scan_around_outside_quotes(
+            ContinuousConditionSeparator::parse,
+            |body, separator, gate| {
+                if separator != marker {
+                    return None;
                 }
-            } else {
-                condition
-            };
-            def.condition = Some(match def.condition.take() {
-                Some(existing) => StaticCondition::And {
-                    conditions: vec![existing, condition],
-                },
-                None => condition,
-            });
+                let condition = separator.apply(parse_affected_scoped_static_condition(
+                    gate.original.trim().trim_end_matches('.'),
+                    Some(&affected),
+                )?);
+                let mut def = parse_complete_continuous_predicate(
+                    body.original,
+                    affected.clone(),
+                    description,
+                )?;
+                def.condition = Some(match def.condition.take() {
+                    Some(existing) => StaticCondition::And {
+                        conditions: vec![existing, condition],
+                    },
+                    None => condition,
+                });
+                Some(def)
+            },
+        ) {
             return Some(def);
         }
     }
@@ -1560,6 +1566,75 @@ pub(crate) fn parse_base_pt_dynamic(
                 base_pt_side_to_expr(p_side, &x_ref),
                 base_pt_side_to_expr(t_side, &x_ref),
             ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod complete_condition_separator_tests {
+    use super::super::keyword_grant::ContinuousConditionSeparator;
+    use super::*;
+
+    #[test]
+    fn complete_predicate_condition_scan_skips_quoted_inner_markers() {
+        // Synthetic grammar compositions exercise the shared separator through
+        // the hosted static owner; they are not attributed to printed cards.
+        for (marker, quoted, separator) in [
+            (
+                "if",
+                "This creature has flying if you control a Swamp.",
+                ContinuousConditionSeparator::If,
+            ),
+            (
+                "as long as",
+                "This creature has flying as long as it's attacking.",
+                ContinuousConditionSeparator::AsLongAs,
+            ),
+            (
+                "unless",
+                "This creature can't attack unless you control a Swamp.",
+                ContinuousConditionSeparator::Unless,
+            ),
+        ] {
+            let body = format!("has \"{quoted}\"");
+            let ungated = parse_complete_continuous_predicate(&body, TargetFilter::SelfRef, &body)
+                .expect("the complete quoted grant reaches the hosted static owner");
+            assert!(!ungated.modifications.is_empty());
+            assert!(ungated.condition.is_none());
+            let source = format!("{body} {marker} you control an Island");
+            let gated =
+                parse_complete_continuous_predicate(&source, TargetFilter::SelfRef, &source)
+                    .expect("the outer condition follows a quoted occurrence of the same marker");
+            assert_eq!(gated.modifications, ungated.modifications);
+            assert_eq!(gated.affected, Some(TargetFilter::SelfRef));
+            assert_eq!(gated.description.as_deref(), Some(source.as_str()));
+            assert_eq!(
+                gated.condition,
+                Some(separator.apply(parse_static_condition("you control an Island").unwrap()))
+            );
+        }
+    }
+
+    #[test]
+    fn complete_predicate_condition_scan_refuses_unowned_full_tails() {
+        let complete =
+            "has \"This creature has flying if you control a Swamp.\" if you control an Island";
+        assert!(
+            parse_complete_continuous_predicate(complete, TargetFilter::SelfRef, complete,)
+                .is_some()
+        );
+        for source in [
+            format!("{complete} and unsupported tail"),
+            "has \"This creature has flying if you control a Swamp.\" if unsupported tail"
+                .to_owned(),
+            "has \"This creature has flying if you control a Swamp if you control an Island"
+                .to_owned(),
+        ] {
+            assert!(
+                parse_complete_continuous_predicate(&source, TargetFilter::SelfRef, &source,)
+                    .is_none(),
+                "no complete prefix may publish from {source:?}"
+            );
         }
     }
 }

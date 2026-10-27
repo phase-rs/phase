@@ -273,10 +273,10 @@ fn create_army_token(
         controller: ability.controller,
     };
 
-    let instructions = crate::types::proposed_event::TokenCreationInstructions {
-        tapped: EtbTapState::Unspecified,
-        enters_attacking: false,
-    };
+    let instructions = crate::types::proposed_event::TokenCreationInstructions::from_legacy(
+        EtbTapState::Unspecified,
+        false,
+    );
     let work =
         std::collections::VecDeque::from([crate::types::game_state::TokenCreationWork::Proposed(
             crate::types::game_state::TokenCreationBatch {

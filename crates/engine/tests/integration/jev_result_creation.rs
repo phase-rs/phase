@@ -1152,3 +1152,430 @@ fn targeted_emblem_gaps_never_create_a_caster_emblem_beside_real_nonemblem_modes
     assert_eq!(emblems[0].controller, P0);
     settled(&runner);
 }
+
+/// A typed composition fixture: the paid, verbatim Raise the Alarm cast and
+/// normal replacement pipeline author the creation. The test then supplies an
+/// independently typed entry instruction at that pipeline's parked boundary;
+/// it does not claim Raise the Alarm has an attacking-entry Oracle clause.
+fn typed_attack_creation_board(
+    copy: bool,
+    counter_pause: bool,
+    copy_on_entry: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::ChosenAttribute;
+    use engine::types::card_type::CoreType;
+    use engine::types::counter::CounterType;
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let donor = if copy_on_entry {
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Glorious Anthem",
+            "Creatures you control get +1/+1.",
+        );
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        scenario
+            .add_creature_from_oracle(
+                P0,
+                "Clone",
+                0,
+                0,
+                "You may have this creature enter as a copy of any creature on the battlefield.",
+            )
+            .id()
+    } else if counter_pause {
+        // Its printed self-entry counter makes the copy use the non-liminal
+        // entry tail before Scales/Branching Evolution ask for their order.
+        scenario.add_creature_from_oracle(P0, "Barkhide Troll", 2, 2,
+            "This creature enters with a +1/+1 counter on it.\n{1}, Remove a +1/+1 counter from this creature: This creature gains hexproof until end of turn. (It can't be the target of spells or abilities your opponents control.)").id()
+    } else {
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2).id()
+    };
+    let walker = scenario
+        .add_planeswalker_from_oracle(P1, "Destination Walker", "Test", 5, "")
+        .id();
+    let battle = scenario.add_creature(P0, "Destination Battle", 0, 0).id();
+    let aura = if copy {
+        Some(scenario.add_enchantment_from_oracle(P0, "Moonlit Meditation",
+            "Enchant artifact or creature you control\nThe first time you would create one or more tokens each turn, you may instead create that many tokens that are copies of enchanted permanent.").id())
+    } else {
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives", "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.");
+        scenario.add_enchantment_from_oracle(P1, "Halving Season", "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.");
+        None
+    };
+    if counter_pause {
+        scenario.add_enchantment_from_oracle(P0, "Hardened Scales", "If one or more +1/+1 counters would be put on a creature you control, that many plus one +1/+1 counters are put on it instead.");
+        scenario.add_enchantment_from_oracle(P0, "Branching Evolution", "If one or more +1/+1 counters would be put on a creature you control, twice that many +1/+1 counters are put on that creature instead.");
+    }
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Raise the Alarm",
+            true,
+            "Create two 1/1 white Soldier creature tokens.",
+        )
+        .with_mana_cost(cost("{1}{W}"))
+        .id();
+    let mut runner = scenario.build();
+    {
+        let object = runner.state_mut().objects.get_mut(&battle).unwrap();
+        object.card_types.core_types = vec![CoreType::Battle];
+        object.card_types.subtypes = vec!["Siege".into()];
+        object.base_card_types = object.card_types.clone();
+        object.power = None;
+        object.toughness = None;
+        object.base_power = None;
+        object.base_toughness = None;
+        object.defense = Some(5);
+        object.base_defense = Some(5);
+        object.counters.insert(CounterType::Defense, 5);
+        object.chosen_attributes.push(ChosenAttribute::Player(P1));
+    }
+    if let Some(aura) = aura {
+        runner.attach_as_bestowed_aura(aura, donor);
+    }
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(donor, AttackTarget::Player(P1))])
+        .unwrap();
+    assert!(runner.state().combat.is_some());
+    fund(&mut runner, 1, &[ManaType::White]);
+    runner.cast(spell).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    (runner, spell, walker, battle)
+}
+
+fn set_typed_attack_instruction(
+    runner: &mut GameRunner,
+    destination: Option<engine::types::ability::EntryAttackDestination>,
+) {
+    use engine::types::proposed_event::{ProposedEvent, TokenCreationInstructions};
+    use engine::types::zones::EtbTapState;
+    let ProposedEvent::CreateToken {
+        instructions, spec, ..
+    } = &mut runner
+        .state_mut()
+        .pending_replacement
+        .as_mut()
+        .unwrap()
+        .proposed
+    else {
+        panic!("real creation proposal is parked before entry");
+    };
+    assert!(
+        !spec.enters_attacking,
+        "legacy token body has no attacking instruction"
+    );
+    *instructions = Some(TokenCreationInstructions {
+        tapped: EtbTapState::Untapped,
+        attack_destination: destination,
+    });
+}
+
+fn finish_typed_attack_creation(
+    mut runner: GameRunner,
+    walker: ObjectId,
+    battle: ObjectId,
+    choice_expected: bool,
+    wire: bool,
+) -> GameRunner {
+    use engine::game::combat::AttackTarget;
+    let mut destination_prompts = 0;
+    let mut counter_prompts = 0;
+    let mut copy_prompts = 0;
+    for _ in 0..40 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                if candidates
+                    .iter()
+                    .any(|candidate| candidate.source_name == "Hardened Scales")
+                {
+                    assert!(matches!(
+                        runner
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .proposed,
+                        engine::types::proposed_event::ProposedEvent::AddCounter { .. }
+                    ));
+                    counter_prompts += 1;
+                }
+                let index = candidates
+                    .iter()
+                    .position(|candidate| {
+                        candidate.source_name == "Parallel Lives"
+                            || candidate.source_name == "Hardened Scales"
+                    })
+                    .unwrap_or(0);
+                runner = roundtrip(runner, wire);
+                runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                let selected = valid_targets
+                    .into_iter()
+                    .find(|id| {
+                        let object = &runner.state().objects[id];
+                        !object.is_token && object.name == "Grizzly Bears"
+                    })
+                    .expect("the real Clone entry offers the separate Bears donor");
+                copy_prompts += 1;
+                runner = roundtrip(runner, wire);
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(selected)),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::EntryAttackTargetChoice {
+                valid_targets,
+                object_id,
+                ..
+            } => {
+                assert!(
+                    choice_expected,
+                    "an exact instruction cannot ask a new question"
+                );
+                assert!(valid_targets.contains(&AttackTarget::Player(P1)));
+                assert!(valid_targets.contains(&AttackTarget::Planeswalker(walker)));
+                assert!(
+                    !valid_targets.contains(&AttackTarget::Battle(battle)),
+                    "the restricted domain excludes the otherwise legal battle"
+                );
+                assert_eq!(runner.state().objects[&object_id].zone, Zone::Battlefield);
+                assert!(
+                    !runner.state().objects[&object_id].tapped,
+                    "attacking and tapping are independent axes"
+                );
+                let before = serde_json::to_value(runner.state()).unwrap();
+                assert!(engine::game::engine::apply(
+                    runner.state_mut(),
+                    P1,
+                    GameAction::ChooseEntryAttackTarget {
+                        target: AttackTarget::Planeswalker(walker)
+                    }
+                )
+                .is_err());
+                assert!(runner
+                    .act(GameAction::ChooseEntryAttackTarget {
+                        target: AttackTarget::Battle(battle)
+                    })
+                    .is_err());
+                assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+                destination_prompts += 1;
+                runner = roundtrip(runner, wire);
+                runner
+                    .act(GameAction::ChooseEntryAttackTarget {
+                        target: AttackTarget::Planeswalker(walker),
+                    })
+                    .unwrap();
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            other => panic!("unexpected creation decision {other:?}"),
+        }
+    }
+    settled(&runner);
+    if runner
+        .state()
+        .objects
+        .values()
+        .any(|object| !object.is_token && object.name == "Clone")
+    {
+        assert_eq!(
+            copy_prompts, 2,
+            "each copied Clone settles its own as-enters copy choice"
+        );
+    }
+    if runner
+        .state()
+        .objects
+        .values()
+        .any(|object| object.is_token && object.name == "Barkhide Troll")
+    {
+        assert_eq!(
+            counter_prompts, 2,
+            "each non-liminal copy actually paused for counter replacement ordering"
+        );
+    }
+    assert_eq!(
+        destination_prompts,
+        if choice_expected { 2 } else { 0 },
+        "every created token settles exactly its own destination"
+    );
+    runner
+}
+
+#[test]
+fn typed_token_entry_destination_survives_replacement_and_public_choice_restore() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::EntryAttackDestination;
+    for copy in [false, true] {
+        for wire in [false, true] {
+            let (mut runner, spell, walker, battle) =
+                typed_attack_creation_board(copy, false, false);
+            set_typed_attack_instruction(
+                &mut runner,
+                Some(EntryAttackDestination::PlayerOrPlaneswalker),
+            );
+            let runner = roundtrip(runner, wire);
+            let runner = finish_typed_attack_creation(runner, walker, battle, true, wire);
+            let tokens: Vec<_> = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+                .collect();
+            assert_eq!(
+                tokens.len(),
+                2,
+                "the whole original/replacement batch completes"
+            );
+            let combat = runner.state().combat.as_ref().unwrap();
+            for token in tokens {
+                assert!(!token.tapped);
+                assert!(combat
+                    .attackers
+                    .iter()
+                    .any(|attacker| attacker.object_id == token.id
+                        && attacker.attack_target == AttackTarget::Planeswalker(walker)));
+            }
+            assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        }
+    }
+}
+
+#[test]
+fn typed_token_exact_destination_survives_copy_counter_pause_and_remaining_batch() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::EntryAttackDestination;
+    use engine::types::counter::CounterType;
+    for wire in [false, true] {
+        let (mut runner, spell, walker, battle) = typed_attack_creation_board(true, true, false);
+        set_typed_attack_instruction(
+            &mut runner,
+            Some(EntryAttackDestination::Exact {
+                target: AttackTarget::Planeswalker(walker),
+            }),
+        );
+        let runner = roundtrip(runner, wire);
+        let runner = finish_typed_attack_creation(runner, walker, battle, false, wire);
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+            .collect();
+        assert_eq!(tokens.len(), 2);
+        for token in tokens {
+            assert_eq!(token.counters.get(&CounterType::Plus1Plus1), Some(&4));
+            assert!(runner
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == token.id
+                    && attacker.attack_target == AttackTarget::Planeswalker(walker)));
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    }
+}
+
+#[test]
+fn typed_token_illegal_exact_destination_never_substitutes_another_defender() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::EntryAttackDestination;
+    for destination in [
+        None,
+        Some(EntryAttackDestination::Exact {
+            target: AttackTarget::Player(P0),
+        }),
+    ] {
+        let (mut runner, _, walker, battle) = typed_attack_creation_board(false, false, false);
+        set_typed_attack_instruction(&mut runner, destination);
+        if destination.is_none() {
+            let engine::types::proposed_event::ProposedEvent::CreateToken { spec, .. } =
+                &mut runner
+                    .state_mut()
+                    .pending_replacement
+                    .as_mut()
+                    .unwrap()
+                    .proposed
+            else {
+                unreachable!()
+            };
+            spec.enters_attacking = true;
+        }
+        let runner = finish_typed_attack_creation(runner, walker, battle, false, false);
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+            .collect();
+        assert_eq!(
+            tokens.len(),
+            2,
+            "the invalid attacking instruction does not prevent creation"
+        );
+        for token in tokens {
+            assert!(!runner
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == token.id));
+        }
+    }
+}
+
+#[test]
+fn typed_token_attacking_choice_waits_for_selected_clone_body_and_resumes_copy_tail() {
+    use engine::game::combat::AttackTarget;
+    use engine::types::ability::EntryAttackDestination;
+    for wire in [false, true] {
+        let (mut runner, spell, walker, battle) = typed_attack_creation_board(true, false, true);
+        set_typed_attack_instruction(
+            &mut runner,
+            Some(EntryAttackDestination::PlayerOrPlaneswalker),
+        );
+        let runner = roundtrip(runner, wire);
+        let runner = finish_typed_attack_creation(runner, walker, battle, true, wire);
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+            .collect();
+        assert_eq!(tokens.len(), 2);
+        for token in tokens {
+            assert_eq!(
+                token.name, "Grizzly Bears",
+                "the answered copy chain runs before entry's attacking question"
+            );
+            assert_eq!((token.power, token.toughness), (Some(3), Some(3)));
+            assert!(runner
+                .state()
+                .combat
+                .as_ref()
+                .unwrap()
+                .attackers
+                .iter()
+                .any(|attacker| attacker.object_id == token.id
+                    && attacker.attack_target == AttackTarget::Planeswalker(walker)));
+        }
+        assert!(runner.state().pending_token_battlefield_entry.is_none());
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    }
+}

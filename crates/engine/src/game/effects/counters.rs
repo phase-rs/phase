@@ -1038,6 +1038,7 @@ fn apply_pending_counter_post_action(
             super::token::continue_token_event_delivery(state, *delivery, events)
         }
         PendingCounterPostAction::FinalizeCopyTokenEntry {
+            instructions,
             creation_frame,
             object_id,
             name,
@@ -1048,10 +1049,27 @@ fn apply_pending_counter_post_action(
             // CR 508.4 + CR 111.1 + CR 603.6a: complete copy-token entry after
             // replacement-processed counters finish, preserving attacking
             // placement and the normal token ETB events.
-            if enters_attacking {
-                crate::game::effects::token::apply_entry_attack_instruction(
-                    state, object_id, source_id, controller,
+            if !super::token::apply_entry_attack_instruction(
+                state,
+                object_id,
+                instructions,
+                enters_attacking,
+            ) {
+                stash_pending_counter_post_actions(
+                    state,
+                    EffectKind::CopyTokenOf,
+                    source_id,
+                    vec![PendingCounterPostAction::FinalizeCopyTokenEntry {
+                        instructions: super::token::settled_attack_instruction(instructions),
+                        creation_frame,
+                        object_id,
+                        name,
+                        enters_attacking: false,
+                        source_id,
+                        controller,
+                    }],
                 );
+                return false;
             }
             super::token::inject_predefined_token_abilities(state, object_id);
             crate::game::layers::mark_layers_entered(state, object_id);
@@ -1085,6 +1103,7 @@ fn apply_pending_counter_post_action(
             true
         }
         PendingCounterPostAction::ContinueCopyTokenCreation {
+            instructions,
             creation_frame,
             owner,
             copy,
@@ -1096,6 +1115,7 @@ fn apply_pending_counter_post_action(
             // after the referent so far.
             super::token_copy::resume_copy_token_batch_remainder(
                 state,
+                instructions,
                 creation_frame,
                 owner,
                 *copy,
@@ -1125,6 +1145,7 @@ fn apply_pending_counter_post_action(
             )
         }
         PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+            instructions,
             creation_frame,
             object_id,
             name,
@@ -1135,6 +1156,7 @@ fn apply_pending_counter_post_action(
             donor,
         } => super::token_copy::apply_remaining_token_modifications_after_counter_pause(
             state,
+            instructions,
             creation_frame,
             object_id,
             name,
@@ -1154,6 +1176,7 @@ fn apply_pending_counter_post_action(
             super::token::finalize_committed_liminal_token_entry_from_action(state, action, events)
         }
         PendingCounterPostAction::ContinueLiminalCopyTokenBatch {
+            instructions,
             creation_frame,
             owner,
             copy,
@@ -1163,6 +1186,7 @@ fn apply_pending_counter_post_action(
         } => super::token::continue_liminal_copy_token_batch_after_counter_pause(
             state,
             super::token::LiminalCopyTokenContinuation {
+                instructions,
                 creation_frame,
                 owner,
                 copy,
@@ -1196,6 +1220,15 @@ fn apply_pending_counter_post_action(
                 .filter(|entry| entry.object_id == object_id)
                 .and_then(|entry| entry.creation_frame);
             let _ = super::token::flush_pending_token_battlefield_entry(state, object_id, events);
+            if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                stash_pending_counter_post_actions(
+                    state,
+                    EffectKind::CopyTokenOf,
+                    object_id,
+                    vec![PendingCounterPostAction::EmitCommittedCopyTokenEntry { object_id }],
+                );
+                return false;
+            }
             if !state.last_created_token_ids.contains(&object_id) {
                 super::token::record_last_created_token(state, object_id);
             }
@@ -9310,6 +9343,7 @@ mod tests {
             );
             let liminal_entry =
                 |entry_events| PendingCounterPostAction::FinalizeCommittedLiminalTokenEntry {
+                    instructions: None,
                     creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
@@ -9325,6 +9359,7 @@ mod tests {
                 };
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    instructions: None,
                     creation_frame: None,
                     object_id,
                     name: "Saproling".to_string(),
@@ -9346,6 +9381,7 @@ mod tests {
                 // without needing an `, except` body.
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        instructions: None,
                         creation_frame: None,
                         object_id,
                         name: "Saproling".to_string(),
@@ -9615,6 +9651,7 @@ mod tests {
             );
             let action = match route {
                 Route::FinalizeCopyTokenEntry => PendingCounterPostAction::FinalizeCopyTokenEntry {
+                    instructions: None,
                     creation_frame: None,
                     object_id,
                     name: "Copy Token".to_string(),
@@ -9624,6 +9661,7 @@ mod tests {
                 },
                 Route::ApplyCopyTokenModificationsAndFinalize => {
                     PendingCounterPostAction::ApplyCopyTokenModificationsAndFinalize {
+                        instructions: None,
                         creation_frame: None,
                         object_id,
                         name: "Copy Token".to_string(),

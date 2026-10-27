@@ -2921,6 +2921,7 @@ pub(super) fn handle_copy_target_choice(
                 (entry.remaining_count > 0).then(|| {
                     (
                         entry.creation_frame,
+                        entry.instructions,
                         entry.object.projected().owner,
                         copy.clone(),
                         entry.enter_tapped,
@@ -3016,6 +3017,7 @@ pub(super) fn handle_copy_target_choice(
         }
         if let Some((
             creation_frame,
+            instructions,
             owner,
             copy,
             enter_tapped,
@@ -3024,6 +3026,7 @@ pub(super) fn handle_copy_target_choice(
         )) = copy_continuation.clone()
         {
             counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
+                instructions,
                 creation_frame,
                 owner,
                 copy,
@@ -3044,6 +3047,7 @@ pub(super) fn handle_copy_target_choice(
         }
         if let Some((
             creation_frame,
+            instructions,
             owner,
             copy,
             enter_tapped,
@@ -3056,6 +3060,7 @@ pub(super) fn handle_copy_target_choice(
                 super::effects::token_copy::apply_copy_token_after_replacement_with_created_ids(
                     state,
                     creation_frame,
+                    instructions,
                     owner,
                     *copy,
                     enter_tapped,
@@ -3299,10 +3304,9 @@ pub(crate) fn resume_copy_target_choice_entry(
     events: &mut Vec<GameEvent>,
 ) -> Result<CopyEntryResumption, EngineError> {
     // CR 400.7: a later incarnation must not receive choices, replayed ETBs,
-    // or attachment work owed by the original entry. Its counter frame was
-    // popped before this call; the spell-resolution frame was retired before the
-    // counter pause, so this only retires whichever paused dispatch is still
-    // active at this point (the same call the live path makes after the tail).
+    // or attachment work owed by the original entry. Its completion frame was
+    // popped before this call. Only the already selected entry tail resumes;
+    // any enclosing token-creation instruction retains its own continuation.
     if !entrant.is_current(state)
         || state
             .objects
@@ -3387,6 +3391,26 @@ fn finish_copy_target_choice_entry_after_counters(
     // `false` here means an earlier convergence point already realized it (structurally
     // idempotent, `Option::take_if`), which is not an error.
     let _ = super::effects::token::flush_pending_token_battlefield_entry(state, source_id, events);
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        // The selected copy is complete before attacking-entry destination
+        // selection can pause. Resume this existing entry tail, then its caller.
+        let entrant = crate::types::identifiers::ObjectIncarnationRef::from_object(
+            state
+                .objects
+                .get(&source_id)
+                .expect("parked attacking entrant"),
+        );
+        let mut post_actions =
+            vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }];
+        post_actions.extend(counter_pause_post_actions);
+        effects::counters::stash_pending_counter_post_actions(
+            state,
+            crate::types::ability::EffectKind::CopyTokenOf,
+            source_id,
+            post_actions,
+        );
+        return Ok(Some(state.waiting_for.clone()));
+    }
     crate::game::layers::mark_layers_full(state);
     // CR 614.12a + CR 707.9: The battlefield-entry `ZoneChanged` event was
     // captured into `state.deferred_entry_events` when `CopyTargetChoice` was
@@ -8987,6 +9011,7 @@ mod tests {
         }
         let values = intrinsic_copiable_values(state.objects.get(&copied).unwrap());
         let continuation = PendingCounterPostAction::ContinueCopyTokenCreation {
+            instructions: None,
             creation_frame: None,
             owner: PlayerId(0),
             copy: Box::new(CopyTokenSpec {

@@ -8037,6 +8037,10 @@ pub enum TokenEntryEventEmission {
 /// is the whole point of postponing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingTokenBattlefieldEntry {
+    /// The creation instruction waits for the selected copy body to settle.
+    /// Old records omitted this because attacking placement already happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub object_id: ObjectId,
@@ -8055,6 +8059,8 @@ pub struct PendingTokenBattlefieldEntry {
 /// resume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTokenEntryTail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
     pub owner: PlayerId,
@@ -8176,6 +8182,8 @@ pub enum PendingCounterPostAction {
     },
     FinalizeCopyTokenEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
@@ -8185,6 +8193,8 @@ pub enum PendingCounterPostAction {
     },
     ContinueCopyTokenCreation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         owner: PlayerId,
         copy: Box<CopyTokenSpec>,
@@ -8193,6 +8203,8 @@ pub enum PendingCounterPostAction {
         remaining_count: u32,
     },
     ApplyCopyTokenModificationsAndFinalize {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
@@ -8236,6 +8248,8 @@ pub enum PendingCounterPostAction {
     },
     FinalizeCommittedLiminalTokenEntry {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         object_id: ObjectId,
         name: String,
@@ -8249,6 +8263,8 @@ pub enum PendingCounterPostAction {
         entry_events: TokenEntryEventEmission,
     },
     ContinueLiminalCopyTokenBatch {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instructions: Option<crate::types::proposed_event::TokenCreationInstructions>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         creation_frame: Option<crate::types::identifiers::TokenCreationFrameId>,
         owner: PlayerId,
@@ -8264,9 +8280,10 @@ pub enum PendingCounterPostAction {
     EmitCommittedCopyTokenEntry {
         object_id: ObjectId,
     },
-    /// CR 614.12 + CR 616.1: finish an ordinary interactive enter-as-copy
-    /// entry after its merged counter placement settles. Never minted by Meld
-    /// or liminal entry. The incarnation pin prevents work on a later object.
+    /// CR 614.12 + CR 616.1: finish an interactive enter-as-copy entry after
+    /// its counter placement or post-copy attacking-destination choice settles.
+    /// The selected copy body is already installed. Meld retains its own tail;
+    /// the incarnation pin prevents work on a later object.
     ///
     /// The fallible engine consumer pops this action before running the entry
     /// tail; a nested pause parks only the remaining post-actions. It runs in
