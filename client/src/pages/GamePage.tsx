@@ -1020,9 +1020,9 @@ function GamePageContent({
   const canReportCard = gameState != null && !isSpectatorMode;
   const canActForWaitingState = useCanActForWaitingState();
   const boardChoiceLayerActive = useMemo(() => {
-    const choice = getBoardChoiceView(waitingFor, objects);
+    const choice = getBoardChoiceView(waitingFor, objects, gameState?.allows_cancel_cast);
     return canActForWaitingState && choice != null;
-  }, [canActForWaitingState, objects, waitingFor]);
+  }, [canActForWaitingState, gameState?.allows_cancel_cast, objects, waitingFor]);
   const helpSheetOpen = useUiStore((s) => s.helpSheetOpen);
   const setHelpSheetOpen = useUiStore((s) => s.setHelpSheetOpen);
   const dismissedFlowHelpNudge = usePreferencesStore((s) => s.dismissedFlowHelpNudge);
@@ -1084,7 +1084,7 @@ function GamePageContent({
   const untapForcedSplit =
     seatCount > 2 &&
     canActForWaitingState &&
-    getBoardChoiceView(waitingFor, objects)?.intent === "untap";
+    getBoardChoiceView(waitingFor, objects, gameState?.allows_cancel_cast)?.intent === "untap";
   const effectiveMultiplayerBoardLayout = untapForcedSplit
     ? "split"
     : resolvedMultiplayerBoardLayout;

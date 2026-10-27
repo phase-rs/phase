@@ -2854,12 +2854,107 @@ fn park_cost_payment_triggers_if_paused(
 /// terminal completion. Mirrors the pair `PendingCostMoveResume::SacrificeForCost`
 /// carries. Both fields live in `PendingCostMoveResume::Cast` while paused.
 #[derive(Debug, Default)]
-struct CostMoveLedger {
+pub(crate) struct CostMoveLedger {
     /// Cost events emitted in earlier actions of this one logical payment,
     /// withheld from trigger collection until the group is stamped.
     deferred_cost_events: Vec<GameEvent>,
     /// Per-turn LKI record identities of the battlefield departures so far.
     departure_record_indices: Vec<usize>,
+}
+
+impl CostMoveLedger {
+    /// Rebuild the ledger a paused cost-move root carried across its pause.
+    pub(crate) fn resumed(
+        deferred_cost_events: Vec<GameEvent>,
+        departure_record_indices: Vec<usize>,
+    ) -> Self {
+        Self {
+            deferred_cost_events,
+            departure_record_indices,
+        }
+    }
+
+    /// Hand the ledger's parts to the typed resume root that carries them
+    /// across a pause: `(deferred_cost_events, departure_record_indices)`.
+    pub(crate) fn into_parts(self) -> (Vec<GameEvent>, Vec<usize>) {
+        (self.deferred_cost_events, self.departure_record_indices)
+    }
+
+    /// CR 603.2c + CR 603.10a: A move of `chosen` paused for a replacement
+    /// choice after emitting `fragment`. Record its departures and, while a
+    /// simultaneous-departure group can still form, withhold the fragment so
+    /// terminal settlement collects the whole group's triggers once. Returns
+    /// whether the fragment was withheld; when it was not, the caller parks the
+    /// fragment's triggers itself.
+    pub(crate) fn retain_paused_fragment(
+        &mut self,
+        state: &GameState,
+        fragment: &[GameEvent],
+        chosen: &[ObjectId],
+    ) -> bool {
+        record_sacrifice_cost_departure_records(
+            &mut self.departure_record_indices,
+            fragment,
+            chosen,
+        );
+        let withhold = cost_move_group_may_form(state, chosen, &self.departure_record_indices);
+        if withhold {
+            self.deferred_cost_events.extend_from_slice(fragment);
+        }
+        withhold
+    }
+
+    /// CR 603.10a + CR 603.2c: Every selected object has moved. Stamp the
+    /// selected battlefield departures, across the withheld fragments and
+    /// `events[current_start..]`, as one simultaneous departure (events and the
+    /// per-turn LKI records), then collect the withheld fragments together with
+    /// the current one exactly once. With nothing withheld the current fragment
+    /// stays with the action's ordinary trigger collection.
+    pub(crate) fn settle(
+        self,
+        state: &mut GameState,
+        pending: Option<&mut PendingCast>,
+        chosen: &[ObjectId],
+        events: &mut [GameEvent],
+        current_start: usize,
+    ) {
+        let Self {
+            mut deferred_cost_events,
+            mut departure_record_indices,
+        } = self;
+        record_sacrifice_cost_departure_records(
+            &mut departure_record_indices,
+            &events[current_start..],
+            chosen,
+        );
+        let group = selected_battlefield_departures(
+            chosen,
+            deferred_cost_events
+                .iter()
+                .chain(events[current_start..].iter()),
+        );
+        crate::game::zones::mark_simultaneous_departures(&mut deferred_cost_events, &group);
+        crate::game::zones::mark_simultaneous_departures(&mut events[current_start..], &group);
+        crate::game::zones::mark_simultaneous_departure_records(
+            state,
+            &departure_record_indices,
+            &group,
+        );
+        if !deferred_cost_events.is_empty() {
+            // CR 603.2 + CR 603.3b: earlier action fragments of this payment were
+            // withheld from trigger collection; collect the fully stamped group
+            // once, together with this action's fragment.
+            let current_end = events.len();
+            settle_sacrifice_for_cost_events(
+                state,
+                pending,
+                deferred_cost_events,
+                events,
+                current_start,
+                current_end,
+            );
+        }
+    }
 }
 
 /// CR 603.10a: Whether the selected objects can still leave the battlefield
@@ -2942,18 +3037,8 @@ fn move_cost_objects(
                 // CR 603.10a: the departures so far, and (while a group can still
                 // form) their events, travel with the root so terminal completion
                 // stamps the whole group and collects its triggers once.
-                record_sacrifice_cost_departure_records(
-                    &mut ledger.departure_record_indices,
-                    &events[cost_event_start..],
-                    chosen,
-                );
                 let withhold =
-                    cost_move_group_may_form(state, chosen, &ledger.departure_record_indices);
-                if withhold {
-                    ledger
-                        .deferred_cost_events
-                        .extend_from_slice(&events[cost_event_start..]);
-                }
+                    ledger.retain_paused_fragment(state, &events[cost_event_start..], chosen);
                 state.pending_cost_move_resume = Some(PendingCostMoveResume::Cast {
                     player,
                     pending: Some(Box::new(pending.clone())),
@@ -3026,42 +3111,8 @@ fn finish_cost_object_moves(
     // Evidence, craft's graveyard materials), which are never part of it, and a
     // call resumed after a replacement-choice pause recomputes the whole group
     // from the ledger it carried.
-    let CostMoveLedger {
-        mut deferred_cost_events,
-        mut departure_record_indices,
-    } = ledger;
-    record_sacrifice_cost_departure_records(
-        &mut departure_record_indices,
-        &events[cost_event_start..],
-        &chosen,
-    );
-    let group = selected_battlefield_departures(
-        &chosen,
-        deferred_cost_events
-            .iter()
-            .chain(events[cost_event_start..].iter()),
-    );
-    crate::game::zones::mark_simultaneous_departures(&mut deferred_cost_events, &group);
-    crate::game::zones::mark_simultaneous_departures(&mut events[cost_event_start..], &group);
-    crate::game::zones::mark_simultaneous_departure_records(
-        state,
-        &departure_record_indices,
-        &group,
-    );
     let mut pending = pending;
-    if !deferred_cost_events.is_empty() {
-        // CR 603.2 + CR 603.3b: earlier action fragments of this payment were
-        // withheld from trigger collection; collect the fully stamped group once,
-        // together with this action's fragment.
-        settle_sacrifice_for_cost_events(
-            state,
-            Some(&mut pending),
-            deferred_cost_events,
-            events,
-            cost_event_start,
-            events.len(),
-        );
-    }
+    ledger.settle(state, Some(&mut pending), &chosen, events, cost_event_start);
 
     // CR 400.7j + CR 400.7 + CR 608.2k + CR 608.2h: Every cost object move above is now
     // complete, so settle the cost-paid provenance: re-pin the referent to the
@@ -3880,7 +3931,7 @@ fn pay_delve_at_commit(
 /// that has actually left the battlefield in this action fragment. The matching
 /// event copy is kept separately in the typed resume root so terminal stamping
 /// can update both event buffers and the authoritative LKI ledger.
-fn record_sacrifice_cost_departure_records(
+pub(crate) fn record_sacrifice_cost_departure_records(
     departure_record_indices: &mut Vec<usize>,
     events: &[GameEvent],
     chosen: &[ObjectId],

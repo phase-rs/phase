@@ -1787,10 +1787,10 @@ pub(crate) fn parse_quoted_ability(text: &str) -> AbilityDefinition {
         crate::parser::oracle::extract_cost_reduction_from_chain(&mut def);
         // CR 201.5a: the granter self-reference marker is rendered to the granting
         // object's printed name by `oracle_util::render_granting_self_reference`, at
-        // the two parse entry points (`parse_oracle_text`,
-        // `catalog_rules_text_abilities`) — NOT collapsed to the host token `~` here,
-        // which is what made a granted "Sacrifice <granter>" print as the equipped
-        // creature's name.
+        // the three parse entry points (`parse_oracle_text`,
+        // `catalog_rules_text_abilities`, `oracle_effect::token::push_parsed_statics`)
+        // — NOT collapsed to the host token `~` here, which is what made a granted
+        // "Sacrifice <granter>" print as the equipped creature's name.
         def.description = Some(text.to_string());
         crate::parser::oracle_effect::refuse_linked_paid_cast_in_activated_mana_ability(
             &mut def, text,

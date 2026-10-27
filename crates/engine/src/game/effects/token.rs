@@ -815,11 +815,12 @@ fn build_token_spec(
 ) -> TokenSpec {
     use crate::types::proposed_event::TokenCharacteristics;
 
-    // CR 201.5a + CR 400.7: the token's statics name the incarnation that
-    // created it, so a creator that later changes zones is a different object.
+    // CR 201.5a + CR 111.3 + CR 400.7: a token static's own fields, and the token's
+    // own quoted abilities, name the incarnation that created it. A grant to another
+    // object stays unbound until layer 6 binds it to the token.
     if let Some(creator) = ability.source_ref(state) {
         for static_def in static_abilities.iter_mut() {
-            crate::game::layers::stamp_static_granter(static_def, creator);
+            crate::game::layers::stamp_token_static_creator(static_def, creator);
         }
     }
 

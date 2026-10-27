@@ -1044,6 +1044,30 @@ fn parse_blitz_cost(cost_text: &str) -> Option<crate::types::keywords::BlitzCost
     }
 }
 
+/// CR 702.37a + CR 702.37e: Parse a morph cost following the em-dash separator
+/// (e.g., "morph—return two islands you control to their owner's hand" on Fathom Seer).
+/// Mirrors `parse_echo_cost`: delegates to `parse_oracle_cost` so comma-separated
+/// parts compose into `AbilityCost::Composite`, and wraps the result in `MorphCost::Mana`
+/// when it's a pure mana cost or `MorphCost::NonMana` otherwise.
+fn parse_morph_cost(cost_text: &str) -> Option<crate::types::keywords::MorphCost> {
+    use crate::types::keywords::MorphCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(MorphCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other => Some(MorphCost::NonMana(other)),
+    }
+}
+
 /// CR 702.30a: Parse an echo cost following the em-dash separator
 /// (e.g., "echo—discard a card" on Rakdos Headliner / Deepcavern Imp).
 /// Mirrors `parse_evoke_cost`: delegates to `parse_oracle_cost` so
@@ -1732,6 +1756,22 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("echo\u{2014}").parse(text) {
         if let Some(echo_cost) = parse_echo_cost(rest) {
             return Some((Keyword::Echo(echo_cost), ""));
+        }
+    }
+
+    // CR 702.37a + CR 702.37e: Morph with em-dash cost — covers non-mana
+    // morph costs ("morph—return two islands you control to their owner's hand" on Fathom Seer,
+    // "morph—discard a card" on Gathan Raiders, "morph—pay 5 life" on Zombie Cutthroat,
+    // "morph—reveal a black card in your hand" on Ruthless Ripper).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("morph\u{2014}"),
+        tag("morph--"),
+        tag("morph — "),
+    ))
+    .parse(text)
+    {
+        if let Some(morph_cost) = parse_morph_cost(rest) {
+            return Some((Keyword::Morph(morph_cost), ""));
         }
     }
 
@@ -7035,6 +7075,23 @@ mod router_registry_tests {
                 parse_router_keyword_line(&hostile).is_none(),
                 "typecycling with unmodelled semantic text must be rejected: {hostile:?}"
             );
+        }
+    }
+
+    /// CR 702.37a + CR 702.37e: Non-mana morph cost (Fathom Seer).
+    #[test]
+    fn parse_morph_non_mana_cost_fathom_seer() {
+        let line = "Morph—Return two Islands you control to their owner's hand. (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
+        let routed = parse_router_keyword_line(line).expect("must parse morph keyword line");
+        let kw = routed.keyword.expect("must produce keyword");
+        match kw {
+            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(
+                crate::types::ability::AbilityCost::ReturnToHand { count, filter, .. },
+            )) => {
+                assert_eq!(count, 2);
+                assert!(filter.is_some());
+            }
+            other => panic!("expected Morph(NonMana(ReturnToHand)), got {other:?}"),
         }
     }
 }

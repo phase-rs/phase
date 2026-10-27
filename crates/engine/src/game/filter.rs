@@ -393,6 +393,18 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
 pub(crate) const UNPAIRED_READS: CharacteristicKinds =
     CharacteristicKinds::CONTROLLER.union(CharacteristicKinds::CARD_TYPES);
 
+/// CR 303.4 + CR 702.103b + CR 702.103f: whether a source's "enchanted creature"
+/// is relative to the source itself. True for an Aura, and for a bestow card:
+/// CR 702.103b makes a bestowed spell and the permanent it becomes an Aura, and
+/// CR 702.103f ends that bestowed status when it becomes unattached, leaving a
+/// creature rather than an Aura. Its "enchanted creature" static still refers
+/// only to the creature it is attached to, never to creatures enchanted by
+/// other Auras.
+fn source_is_aura_or_bestow(subtypes: &[String], keywords: &[Keyword]) -> bool {
+    subtypes.iter().any(|subtype| subtype == "Aura")
+        || keywords.iter().any(|k| matches!(k, Keyword::Bestow(_)))
+}
+
 /// CR 301.5f + CR 303.4: true when every object `filter` admits must stand in an
 /// attachment relation — be what the source is attached to, or carry an
 /// attachment — because it requires `EquippedBy`/`EnchantedBy` on every branch.
@@ -6195,6 +6207,7 @@ fn matches_target_filter_on_lki_snapshot_with_incarnation(
         // `FilterProp::Prepared` reads last known information for a departed
         // source's intervening-if recheck (CR 603.4).
         was_prepared: lki.was_prepared,
+        departure: crate::types::game_state::ZoneDeparture::Moved,
     };
     matches_target_filter_on_zone_change_record(state, &record, filter, ctx)
 }
@@ -8952,7 +8965,7 @@ fn source_context_from_filter<'a>(
                 Vec::new(),
             )
         };
-    let source_is_aura = lki.subtypes.iter().any(|subtype| subtype == "Aura");
+    let source_is_aura = source_is_aura_or_bestow(&lki.subtypes, &lki.keywords);
     let source_is_equipment = lki.subtypes.iter().any(|subtype| subtype == "Equipment");
     let chosen_creature_type = lki
         .chosen_attributes
@@ -11401,7 +11414,7 @@ fn source_context_from_spell_filter(context: SpellFilterContext<'_>) -> SourceCo
         trigger_source: None,
         attached_to: source_obj.and_then(|o| o.attached_to),
         source_is_aura: source_obj
-            .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Aura")),
+            .is_some_and(|o| source_is_aura_or_bestow(&o.card_types.subtypes, &o.keywords)),
         source_is_equipment: source_obj
             .is_some_and(|o| o.card_types.subtypes.iter().any(|s| s == "Equipment")),
         saddled_by: source_obj.map_or_else(Vec::new, |o| o.saddled_by.clone()),
@@ -11731,15 +11744,29 @@ pub fn validate_shares_quality(
             TargetRef::Player(_) => None,
         })
         .collect();
+    objects_have_common_quality_value(state, &obj_ids, quality)
+}
 
+/// Whether some value of `quality` is common to every object in `ids`
+/// (group form; contrast the pairwise `quality_sets_overlap`).
+/// Vacuously true for fewer than two ids, decided before any lookup; with
+/// two or more ids, false if any id is missing from `state.objects`,
+/// otherwise true iff the objects' value sets have a non-empty intersection.
+/// Shared group core for target validation (`validate_shares_quality`) and
+/// library-search selection (`search_library::selection_satisfies_constraint`).
+pub fn objects_have_common_quality_value(
+    state: &GameState,
+    ids: &[ObjectId],
+    quality: &SharedQuality,
+) -> bool {
     // Fewer than 2 objects — constraint is trivially satisfied.
-    if obj_ids.len() < 2 {
+    if ids.len() < 2 {
         return true;
     }
 
     let mut sets = Vec::new();
-    for id in obj_ids {
-        let Some(obj) = state.objects.get(&id) else {
+    for id in ids {
+        let Some(obj) = state.objects.get(id) else {
             return false;
         };
         sets.push(object_shared_quality_values(
@@ -22698,6 +22725,7 @@ mod tests {
             recorded_turn_number: 0,
             is_suspected: false,
             was_prepared: false,
+            departure: crate::types::game_state::ZoneDeparture::Moved,
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");
@@ -23913,6 +23941,43 @@ mod tests {
 
     fn equipped_creature() -> TargetFilter {
         TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy]))
+    }
+
+    /// CR 303.4 + CR 702.103b: a bestow card on the battlefield as an unattached
+    /// creature (Nyxborn Rollicker) has "enchanted creature gets +1/+1" that
+    /// refers only to what it is attached to — creatures enchanted by other
+    /// Auras are not "enchanted creature" for it.
+    #[test]
+    fn unattached_bestow_creature_enchanted_by_matches_nothing() {
+        let mut state = setup();
+        let rollicker = add_creature(&mut state, PlayerId(0), "Nyxborn Rollicker");
+        state
+            .objects
+            .get_mut(&rollicker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Bestow(crate::types::keywords::BestowCost::Mana(
+                ManaCost::zero(),
+            )));
+        let bear = add_creature(&mut state, PlayerId(0), "Bear");
+        let other_aura = add_artifact(&mut state, "Other Aura", &["Aura"]);
+        attach(&mut state, other_aura, bear);
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]));
+
+        // Positive guard: the bear really is enchanted, by a different Aura.
+        assert!(matches_target_filter(&state, bear, &filter, other_aura));
+        // Unattached bestow creature: nothing is enchanted by it.
+        assert!(!matches_target_filter(&state, bear, &filter, rollicker));
+        assert!(!matches_target_filter(
+            &state, rollicker, &filter, rollicker
+        ));
+
+        // Attached (Aura form): only its host qualifies.
+        let host = add_creature(&mut state, PlayerId(0), "Host");
+        attach(&mut state, rollicker, host);
+        assert!(matches_target_filter(&state, host, &filter, rollicker));
+        assert!(!matches_target_filter(&state, bear, &filter, rollicker));
     }
 
     /// CR 301.5f: `attachment_relation_rejects` proves rejection only for an

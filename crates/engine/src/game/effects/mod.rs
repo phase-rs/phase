@@ -8780,7 +8780,7 @@ fn effect_fields_read_filter_population(
                         filters.iter().any(has_filter)
                     }
                     SearchSelectionConstraint::None
-                    | SearchSelectionConstraint::DistinctQualities { .. }
+                    | SearchSelectionConstraint::SharesQualities { .. }
                     | SearchSelectionConstraint::TotalManaValue { .. } => false,
                 }
         }
