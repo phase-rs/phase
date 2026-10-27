@@ -2039,15 +2039,23 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
 }
 
 /// How a card-type population reads the recipient binding: consult the
-/// stored member filter (Objects, TurnJournal, TrackedSet) or the canonical
-/// slot filter (TargetedObjects), walking unions. Mirrors
-/// `characteristic_leaf_reads_at` so recipient classification can never
-/// disagree with characteristic reads on which filter a source carries.
+/// stored member filter (Objects, TrackedSet) or the canonical slot filter
+/// (TargetedObjects), walking unions. A journal source never consults its
+/// filter here even though `characteristic_leaf_reads_at` does — the two
+/// classifiers answer different questions (live recipient dependence vs.
+/// characteristic coverage), and the journal family evaluates its filters
+/// against records, not the live binding (see below).
 fn card_type_set_source_recipient_read(source: &CardTypeSetSource) -> RecipientRead {
     match source {
         CardTypeSetSource::Objects { filter } => filter_recipient_read(filter),
-        CardTypeSetSource::TurnJournal { filter, .. }
-        | CardTypeSetSource::TrackedSet { filter, .. } => filter
+        // Record-backed journal reads evaluate their member filter against
+        // journal records in a fresh context, not the live recipient
+        // binding — the same rule the journal-family QuantityRefs pin
+        // below (SpellsCastThisTurn et al.): only player scopes can read
+        // the recipient. A recipient-relative filter grades Unread even
+        // though the identical filter reads PopulationIdentity live.
+        CardTypeSetSource::TurnJournal { .. } => RecipientRead::Unread,
+        CardTypeSetSource::TrackedSet { filter, .. } => filter
             .as_ref()
             .map_or(RecipientRead::Unread, filter_recipient_read),
         CardTypeSetSource::AnyOf { .. } => {
