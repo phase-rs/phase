@@ -3,7 +3,7 @@
 use super::jev_defining_destroy::{cost, fund, settled};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card_type::{CoreType, Supertype};
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -35,6 +35,89 @@ fn pt(runner: &mut GameRunner, id: ObjectId) -> (i32, i32) {
     engine::game::layers::evaluate_layers(runner.state_mut());
     let object = &runner.state().objects[&id];
     (object.power.unwrap(), object.toughness.unwrap())
+}
+
+#[test]
+fn mystic_decree_paid_cast_removes_only_flying_and_islandwalk_until_source_leaves() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let creatures = [P0, P1].map(|controller| {
+        scenario
+            .add_creature(controller, "Multiple distinct evasion abilities", 3, 4)
+            .flying()
+            .with_keyword(Keyword::Landwalk("Island".into()))
+            .with_keyword(Keyword::Landwalk("Swamp".into()))
+            .with_keyword(Keyword::Vigilance)
+            .id()
+    });
+    // Complete pinned MTGJSON Oracle text and printed cost/type; this card is
+    // outside the closed fixture consumed by printed().
+    let decree = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Mystic Decree",
+            false,
+            "All creatures lose flying and islandwalk.",
+        )
+        .as_enchantment()
+        .with_mana_cost(cost("{2}{U}{U}"))
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    let object = runner.state_mut().objects.get_mut(&decree).unwrap();
+    object.card_types.supertypes.push(Supertype::World);
+    object.base_card_types = object.card_types.clone();
+    for id in creatures {
+        let keywords = &runner.state().objects[&id].keywords;
+        for keyword in [
+            Keyword::Flying,
+            Keyword::Landwalk("Island".into()),
+            Keyword::Landwalk("Swamp".into()),
+            Keyword::Vigilance,
+        ] {
+            assert!(keywords.contains(&keyword));
+        }
+    }
+    fund(&mut runner, 2, &[ManaType::Blue; 2]);
+    runner.cast(decree).resolve();
+    assert_eq!(runner.state().objects[&decree].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+    // CR 611.3a + CR 702.14a + CR 702.14c: all creatures lose the named
+    // abilities, while a different landwalk quality and vigilance remain.
+    for id in creatures {
+        let keywords = &runner.state().objects[&id].keywords;
+        assert!(!keywords.contains(&Keyword::Flying));
+        assert!(!keywords.contains(&Keyword::Landwalk("Island".into())));
+        assert!(keywords.contains(&Keyword::Landwalk("Swamp".into())));
+        assert!(keywords.contains(&Keyword::Vigilance));
+    }
+    fund(&mut runner, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(decree).resolve();
+    assert_eq!(runner.state().objects[&decree].zone, Zone::Hand);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+    // CR 611.3b: the static effect ends when its source leaves the battlefield.
+    for id in creatures {
+        let keywords = &runner.state().objects[&id].keywords;
+        for keyword in [
+            Keyword::Flying,
+            Keyword::Landwalk("Island".into()),
+            Keyword::Landwalk("Swamp".into()),
+            Keyword::Vigilance,
+        ] {
+            assert!(keywords.contains(&keyword));
+        }
+    }
 }
 
 #[test]

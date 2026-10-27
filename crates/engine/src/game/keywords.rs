@@ -79,10 +79,16 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
 
 /// Whether generic keyword removal strips this candidate.
 /// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
-/// abilities. Other removal operands keep their existing same-variant scope.
+/// abilities. CR 702.14a + CR 702.14c: landwalk removal matches its specified
+/// quality. Other removal operands keep their existing same-variant scope.
 pub(crate) fn keyword_matches_removal(candidate: &Keyword, removed: &Keyword) -> bool {
-    std::mem::discriminant(candidate) == std::mem::discriminant(removed)
-        || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
+    match removed {
+        Keyword::Landwalk(_) => candidate == removed,
+        _ => {
+            std::mem::discriminant(candidate) == std::mem::discriminant(removed)
+                || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
+        }
+    }
 }
 
 /// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
@@ -1392,6 +1398,27 @@ mod tests {
             "Test".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    #[test]
+    fn lose_landwalk_removal_matches_only_the_specified_quality() {
+        // CR 702.14a + CR 702.14c + CR 702.14e: different landwalk qualities
+        // are distinct; only multiple instances of the same kind are redundant.
+        let islandwalk = Keyword::Landwalk("Island".into());
+        let swampwalk = Keyword::Landwalk("Swamp".into());
+        assert!(keyword_matches_removal(&islandwalk, &islandwalk));
+        assert!(keyword_matches_removal(&swampwalk, &swampwalk));
+        assert!(!keyword_matches_removal(&swampwalk, &islandwalk));
+        assert!(!keyword_matches_removal(&islandwalk, &swampwalk));
+        for candidate in [
+            Keyword::Landwalk("Forest".into()),
+            Keyword::Landwalk("Nonbasic".into()),
+            Keyword::Landwalk("Snow".into()),
+            Keyword::Flying,
+            Keyword::Hexproof,
+        ] {
+            assert!(!keyword_matches_removal(&candidate, &islandwalk));
+        }
     }
 
     #[test]
