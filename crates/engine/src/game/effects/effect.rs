@@ -1017,7 +1017,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { .. }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }

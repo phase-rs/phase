@@ -266,7 +266,7 @@ pub(crate) fn parse_spell_casting_option_line(
 pub(crate) fn is_self_alternative_cost_line(text: &str) -> bool {
     let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
     let (_, body) = split_leading_if_clause(&lower);
-    alt((
+    let parsed = alt((
         value(
             (),
             (
@@ -285,8 +285,8 @@ pub(crate) fn is_self_alternative_cost_line(text: &str) -> bool {
             ),
         ),
     ))
-    .parse(body)
-    .is_ok()
+    .parse(body);
+    parsed.is_ok()
 }
 
 fn split_leading_if_clause(text: &str) -> (Option<&str>, &str) {

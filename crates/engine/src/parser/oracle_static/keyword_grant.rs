@@ -6,6 +6,7 @@ use super::prelude::*;
 use super::support::*;
 use nom::character::complete::alphanumeric1;
 use nom::combinator::not;
+use nom::multi::many1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleStaticPredicate {
@@ -61,7 +62,7 @@ pub(crate) fn parse_graveyard_granted_keyword_kind(
 /// the unframed callback used by the structural activation query.
 fn consult_grant_root_frame(text: &str) -> Option<Result<(), &str>> {
     let lower = text.to_lowercase();
-    if super::oracle_classifier::has_trigger_prefix(&lower)
+    if crate::parser::oracle_classifier::has_trigger_prefix(&lower)
         || super::oracle_modal::strip_ability_word_with_name(text).is_some()
     {
         return Some(Ok(()));
@@ -122,8 +123,10 @@ fn grant_boundary_has_foreign_owner(
     let embedded = nom_primitives::scan_at_word_boundaries(&lower, |suffix| {
         let start = lower.len() - suffix.len();
         if start < boundary {
-            if super::oracle_target::relative_card_predicate_owns_boundary(suffix, boundary - start)
-            {
+            if crate::parser::oracle_target::relative_card_predicate_owns_boundary(
+                suffix,
+                boundary - start,
+            ) {
                 return Ok((suffix, ()));
             }
             if let Ok((rest, _)) = nom_quantity::parse_quantity_ref(suffix) {
@@ -155,7 +158,7 @@ fn grant_boundary_has_foreign_owner(
     nom_primitives::scan_at_word_boundaries(&lower[..boundary], |suffix| {
         let (rest, ()) = super::oracle_effect::subject::parse_predicate_verb_head(suffix)?;
         let start = boundary - suffix.len();
-        let (filter, remainder) = super::oracle_target::parse_target(body[..start].trim());
+        let (filter, remainder) = crate::parser::oracle_target::parse_target(body[..start].trim());
         let concrete = match &filter {
             TargetFilter::Any => false,
             TargetFilter::Typed(filter) => {

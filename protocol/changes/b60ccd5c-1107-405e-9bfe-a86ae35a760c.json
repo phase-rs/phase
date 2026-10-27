@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Preserve exact source, result invocation, and token continuation authority across choices and saved game state"
+}

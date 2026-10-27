@@ -1663,6 +1663,7 @@ impl<'a> FilterContext<'a> {
     /// declared-slot bindings all survive into a nested host evaluation.
     fn from_source_context(source: &SourceContext<'a>) -> Self {
         Self {
+            casting_spell: source.casting_spell,
             source_id: source.id,
             source_controller: source.controller,
             ability: source.ability,
@@ -6322,6 +6323,7 @@ pub(crate) fn matches_target_filter_on_departure(
         ctx.triggering_object,
         ctx.declared_slot_view,
         ctx.granting_object,
+        ctx.casting_spell,
         ControllerLookup::Departed(from),
         HeldObject::Live,
     )
@@ -9461,7 +9463,20 @@ fn filter_object_known(
             .and_then(|choice| choice.source.as_ref()).is_some_and(|source| {
                 source.identity.reference.object_id == object_id
                     && source.identity.reference.incarnation == obj.incarnation
-                    && filter.as_deref().is_none_or(|qualifier| matches_target_filter_on_exact_source(state, source, qualifier, &FilterContext::from_source_with_controller(source_id, source_controller)))
+                    && filter.as_deref().is_none_or(|qualifier| {
+                        let mut context = FilterContext::neutral();
+                        context.source_id = source_id;
+                        context.source_controller = source_controller;
+                        context.ability = ability;
+                        context.trigger_source = trigger_source;
+                        context.recipient_id = recipient_id;
+                        context.scoped_iteration_player = scoped_iteration_player;
+                        context.triggering_object = triggering_object;
+                        context.declared_slot_view = declared_slot_view;
+                        context.granting_object = granting_object;
+                        context.casting_spell = casting_spell;
+                        matches_target_filter_on_exact_source(state, source, qualifier, &context)
+                    })
             }),
         // "card named [literal]" — static name match.
         TargetFilter::Named { name } => obj.name == *name,

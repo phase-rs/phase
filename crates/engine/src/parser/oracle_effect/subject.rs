@@ -287,14 +287,15 @@ pub(super) fn try_parse_subject_predicate_ast(
         return Some(ast);
     }
     let restriction_head = find_predicate_start(text).is_some_and(|start| {
-        alt((
+        let lower = text[start..].to_lowercase();
+        let parsed = alt((
             tag::<_, _, OracleError<'_>>("can't "),
             tag("cannot "),
             tag("doesn't untap"),
             tag("don't untap"),
         ))
-        .parse(text[start..].to_lowercase().as_str())
-        .is_ok()
+        .parse(lower.as_str());
+        parsed.is_ok()
     });
     if restriction_head {
         if let Some(clause) = try_parse_subject_restriction_clause(text, ctx) {
@@ -847,7 +848,7 @@ pub(super) fn split_distinct_continuous_subjects<'a>(
     while let Some((left, right)) = scan.split_around_outside_quotes(" and ") {
         let offset = full.len() - scan.len() + left.len();
         let first = text[..offset].trim();
-        let second = right.original.trim();
+        let second = text[text.len() - right.len()..].trim();
         let left_verb = find_predicate_start(first)?;
         let right_verb = find_predicate_start(second);
         if let Some(right_verb) = right_verb.filter(|position| *position > 0) {
@@ -1015,6 +1016,7 @@ fn build_conditional_continuous_members(
         optional: application.is_optional,
         optional_targeting: first.optional_targeting,
         unless_pay: first.unless_pay,
+        entry_onset: first.entry_onset,
     })
 }
 
@@ -3127,6 +3129,7 @@ fn parse_subject_application_for(
             multi_target: None,
             inherits_parent: false,
             is_optional: false,
+            player_anaphor: None,
         });
     }
 

@@ -10056,10 +10056,15 @@ fn parse_source_quality(input: &str) -> OracleResult<'_, TargetFilter> {
     let (input, negative) = opt(parse_non_prefix).parse(input)?;
     let (input, filter) = alt((
         map(nom_primitives::parse_color, |color| {
-            TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasColor { color }))
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+            )
         }),
         map(parse_supertype_word, |supertype| {
-            TargetFilter::Typed(TypedFilter::default().prop(FilterProp::HasSupertype { supertype }))
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .properties(vec![FilterProp::HasSupertype { value: supertype }]),
+            )
         }),
         map(parse_type_filter_word, |kind| {
             TargetFilter::Typed(TypedFilter::default().with_type(kind))
@@ -10240,16 +10245,15 @@ pub(crate) fn parse_choose_damage_source_candidate_prefix(
 
 pub(crate) fn parse_choose_damage_source_candidate(input: &str) -> Option<TargetFilter> {
     let lower = input.to_lowercase();
-    all_consuming(terminated(
+    let parsed = all_consuming(terminated(
         preceded(
             opt(tag("choose ")),
             parse_choose_damage_source_candidate_prefix,
         ),
         opt(char('.')),
     ))
-    .parse(lower.trim())
-    .ok()
-    .map(|(_, filter)| filter)
+    .parse(lower.trim());
+    parsed.ok().map(|(_, filter)| filter)
 }
 
 /// Shared subject-postprocessing tail for damage-source subject extraction,

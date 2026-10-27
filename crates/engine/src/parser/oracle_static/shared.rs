@@ -1552,7 +1552,7 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::LastCreated
         | TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
+        | TargetFilter::CostPaidObject { .. }
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::ExiledCardByIndex { .. }

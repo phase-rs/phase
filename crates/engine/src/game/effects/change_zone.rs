@@ -2435,6 +2435,7 @@ fn open_arranger_election(
     let election = crate::game::players::substitute_chooser_election(state, entry);
     pending.arranger_election = Some(batch);
     state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
+        return_result_occurrence: state.active_return_result_occurrence,
         player: election.elector,
         candidates: election.candidates,
         ability: Box::new(ability),

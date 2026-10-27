@@ -3609,6 +3609,7 @@ pub(crate) fn copy_probe_spec(
             sacrifice_at: ability.duration.clone(),
             source_id: ability.source_id,
             controller: ability.controller,
+            donor: None,
         },
         all_creature_types,
     )
@@ -5462,6 +5463,7 @@ mod tests {
             sacrifice_at: None,
             source_id: object.id,
             controller: PlayerId(1),
+            donor: Some(ObjectIncarnationRef::from_object(&object)),
         };
         let body = copy_probe_object_for(&copy, &[]);
         assert_eq!(body.effective_mana_value(), 3);

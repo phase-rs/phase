@@ -390,14 +390,22 @@ fn chosen_source_one_shot_damage_replacement_doubles_every_trample_recipient() {
         .id();
     let blocker = scenario.add_creature(P1, "Blocker", 2, 2).id();
     let mut runner = scenario.build();
-    runner.state_mut().last_chosen_damage_source = Some(ChosenDamageSource {
-        source_id: attacker,
-        source_filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
-    });
-    let ability = ResolvedAbility::new(
+    let selected_choice = ChosenDamageSource {
+        source: Some(engine::game::triggers::trigger_source_context_for_latch(
+            runner.state(),
+            &runner.state().objects[&attacker],
+        )),
+        candidate_filter: TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::You),
+        ),
+    };
+    let mut ability = ResolvedAbility::new(
         Effect::CreateDamageReplacement {
             redirect_lifetime: RedirectionLifetime::OneOpportunity,
-            source_filter: Some(TargetFilter::ChosenDamageSource { filter: None }),
+            source_filter: Some(TargetFilter::ChosenDamageSource {
+                chooser: None,
+                filter: None,
+            }),
             combat_scope: None,
             target_filter: None,
             modification: Some(DamageModification::Double),
@@ -410,6 +418,7 @@ fn chosen_source_one_shot_damage_replacement_doubles_every_trample_recipient() {
         attacker,
         P0,
     );
+    ability.context.damage_source_choice = Some(selected_choice);
     let mut events = Vec::new();
     create_damage_replacement::resolve(runner.state_mut(), &ability, &mut events)
         .expect("resolve the chosen-source one-shot damage replacement");

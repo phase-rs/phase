@@ -11514,6 +11514,7 @@ TargetFilter::PostReplacementDamageSource |
 TargetFilter::PostReplacementDamageTarget |
 TargetFilter::PostReplacementDamageTargetOwner |
 TargetFilter::DefendingPlayer |
+TargetFilter::AttackedPlayerOrPlaneswalker |
 TargetFilter::HasChosenName |
 TargetFilter::Named { .. } |
 TargetFilter::Owner |
@@ -30912,6 +30913,7 @@ Effect::MiracleCast { .. } |
 Effect::MadnessCast { .. } |
 Effect::GiftDelivery { .. } |
 Effect::ManifestDread |
+Effect::ModifyAnnouncedX { .. } |
 Effect::RuntimeHandled { .. } |
 Effect::Incubate { .. } |
 Effect::EmpowerJace { .. } |

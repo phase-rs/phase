@@ -26633,8 +26633,10 @@ declare_game_state! {
     /// Historical compatibility input only. Canonical restore transfers an
     /// authentic selected scalar to its one actual continuation/flip owner;
     /// current source choices live on that owner's SpellContext instead.
+    /// This legacy-only payload embeds a full source snapshot. Keep it off the
+    /// stack without changing its serialized representation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_chosen_damage_source: Option<ChosenDamageSource>,
+    pub last_chosen_damage_source: Option<Box<ChosenDamageSource>>,
 
     /// All creature subtypes seen across loaded cards. Used by Changeling CDA
     /// to grant every creature type at runtime.
@@ -28217,7 +28219,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     if let DefinitionNode::Ability(definition) = node {
                         nested.push(crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
                             definition, ability.source_id, ability.controller,
-                            ability.targets.clone(), ability.chain_root_targets.clone()));
+                            ability.targets.clone(), ability.context.chain_root_targets.clone()));
                     }
                     ControlFlow::Continue(())
                 };
@@ -28380,7 +28382,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 }
                 let mut materialized = scratch.clone();
                 materialized.pending_damage_replacements.clear();
-                for object in materialized.objects.values_mut() {
+                for (_, object) in materialized.objects.iter_mut() {
                     object.replacement_definitions.clear();
                 }
                 let mut events = Vec::new();

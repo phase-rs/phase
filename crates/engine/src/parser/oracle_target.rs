@@ -309,8 +309,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space0, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
-use nom::multi::{many0, separated_list1};
-use nom::sequence::{preceded, terminated};
+use nom::multi::many0;
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{

@@ -11,7 +11,7 @@ use nom::Parser;
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
-use super::super::oracle_util::{parse_count_expr_combinator, split_around};
+use super::super::oracle_util::parse_count_expr_combinator;
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };

@@ -81,6 +81,13 @@
 //! ChooseOneOfBranch more than 200 B apart, so `WaitingFor` carries an intentional
 //! `#[allow(clippy::large_enum_variant)]`; the GameState ceiling above is the bound.
 //!
+//! The source-choice migration retains `last_chosen_damage_source` only as a
+//! legacy compatibility input. Its `ChosenDamageSource` now contains a full
+//! optional `TriggerSourceContext`, so this rarely populated field is boxed,
+//! as are the other parked source snapshots. Serde's `Box` representation is
+//! transparent; current source choices continue to use their owning
+//! `SpellContext`. The existing ceiling remains the verification gate.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

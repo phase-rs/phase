@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use crate::types::ability::{
@@ -24,11 +24,11 @@ use super::filter::{
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
-    NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
-    ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
-    ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, TriggerSourceContext,
-    WaitingFor,
+    NamedChoiceSourceBinding, PayableResource, PendingContinuation, PendingReplacement,
+    PostReplacementDrain, ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity,
+    ReplacementAutoChoiceKey, ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail,
+    ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
+    TriggerSourceContext, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -12911,6 +12911,8 @@ fn park_as_enters_pay_choice(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        damage_opportunity: Default::default(),
+        damage_source_context: None,
         proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],

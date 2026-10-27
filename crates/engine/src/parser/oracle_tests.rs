@@ -45970,6 +45970,359 @@ pub(crate) mod defining_modifier_publication {
 
     fn expected_defining_program(name: &str, out: &mut ParsedAbilities) {
         match name {
+            "Consuming Ferocity" => {
+                let counter_type = CounterType::PowerToughness {
+                    power: 1,
+                    toughness: 0,
+                };
+                out.extracted_keywords = vec![Keyword::Enchant(TargetFilter::Typed(
+                    TypedFilter::creature().with_type(TypeFilter::Non(Box::new(
+                        TypeFilter::Subtype("Wall".into()),
+                    ))),
+                ))];
+                out.statics.push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::AttachedTo)
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 1 },
+                            ContinuousModification::AddToughness { value: 0 },
+                        ])
+                        .description(printed_line(name, 1)),
+                );
+                let put = spell(Effect::PutCounter {
+                    target: TargetFilter::AttachedTo,
+                    counter_type: counter_type.clone(),
+                    count: fixed(1),
+                });
+                let mut damage = spell(Effect::EachSourceDealsDamage {
+                    sources: TargetFilter::AttachedTo,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::BatchSource,
+                        },
+                    },
+                    recipient: EachDamageRecipient::EachController,
+                });
+                damage.condition = Some(AbilityCondition::QuantityCheck {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOnObjects {
+                            counter_type: Some(counter_type),
+                            filter: TargetFilter::AttachedTo,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: fixed(3),
+                });
+                // Destruction belongs to the threshold's entire dependent tail.
+                damage.sub_ability = Some(Box::new(spell(Effect::Destroy {
+                    target: TargetFilter::AttachedTo,
+                    cant_regenerate: true,
+                })));
+                let mut upkeep = TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(crate::types::phase::Phase::Upkeep)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(chain(vec![put, damage]))
+                    .description(printed_line(name, 2));
+                upkeep.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+                out.triggers.push(upkeep);
+            }
+            "Martyrdom" => {
+                let complete = printed_line(name, 0);
+                let mut grant = spell(Effect::unimplemented("fixed_grant_activator", &complete));
+                grant.description = Some(complete);
+                out.abilities.push(grant);
+            }
+            "Doors of Durin" => {
+                let scry = spell(Effect::Scry {
+                    count: fixed(2),
+                    target: TargetFilter::Controller,
+                });
+                let mut reveal = spell(Effect::RevealTop {
+                    player: TargetFilter::Controller,
+                    count: 1,
+                });
+                reveal.optional = true;
+                let mut put = spell(effect(json!({
+                    "type":"ChangeZone", "origin":"Library", "destination":"Battlefield",
+                    "target":{"type":"LastRevealed"}, "enter_tapped":true,
+                    "enters_attacking":true
+                })));
+                put.condition = Some(AbilityCondition::RevealedHasCardType {
+                    card_types: vec![crate::types::card_type::CoreType::Creature],
+                    additional_filter: None,
+                    subtype_filter: None,
+                });
+                put.forward_result = true;
+                let duration = Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                };
+                let mut grants = Vec::new();
+                for (tribe, keyword) in [("Dwarf", Keyword::Trample), ("Elf", Keyword::Hexproof)] {
+                    let mut grant = spell(Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(TargetFilter::ParentTarget)
+                            .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+                        duration: Some(duration.clone()),
+                        target: Some(TargetFilter::ParentTarget),
+                        end_cost: None,
+                    });
+                    grant.duration = Some(duration.clone());
+                    grant.target_reads = TargetReadOrigin::ParentAnnouncement;
+                    grant.condition = Some(AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(
+                                    TypedFilter::default()
+                                        .with_type(TypeFilter::Subtype(tribe.into()))
+                                        .controller(ControllerRef::You),
+                                ),
+                            },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: fixed(1),
+                    });
+                    grant.sibling_condition = SiblingCondition::ReplicatedOrBranch;
+                    grants.push(grant);
+                }
+                put.sub_ability = Some(Box::new(chain(grants)));
+                reveal.sub_ability = Some(Box::new(put));
+                // Both the optional reveal and its type-gated move depend on this
+                // reveal; neither may borrow an earlier revealed/created object.
+                let mut body = scry;
+                body.sub_ability = Some(Box::new(reveal));
+                out.triggers.push(
+                    TriggerDefinition::new(TriggerMode::YouAttack)
+                        .trigger_zones(vec![Zone::Battlefield])
+                        .execute(body)
+                        .description(printed_line(name, 0)),
+                );
+            }
+            "Liara of the Flaming Fist" => {
+                let reference = TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::Another]),
+                        ),
+                        TargetFilter::Typed(
+                            TypedFilter::card()
+                                .with_type(TypeFilter::Creature)
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::InZone {
+                                    zone: Zone::Graveyard,
+                                }]),
+                        ),
+                    ],
+                };
+                let qualified = TargetFilter::And {
+                    filters: vec![
+                        own_creature(),
+                        TargetFilter::Typed(TypedFilter::default().properties(vec![
+                            FilterProp::SharesQuality {
+                                quality: SharedQuality::Name,
+                                reference: Some(Box::new(reference)),
+                                relation: SharedQualityRelation::Shares,
+                            },
+                        ])),
+                    ],
+                };
+                let mut pump = spell(Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(qualified)
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 1 },
+                            ContinuousModification::AddToughness { value: 1 },
+                        ])],
+                    duration: Some(Duration::UntilEndOfTurn),
+                    target: None,
+                    end_cost: None,
+                });
+                pump.duration = Some(Duration::UntilEndOfTurn);
+                out.triggers.push(
+                    TriggerDefinition::new(TriggerMode::Phase)
+                        .phase(crate::types::phase::Phase::BeginCombat)
+                        .trigger_zones(vec![Zone::Battlefield])
+                        .execute(pump)
+                        .description(printed_line(name, 0)),
+                );
+                let mut grant = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GenericEffect {
+                        static_abilities: vec![StaticDefinition::continuous()
+                            .affected(TargetFilter::ParentTarget)
+                            .modifications(vec![
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::FirstStrike,
+                                },
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::DoubleTeam,
+                                },
+                            ])
+                            .description("gains first strike and double team".into())],
+                        duration: Some(Duration::UntilEndOfTurn),
+                        target: Some(TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(ControllerRef::You)
+                                .properties(vec![FilterProp::Another, FilterProp::NonToken]),
+                        )),
+                        end_cost: None,
+                    },
+                );
+                grant.duration = Some(Duration::UntilEndOfTurn);
+                grant.cost = Some(AbilityCost::Mana {
+                    cost: mana("{1}{R}{W}"),
+                });
+                grant.activation_restrictions = vec![
+                    ActivationRestriction::AsSorcery,
+                    ActivationRestriction::OnlyOnce,
+                ];
+                grant.description = Some(printed_line(name, 1));
+                out.abilities.push(grant);
+            }
+            "Really Epic Punch" => {
+                let mut pump = spell(Effect::GenericEffect {
+                    static_abilities: vec![StaticDefinition::continuous()
+                        .affected(TargetFilter::ParentTarget)
+                        .modifications(vec![
+                            ContinuousModification::AddPower { value: 2 },
+                            ContinuousModification::AddToughness { value: 2 },
+                        ])],
+                    duration: Some(Duration::Permanent),
+                    target: Some(TargetFilter::ParentTarget),
+                    end_cost: None,
+                });
+                pump.duration = Some(Duration::Permanent);
+                pump.target_reads = TargetReadOrigin::ParentAnnouncement;
+                pump.condition = Some(AbilityCondition::And {
+                    conditions: vec![
+                        AbilityCondition::HasObjectTarget,
+                        AbilityCondition::TargetMatchesFilter {
+                            filter: TargetFilter::Or {
+                                filters: vec![
+                                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                        FilterProp::HasSupertype {
+                                            value: crate::types::card_type::Supertype::Host,
+                                        },
+                                    ])),
+                                    TargetFilter::Typed(TypedFilter::default().properties(vec![
+                                        FilterProp::HasKeywordKind {
+                                            value: crate::types::keywords::KeywordKind::Augment,
+                                        },
+                                    ])),
+                                ],
+                            },
+                            use_lki: false,
+                            subject_slot: Some(0),
+                        },
+                    ],
+                });
+                let mut fight = spell(Effect::Fight {
+                    target: TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent),
+                    ),
+                    subject: TargetFilter::ParentTargetSlot { index: 0 },
+                });
+                fight.sub_link = SubAbilityLink::SequentialSibling;
+                pump.sub_ability = Some(Box::new(fight));
+                let mut body = spell(Effect::TargetOnly {
+                    target: own_creature(),
+                });
+                body.sub_ability = Some(Box::new(pump));
+                body.description = Some(printed_line(name, 0));
+                out.abilities.push(body);
+            }
+            "Walking Sponge" => {
+                let branches = [Keyword::Flying, Keyword::FirstStrike, Keyword::Trample]
+                    .into_iter()
+                    .map(|keyword| {
+                        let description = format!("lose {keyword}");
+                        let mut branch = spell(Effect::GenericEffect {
+                            static_abilities: vec![StaticDefinition::continuous()
+                                .affected(TargetFilter::ParentTarget)
+                                .modifications(vec![ContinuousModification::RemoveKeyword {
+                                    keyword,
+                                }])
+                                .description(description.clone())],
+                            duration: Some(Duration::UntilEndOfTurn),
+                            target: None,
+                            end_cost: None,
+                        });
+                        branch.duration = Some(Duration::UntilEndOfTurn);
+                        branch.description = Some(description);
+                        branch
+                    })
+                    .collect();
+                let choose = spell(Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                    kind: ChooseOneOfKind::Ordinary,
+                });
+                let mut body = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::TargetOnly {
+                        target: TargetFilter::Typed(TypedFilter::creature()),
+                    },
+                )
+                .cost(AbilityCost::Tap);
+                body.sub_ability = Some(Box::new(choose));
+                body.description = Some(printed_line(name, 0));
+                out.abilities.push(body);
+            }
+            "Sorin's Remastered Manor" => {
+                let counter = spell(Effect::PutCounter {
+                    target: own_creature(),
+                    counter_type: CounterType::Generic("spooky".into()),
+                    count: fixed(1),
+                });
+                out.triggers.push(
+                    TriggerDefinition::new(TriggerMode::Planeswalked { role: PlaneswalkRole::To })
+                        .valid_card(TargetFilter::SelfRef)
+                        .valid_target(TargetFilter::Controller)
+                        .trigger_zones(vec![Zone::Battlefield])
+                        .execute(counter.clone())
+                        .description("When you planeswalk here, put a spooky counter on target creature you control.".into()),
+                );
+                let mut upkeep = TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(crate::types::phase::Phase::Upkeep)
+                    .trigger_zones(vec![Zone::Battlefield])
+                    .execute(counter)
+                    .description("At the beginning your upkeep, put a spooky counter on target creature you control.".into());
+                upkeep.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+                out.triggers.push(upkeep);
+                let static_text = printed_line(name, 1);
+                let mut unsupported =
+                    spell(Effect::unimplemented("static_structure", &static_text));
+                unsupported.description = Some(format!(
+                    "Static pattern matched but line failed static parser: {static_text}"
+                ));
+                out.abilities.push(unsupported);
+                let bites = "target spooky creature you control bites target opponent or creature an opponent controls.";
+                out.triggers.push(
+                    TriggerDefinition::new(TriggerMode::ChaosEnsues)
+                        .valid_card(TargetFilter::SelfRef)
+                        .trigger_zones(vec![Zone::Battlefield])
+                        .execute(spell(Effect::unimplemented(
+                            "unrecognized_clause_head",
+                            bites,
+                        )))
+                        .description(format!("Whenever chaos ensues, {bites}")),
+                );
+            }
+            "I'm Going On An Adventure!" => {
+                out.extracted_keywords = vec![Keyword::Flashback(
+                    crate::types::keywords::FlashbackCost::Mana(mana("{4}{W}")),
+                )];
+                let exile = spell(effect(json!({"type":"ChangeZone", "destination":"Exile",
+                    "target":{"type":"Typed","type_filters":["Creature"],"properties":[]}})));
+                let provenance = spell(Effect::unimplemented(
+                    "on_adventure_provenance",
+                    "It's on an adventure. When it enters from being on an adventure, it explores.",
+                ));
+                let mut body = chain(vec![exile, provenance]);
+                body.description = Some(printed_line(name, 0));
+                out.abilities.push(body);
+            }
             "Rumbling Crescendo" | "Serra's Liturgy" | "Vile Requiem" => {
                 let mut counter = spell(Effect::PutCounter {
                     counter_type: crate::types::counter::CounterType::Generic("verse".into()),
@@ -48390,7 +48743,12 @@ pub(crate) mod defining_modifier_publication {
                 (2, "Static"),
                 (3, "Keyword"),
             ],
-            "Sorin's Remastered Manor" => vec![(0, "Trigger"), (1, "Static"), (2, "Trigger")],
+            "Sorin's Remastered Manor" => vec![
+                (0, "Trigger"),
+                (0, "Trigger"),
+                (1, "Unsupported"),
+                (2, "Trigger"),
+            ],
             "Consuming Ferocity" => vec![(0, "Keyword"), (1, "Static"), (2, "Trigger")],
             "Emrakul, the Exigent Doom" => vec![
                 (0, "Trigger"),
@@ -48434,7 +48792,7 @@ pub(crate) mod defining_modifier_publication {
             | "Path of Discovery"
             | "Agrus Kos, Wojek Veteran"
             | "Doors of Durin" => vec![(0, "Trigger")],
-            // The Adventure source unit awaits the reviewed complete-extent correction.
+            "I'm Going On An Adventure!" => vec![(0, "Spell"), (1, "Keyword")],
             _ => panic!("unlisted independent full source categories: {name}"),
         }
     }
@@ -48510,9 +48868,14 @@ pub(crate) mod defining_modifier_publication {
                 }
                 OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) => {
                     assert_eq!(category, "Trigger");
+                    let expected_source = match (name, line, index) {
+                        ("Sorin's Remastered Manor", 0, 0) => "When you planeswalk here, put a spooky counter on target creature you control.".to_owned(),
+                        ("Sorin's Remastered Manor", 0, 1) => "At the beginning your upkeep, put a spooky counter on target creature you control.".to_owned(),
+                        ("Sorin's Remastered Manor", 2, _) => "Whenever chaos ensues, target spooky creature you control bites target opponent or creature an opponent controls.".to_owned(),
+                        _ => printed_line(name, line),
+                    };
                     assert_eq!(
-                        trigger.source_text,
-                        printed_line(name, line),
+                        trigger.source_text, expected_source,
                         "entire independent printed trigger before assembly: {name}"
                     );
                     match trigger
@@ -48575,6 +48938,27 @@ pub(crate) mod defining_modifier_publication {
                 OracleNodeIr::Replacement(_) => assert_eq!(category, "Replacement"),
                 OracleNodeIr::AdditionalCost(_) => assert_eq!(category, "AdditionalCost"),
                 OracleNodeIr::Modal(_) => assert_eq!(category, "Modal"),
+                OracleNodeIr::Unsupported {
+                    unsupported,
+                    min_x_value,
+                } => {
+                    assert_eq!(category, "Unsupported");
+                    assert_eq!(name, "Sorin's Remastered Manor");
+                    assert_eq!(line, 1);
+                    assert_eq!(*min_x_value, 0);
+                    assert_eq!(
+                        unsupported.category,
+                        crate::parser::oracle_ir::doc::UnsupportedAbilityCategory::StaticStructure
+                    );
+                    assert_eq!(unsupported.fragment, printed_line(name, 1));
+                    assert_eq!(
+                        unsupported.description,
+                        format!(
+                            "Static pattern matched but line failed static parser: {}",
+                            printed_line(name, 1)
+                        )
+                    );
+                }
                 other => panic!("unlisted independent source category for {name}: {other:?}"),
             }
         }
@@ -48605,6 +48989,9 @@ pub(crate) mod defining_modifier_publication {
             let expected_reported_gap = matches!(
                 expected.name.as_str(),
                 "Wall of Vipers"
+                    | "Martyrdom"
+                    | "Sorin's Remastered Manor"
+                    | "I'm Going On An Adventure!"
                     | "Stitcher Geralf"
                     | "Emrakul, the Exigent Doom"
                     | "Glamorous Outlaw"

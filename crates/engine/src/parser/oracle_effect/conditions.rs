@@ -4218,7 +4218,9 @@ fn parse_same_quality_reference<'a>(
             return Err(oracle_err(i));
         }
         value(
-            TargetFilter::CostPaidObject,
+            TargetFilter::CostPaidObject {
+                reference: crate::types::ability::CostPaidObjectRef::Selected,
+            },
             verify(
                 alt((
                     parse_cost_paid_participle_object,

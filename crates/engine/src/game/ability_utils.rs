@@ -7417,6 +7417,7 @@ fn filter_binds_player(
         | TargetFilter::SelfRef
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::SourceOrPaired
+        | TargetFilter::CastingSpell
         | TargetFilter::StackAbility { .. }
         | TargetFilter::StackSpell
         | TargetFilter::SpecificObject { .. }
