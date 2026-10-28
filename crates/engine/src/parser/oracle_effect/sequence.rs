@@ -2302,6 +2302,14 @@ fn complete_continuous_sentence(text: &str) -> bool {
     let Some(start) = super::subject::find_predicate_start(text) else {
         return false;
     };
+    // CR 608.2c: the complete prefix must be the predicate's subject. A
+    // later grant cannot absorb an earlier imperative ("double ... and it
+    // gains ...") merely because the suffix is a valid continuous modifier.
+    if super::subject::parse_subject_application(text[..start].trim(), &mut ParseContext::default())
+        .is_none()
+    {
+        return false;
+    }
     let predicate = &text[start..];
     let (predicate, _) = super::strip_trailing_duration(predicate);
     crate::parser::oracle_static::parse_complete_continuous_modifications(predicate).is_some()

@@ -3358,6 +3358,9 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // authorize a synthetic entry completion.
         }
         ResolutionFrame::PostReplacement(drains) => {
+            let token_creation_parent = drains
+                .resident()
+                .and_then(|drain| drain.token_creation_parent);
             let retired_paused_dispatch = matches!(
                 drains.resident().map(|drain| &drain.status),
                 Some(crate::types::game_state::DrainStatus::Paused)
@@ -3402,6 +3405,25 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                     .is_some_and(|continuation| continuation.attachment_choice.is_none())
             {
                 drain_pending_continuation(state, events);
+            }
+            // CR 614.6 + CR 608.2c: a completed substitution returns to the
+            // exact original creation instruction, including its zero-token
+            // approved primary and any later work. The replacement frame was
+            // the child keeping that instruction suspended; retiring it is not
+            // completion of the parent's remaining queue or printed tail.
+            if retired_paused_dispatch
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && token_creation_parent.is_some_and(|parent| {
+                    state.active_copy_token().is_some_and(|pending| {
+                        pending.creation_id == Some(parent.frame)
+                            && matches!(
+                                pending.pending,
+                                Some(crate::types::game_state::TokenCreationPending::Substitution)
+                            )
+                    })
+                })
+            {
+                resume_resolution_frames(state, events);
             }
         }
     }

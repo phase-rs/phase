@@ -1751,6 +1751,8 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
     let db = export_route_repair_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Draw buffer"]);
+    scenario.with_library_top(P1, &["Draw buffer"]);
     let kitten = scenario.add_real_card(P0, "The Swamp Kitten", Zone::Battlefield, &db);
     let swamp = scenario
         .add_land_from_oracle(P0, "Selected Swamp", "{T}: Add {B}.")
@@ -1763,10 +1765,14 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
         .id();
     let mut runner = scenario.build();
     runner.advance_to_combat();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::TriggerTargetSelection { .. }
-    ));
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ),
+        "the complete loaded face must reach its combat target choice: {:?}",
+        runner.state().waiting_for
+    );
     runner
         .act(GameAction::ChooseTarget {
             target: Some(engine::types::ability::TargetRef::Object(swamp)),

@@ -1832,7 +1832,11 @@ fn static_preservation_complete_faces_survive_both_normal_loaders() {
                 ))),
                 "Fluros of Myra's Marvels" => {
                     assert!(
-                        gaps > 0,
+                        face.triggers.iter().any(|trigger| matches!(
+                            &trigger.mode,
+                            engine::types::ability::TriggerMode::Unknown(description)
+                                if description == "whenever you cast a spell with power, toughness, or loyalty equal to the chosen number"
+                        )),
                         "the independent multi-comma trigger head remains honest"
                     );
                     let encoded = serde_json::to_string(face).unwrap();
@@ -3041,6 +3045,88 @@ fn modifier_owner_full_faces_keep_retention_and_each_registered_child_window_in_
                 );
             }
         }
+    }
+}
+
+#[test]
+fn modifier_owner_perch_paid_gift_keeps_the_bounded_tail_and_independent_instructions() {
+    use engine::game::game_object::PhaseStatus;
+    use engine::game::scenario_db::GameScenarioDbExt;
+
+    for promised in [false, true] {
+        let db = super::jev_cost_populations::export_route_repair_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PostCombatMain);
+        scenario.with_library_top(P0, &["Draw buffer", "Reserve"]);
+        scenario.with_library_top(P1, &["Draw buffer", "Reserve", "Extra turn draw"]);
+        let spell = scenario.add_real_card(P0, "Perch Protection", Zone::Hand, &db);
+        let own = scenario.add_creature(P0, "Own permanent", 2, 2).id();
+        let foreign = scenario.add_creature(P1, "Foreign permanent", 2, 2).id();
+        let passage = [0, 1].map(|_| {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, "Whitesun's Passage", true, "You gain 5 life.")
+                .with_mana_cost(cost("{1}{W}"))
+                .id()
+        });
+        let mut runner = scenario.build();
+        fund(&mut runner, 4, &[ManaType::White, ManaType::White]);
+        let cast = runner.cast(spell);
+        if promised {
+            cast.accept_optional().resolve();
+        } else {
+            cast.decline_optional().resolve();
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
+        let birds: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token)
+            .collect();
+        assert_eq!(birds.len(), 4, "the independent creation always happens");
+        for object in birds.into_iter().chain([&runner.state().objects[&own]]) {
+            assert_eq!(
+                matches!(object.phase_status, PhaseStatus::PhasedOut { .. }),
+                promised
+            );
+        }
+        assert!(matches!(
+            runner.state().objects[&foreign].phase_status,
+            PhaseStatus::PhasedIn
+        ));
+        assert_eq!(runner.state().extra_turns.len(), usize::from(promised));
+        if promised {
+            assert_eq!(runner.state().extra_turns[0].player, P1);
+        }
+        settled(&runner);
+        fund(&mut runner, 1, &[ManaType::White]);
+        runner.cast(passage[0]).resolve();
+        assert_eq!(
+            runner.state().players[0].life,
+            if promised { 20 } else { 25 }
+        );
+        // CR 611.2a: the lock expires at this controller's next turn, including
+        // after the opponent's promised extra turn, rather than at cleanup.
+        for _ in 0..3 {
+            finish_to_next_upkeep(&mut runner);
+            if runner.state().active_player == P0 {
+                break;
+            }
+        }
+        assert_eq!(runner.state().active_player, P0);
+        assert!(matches!(
+            runner.state().objects[&own].phase_status,
+            PhaseStatus::PhasedIn
+        ));
+        fund(&mut runner, 1, &[ManaType::White]);
+        runner.cast(passage[1]).resolve();
+        assert_eq!(
+            runner.state().players[0].life,
+            if promised { 25 } else { 30 }
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        settled(&runner);
     }
 }
 

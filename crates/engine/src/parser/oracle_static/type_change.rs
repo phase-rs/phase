@@ -1170,6 +1170,21 @@ pub(crate) fn parse_enchanted_is_type(
             (is_rest_lower, false)
         };
 
+    // CR 305.7: the attached-subject multi parser consults this authority
+    // before its general continuous-predicate branch. Claim a complete basic
+    // land-type predicate here as well as on the single-static route, so the
+    // general subtype setter cannot retain the land's printed abilities.
+    if let Some(modifications) = parse_land_type_change_modifications(is_rest_lower) {
+        return Some(
+            StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::new(perm_tf).properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(modifications)
+                .description(description.to_string()),
+        );
+    }
+
     // Try to parse "base power and toughness N/N" suffix.
     //
     // `pt_part` is everything after the " with base power and toughness "

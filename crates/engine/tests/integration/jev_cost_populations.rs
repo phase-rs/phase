@@ -7821,6 +7821,9 @@ fn hand_reveal_player_references_keep_their_declared_identity_in_normal_export()
                 if object.get("type").and_then(Value::as_str) == Some("DeclaredPlayer") {
                     references.push(object["group"].as_u64().unwrap());
                 }
+                if let Some(reference) = object.get("DeclaredPlayer") {
+                    references.push(reference["group"].as_u64().unwrap());
+                }
                 for child in object.values() {
                     inspect(child, declarations, references);
                 }
@@ -7854,7 +7857,7 @@ fn hand_reveal_player_references_keep_their_declared_identity_in_normal_export()
         );
         assert!(
             !declarations.is_empty() && !references.is_empty(),
-            "positive player-binding reach guard: {name}"
+            "positive player-binding reach guard: {name}: {declarations:?}/{references:?}"
         );
         assert_eq!(
             declarations.len(),

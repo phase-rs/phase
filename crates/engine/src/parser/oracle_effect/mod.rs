@@ -11427,6 +11427,30 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
+    // CR 608.2c + CR 611.2a: a coordinated instruction can introduce its own
+    // duration after an earlier action. Keep that whole bounded tail together
+    // under the enclosing condition, rather than letting a later life-lock or
+    // keyword recognizer consume the action and discard the printed window.
+    let coordinated_lower = text.to_lowercase();
+    if let Some(clause) = TextPair::new(text, &coordinated_lower).scan_around_outside_quotes(
+        |input| tag::<_, _, OracleError<'_>>(", and ").parse(input),
+        |head, _, tail| {
+            strip_leading_duration(tail.original)?;
+            let mut trial = ctx.clone();
+            let mut clause = parse_effect_clause(head.original, &mut trial);
+            let continuation =
+                parse_effect_chain_with_context(tail.original, AbilityKind::Spell, &mut trial);
+            if let Some(existing) = clause.sub_ability.as_deref_mut() {
+                append_to_deepest_sub_ability(existing, Some(Box::new(continuation)));
+            } else {
+                clause.sub_ability = Some(Box::new(continuation));
+            }
+            *ctx = trial;
+            Some(clause)
+        },
+    ) {
+        return clause;
+    }
     // CR 608.2d: a fixed-budget aggregate return lowers to a subset choice; the
     // checks below keep the shapes that lowering cannot carry honestly red.
     if imperative::aggregate_return_choice_cardinality(text, ctx).is_some() {

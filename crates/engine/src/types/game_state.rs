@@ -2974,9 +2974,36 @@ enum ReturnResultFrameWire {
     Owned {
         #[serde(default)]
         process: Option<ReturnResultProcessId>,
+        #[serde(deserialize_with = "deserialize_instruction_results")]
         results: BTreeMap<ReturnResultId, InstructionResult>,
     },
-    Legacy(BTreeMap<ReturnResultId, InstructionResult>),
+    Legacy(
+        #[serde(deserialize_with = "deserialize_instruction_results")]
+        BTreeMap<ReturnResultId, InstructionResult>,
+    ),
+}
+
+fn deserialize_instruction_results<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<ReturnResultId, InstructionResult>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Untagged compatibility decoding buffers map keys as strings. Reuse the
+    // canonical numeric-key decoder rather than relying on serde_json's direct
+    // map-key coercion, which is absent from that buffered deserializer.
+    let results =
+        super::deterministic_serde::deserialize_numeric_hash_map::<u64, InstructionResult, D>(
+            deserializer,
+        )?;
+    results
+        .into_iter()
+        .map(|(id, result)| {
+            u32::try_from(id)
+                .map(|id| (ReturnResultId(id), result))
+                .map_err(serde::de::Error::custom)
+        })
+        .collect()
 }
 
 impl From<ReturnResultFrameWire> for ReturnResultFrame {
@@ -59099,10 +59126,34 @@ mod departure_process_saved_authority_tests {
         let current: ReturnResultFrame =
             serde_json::from_value(serde_json::to_value(&owned).unwrap()).unwrap();
         assert_eq!(current, owned);
+        let current_text: ReturnResultFrame =
+            serde_json::from_str(&serde_json::to_string(&owned).unwrap()).unwrap();
+        assert_eq!(current_text, owned);
         let legacy: ReturnResultFrame =
             serde_json::from_value(serde_json::to_value(&owned.results).unwrap()).unwrap();
         assert_eq!(legacy.process, None);
         assert_eq!(legacy.results[&result], records);
+        let legacy_text: ReturnResultFrame =
+            serde_json::from_str(&serde_json::to_string(&owned.results).unwrap()).unwrap();
+        assert_eq!(legacy_text, legacy);
+        for key in ["07", "-1", "4294967296"] {
+            for mut malformed in [
+                serde_json::to_value(&owned).unwrap(),
+                serde_json::to_value(&owned.results).unwrap(),
+            ] {
+                let results = if malformed.get("results").is_some() {
+                    &mut malformed["results"]
+                } else {
+                    &mut malformed
+                };
+                let records = results.as_object_mut().unwrap().remove("7").unwrap();
+                results.as_object_mut().unwrap().insert(key.into(), records);
+                assert!(
+                    serde_json::from_value::<ReturnResultFrame>(malformed).is_err(),
+                    "result ids must remain canonical u32 keys: {key}"
+                );
+            }
+        }
         assert_ne!(legacy, owned);
         let mut state = GameState::new_two_player(42);
         for expected in [None, Some(ReturnResultProcessId(5))] {

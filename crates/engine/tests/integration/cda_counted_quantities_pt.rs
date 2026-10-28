@@ -2983,11 +2983,37 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
             let before = runner.state().objects[&lord].incarnation;
             // The public action boundary can report an unaffordable activation
             // as a typed reversal. An ordinary applied result is never refusal.
-            let refused = match runner.act(GameAction::ActivateAbility {
+            let mut refusal = runner.act(GameAction::ActivateAbility {
                 payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 source_id: lord,
                 ability_index: index,
-            }) {
+            });
+            if hostile == "colors" {
+                assert!(refusal
+                    .as_ref()
+                    .is_ok_and(|result| result.disposition.is_applied()));
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::TargetSelection { .. }
+                    ),
+                    "CR 602.2b: announce the legal target before paying the cost"
+                );
+                refusal = runner.act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Object(recipient)),
+                });
+                if refusal
+                    .as_ref()
+                    .is_ok_and(|result| result.disposition.is_applied())
+                {
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ManaPayment { .. }
+                    ));
+                    refusal = runner.act(GameAction::PassPriority);
+                }
+            }
+            let refused = match refusal {
                 Err(_) => true,
                 Ok(result) => !result.disposition.is_applied(),
             };
