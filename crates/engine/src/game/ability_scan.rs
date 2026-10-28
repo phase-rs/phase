@@ -104,7 +104,7 @@ use crate::types::ability::{
     TrackedAnaphorSource, TriggerCondition, TriggerConstraint, TriggerDefinition, TypedFilter,
     UnlessPayModifier, ZoneChangeClause, ZoneChoiceCandidateSource,
 };
-use crate::types::game_state::TargetSelectionConstraint;
+use crate::types::game_state::{GameState, TargetSelectionConstraint};
 use crate::types::keywords::{DisguiseCost, Keyword};
 use crate::types::statics::CastFrequency;
 
@@ -6710,13 +6710,16 @@ pub(crate) fn static_definition_history(
 
 /// The history a replacement effect reads when it applies (CR 614.1).
 pub(crate) fn replacement_definition_history(
+    state: &GameState,
     def: &crate::types::ability::ReplacementDefinition,
 ) -> HistoryReads {
-    replacement_definition_axes(def, ScanMode::LoopFirewall).history
+    replacement_definition_axes(state, def, ScanMode::LoopFirewall).history
 }
 
-/// CR 614.1: a replacement definition's reads, destructured with no `..`.
+/// CR 614.1: a replacement definition's reads, destructured with no `..`. The
+/// runtime continuation is read from `state`'s arena (CR 615.5 + CR 614.6).
 fn replacement_definition_axes(
+    state: &GameState,
     def: &crate::types::ability::ReplacementDefinition,
     mode: ScanMode,
 ) -> Axes {
@@ -6770,7 +6773,7 @@ fn replacement_definition_axes(
     if let Some(execute) = execute {
         acc = acc.or(ability_definition_axes(execute, mode));
     }
-    if let Some(ability) = runtime_execute {
+    if let Some(ability) = runtime_execute.and_then(|id| state.replacement_continuation(id)) {
         acc = acc.or(resolved_ability_axes(ability, mode));
     }
     match replacement_mode {

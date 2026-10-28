@@ -3968,9 +3968,9 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
 /// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
-/// `pending_library_search_delivery`, `epic_effects` and the prevention rider
-/// (`runtime_execute`) of `pending_damage_replacements` and object replacement
-/// definitions (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
+/// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
+/// `replacement_continuations`, which every shield's `runtime_execute` names
+/// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
 /// after every `WaitingFor` rebuild so no rebuild re-clones an unredacted prompt.
 ///
 /// Not carriers because no viewer receives them: `pending_cost_move_resume`,
@@ -4335,39 +4335,12 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
     for epic in &mut state.epic_effects {
         redact_ability_payment(&mut epic.spell, hidden_ids);
     }
-    for replacement in &mut state.pending_damage_replacements {
-        if let Some(rider) = replacement.runtime_execute.as_deref_mut() {
-            redact_ability_payment(rider, hidden_ids);
-        }
-    }
-    // A read-only pass selects the objects whose rider names a hidden source, so only
-    // those definition lists are copied on write.
-    let rider_objects: Vec<ObjectId> = state
-        .objects
-        .iter()
-        .filter(|(_, object)| {
-            object
-                .replacement_definitions
-                .iter_all()
-                .any(|replacement| {
-                    replacement
-                        .runtime_execute
-                        .as_deref()
-                        .is_some_and(|rider| ability_payment_names_hidden_source(rider, hidden_ids))
-                })
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    for id in rider_objects {
-        let Some(object) = state.objects.get_mut(&id) else {
-            continue;
-        };
-        for index in 0..object.replacement_definitions.len() {
-            if let Some(rider) = object
-                .replacement_definitions
-                .get_mut(index)
-                .and_then(|replacement| replacement.runtime_execute.as_deref_mut())
-            {
+    // CR 615.5 + CR 400.2: every installed rider, live or ended, is redacted against the
+    // current hidden set; only entries that name a hidden source are copied on write.
+    for index in 0..state.replacement_continuations.len() {
+        if ability_payment_names_hidden_source(&state.replacement_continuations[index], hidden_ids)
+        {
+            if let Some(rider) = state.replacement_continuations.get_mut(index) {
                 redact_ability_payment(rider, hidden_ids);
             }
         }
@@ -6360,14 +6333,14 @@ mod tests {
                 },
             )]),
         );
+        let rider = state.install_replacement_continuation(ability.clone());
         state
             .objects
             .get_mut(&paid)
             .expect("paid object")
             .replacement_definitions =
-            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                .runtime_execute(ability.clone())]
-            .into();
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(rider)]
+                .into();
         state.transient_continuous_effects.push_back(
             crate::types::game_state::TransientContinuousEffect {
                 id: 1,
@@ -6404,7 +6377,7 @@ mod tests {
         );
         for prefix in [
             format!("/departed_stack_spells/{}/", departed.0),
-            format!("/objects/{}/replacement_definitions/", paid.0),
+            "/replacement_continuations/".to_string(),
             "/transient_continuous_effects/".to_string(),
         ] {
             let raw = linked_arrays_under(&state, &prefix);
@@ -7189,26 +7162,28 @@ mod tests {
             ),
             (
                 "pending_damage_replacements rider",
-                "/pending_damage_replacements/".to_string(),
+                "/replacement_continuations/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
+                    let rider = state.install_replacement_continuation(fixture.ability.clone());
                     state.pending_damage_replacements =
                         vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                            .runtime_execute(fixture.ability.clone())];
+                            .runtime_execute(rider)];
                 }),
             ),
             (
                 "object replacement_definitions rider",
-                format!("/objects/{}/replacement_definitions/", paid.0),
+                "/replacement_continuations/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
+                    let rider = state.install_replacement_continuation(fixture.ability.clone());
                     state
                         .objects
                         .get_mut(&paid)
                         .expect("paid object")
                         .replacement_definitions =
                         vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                            .runtime_execute(fixture.ability.clone())]
+                            .runtime_execute(rider)]
                         .into();
                 }),
             ),
@@ -15038,5 +15013,62 @@ mod tests {
             shared > 0,
             "redacting one object must not copy every other object"
         );
+    }
+
+    /// CR 615.5 + CR 400.2: an opponent's projection keeps `replacement_continuations`
+    /// whole, so a projected shield's handle still names an entry: the projection decodes
+    /// through the transport path and the handle resolves to the installed rider, for a
+    /// face-up host and for a face-down one (CR 708.2) alike.
+    #[test]
+    fn projected_replacement_rider_handle_decodes_through_the_transport_path() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        const TEST_OF_FAITH: &str = "Prevent the next 3 damage that would be dealt to target \
+             creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on \
+             that creature.";
+        for face_down in [false, true] {
+            let mut scenario = GameScenario::new_n_player(2, 42);
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let bear = scenario.add_creature(P0, "Bear", 3, 3).id();
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Test of Faith", true, TEST_OF_FAITH)
+                .id();
+            let mut runner = scenario.build();
+            runner.cast(spell).target_objects(&[bear]).resolve();
+            if face_down {
+                runner.state_mut().objects.get_mut(&bear).unwrap().face_down = true;
+            }
+            let state = runner.state();
+            let handle = state.objects[&bear].replacement_definitions[0].runtime_execute;
+            assert!(
+                handle.is_some() && state.replacement_continuations.len() == 1,
+                "reach guard: Test of Faith installed one rider its shield names"
+            );
+
+            let projection = filter_state_for_viewer(state, P1);
+            assert_eq!(
+                projection.replacement_continuations, state.replacement_continuations,
+                "the projection keeps the arena whole (face_down={face_down})"
+            );
+            let decoded =
+                serde_json::from_value::<GameState>(serde_json::to_value(&projection).unwrap())
+                    .unwrap_or_else(|error| {
+                        panic!("the projection decodes (face_down={face_down}): {error}")
+                    });
+            let projected = decoded.objects[&bear].replacement_definitions.get(0);
+            if !face_down {
+                assert_eq!(
+                    projected.and_then(|def| def.runtime_execute),
+                    handle,
+                    "the projected shield keeps its handle"
+                );
+            }
+            if let Some(def) = projected {
+                assert_eq!(
+                    decoded.replacement_rider(def),
+                    state.replacement_rider(&state.objects[&bear].replacement_definitions[0]),
+                    "the projected handle resolves to the installed rider (face_down={face_down})"
+                );
+            }
+        }
     }
 }
