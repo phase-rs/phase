@@ -4602,10 +4602,13 @@ fn departure_mass_child_member(
     restore: u8,
     legacy: bool,
 ) {
+    use engine::game::ability_utils::{build_target_slots, validate_targets_in_chain};
+    use engine::game::targeting::resolved_targets;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, FilterProp, MultiTargetSpec,
         QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
-        ReturnResultId, TargetFilter, TriggerDefinition, TypedFilter,
+        ReturnResultId, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
+        TypedFilter,
     };
     use engine::types::game_state::{InstructionResult, ZoneMoveCompletion};
     use engine::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
@@ -4813,7 +4816,68 @@ fn departure_mass_child_member(
         object.replacement_definitions.push(replacement.clone());
         std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
     }
-    runner.cast(spell).target_objects(&selected).commit();
+    {
+        let committed = runner.cast(spell).target_objects(&selected).commit();
+        let state = committed.state();
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+        assert_eq!(state.stack.len(), 1, "the paid spell actually committed");
+        let entry = state.stack.back().unwrap();
+        assert_eq!(entry.id, spell);
+        assert_eq!(entry.source_id, spell);
+        let engine::types::game_state::StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &entry.kind
+        else {
+            panic!("the actual cast must retain its selected-primary ability");
+        };
+        let Effect::ChangeZone {
+            origin: announced_origin,
+            destination: Zone::Exile,
+            target,
+            ..
+        } = &ability.effect
+        else {
+            panic!("the committed spell must own the targeted zone instruction");
+        };
+        assert_eq!(*announced_origin, Some(origin));
+        assert_eq!(ability.declares_return_result, Some(ReturnResultId(7)));
+        assert_eq!(ability.target_choice_timing, TargetChoiceTiming::Stack);
+        assert!(!ability.optional_targeting);
+        assert_eq!(ability.multi_target, Some(MultiTargetSpec::fixed(3, 3)));
+        // CR 601.2c: the real cast must announce all three original targets,
+        // in order, with the engine's ordinary occurrence identity pins.
+        let announced: Vec<_> = selected.iter().copied().map(TargetRef::Object).collect();
+        let pins: Vec<_> = original
+            .iter()
+            .map(|binding| Some(binding.reference))
+            .collect();
+        assert_eq!(ability.targets, announced);
+        assert_eq!(ability.chosen_target_slots.slots(), &[0, 1, 2]);
+        assert_eq!(ability.target_pins, pins);
+        let slots = build_target_slots(state, ability).expect("the cast owns three target slots");
+        assert_eq!(slots.len(), 3);
+        for slot in slots {
+            assert!(!slot.optional, "all three announced targets are required");
+            assert_eq!(slot.legal_targets.len(), selected.len());
+            assert!(announced
+                .iter()
+                .all(|target| slot.legal_targets.contains(target)));
+        }
+        // CR 608.2b: these current originals must survive the same legality
+        // check the stack uses before entering the actual zone resolver.
+        let validated = validate_targets_in_chain(state, ability);
+        assert_eq!(validated.targets, announced);
+        assert_eq!(validated.target_pins, pins);
+        assert_eq!(resolved_targets(&validated, target, state), announced);
+        for binding in &original {
+            let object = &state.objects[&binding.reference.object_id];
+            assert_eq!(ObjectIncarnationRef::from_object(object), binding.reference);
+            assert_eq!(object.zone, binding.expected_zone);
+        }
+    }
     for _ in 0..8 {
         if matches!(
             runner.state().waiting_for,
@@ -4821,6 +4885,15 @@ fn departure_mass_child_member(
         ) {
             break;
         }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "the committed spell must reach A's replacement before another game decision: {:?}",
+            runner.state().waiting_for
+        );
+        assert!(
+            runner.state().stack.iter().any(|entry| entry.id == spell),
+            "the announced three-target spell finished without reaching A's actual replacement"
+        );
         runner.act(GameAction::PassPriority).unwrap();
     }
     for pause in 0..2 {
