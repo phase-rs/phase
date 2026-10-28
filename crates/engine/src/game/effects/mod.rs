@@ -1011,13 +1011,10 @@ fn rebind_child_to_forwarded_objects(
     // rebinding `source_id` to the just-moved permanent would make
     // `copy_spell::resolve` look up the wrong stack entry after
     // `resolve_top` has popped the spell (issue #2860).
-    if copy_spell_self_ref_keeps_resolving_spell_source(child) {
-        return attachment_candidates;
-    }
     // CR 603.7c + CR 201.5: `CreateDelayedTrigger` keeps the creating
     // ability's source. Its ParentTarget anaphora read the separate
     // forwarded-result context at delayed-trigger creation.
-    if !matches!(child.effect, Effect::CreateDelayedTrigger { .. }) {
+    if forwarded_child_uses_moved_source(&child.effect) {
         child.rebind_source(moved[0]);
         // CR 400.7j: this forwarded instruction names the moved object in its
         // new zone. Its own-source pin must agree with that changed source,
@@ -3090,6 +3087,58 @@ pub(crate) fn parent_referent_context_from_events(
     damaged_object_context_from_events(state, events)
 }
 
+/// CR 608.2c + CR 608.2h: retain the singular object selected by a preceding
+/// instruction independently of a later instruction's own recipient.
+fn selected_parent_object_context(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<CostPaidObjectSnapshot> {
+    let occurrences = if matches!(ability.effect, Effect::TargetOnly { .. }) {
+        ability.target_occurrences()
+    } else if matches!(
+        ability.effect.target_filter(),
+        Some(TargetFilter::EventTarget)
+    ) {
+        // CR 400.7: an event recipient must still be the occurrence recorded
+        // by the event, rather than a new object occupying the same id.
+        targeting::resolve_event_referent_objects(
+            state,
+            &TargetFilter::EventTarget,
+            ability.source_id,
+        )
+        .into_iter()
+        .filter_map(|id| {
+            state.objects.get(&id).map(|object| {
+                (
+                    TargetRef::Object(id),
+                    Some(ObjectIncarnationRef::from_object(object)),
+                )
+            })
+        })
+        .collect()
+    } else {
+        return None;
+    };
+    let mut objects = occurrences
+        .into_iter()
+        .filter_map(|(target, pin)| match target {
+            TargetRef::Object(id) => Some((id, pin)),
+            TargetRef::Player(_) => None,
+        });
+    let (id, pin) = objects.next()?;
+    if objects.next().is_some() {
+        return None;
+    }
+    let object = state.objects.get(&id)?;
+    if pin.is_some_and(|reference| reference != ObjectIncarnationRef::from_object(object)) {
+        return None;
+    }
+    Some(CostPaidObjectSnapshot::capture(
+        object,
+        object.snapshot_for_mana_spent(),
+    ))
+}
+
 fn amassed_army_context_from_events(
     state: &GameState,
     events: &[GameEvent],
@@ -4291,7 +4340,13 @@ fn resolve_sub_with_missing_forward_result(
 ) -> Result<(), EffectError> {
     let mut bound_sub = sub.clone();
     bind_forwarded_generic_self_ref(&mut bound_sub);
-    if let Some(mut remaining) = without_missing_forward_result_dependencies(&bound_sub) {
+    let remaining =
+        if ability.forward_result && damage_uses_missing_forwarded_source(&bound_sub.effect) {
+            first_independent_forward_result_sibling(bound_sub.sub_ability.as_deref())
+        } else {
+            without_missing_forward_result_dependencies(&bound_sub)
+        };
+    if let Some(mut remaining) = remaining {
         apply_parent_chain_context(&mut remaining, ability, effect_context_object, state);
         remaining.context.forwarded_result_context = Some(Box::new(
             ForwardedResultContext::from_object_ids(state, &[]),
@@ -4482,7 +4537,7 @@ pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
             // CR 608.2c: a resolution-time instruction can still consume an
             // object selected by its parent. `ParentTarget` is not a fresh
             // choice, so retain the already-bound target for continuations.
-            || effect_refs_parent_target(&sub.effect)
+            || effect_requires_parent_target_object(&sub.effect)
             // CR 608.2c + CR 303.4f: TargetOnly → ChangeZone[+Attach ParentTarget]
             // (Necrotic Plague) stamps Resolution on the return clause, but the
             // chosen host is still the parent's bound target — propagate it so
@@ -6970,11 +7025,19 @@ fn is_player_scope_local_continuation(
     if effect_has_iteration_bound_recipient(parent) && effect_has_iteration_bound_recipient(child) {
         return true;
     }
-    // CR 608.2c: a card selected by this player's zone choice belongs to this
-    // iteration. Its anaphoric consumer must run before the next player picks.
-    if matches!(parent, Effect::ChooseFromZone { .. })
-        && effect_consumes_parent_object_referent(child)
+    // CR 608.2c: a card selected by this player's zone or resolution-time
+    // target choice belongs to this iteration. Its anaphoric consumer must run
+    // before the next player picks.
+    if matches!(
+        parent,
+        Effect::ChooseFromZone { .. } | Effect::TargetOnly { .. }
+    ) && effect_consumes_parent_object_referent(child)
     {
+        return true;
+    }
+    // CR 608.2c: "its controller/owner chooses" consumes the selected
+    // object's metadata even when that player chooses a different object.
+    if matches!(parent, Effect::TargetOnly { .. }) && effect_refs_parent_target_metadata(child) {
         return true;
     }
     let generic_local_continuation = matches!(
@@ -7284,9 +7347,10 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
 /// one card per scoped player, captured into `effect_context_object` and exposed
 /// to later clauses as `Demonstrative`/`Anaphoric`/`ParentTarget`. This referent
 /// is rebuilt fresh each iteration, so a consuming sub-clause MUST run inside the
-/// same iteration as its introducer.
+/// same iteration as its introducer. `TargetOnly` likewise introduces the
+/// object selected for a resolution-time instruction.
 fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
-    matches!(effect, Effect::RevealTop { .. })
+    matches!(effect, Effect::RevealTop { .. } | Effect::TargetOnly { .. })
 }
 
 /// CR 608.2c + CR 701.20a: a per-iteration reveal choice introduces the chosen
@@ -7322,10 +7386,7 @@ fn effect_consumes_parent_object_referent(effect: &Effect) -> bool {
     let amount_is_anaphoric = quantities
         .iter()
         .any(|qty| quantity_expr_references_demonstrative(qty));
-    let target_is_anaphoric = match effect {
-        Effect::ChangeZone { target, .. } => filter_is_parent_object_anaphor(target),
-        _ => false,
-    };
+    let target_is_anaphoric = effect_requires_parent_target_object(effect);
     amount_is_anaphoric || target_is_anaphoric
 }
 
@@ -7381,13 +7442,6 @@ fn quantity_ref_references_demonstrative(qty: &QuantityRef) -> bool {
     )
 }
 
-fn filter_is_parent_object_anaphor(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-    )
-}
-
 fn detach_after_player_scope_local_chain(
     node: &mut ResolvedAbility,
     scope: &PlayerFilter,
@@ -7433,7 +7487,8 @@ fn detach_after_player_scope_local_chain(
     // referent consumer, so it still runs as its own post-all-iterations loop.
     let referent_in_scope =
         referent_introduced || effect_introduces_per_iteration_referent(&node.effect);
-    let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
+    let next_is_co_scoped_anaphoric_consumer = (next.player_scope.as_ref() == Some(scope)
+        || (next.player_scope.is_none() && next.sub_link == SubAbilityLink::ContinuationStep))
         && referent_in_scope
         && effect_consumes_parent_object_referent(&next.effect);
     if next_is_co_scoped_anaphoric_consumer {
@@ -7480,6 +7535,11 @@ fn detach_after_player_scope_local_chain(
     );
     // CR 608.2c: a continuation performed by this iteration's player stays
     // with that player even when its recipient is independently named.
+    // CR 118.12a: an aggregate unless instruction's scope identifies its
+    // payers, independently of the outer seat that performs the instruction.
+    let next_has_aggregate_payer_scope =
+        crate::game::engine_payment_choices::player_scope_token_unless_sacrifice_cost(&next)
+            .is_some();
     let next_has_iteration_bound_actor = next
         .instruction_actor
         .as_ref()
@@ -7488,7 +7548,7 @@ fn detach_after_player_scope_local_chain(
         && next
             .player_scope
             .as_ref()
-            .is_none_or(|child_scope| child_scope == scope);
+            .is_none_or(|child_scope| child_scope == scope || next_has_aggregate_payer_scope);
     let next_is_local_continuation = next.sub_link == SubAbilityLink::ContinuationStep
         && (next_has_iteration_bound_actor
             || is_player_scope_local_continuation(&node.effect, &next.effect, scope))
@@ -7503,7 +7563,7 @@ fn detach_after_player_scope_local_chain(
         // inherit the outer iteration — redundant `player_scope` on the child
         // would re-enter the fan-out driver mid-instruction (Grave Sifter:
         // Choose → graveyard ChangeZone must run once per outer iteration).
-        if next_is_local_continuation {
+        if next_is_local_continuation && !next_has_aggregate_payer_scope {
             next.player_scope = None;
         }
         let tail = detach_after_player_scope_local_chain(&mut next, scope, referent_in_scope);
@@ -9122,18 +9182,17 @@ fn effect_uses_implicit_tracked_set_targets(effect: &Effect) -> bool {
     )
 }
 
-/// CR 707.10: A `CopySpell { SelfRef }` sub-ability after a `forward_result`
-/// parent copies the resolving spell, not the object the parent just moved.
-/// Rebinding `source_id` to the forwarded permanent breaks the
-/// `resolving_stack_entry` fallback in `copy_spell::resolve` once the spell
-/// has left the stack (Sevinne's Reclamation — issue #2860).
-fn copy_spell_self_ref_keeps_resolving_spell_source(sub: &ResolvedAbility) -> bool {
-    matches!(
-        &sub.effect,
-        Effect::CopySpell {
-            target: TargetFilter::SelfRef,
-            ..
-        }
+/// CR 400.7j + CR 603.7c + CR 707.10: immediate forwarded instructions use
+/// the moved source, except delayed triggers that retain their creating source
+/// and spell copies that refer to the resolving spell itself.
+fn forwarded_child_uses_moved_source(effect: &Effect) -> bool {
+    !matches!(
+        effect,
+        Effect::CreateDelayedTrigger { .. }
+            | Effect::CopySpell {
+                target: TargetFilter::SelfRef,
+                ..
+            }
     )
 }
 
@@ -10980,7 +11039,7 @@ fn filter_refs_parent_target_metadata(filter: &TargetFilter) -> bool {
         TargetFilter::Typed(typed) => {
             matches!(
                 typed.controller,
-                Some(ControllerRef::ParentTargetController)
+                Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner)
             )
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -11219,7 +11278,7 @@ pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. } => true,
         TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
+            matches!(typed.controller, Some(ControllerRef::ParentTargetController | ControllerRef::ParentTargetOwner))
                 // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
                 // property (Jodah's "put the rest ..." exclusion of the declined
                 // hit, Radiance's "each OTHER creature that shares a color with it")
@@ -18546,8 +18605,9 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    let effect_context_object =
-        parent_referent_context_from_events(state, effect_events).or_else(|| {
+    let effect_context_object = parent_referent_context_from_events(state, effect_events)
+        .or_else(|| selected_parent_object_context(state, ability))
+        .or_else(|| {
             ability
                 .sub_ability
                 .as_deref()
@@ -19298,6 +19358,10 @@ fn resolve_chain_body(
                         && condition_depends_on_graveyard_size(condition))
                     || condition_depends_on_last_created(condition)
                     || condition.has_when_you_do_marker()
+                    // CR 608.2c + CR 615.5: a saved replacement rider follows
+                    // the paused child instruction. Evaluating its event gate
+                    // now can run an independent tail before that child resumes.
+                    || matches!(condition, AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })
                     || (matches!(state.waiting_for, WaitingFor::SearchChoice { .. })
                         && condition_depends_on_result_object(condition))
                     || condition_awaits_resolution_only_referent(condition, state, ability))
@@ -19920,7 +19984,8 @@ fn resolve_chain_body(
             }
         } else if ability.forward_result
             && forwarded_objects.is_empty()
-            && ability_chain_depends_on_missing_forward_result(sub)
+            && (damage_uses_missing_forwarded_source(&sub.effect)
+                || ability_chain_depends_on_missing_forward_result(sub))
         {
             // CR 608.2c: A forward-result continuation is anchored to the object
             // moved by the preceding instruction. If no object moved, an
@@ -20548,6 +20613,19 @@ fn effect_chain_depends_on_missing_forward_result(effect: &Effect) -> bool {
             effect,
             Effect::CreateDelayedTrigger { effect: definition, .. }
                 if ability_definition_chain_refs_parent_target(definition)
+        )
+}
+
+/// CR 608.2c + CR 609.3: only the immediate forwarded child receives the
+/// moved source. A later independent damage instruction keeps its own source.
+fn damage_uses_missing_forwarded_source(effect: &Effect) -> bool {
+    forwarded_child_uses_moved_source(effect)
+        && matches!(
+            effect,
+            Effect::DealDamage {
+                damage_source: None,
+                ..
+            }
         )
 }
 
@@ -31862,6 +31940,62 @@ mod tests {
         assert!(revealed_object_context_from_events(&state, &events).is_none());
     }
 
+    /// CR 608.2c + CR 400.7: an event-recipient instruction establishes one
+    /// exact parent referent, never an arbitrary member or a later occurrence.
+    #[test]
+    fn instruction_actor_event_recipient_parent_context_requires_one_current_occurrence() {
+        let mut state = GameState::new_two_player(42);
+        let victim = create_object(
+            &mut state,
+            CardId(1),
+            P1,
+            "Victim".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&victim).unwrap().controller = P0;
+        let other = create_object(&mut state, CardId(2), P0, "Other".into(), Zone::Battlefield);
+        let event = |target| GameEvent::DamageDealt {
+            source_id: ObjectId(99),
+            target: TargetRef::Object(target),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+            source_incarnation: None,
+        };
+        state.current_trigger_event = Some(event(victim));
+        state
+            .damage_dealt_this_turn
+            .push_back(crate::types::game_state::DamageRecord {
+                source_id: ObjectId(99),
+                target: TargetRef::Object(victim),
+                target_incarnation: Some(state.objects[&victim].incarnation),
+                amount: 1,
+                ..Default::default()
+            });
+        let predecessor = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::EventTarget,
+            },
+            vec![],
+            ObjectId(99),
+            P0,
+        );
+        let snapshot = selected_parent_object_context(&state, &predecessor).unwrap();
+        assert_eq!(snapshot.object_id, victim);
+        assert_eq!(snapshot.lki.owner, P1);
+        assert_eq!(snapshot.lki.controller, P0);
+
+        state.current_trigger_events = vec![event(victim), event(other)];
+        assert!(selected_parent_object_context(&state, &predecessor).is_none());
+        state.current_trigger_events.clear();
+        state.objects.get_mut(&victim).unwrap().incarnation += 1;
+        assert!(selected_parent_object_context(&state, &predecessor).is_none());
+        state.objects.remove(&victim);
+        assert!(selected_parent_object_context(&state, &predecessor).is_none());
+    }
+
     /// CR 608.2c: a single object-targeted `DamageDealt` introduces a
     /// fight-back referent ("that creature deals damage equal to its power").
     #[test]
@@ -32316,6 +32450,45 @@ mod tests {
         assert!(has_forwarded_test_grant(&state, source, Keyword::Flying));
         assert!(!has_forwarded_test_grant(&state, returned, Keyword::Flying));
         assert!(!has_forwarded_test_grant(&state, source, Keyword::Haste));
+    }
+
+    #[test]
+    fn empty_forwarded_damage_keeps_later_independent_damage_by_its_own_source() {
+        let (mut state, source, returned, _) = forwarded_test_objects();
+        let damage = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SpecificPlayer { id: P1 },
+            damage_source: None,
+            excess: None,
+        };
+        let mut later =
+            ResolvedAbility::new(damage.clone(), vec![TargetRef::Player(P1)], source, P0);
+        later.sub_link = SubAbilityLink::SequentialSibling;
+        let mut immediate = ResolvedAbility::new(damage, vec![TargetRef::Player(P1)], source, P0)
+            .sub_ability(later);
+        immediate.optional = true;
+        let mut producer = forwarding_zone_change(source, returned, vec![], immediate);
+        if let Effect::ChangeZone { target, .. } = &mut producer.effect {
+            *target = TargetFilter::Typed(TypedFilter::creature());
+        }
+        producer.optional_targeting = true;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &producer, &mut events, 0).unwrap();
+        assert_eq!(state.objects[&returned].zone, Zone::Graveyard);
+        assert_eq!(state.players[1].life, 19);
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+                    GameEvent::DamageDealt { source_id: dealer, .. } if *dealer == source
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -40512,6 +40685,59 @@ mod tests {
                     "{selection:?}, {link:?}"
                 );
                 assert_eq!(after_scope.is_none(), retained);
+            }
+        }
+    }
+
+    #[test]
+    fn player_scope_target_choice_keeps_compound_object_consumers_and_their_actors() {
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            let mut head = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![],
+                ObjectId(1),
+                P0,
+            );
+            head.player_scope = Some(PlayerFilter::All);
+            let mut first = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                },
+                vec![],
+                ObjectId(1),
+                P0,
+            );
+            first.instruction_actor = Some(ControllerRef::ParentTargetOwner.into());
+            let mut second = first.clone();
+            second.instruction_actor = Some(ControllerRef::You.into());
+            second.sub_link = link;
+            first.sub_ability = Some(Box::new(second));
+            head.sub_ability = Some(Box::new(first));
+            let (scoped, tail) = split_player_scope_chain(&head, &PlayerFilter::All);
+            let first = scoped.sub_ability.unwrap();
+            assert_eq!(
+                first.instruction_actor,
+                Some(ControllerRef::ParentTargetOwner.into())
+            );
+            if link == SubAbilityLink::ContinuationStep {
+                assert!(tail.is_none());
+                assert_eq!(
+                    first.sub_ability.unwrap().instruction_actor,
+                    Some(ControllerRef::You.into())
+                );
+            } else {
+                assert!(first.sub_ability.is_none());
+                assert_eq!(
+                    tail.unwrap().instruction_actor,
+                    Some(ControllerRef::You.into())
+                );
             }
         }
     }

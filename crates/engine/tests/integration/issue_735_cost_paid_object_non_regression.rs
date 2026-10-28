@@ -437,8 +437,10 @@ fn synthetic_decline_owned_body_preserves_a_later_explicit_player_actor() {
         .resolve();
     let mut events = outcome.events().to_vec();
     assert!(
-        matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { player: P1, cards, .. }
-        if cards.contains(&other) && cards.contains(&decoy))
+        matches!(&runner.state().waiting_for, WaitingFor::EffectZoneChoice { player: P1, cards, .. }
+        if cards.contains(&other) && cards.contains(&decoy)),
+        "explicit player's counter choice: {:?}",
+        runner.state().waiting_for
     );
     events.extend(
         runner
@@ -523,7 +525,7 @@ fn synthetic_decline_printed_controller_survives_source_exit_or_control_change()
             .id();
         scenario.add_card_to_library_top(P1, "Forest");
         let response = if change_control {
-            let mut def = engine::types::ability::AbilityDefinition::new(
+            let def = engine::types::ability::AbilityDefinition::new(
                 engine::types::ability::AbilityKind::Spell,
                 engine::types::ability::Effect::GainControl {
                     target: engine::types::ability::TargetFilter::Typed(
@@ -531,11 +533,8 @@ fn synthetic_decline_printed_controller_survives_source_exit_or_control_change()
                     ),
                 },
             );
-            def.instruction_actor =
-                (Some(engine::types::ability::ControllerRef::SpecificPlayer { id: P1 }))
-                    .map(Into::into);
             scenario
-                .add_spell_to_hand(P0, "Synthetic Transfer Response", true)
+                .add_spell_to_hand(P1, "Synthetic Transfer Response", true)
                 .with_ability_definition(def)
                 .with_mana_cost(engine::types::mana::ManaCost::zero())
                 .id()
@@ -570,6 +569,13 @@ fn synthetic_decline_printed_controller_survives_source_exit_or_control_change()
             !runner.state().stack.is_empty(),
             "the P0 ability was queued before the response"
         );
+        if change_control {
+            runner.act(GameAction::PassPriority).unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { player: P1 }
+            ));
+        }
         let mut committed = runner.cast(response).target_object(source).commit();
         for _ in 0..20 {
             if !matches!(committed.state().waiting_for, WaitingFor::Priority { .. }) {
@@ -673,9 +679,13 @@ fn synthetic_explicit_controller_subject_owns_its_counter_choice() {
         .resolve()
         .events()
         .to_vec();
-    assert!(matches!(&runner.state().waiting_for,
-        WaitingFor::ChooseFromZoneChoice { player: P1, cards, .. }
-        if cards.contains(&anchor) && cards.contains(&recipient) && !cards.contains(&decoy)));
+    assert!(
+        matches!(&runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice { player: P1, cards, .. }
+        if cards.contains(&anchor) && cards.contains(&recipient) && !cards.contains(&decoy)),
+        "possessive controller's counter choice: {:?}",
+        runner.state().waiting_for
+    );
     events.extend(
         runner
             .act(GameAction::SelectCards {
@@ -854,7 +864,7 @@ fn synthetic_target_player_wrapper_owns_its_zone_choice_and_move() {
         .events()
         .to_vec();
     assert!(
-        matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { player: P1, cards, .. }
+        matches!(&runner.state().waiting_for, WaitingFor::EffectZoneChoice { player: P1, cards, .. }
         if cards.contains(&recipient) && cards.contains(&decoy))
     );
     events.extend(

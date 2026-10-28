@@ -431,6 +431,9 @@ fn real_lithoform_ability_copy_keeps_the_sacrificed_moggs_exact_source_at_saved_
         original_pin.reference.incarnation
     );
     let original_id = runner.state().stack.back().unwrap().id;
+    // CR 400.7j + CR 608.2h: SelfRef follows the sacrificed object's
+    // post-cost occurrence, while source information retains battlefield LKI.
+    let post_cost_incarnation = runner.state().objects[&mogg].incarnation;
     assert_eq!(
         runner
             .state()
@@ -495,10 +498,7 @@ fn real_lithoform_ability_copy_keeps_the_sacrificed_moggs_exact_source_at_saved_
         let ability = entry.ability().unwrap();
         assert_eq!(ability.source_id, mogg);
         assert_eq!(ability.context.source_identity, Some(original_pin));
-        assert_eq!(
-            ability.source_incarnation,
-            Some(original_pin.reference.incarnation)
-        );
+        assert_eq!(ability.source_incarnation, Some(post_cost_incarnation));
         assert_eq!(ability.targets, vec![TargetRef::Object(swans)]);
     }
     let saved =
@@ -1322,39 +1322,57 @@ fn actual_targeter_and_damage_recipient_triggers_keep_their_distinct_instruction
             WaitingFor::Priority { .. }
         ));
     }
-    let mut scenario = GameScenario::new_n_player(4, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario.add_creature_from_oracle(P0, "Synthetic damaged-controller actor", 2, 5,
-        "{T}: This creature deals 1 damage to target creature.\nWhenever this creature deals damage to a creature, that creature's controller puts a +1/+1 counter on that creature. That creature's owner puts a +1/+1 counter on that creature. You put a +1/+1 counter on this creature.").id();
-    let victim = scenario
-        .add_creature(p3, "Borrowed damaged object", 2, 5)
-        .controlled_by(p2)
-        .id();
-    let mut runner = scenario.build();
-    assert!(runner.state().objects[&source].parse_warnings.is_empty());
-    assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
-    let outcome = runner.activate(source, 0).target_object(victim).resolve();
-    for (actor, object) in [(p2, victim), (p3, victim), (P0, source)] {
-        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == object)).count(), 1);
+    for owner_counters_source in [false, true] {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let owner_recipient = if owner_counters_source {
+            "this creature"
+        } else {
+            "that creature"
+        };
+        let source = scenario.add_creature_from_oracle(P0, "Synthetic damaged-controller actor", 2, 5,
+        &format!("{{T}}: This creature deals 1 damage to target creature.\nWhenever this creature deals damage to a creature, that creature's controller puts a +1/+1 counter on that creature. That creature's owner puts a +1/+1 counter on {owner_recipient}. You put a +1/+1 counter on this creature.")).id();
+        let victim = scenario
+            .add_creature(p3, "Borrowed damaged object", 2, 5)
+            .controlled_by(p2)
+            .id();
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&source].parse_warnings.is_empty());
+        assert_eq!(runner.state().objects[&source].trigger_definitions.len(), 1);
+        let outcome = runner.activate(source, 0).target_object(victim).resolve();
+        for (actor, object) in [
+            (p2, victim),
+            (
+                p3,
+                if owner_counters_source {
+                    source
+                } else {
+                    victim
+                },
+            ),
+            (P0, source),
+        ] {
+            assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == object)).count(), 1);
+        }
+        assert_eq!(outcome.state().objects[&victim].damage_marked, 1);
+        assert_eq!(
+            outcome.state().objects[&victim]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&(2 - u32::from(owner_counters_source)))
+        );
+        assert_eq!(
+            outcome.state().objects[&source]
+                .counters
+                .get(&CounterType::Plus1Plus1),
+            Some(&(1 + u32::from(owner_counters_source)))
+        );
+        assert!(outcome.state().stack.is_empty());
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
     }
-    assert_eq!(outcome.state().objects[&victim].damage_marked, 1);
-    assert_eq!(
-        outcome.state().objects[&victim]
-            .counters
-            .get(&CounterType::Plus1Plus1),
-        Some(&2)
-    );
-    assert_eq!(
-        outcome.state().objects[&source]
-            .counters
-            .get(&CounterType::Plus1Plus1),
-        Some(&1)
-    );
-    assert!(outcome.state().stack.is_empty());
-    assert!(matches!(
-        outcome.final_waiting_for(),
-        WaitingFor::Priority { .. }
-    ));
 }
 
 /// CR 510.2 + CR 702.15e + CR 615.5: Phase A's source identities survive
@@ -2015,7 +2033,12 @@ fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_
                     .active_optional_effect_frame()
                     .unwrap()
                     .ability;
-                assert!(pending.targets.contains(&TargetRef::Object(revealed)));
+                let selected_reveal = pending
+                    .effect_context_object
+                    .as_ref()
+                    .expect("the original revealed card remains the selected referent");
+                assert_eq!(selected_reveal.object_id, revealed);
+                assert!(selected_reveal.is_current(runner.state()));
                 assert!(pending.targets.contains(&TargetRef::Player(p2)));
                 assert!(
                     !pending.targets.contains(&TargetRef::Player(P1)),

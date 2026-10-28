@@ -48,6 +48,40 @@ fn assert_tracked_mana_value_source(def: &AbilityDefinition, expected: TrackedAn
     ));
 }
 
+/// SHAPE: CR 608.2c + CR 109.5: a library action does not replace its
+/// declared subject, and a later imperative starts with the printed controller.
+/// The integration counterpart checks both CounterAdded performers.
+#[test]
+fn instruction_actor_declared_library_subject_survives_conjugated_counter() {
+    for subject in ["Target player", "Target opponent"] {
+        let definition = parse_effect_chain(
+            &format!("{subject} shuffles their library, then puts a +1/+1 counter on target creature. Put a +1/+1 counter on target creature."),
+            AbilityKind::Spell,
+        );
+        assert_attachment_chain_has_no_unimplemented(&definition);
+        let counters: Vec<_> =
+            std::iter::successors(Some(&definition), |node| node.sub_ability.as_deref())
+                .filter(|node| matches!(node.effect.as_ref(), Effect::PutCounter { .. }))
+                .collect();
+        assert_eq!(counters.len(), 2, "{subject}");
+        assert!(
+            matches!(
+                counters[0]
+                    .instruction_actor
+                    .as_ref()
+                    .and_then(|actor| actor.as_controller()),
+                Some(ControllerRef::DeclaredPlayer { .. })
+            ),
+            "{subject}: {:?}",
+            counters[0].instruction_actor
+        );
+        assert_eq!(
+            counters[1].instruction_actor,
+            Some(ControllerRef::You.into())
+        );
+    }
+}
+
 /// SHAPE: grammatical actors are retained before owned-body assembly. Runtime
 /// counterparts use the ordinary cast and optional-choice pipeline.
 #[test]

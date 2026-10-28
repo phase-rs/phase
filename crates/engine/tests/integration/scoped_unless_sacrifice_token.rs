@@ -134,6 +134,7 @@ fn assert_one_terminal_batch(
     runner: &GameRunner,
     spell: ObjectId,
     count: usize,
+    expected_source_zone: Zone,
     events: &[GameEvent],
 ) {
     assert_eq!(zombie_count(runner), count);
@@ -165,7 +166,9 @@ fn assert_one_terminal_batch(
         21,
         "independent tail runs once even when every payer pays"
     );
-    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    // CR 608.2n + CR 614.6: the spell's final graveyard delivery is still
+    // replaced when the fixture has a live graveyard replacement.
+    assert_eq!(runner.state().objects[&spell].zone, expected_source_zone);
     assert!(runner.state().stack.is_empty());
     expect_aggregate_payment_finished(runner);
     assert!(matches!(
@@ -180,7 +183,6 @@ fn instruction_actor_aggregate_admits_one_bound_instruction_and_one_terminal_bat
         (None, P0),
         (Some(ControllerRef::You), P0),
         (Some(ControllerRef::SpecificPlayer { id: P2 }), P2),
-        (Some(ControllerRef::ScopedPlayer), P0),
     ] {
         for all_pay in [false, true] {
             let expected_original = actor.as_ref().map(|_| P0);
@@ -247,7 +249,13 @@ fn instruction_actor_aggregate_admits_one_bound_instruction_and_one_terminal_bat
                     );
                 }
             }
-            assert_one_terminal_batch(&runner, spell, if all_pay { 0 } else { 3 }, &events);
+            assert_one_terminal_batch(
+                &runner,
+                spell,
+                if all_pay { 0 } else { 3 },
+                Zone::Graveyard,
+                &events,
+            );
         }
     }
 }
@@ -257,6 +265,8 @@ fn instruction_actor_missing_aggregate_skips_poll_dependents_and_else_but_keeps_
     for actor in [
         ControllerRef::ChosenPlayer { index: 0 },
         ControllerRef::Opponent,
+        // CR 101.3: a payer population does not establish an outer actor seat.
+        ControllerRef::ScopedPlayer,
     ] {
         let (mut runner, spell, _) = payment_fixture(Some(actor), false);
         let object = runner.state_mut().objects.get_mut(&spell).unwrap();
@@ -375,7 +385,17 @@ fn instruction_actor_aggregate_departure_distinguishes_unanswered_selector_and_b
                 .unwrap()
                 .events,
         );
-        assert_one_terminal_batch(&runner, spell, if phase == 2 { 1 } else { 2 }, &events);
+        assert_one_terminal_batch(
+            &runner,
+            spell,
+            if phase == 2 { 1 } else { 2 },
+            if phase == 2 {
+                Zone::Exile
+            } else {
+                Zone::Graveyard
+            },
+            &events,
+        );
     }
 }
 
@@ -479,7 +499,17 @@ fn instruction_actor_aggregate_future_departure_preserves_a_living_payment_or_re
                 .unwrap()
                 .events,
         );
-        assert_one_terminal_batch(&runner, spell, 2, &events);
+        assert_one_terminal_batch(
+            &runner,
+            spell,
+            2,
+            if phase == 2 {
+                Zone::Exile
+            } else {
+                Zone::Graveyard
+            },
+            &events,
+        );
         assert!(runner.state().pending_cost_move_resume.is_none());
     }
 }
@@ -580,7 +610,13 @@ fn instruction_actor_aggregate_completed_payer_departure_keeps_its_recorded_disp
                 .unwrap()
                 .events,
         );
-        assert_one_terminal_batch(&runner, spell, if paid { 1 } else { 2 }, &events);
+        assert_one_terminal_batch(
+            &runner,
+            spell,
+            if paid { 1 } else { 2 },
+            Zone::Graveyard,
+            &events,
+        );
     }
 }
 
@@ -666,7 +702,12 @@ fn instruction_actor_aggregate_keeps_a_real_outer_seat_or_prior_player_choice() 
             .state()
             .pending_player_scope_unless_payment
             .as_ref()
-            .unwrap()
+            .unwrap_or_else(|| {
+                panic!(
+                    "outer_scope={outer_scope}, wait={:?}",
+                    runner.state().waiting_for
+                )
+            })
             .pending_effect
             .clone();
         assert_eq!(bound.controller, P2);
@@ -693,7 +734,7 @@ fn instruction_actor_aggregate_keeps_a_real_outer_seat_or_prior_player_choice() 
                     .events,
             );
         }
-        assert_one_terminal_batch(&runner, spell, 4, &events);
+        assert_one_terminal_batch(&runner, spell, 4, Zone::Graveyard, &events);
     }
 }
 
@@ -829,7 +870,7 @@ fn instruction_actor_aggregate_latches_enchanted_player_before_first_payer_sacri
                 .events,
         );
     }
-    assert_one_terminal_batch(&runner, source, 3, &events);
+    assert_one_terminal_batch(&runner, source, 3, Zone::Graveyard, &events);
 }
 
 #[test]
@@ -890,7 +931,7 @@ fn instruction_actor_aggregate_canonical_simultaneous_departure_settles_each_adm
                 .unwrap()
                 .events,
         );
-        assert_one_terminal_batch(&runner, spell, 2, &events);
+        assert_one_terminal_batch(&runner, spell, 2, Zone::Graveyard, &events);
     }
 }
 
@@ -932,7 +973,7 @@ fn instruction_actor_aggregate_does_not_admit_a_player_who_left_before_the_instr
             .unwrap()
             .events,
     );
-    assert_one_terminal_batch(&runner, spell, 1, &events);
+    assert_one_terminal_batch(&runner, spell, 1, Zone::Graveyard, &events);
 }
 
 #[test]

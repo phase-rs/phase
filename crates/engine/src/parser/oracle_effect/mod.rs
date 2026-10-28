@@ -45542,7 +45542,14 @@ fn parse_effect_chain_ir_body(
         }) {
             let text_lower_for_anchor = text.to_lowercase();
             apply_anchor_subject_to_clause(&mut clause, &extracted, &text_lower_for_anchor);
-            carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
+            // CR 608.2c: a declared player's library action retains its
+            // declaration for following conjugated instructions. The bare
+            // player filter is not a new, independently acting subject.
+            if !matches!(carried_player, Some(CarriedPlayerSubject::Declared))
+                || !is_declared_player_filter(&extracted)
+            {
+                carried_player = Some(CarriedPlayerSubject::antecedent(extracted));
+            }
         }
 
         // Anaphoric resolution: parse-time pronoun→parent-target rewrites.

@@ -9423,13 +9423,45 @@ impl EventModifiers {
     pub(super) fn first_non_modifier_ability(
         ability: Option<&AbilityDefinition>,
     ) -> Option<&AbilityDefinition> {
-        let mut current = ability?;
-        loop {
-            if !Self::is_event_modifier_effect(&current.effect) {
-                return Some(current);
+        std::iter::successors(ability, |current| current.sub_ability.as_deref())
+            .find(|current| !Self::is_event_modifier_effect(&current.effect))
+    }
+
+    /// CR 614.1c + CR 614.12: entry modifiers are absorbed only by an entry
+    /// event; other replacements must resolve those instructions normally.
+    fn first_non_modifier_ability_for_event<'a>(
+        ability: Option<&'a AbilityDefinition>,
+        event: &ProposedEvent,
+    ) -> Option<&'a AbilityDefinition> {
+        std::iter::successors(ability, |current| current.sub_ability.as_deref()).find(|current| {
+            match current.effect.as_ref() {
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    ..
+                }
+                | Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => !matches!(
+                    event,
+                    ProposedEvent::ZoneChange {
+                        to: Zone::Battlefield,
+                        ..
+                    } | ProposedEvent::TokenEntry { .. }
+                        | ProposedEvent::CreateToken { .. }
+                ),
+                Effect::ChangeZone { .. } => !matches!(event, ProposedEvent::ZoneChange { .. }),
+                _ => true,
             }
-            current = current.sub_ability.as_deref()?;
-        }
+        })
+    }
+
+    fn has_only_event_modifier_for_event(
+        ability: Option<&AbilityDefinition>,
+        event: &ProposedEvent,
+    ) -> bool {
+        ability.is_some() && Self::first_non_modifier_ability_for_event(ability, event).is_none()
     }
 }
 
@@ -9861,14 +9893,6 @@ fn apply_single_replacement(
                     (ReplacementBranch::Execute, ReplacementMode::Mandatory)
                         if !batched_combat_all_shield =>
                     {
-                        // CR 615.5: Damage prevention follow-ups (e.g. Phyrexian
-                        // Hydra's "Put a -1/-1 counter on ~ for each 1 damage
-                        // prevented this way") must always stash as a post-effect
-                        // — the `has_only_event_modifier` heuristic that classifies
-                        // self-targeted PutCounter as an ETB modifier does not
-                        // apply to Damage events, where there is no `etb_counters`
-                        // slot to absorb the counters into.
-                        let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
                         if let Some(runtime) = repl_def.runtime_execute.clone() {
                             Some(PostReplacementContinuation::Resolved(runtime))
                         } else {
@@ -9904,46 +9928,19 @@ fn apply_single_replacement(
                                         .clone()
                                         .map(PostReplacementContinuation::Template);
                                 }
-                                // CR 615.5: for Damage event replacements, `ChangeZone`
-                                // (and other effects classified as "event modifiers") in
-                                // the follow-up chain are SIDE EFFECTS of the prevention
-                                // — they do not modify the damage event itself. Stash the
-                                // full `def` chain so every link (ChangeZone → Shuffle,
-                                // etc.) fires as a post-replacement continuation.
-                                //
-                                // Without this guard, `first_non_modifier_ability` skips
-                                // the ChangeZone prefix (treating it as a Damage-event
-                                // modifier, which has no meaning) and stashes only the
-                                // Shuffle tail — leaving the creature on the battlefield.
-                                //
-                                // CR 614.1c: for non-Damage events, walk past modifier-
-                                // only effects (Tap/Untap/PutCounter/ChangeZone) to find
-                                // the first non-modifier work. Covers the existing
-                                // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
-                                // back) and composed replacements like Tap → BecomeCopy
-                                // (Vesuva "enter tapped as a copy").
-                                if is_damage {
-                                    Some(PostReplacementContinuation::Template(Box::new(
-                                        def.clone(),
-                                    )))
-                                } else {
-                                    match EventModifiers::first_non_modifier_ability(Some(def)) {
-                                        Some(real_work) => {
-                                            Some(PostReplacementContinuation::Template(Box::new(
-                                                real_work.clone(),
-                                            )))
-                                        }
-                                        None if EventModifiers::has_only_event_modifier(Some(
-                                            def,
-                                        )) =>
-                                        {
-                                            None
-                                        }
-                                        _ => Some(PostReplacementContinuation::Template(Box::new(
-                                            def.clone(),
-                                        ))),
-                                    }
-                                }
+                                // CR 614.1c + CR 614.12 + CR 615.5: skip only
+                                // instructions absorbed by this event. Counters,
+                                // taps and moves remain real work after a draw,
+                                // life-gain or damage replacement.
+                                EventModifiers::first_non_modifier_ability_for_event(
+                                    Some(def),
+                                    &proposed,
+                                )
+                                .map(|real_work| {
+                                    PostReplacementContinuation::Template(Box::new(
+                                        real_work.clone(),
+                                    ))
+                                })
                             })
                         }
                     }
@@ -10216,10 +10213,13 @@ fn apply_single_replacement(
     // event outcome, regardless of which event-specific applier owns it: a
     // declined optional draw-skip, counter-prevention, or future quantity
     // prevention replacement must leave its original event unchanged.
+    // Life-gain appliers likewise read the accept branch's replacement amount
+    // or cross-event substitute; declining must retain the original gain.
     if matches!(branch, ReplacementBranch::Decline)
         && repl_def_ref.is_some_and(|repl_def| {
             replacement_mode_is_optional(&repl_def.mode)
                 && (repl_def.quantity_modification == Some(QuantityModification::Prevent)
+                    || matches!(proposed, ProposedEvent::LifeGain { .. })
                     || (matches!(proposed, ProposedEvent::Damage { .. })
                         && (repl_def.damage_modification.is_some()
                             || repl_def.shield_kind.is_shield())))
@@ -11657,22 +11657,19 @@ fn auto_choice_identities(
                 ReplacementMode::Mandatory => None,
                 ReplacementMode::MayCost { .. } => unreachable!(),
             };
-            let (execute, decline) = if matches!(proposed, ProposedEvent::Damage { .. }) {
-                // CR 615.5: damage delivery resolves the full continuation, including
-                // ChangeZone prefixes that modify other event kinds instead.
-                (definition.execute.as_deref(), decline)
-            } else {
-                // Match ordinary delivery: accept skips applied modifier prefixes,
-                // while mixed decline retains its full root; pure modifiers do not run.
-                (
-                    EventModifiers::first_non_modifier_ability(definition.execute.as_deref()),
-                    if EventModifiers::has_only_event_modifier(decline) {
-                        None
-                    } else {
-                        decline
-                    },
-                )
-            };
+            // Match ordinary delivery for this event: only absorbed modifier
+            // prefixes disappear; mixed decline retains its full root.
+            let (execute, decline) = (
+                EventModifiers::first_non_modifier_ability_for_event(
+                    definition.execute.as_deref(),
+                    proposed,
+                ),
+                if EventModifiers::has_only_event_modifier_for_event(decline, proposed) {
+                    None
+                } else {
+                    decline
+                },
+            );
             if entry_controller_choice(state, proposed, *rid).is_some()
                 || branch_can_prompt(execute)
                 || branch_can_prompt(decline)
@@ -12503,12 +12500,15 @@ fn continue_replacement_impl(
                 None
             } else {
                 let real_work = accept_effect.as_deref().and_then(|def| {
-                    EventModifiers::first_non_modifier_ability(Some(def))
+                    EventModifiers::first_non_modifier_ability_for_event(Some(def), &proposed)
                         .map(|work| Box::new(work.clone()))
                 });
                 if real_work.is_some() {
                     real_work
-                } else if EventModifiers::has_only_event_modifier(accept_effect.as_deref()) {
+                } else if EventModifiers::has_only_event_modifier_for_event(
+                    accept_effect.as_deref(),
+                    &proposed,
+                ) {
                     None
                 } else {
                     accept_effect
@@ -12523,7 +12523,10 @@ fn continue_replacement_impl(
             // needed — the modifier has already been applied to the ProposedEvent.
             // If the decline branch has non-modifier work (e.g., a choice side-effect),
             // it is retained as a post-replacement side effect.
-            let post = if EventModifiers::has_only_event_modifier(decline_effect.as_deref()) {
+            let post = if EventModifiers::has_only_event_modifier_for_event(
+                decline_effect.as_deref(),
+                &proposed,
+            ) {
                 None
             } else {
                 decline_effect
@@ -24453,6 +24456,135 @@ mod tests {
             Ok(expected),
             "declining optional counter prevention must preserve the original counter event"
         );
+    }
+
+    /// CR 614.1a + CR 614.12 + CR 122.6: a counter instruction replacing life
+    /// gain is real work, not an enters-with-counters modifier.
+    #[test]
+    fn replacement_counter_followup_remains_work_for_non_entry_events() {
+        for optional in [false, true] {
+            let source = ObjectId(90);
+            let execute = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+            let mut replacement =
+                ReplacementDefinition::new(ReplacementEvent::GainLife).execute(execute.clone());
+            if optional {
+                replacement.mode = ReplacementMode::Optional { decline: None };
+            }
+            let mut state = test_state_with_object(source, Zone::Battlefield, vec![replacement]);
+            let mut events = Vec::new();
+            let result = replace_event(
+                &mut state,
+                ProposedEvent::LifeGain {
+                    player_id: PlayerId(0),
+                    amount: 2,
+                    applied: HashSet::new(),
+                },
+                &mut events,
+            );
+            if optional {
+                assert_eq!(result, ReplacementResult::NeedsChoice(PlayerId(0)));
+                assert_eq!(
+                    continue_replacement(&mut state, 0, &mut events),
+                    ReplacementResult::Prevented
+                );
+            } else {
+                assert_eq!(result, ReplacementResult::Prevented);
+            }
+            let resident = state
+                .active_post_replacement_drains_mut()
+                .and_then(|drains| drains.resident_mut())
+                .expect("the counter and its draw rider remain pending");
+            assert!(matches!(
+                &resident.status,
+                DrainStatus::Ready(PostReplacementContinuation::Template(body))
+                    if body.as_ref() == &execute
+            ));
+        }
+    }
+
+    /// CR 614.1a + CR 614.6: a declined optional life-gain replacement keeps
+    /// the original event, independently of its accept effect and decline rider.
+    #[test]
+    fn optional_life_gain_decline_keeps_original_amount_and_decline_rider() {
+        for substitute in [false, true] {
+            for accept in [false, true] {
+                let source = ObjectId(90);
+                let decline = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                );
+                let execute = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    if substitute {
+                        Effect::NoOp
+                    } else {
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 5 },
+                            player: TargetFilter::Controller,
+                        }
+                    },
+                );
+                let replacement = ReplacementDefinition::new(ReplacementEvent::GainLife)
+                    .mode(ReplacementMode::Optional {
+                        decline: Some(Box::new(decline.clone())),
+                    })
+                    .execute(execute);
+                let mut state =
+                    test_state_with_object(source, Zone::Battlefield, vec![replacement]);
+                let mut events = Vec::new();
+                assert_eq!(
+                    replace_event(
+                        &mut state,
+                        ProposedEvent::LifeGain {
+                            player_id: PlayerId(0),
+                            amount: 2,
+                            applied: HashSet::new(),
+                        },
+                        &mut events,
+                    ),
+                    ReplacementResult::NeedsChoice(PlayerId(0))
+                );
+                let result = continue_replacement(&mut state, usize::from(!accept), &mut events);
+                if accept && substitute {
+                    assert_eq!(result, ReplacementResult::Prevented);
+                } else {
+                    assert!(matches!(
+                        result,
+                        ReplacementResult::Execute(ProposedEvent::LifeGain {
+                            player_id: PlayerId(0), amount, ..
+                        }) if amount == if accept { 5 } else { 2 }
+                    ));
+                }
+                if !accept {
+                    let resident = state
+                        .active_post_replacement_drains_mut()
+                        .and_then(|drains| drains.resident_mut())
+                        .expect("the selected decline rider remains ready");
+                    assert!(matches!(
+                        &resident.status,
+                        DrainStatus::Ready(PostReplacementContinuation::Template(body))
+                            if body.as_ref() == &decline
+                    ));
+                }
+            }
+        }
     }
 
     #[test]

@@ -584,6 +584,17 @@ fn resolve_all_declined_opponent_may(
             // OptionalEffectPerformed sub).
             if let Some(ref else_branch) = sub.else_ability {
                 let mut else_resolved = else_branch.as_ref().clone();
+                // CR 608.2c: the failed performed-gate skips its dependent
+                // steps, but the next independent instruction follows either
+                // branch. Join it to the else chain so a paused else retains
+                // sole ownership of when that tail resumes.
+                if let Some(tail) = std::iter::successors(sub.sub_ability.as_deref(), |node| {
+                    node.sub_ability.as_deref()
+                })
+                .find(|node| node.sub_link == SubAbilityLink::SequentialSibling)
+                {
+                    super::ability_utils::append_to_sub_chain(&mut else_resolved, tail.clone());
+                }
                 // CR 608.2c: the else branch resolves as the continuation of the
                 // stashed optional ability. Preserve a captured event-context
                 // target (such as the affected player of a replaced Draw) after
@@ -3021,6 +3032,85 @@ mod tests {
         .expect("terminal decline resolves the parked frame");
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    #[test]
+    fn opponent_may_all_decline_runs_the_independent_tail_after_a_paused_else_once() {
+        use crate::types::ability::{ChoiceType, TargetSelectionMode};
+        for paused_else in [false, true] {
+            let mut state = opponent_may_state(gain_life(1), vec![]);
+            let mut gated = ResolvedAbility::new(gain_life(99), vec![], ObjectId(100), PlayerId(0));
+            gated.condition = Some(AbilityCondition::effect_performed());
+            let mut otherwise =
+                ResolvedAbility::new(gain_life(2), vec![], ObjectId(100), PlayerId(0));
+            if paused_else {
+                otherwise.sub_ability = Some(Box::new(ResolvedAbility::new(
+                    Effect::Choose {
+                        choice_type: ChoiceType::player(),
+                        persist: false,
+                        selection: TargetSelectionMode::Chosen,
+                    },
+                    vec![],
+                    ObjectId(100),
+                    PlayerId(0),
+                )));
+            }
+            gated.else_ability = Some(Box::new(otherwise));
+            let mut dependent =
+                ResolvedAbility::new(gain_life(1000), vec![], ObjectId(100), PlayerId(0));
+            let mut tail = ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            dependent.sub_ability = Some(Box::new(tail));
+            gated.sub_ability = Some(Box::new(dependent));
+            state
+                .active_optional_effect_frame_mut()
+                .unwrap()
+                .ability
+                .sub_ability = Some(Box::new(gated));
+            let outcome = crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .unwrap();
+            let mut events = outcome.events;
+            if paused_else {
+                assert_eq!(state.players[0].life, 22);
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::NamedChoice {
+                        player: PlayerId(0),
+                        ..
+                    }
+                ));
+                events.extend(
+                    crate::game::engine::apply(
+                        &mut state,
+                        PlayerId(0),
+                        GameAction::ChooseOption { choice: "1".into() },
+                    )
+                    .unwrap()
+                    .events,
+                );
+            }
+            assert_eq!(state.players[0].life, 25);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::LifeChanged {
+                            player_id: PlayerId(0),
+                            ..
+                        }
+                    ))
+                    .count(),
+                2
+            );
+            assert!(state.active_optional_effect_frame().is_none());
+            assert!(state.active_ability_continuation().is_none());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
     }
 
     #[test]

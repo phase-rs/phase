@@ -35932,7 +35932,9 @@ impl<'de> Deserialize<'de> for ResolvedAbility {
         validate_source_identity(
             Some(ability.source_id),
             ability.context.source_identity,
-            ability.source_incarnation,
+            // CR 400.7j + CR 608.2h: own-source information can retain the
+            // pre-cost occurrence while SelfRef follows the post-cost object.
+            None,
         )
         .map_err(de::Error::custom)?;
         Ok(ability)
@@ -38609,14 +38611,9 @@ mod tests {
                 .unwrap(),
             resolved
         );
-        for key in ["source_id", "source_incarnation"] {
-            let mut malformed = serde_json::to_value(&resolved).unwrap();
-            malformed[key] = serde_json::json!(92);
-            assert!(
-                serde_json::from_value::<ResolvedAbility>(malformed).is_err(),
-                "{key}"
-            );
-        }
+        let mut malformed = serde_json::to_value(&resolved).unwrap();
+        malformed["source_id"] = serde_json::json!(92);
+        assert!(serde_json::from_value::<ResolvedAbility>(malformed).is_err());
     }
 
     #[test]
@@ -38638,6 +38635,11 @@ mod tests {
             assert_eq!(node.context.source_identity, Some(before_cost));
             assert_eq!(node.source_incarnation, Some(5));
         }
+        assert_eq!(
+            serde_json::from_value::<ResolvedAbility>(serde_json::to_value(&root).unwrap())
+                .unwrap(),
+            root
+        );
     }
 
     #[test]
