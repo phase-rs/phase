@@ -14634,6 +14634,7 @@ fn continue_replacement_in_opportunity(
                     .flatten();
                 state.install_post_replacement_drain(
                     PostReplacementDrain {
+                        independent_departure_ancestors: None,
                         token_creation_parent,
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                         source: Some(rid.source),

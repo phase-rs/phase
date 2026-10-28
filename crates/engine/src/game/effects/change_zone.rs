@@ -1281,10 +1281,6 @@ pub fn resolve(
                 let _ = state
                     .take_active_change_zone_frame()
                     .expect("completed ChangeZone owns the active frame");
-                crate::game::triggers::sync_logical_zone_change_departure_stamps(
-                    &logical_zone_change_group,
-                    events,
-                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -1362,10 +1358,6 @@ pub fn resolve(
                 let _ = state
                     .take_active_change_zone_frame()
                     .expect("completed ChangeZone owns the active frame");
-                crate::game::triggers::sync_logical_zone_change_departure_stamps(
-                    &logical_zone_change_group,
-                    events,
-                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),

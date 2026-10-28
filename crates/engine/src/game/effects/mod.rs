@@ -3896,10 +3896,9 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                 }
             }
         }
-        // CR 603.10a: scope this drain pass's battlefield-exit events so the
-        // members moved in this resume join the logical co-departed group and
-        // their observer triggers are collected with earlier pause segments.
-
+        // Keep ordinary observer collection bounded to this drain pass;
+        // zone-change observers consume their certified primary receipts separately.
+        let events_before_drain = events.len();
         // CR 603.6a + CR 614.12: each member applies the entry modifications
         // resolved before the event's first member moved; never recompute
         // against the partly-moved board.
