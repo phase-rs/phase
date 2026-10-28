@@ -1000,7 +1000,7 @@ fn the_walker_flags_parser_crossings_from_the_ast_layer() {
 /// item is the macro path).
 type FieldHit = (String, String, Option<String>, String);
 
-/// Clause 4b: every struct field, enum-variant field (named and tuple) and `type` alias in
+/// Clauses 4b and 4d: every struct field, enum-variant field (named and tuple) and `type` alias in
 /// `src`, inline `mod` blocks included, whose flattened type names `marker`, and every item
 /// macro whose tokens name it. Function bodies are not declarations, so a local of that type
 /// is not a hit.

@@ -369,8 +369,9 @@ mod tests {
     /// shield, so the first two draws are each replaced by 5 life and the third draws
     /// normally. The two substitutes are `==` and live under distinct arena handles.
     /// The first draw parks a CR 616.1 choice between the two floating shields (the
-    /// engine's choice surface, recorded at base); floating shields have no exact
-    /// definition identity (CR 400.7), so no saved preference can be offered for it.
+    /// engine's choice surface, recorded at base); floating shields are addressed by
+    /// the `ObjectId(0)` sentinel and have no exact definition identity, so no saved
+    /// preference can be offered for it.
     #[test]
     fn words_of_worship_twice_replaces_two_draws_under_distinct_handles() {
         use crate::game::scenario::GameScenario;
