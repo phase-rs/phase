@@ -17280,10 +17280,12 @@ fn resolve_chain_body(
                     std::iter::successors(sub.sub_ability.as_deref(), |node| {
                         node.sub_ability.as_deref()
                     })
-                    .find(|node| starts_independent_instruction(node) && node.condition.is_none())
+                    .find(|node| starts_independent_instruction(node))
                 {
                     // CR 608.2c: a paused conditional head can have several
                     // dependent steps before its next independent instruction.
+                    // That instruction evaluates its own condition, even when
+                    // the skipped instruction's condition was false.
                     let mut sibling = sibling.clone();
                     apply_parent_chain_context(&mut sibling, ability, None, state);
                     resolve_ability_chain(state, &sibling, events, depth + 1)?;
@@ -22536,6 +22538,71 @@ mod tests {
                     if *source_id == spell))
                         .count(),
                     if with_else { 2 } else { 1 }
+                );
+                outcome.assert_zone(&[spell], Zone::Graveyard);
+                assert!(outcome.state().stack.is_empty());
+            }
+        }
+    }
+
+    /// CR 608.2c: a conditional independent instruction keeps its own gate
+    /// after a skipped head and its dependent steps.
+    #[test]
+    fn false_instruction_reaches_the_next_conditional_independent_instruction() {
+        for with_else in [false, true] {
+            for next_condition_met in [false, true] {
+                let gain = |value| {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value },
+                            player: TargetFilter::Controller,
+                        },
+                    )
+                };
+                let not_your_turn = || AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::IsYourTurn),
+                };
+                let mut head = gain(99);
+                head.condition = Some(not_your_turn());
+                if with_else {
+                    head.else_ability = Some(Box::new(gain(2)));
+                }
+                let mut dependent = gain(100);
+                let mut conditional = gain(7);
+                conditional.sub_link = SubAbilityLink::SequentialSibling;
+                conditional.condition = Some(if next_condition_met {
+                    AbilityCondition::IsYourTurn
+                } else {
+                    not_your_turn()
+                });
+                let mut tail = gain(3);
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                conditional.sub_ability = Some(Box::new(tail));
+                dependent.sub_ability = Some(Box::new(conditional));
+                head.sub_ability = Some(Box::new(dependent));
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic conditional sibling", false)
+                    .with_ability_definition(head)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let mut runner = scenario.build();
+                let outcome = runner.cast(spell).resolve();
+                assert_eq!(
+                    outcome.state().players[0].life,
+                    23 + i32::from(with_else) * 2 + i32::from(next_condition_met) * 7
+                );
+                assert_eq!(
+                    outcome
+                        .events()
+                        .iter()
+                        .filter(|event| matches!(event,
+                    GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. }
+                    if *source_id == spell))
+                        .count(),
+                    1 + usize::from(with_else) + usize::from(next_condition_met)
                 );
                 outcome.assert_zone(&[spell], Zone::Graveyard);
                 assert!(outcome.state().stack.is_empty());
