@@ -95,7 +95,7 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
 /// controller), a required target that has not been chosen
 /// (`stack::has_missing_required_stack_targets`), or a CR 608.2b declared
 /// target that is no longer legal.
-fn resolution_board(
+pub(crate) fn resolution_board(
     state: &GameState,
     entry: &StackEntry,
     root: &ResolvedAbility,

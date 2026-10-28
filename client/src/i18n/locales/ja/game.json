@@ -2752,6 +2752,8 @@
     "delta": "増減数",
     "modifyCounters": "カウンターを増減",
     "modifyEnergy": "エネルギーを増減",
+    "givePlayerCounters": "カウンターを与える",
+    "giveEnergy": "エネルギーを与える",
     "browseDescription": "自分のライブラリーをランダムな順番で表示します。カードをクリックして移動先の領域を選ぶか、「戦場」「手札」ボタンで直接移動できます。",
     "browseLibrary": "ライブラリーを見る",
     "infiniteMana": "無限マナ",

@@ -2257,7 +2257,7 @@ fn target_ref_object(target: &TargetRef) -> Option<ObjectId> {
     }
 }
 
-fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
+pub(crate) fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
     targets.iter().filter_map(target_ref_object)
 }
 

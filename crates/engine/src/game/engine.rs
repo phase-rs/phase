@@ -124,8 +124,9 @@ pub enum EngineError {
         player: PlayerId,
         pending: Box<crate::types::game_state::PendingCast>,
     },
-    /// A life change in this action proved unrepresentable (the final amount,
-    /// the life total, or the per-turn gained/lost counter does not fit the
+    /// A life, player-counter or energy change in this action proved
+    /// unrepresentable (the final amount, the life total, the per-turn
+    /// gained/lost counter, or the counter/energy total does not fit the
     /// engine's `i32`/`u32` storage). Representability is an engine limit, not
     /// a game rule; the action boundary rejects the whole action and restores
     /// its pre-action snapshot rather than silently skipping the change.
@@ -1393,8 +1394,9 @@ impl ProspectiveSimulationOutcome {
     }
 }
 
-/// Closes this boundary's life window and restores the window that was open
-/// before it. Returns the player whose life change failed inside the boundary.
+/// Closes this boundary's ingress window and restores the window that was open
+/// before it. Returns the player whose life, player-counter or energy change
+/// failed inside the boundary.
 fn close_ingress_window(
     state: &mut GameState,
     prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
@@ -1404,8 +1406,8 @@ fn close_ingress_window(
     window.and_then(|window| window.failed_player)
 }
 
-/// The player whose life change inside the current action proved
-/// unrepresentable, if any. An open ingress window records the first failure;
+/// The player whose life, player-counter or energy change inside the current
+/// action proved unrepresentable, if any. An open ingress window records the first failure;
 /// the enclosing action boundary turns it into a rejection and restores its
 /// pre-action snapshot.
 fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
@@ -1551,10 +1553,10 @@ fn apply_action_boundary_core(
             lifecycle,
         });
     }
-    // A life change this action resolves must be representable: open the
-    // ingress window after transient cleanup (which clears any prior window)
+    // A player-resource change this action resolves must be representable: open
+    // the ingress window after transient cleanup (which clears any prior window)
     // and close it before returning a `RawActionApplication`. Every ordinary
-    // life settlement records a failure here instead of silently treating the
+    // life, player-counter and energy settlement records a failure here instead of silently treating the
     // change as zero, so the boundary rejects the whole action atomically.
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
@@ -10006,7 +10008,8 @@ enum AutoPassDecision {
 ///
 /// Interrupts (MTGA-style): `UntilStackEmpty` bails when the stack empties or
 /// grows beyond the baseline (trigger or opponent spell); `UntilTurnBoundary`
-/// bails when an opponent-controlled object is on top of the stack or when the
+/// bails when an opponent-controlled object is on top of the stack, when the
+/// player's own top is `Held` (`priority::standing_priority_pass`), or when the
 /// current phase is in the user-supplied `phase_stops` list. The per-window
 /// interrupt logic is boundary-agnostic — both `EndOfCurrentTurn` and
 /// `MyNextTurnStart` behave identically within a priority window.
@@ -10043,14 +10046,21 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // CR 117.3d: An opponent-controlled top-of-stack normally ends the
             // session so the player can respond — unless they have pre-committed
             // to yield priority for that exact triggered ability, in which case
-            // the session keeps auto-passing through it. The standing rungs are
-            // `priority::standing_priority_pass`'s; Full Control already returned
-            // above, so `Withheld` cannot reach this arm.
-            let opponent_on_stack = state.stack.last().is_some_and(|top| {
-                priority::standing_priority_pass(state, player, Some(top))
-                    == priority::StandingPriorityPass::Undecided
+            // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
+            // the player's own object that can move one of their activatable
+            // mana sources off the battlefield (`Held`) ends it too, since that
+            // activation is lost once the object resolves. (`UntilStackEmpty` is
+            // consent to resolve the stack itself, so it passes through.) The standing rungs
+            // are `priority::standing_priority_pass`'s; Full Control already
+            // returned above, so `Withheld` cannot reach this arm.
+            let top_needs_response = state.stack.last().is_some_and(|top| {
+                matches!(
+                    priority::standing_priority_pass(state, player, Some(top)),
+                    priority::StandingPriorityPass::Undecided
+                        | priority::StandingPriorityPass::Held
+                )
             });
-            if opponent_on_stack {
+            if top_needs_response {
                 AutoPassDecision::Break
             } else if state.phase_stop_hit(player) {
                 AutoPassDecision::Finish
@@ -10603,7 +10613,9 @@ fn stack_resolution_session_participant_authorizes_pass(
         // the session's own representative's included.
         priority::StandingPriorityPass::Withheld => return false,
         priority::StandingPriorityPass::Granted => true,
-        priority::StandingPriorityPass::Undecided => false,
+        // CR 117.1d + CR 605.3a: an own object that can remove an activatable
+        // mana source is no standing pass; only explicit consent skips it.
+        priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
     };
     match session.policy {
         // A verified AI pass authorizes later windows in this exact fenced
@@ -10673,7 +10685,14 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // CR 117.3b + CR 117.4: resolving K entries skips every participant's
     // window over each of the next K − 1 entries, each with its own top; the
     // boundary ends before the first window a participant has not authorized
-    // (CR 732.2b), so K = 1 + the authorized prefix of those windows.
+    // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
+    // window is judged against the board before anything resolves, so it cannot
+    // see a mana source an earlier member untaps. That is sound for the `Held`
+    // rung because a batch consumes only windows this look-ahead authorized, and
+    // its members are either the resolver's fixed inert kinds or one repeated
+    // untargeted triggered ability. A member that untaps a mana source which a
+    // later identical member then removes, without pausing, is an accepted
+    // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {
             participants.iter().all(|&participant| {
@@ -17398,20 +17417,19 @@ pub fn preflight_debug_action(
         .validate_create_count()
         .map_err(EngineError::InvalidAction)?;
     action
-        .validate_life_change_amount()
+        .validate_player_resource_amount()
         .map_err(EngineError::InvalidAction)?;
 
-    // CR 616.1: a sandbox life change is a real event whose replacements can
-    // park a replacement-order choice for the affected player. Only a settled
-    // Priority boundary can own that choice; admitting a second event under an
-    // open prompt would replace the outstanding proposal before it resolves.
-    if matches!(
-        action,
-        DebugAction::GainLife { .. } | DebugAction::LoseLife { .. }
-    ) && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+    // CR 616.1: a sandbox life change or player-counter/energy gain is a real
+    // event whose replacements can park a replacement-order choice for the
+    // affected player. Only a settled Priority boundary can own that choice;
+    // admitting a second event under an open prompt would replace the
+    // outstanding proposal before it resolves.
+    if action.requires_settled_priority()
+        && !matches!(state.waiting_for, WaitingFor::Priority { .. })
     {
         return Err(EngineError::InvalidAction(
-            "Debug::GainLife / Debug::LoseLife require a Priority window".into(),
+            "Debug::GainLife / Debug::LoseLife / Debug::GivePlayerCounters / Debug::GiveEnergy require a Priority window".into(),
         ));
     }
 

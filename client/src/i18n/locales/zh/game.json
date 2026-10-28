@@ -2752,6 +2752,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",

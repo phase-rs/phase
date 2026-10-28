@@ -20913,7 +20913,8 @@ pub enum AutoPassMode {
 ///   client-only preference is invisible to it. Inside a rechecking
 ///   (`RecheckNoMeaningfulPriorityAction`) stack-resolution session that loop
 ///   also executes the ladder's standing rungs (Full Control, yields, own
-///   object on top) through `priority::standing_priority_pass`, the same
+///   object on top unless held for a removable mana source) through
+///   `priority::standing_priority_pass`, the same
 ///   authority the recommendation uses; a Committed session consults only its
 ///   Full Control rung.
 ///
@@ -22927,16 +22928,18 @@ declare_game_state! {
     /// inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
-    /// Open while an action-ingress life change settles synchronously (a `try_*`
-    /// entry's whole call, or the replacement-choice handler resuming a `Reject`
-    /// record). Any life settlement inside it that is unrepresentable is recorded
-    /// here and the ingress caller rejects. Transient — never serialized.
+    /// Open while an action-ingress player-resource change (life, player
+    /// counter, energy) settles synchronously (a `try_*` entry's whole call, or
+    /// the replacement-choice handler resuming a `Reject` record). Any such
+    /// settlement inside it that is unrepresentable is recorded here and the
+    /// ingress caller rejects. Transient — never serialized.
     #[serde(skip)]
     pub(crate) ingress_life_window: Option<IngressLifeWindow>,
-    /// A replacement's computed life quantity overflowed while the current life
-    /// event was being replaced (see `ReplacementQuantityOverflow`). Recorded by
-    /// the life appliers, taken by the life settle step of the same event inside
-    /// one synchronous action. Transient — never serialized.
+    /// A replacement's computed life, player-counter or energy quantity
+    /// overflowed while the current event was being replaced (see
+    /// `ReplacementQuantityOverflow`). Recorded by the life and player/energy
+    /// counter appliers, taken by that event's settle step inside one
+    /// synchronous action. Transient — never serialized.
     #[serde(skip)]
     pub(crate) replacement_quantity_overflow: Option<ReplacementQuantityOverflow>,
     /// CR 601.2g + CR 605.3b: the row policy of the automatic mana payment that
@@ -28457,7 +28460,8 @@ pub struct PendingReplacement {
     /// boundary methods below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_boundary: Option<Box<ProposedEvent>>,
-    /// Whether an engine-unrepresentable final life edit on resume rejects the
+    /// Whether an engine-unrepresentable final player-resource edit (life,
+    /// player counter, energy) on resume rejects the
     /// public action and restores its entry state (`Reject`), or uses the
     /// compatibility skip when no ingress window owns it (`IgnoreImpossible`).
     /// Older payloads omit this field and retain that compatibility policy.
@@ -28468,9 +28472,10 @@ pub struct PendingReplacement {
     pub unrepresentable_life_change: UnrepresentablePolicy,
 }
 
-/// Who owns a life change whose final result the engine cannot represent
-/// (final amount beyond an `i32` delta, life total overflow, or per-turn
-/// gained/lost counter overflow).
+/// Who owns a player-resource change (life, player counter, energy) whose final
+/// result the engine cannot represent (final amount beyond an `i32` delta, life
+/// total overflow, per-turn gained/lost counter overflow, or counter/energy
+/// total overflow).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnrepresentablePolicy {
     /// Action ingress: return the typed error so the caller rejects the
@@ -28493,31 +28498,32 @@ impl UnrepresentablePolicy {
     }
 }
 
-/// State of the transient action-ingress life window (see
-/// `GameState::ingress_life_window`): the first player whose life settlement
-/// inside the window proved unrepresentable, if any.
+/// State of the transient action-ingress window (see
+/// `GameState::ingress_life_window`): the first player whose player-resource
+/// (life, player counter, energy) settlement inside the window proved
+/// unrepresentable, if any.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct IngressLifeWindow {
     pub(crate) failed_player: Option<PlayerId>,
 }
 
-/// A replacement's computed life quantity overflowed the engine's numeric
-/// range, so the modified event cannot be represented. This is an engine
-/// capacity limit, NOT a CR 101.3 impossibility: the applier records the
-/// overflowing replacement's source (diagnostic) and the life settle step takes
-/// the record and routes it through the existing unrepresentable-life-change
-/// authority. A public action boundary rejects and restores; the ordinary
-/// fallback outside one skips the change for compatibility (never clamping,
-/// and never inventing a CR 119.3 amount).
+/// A replacement's computed life, player-counter or energy quantity overflowed
+/// the engine's numeric range, so the modified event cannot be represented. This
+/// is an engine capacity limit, NOT a CR 101.3 impossibility: the applier
+/// records the overflowing replacement's source (diagnostic) and that event's
+/// settle step takes the record and routes it through the existing
+/// unrepresentable-player-resource-change authority. A public action boundary
+/// rejects and restores; the ordinary fallback outside one skips the change for
+/// compatibility (never clamping, and never inventing a CR 119.3 amount).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReplacementQuantityOverflow {
     pub(crate) source: ObjectId,
 }
 
 impl GameState {
-    /// Record that a replacement's computed life quantity overflowed. The first
-    /// writer wins: the loop stops at the first overflow, so a later record can
-    /// only be the same event.
+    /// Record that a replacement's computed life, player-counter or energy
+    /// quantity overflowed. The first writer wins: the loop stops at the first
+    /// overflow, so a later record can only be the same event.
     pub(crate) fn record_replacement_quantity_overflow(&mut self, source: ObjectId) {
         if self.replacement_quantity_overflow.is_none() {
             self.replacement_quantity_overflow = Some(ReplacementQuantityOverflow { source });
@@ -34053,7 +34059,8 @@ impl GameState {
         self.replacement_quantity_overflow = None;
     }
 
-    /// The policy a life event parked right now must be stamped with: `Reject`
+    /// The policy a player-resource event (life, player counter, energy) parked
+    /// right now must be stamped with: `Reject`
     /// while an action-ingress window is open (the event belongs to that public
     /// action), otherwise legacy/outside-boundary compatibility behavior.
     pub(crate) fn ingress_life_policy(&self) -> UnrepresentablePolicy {
