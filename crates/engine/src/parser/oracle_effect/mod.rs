@@ -55073,3 +55073,78 @@ mod retained_complete_relation_unit_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod coordinated_interior_duration_tests {
+    use super::*;
+    use crate::types::ability::PlayerScope;
+    use crate::types::keywords::ProtectionTarget;
+
+    #[test]
+    fn perch_joined_action_window_reaches_protection_in_full_chain_lowering() {
+        // Verbatim printed instruction, with the usual normalized self-reference.
+        // CR 611.2a: the middle window governs both continuous effects, while
+        // the preceding phasing and following independent exile stay unbounded.
+        let definition = parse_effect_chain(
+            "Create four 2/2 blue Bird creature tokens with flying. If the gift was promised, all permanents you control phase out, and until your next turn, your life total can't change and you gain protection from everything. Exile ~.",
+            AbilityKind::Spell,
+        );
+        let clauses: Vec<_> =
+            std::iter::successors(Some(&definition), |clause| clause.sub_ability.as_deref())
+                .collect();
+        assert!(matches!(definition.effect.as_ref(), Effect::Token { .. }));
+        let phasing = clauses
+            .iter()
+            .find(|clause| matches!(clause.effect.as_ref(), Effect::PhaseOut { .. }))
+            .expect("the earlier conditional action survives");
+        assert_eq!(phasing.duration, None);
+        assert_eq!(
+            phasing.condition,
+            Some(AbilityCondition::AdditionalCostPaid)
+        );
+        let expected = Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        };
+        let mut life_lock = false;
+        let mut protection = false;
+        let mut exile = false;
+        for clause in clauses {
+            match clause.effect.as_ref() {
+                Effect::GenericEffect {
+                    static_abilities,
+                    duration,
+                    ..
+                } => {
+                    for static_ability in static_abilities {
+                        if matches!(static_ability.mode, StaticMode::CantGainLife) {
+                            life_lock = true;
+                            assert_eq!(duration.as_ref(), Some(&expected));
+                        }
+                        if static_ability.modifications.iter().any(|modification| {
+                            matches!(
+                                modification,
+                                ContinuousModification::AddKeyword {
+                                    keyword: Keyword::Protection(ProtectionTarget::Everything)
+                                }
+                            )
+                        }) {
+                            protection = true;
+                            assert_eq!(duration.as_ref(), Some(&expected));
+                            assert_eq!(clause.duration.as_ref(), Some(&expected));
+                        }
+                    }
+                }
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    ..
+                } => {
+                    exile = true;
+                    assert_eq!(clause.duration, None);
+                }
+                _ => {}
+            }
+        }
+        assert!(life_lock && protection && exile);
+    }
+}

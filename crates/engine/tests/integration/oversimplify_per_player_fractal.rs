@@ -4603,9 +4603,9 @@ fn departure_mass_child_member(
     legacy: bool,
 ) {
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityModification,
-        QuantityRef, ReplacementDefinition, ReplacementMode, ReturnResultId, TargetFilter,
-        TriggerDefinition,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, FilterProp, MultiTargetSpec,
+        QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ReturnResultId, TargetFilter, TriggerDefinition, TypedFilter,
     };
     use engine::types::game_state::{InstructionResult, ZoneMoveCompletion};
     use engine::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
@@ -4648,21 +4648,30 @@ fn departure_mass_child_member(
         )
         .id();
     let mut root = departure_exile_definition(7);
-    let Effect::ChangeZoneAll {
-        origin: from,
-        target,
-        ..
-    } = root.effect.as_mut()
-    else {
+    // CR 601.2c: announce A, B, C through the existing ordered target slots.
+    // An unordered ChangeZoneAll scan could miss the child-before-primary seam.
+    let mut effect: Effect = serde_json::from_value(serde_json::json!({
+        "type": "ChangeZone", "origin": origin, "destination": "Exile"
+    }))
+    .unwrap();
+    let Effect::ChangeZone { target, .. } = &mut effect else {
         unreachable!()
     };
-    *from = Some(origin);
-    *target = TargetFilter::Or {
-        filters: selected
-            .iter()
-            .map(|id| TargetFilter::SpecificObject { id: *id })
-            .collect(),
+    *target = TargetFilter::And {
+        filters: vec![
+            TargetFilter::Or {
+                filters: selected
+                    .iter()
+                    .map(|id| TargetFilter::SpecificObject { id: *id })
+                    .collect(),
+            },
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::InZone { zone: origin }]),
+            ),
+        ],
     };
+    root.effect = Box::new(effect);
+    root.multi_target = Some(MultiTargetSpec::fixed(3, 3));
     let mut branch = departure_branch_reader();
     let Effect::ChooseOneOf { branches, .. } = branch.effect.as_mut() else {
         unreachable!()
@@ -4725,6 +4734,19 @@ fn departure_mass_child_member(
                 ObjectIncarnationRef::from_object(&runner.state().objects[id]),
                 origin,
             )
+        })
+        .collect();
+    // CR 616.1: the affected permanent's controller chooses; outside the
+    // battlefield the card's owner chooses. Capture that authority before moves.
+    let choosers: Vec<_> = selected
+        .iter()
+        .map(|id| {
+            let object = &runner.state().objects[id];
+            if origin == Zone::Battlefield {
+                object.controller
+            } else {
+                object.owner
+            }
         })
         .collect();
     let zone_move = |from: Zone, to: Zone| {
@@ -4791,7 +4813,7 @@ fn departure_mass_child_member(
         object.replacement_definitions.push(replacement.clone());
         std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
     }
-    runner.cast(spell).commit();
+    runner.cast(spell).target_objects(&selected).commit();
     for _ in 0..8 {
         if matches!(
             runner.state().waiting_for,
@@ -4808,7 +4830,8 @@ fn departure_mass_child_member(
         else {
             panic!("the actual selected primary and the normal peer must each request a public replacement response");
         };
-        assert_eq!(*player, if pause == 0 { P0 } else { P1 });
+        let paused_index = if pause == 0 { 0 } else { 2 };
+        assert_eq!(*player, choosers[paused_index]);
         assert_eq!(candidates.len(), 2);
         let pending = runner
             .state()
@@ -4818,6 +4841,36 @@ fn departure_mass_child_member(
             .as_ref()
             .unwrap();
         let group = &pending.logical_zone_change_group;
+        let paused = pending.paused_current.as_ref().unwrap();
+        assert_eq!(paused.member, original[paused_index].reference);
+        assert!(matches!(
+            paused.expected_event,
+            engine::types::proposed_event::ProposedEvent::ZoneChange {
+                object_id, from, to: Zone::Exile, ..
+            } if object_id == selected[paused_index] && from == origin
+        ));
+        if pause == 0 {
+            assert_eq!(
+                pending
+                    .remaining
+                    .iter()
+                    .map(|entry| entry.object_id)
+                    .collect::<Vec<_>>(),
+                selected[1..],
+                "A's public replacement must precede B and C's primary requests"
+            );
+            for binding in &original {
+                let object = &runner.state().objects[&binding.reference.object_id];
+                assert_eq!(ObjectIncarnationRef::from_object(object), binding.reference);
+                assert_eq!(object.zone, binding.expected_zone);
+            }
+            assert!(group
+                .instruction_deliveries
+                .as_ref()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.completion.is_none()));
+        }
         assert_eq!(
             group
                 .instruction_deliveries
@@ -4833,6 +4886,11 @@ fn departure_mass_child_member(
             .results
             .contains_key(&result));
         if pause == 1 {
+            assert!(
+                pending.remaining.is_empty(),
+                "C is the final selected primary"
+            );
+            assert_eq!(runner.state().objects[&selected[2]].zone, origin);
             let receipt = group
                 .instruction_deliveries
                 .as_ref()
@@ -4873,6 +4931,36 @@ fn departure_mass_child_member(
                     1,
                     "the child really delivered the selected object away"
                 );
+                let primary_a = runner
+                    .state()
+                    .zone_changes_this_turn
+                    .iter()
+                    .position(|record| {
+                        record.object_id == selected[0]
+                            && record.from_zone == Some(origin)
+                            && record.to_zone == Zone::Exile
+                    });
+                if current_primary {
+                    assert!(
+                        primary_a.is_none(),
+                        "the child precedes A's physical primary delivery"
+                    );
+                } else {
+                    let child_b = runner
+                        .state()
+                        .zone_changes_this_turn
+                        .iter()
+                        .position(|record| {
+                            record.object_id == selected[1]
+                                && record.from_zone == Some(origin)
+                                && record.to_zone == Zone::Hand
+                        })
+                        .unwrap();
+                    assert!(
+                        primary_a.unwrap() < child_b,
+                        "A delivers before its child invalidates future B"
+                    );
+                }
                 if child_moves == 2 {
                     assert_eq!(
                         runner
@@ -4979,6 +5067,17 @@ fn departure_mass_child_member(
             .is_some_and(|context| original.contains(&context.identity))),
         "only genuine primary records retain the original selected identities"
     );
+    let completed_originals: Vec<_> = original
+        .iter()
+        .copied()
+        .filter(|binding| !excluded || binding.reference.object_id != invalidated)
+        .collect();
+    departure_assert_original_bindings(
+        records
+            .iter()
+            .map(|record| record.trigger_source_context.as_ref().unwrap().identity),
+        &completed_originals,
+    );
     if excluded {
         let object = &runner.state().objects[&invalidated];
         assert_eq!(
@@ -5061,6 +5160,19 @@ fn departure_remove_instruction_deliveries(value: &mut serde_json::Value) -> usi
             .sum(),
         _ => 0,
     }
+}
+
+fn departure_assert_original_bindings(
+    actual: impl Iterator<Item = engine::types::identifiers::ObjectIdentityBinding>,
+    expected: &[engine::types::identifiers::ObjectIdentityBinding],
+) {
+    use std::collections::HashSet;
+    // CR 400.7: compare the full original incarnation and zone, with no ordering claim.
+    let actual: Vec<_> = actual.collect();
+    assert_eq!(actual.len(), expected.len());
+    let unique: HashSet<_> = actual.iter().copied().collect();
+    assert_eq!(unique.len(), actual.len(), "original bindings are unique");
+    assert_eq!(unique, expected.iter().copied().collect::<HashSet<_>>());
 }
 
 fn departure_mass_return_after_aura_pauses(restore: u8) {
@@ -5200,7 +5312,8 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
         }
         runner.act(GameAction::PassPriority).unwrap();
     }
-    for aura in &auras[..2] {
+    let mut answered_auras = Vec::new();
+    for _ in &auras {
         let WaitingFor::ReturnAsAuraTarget {
             player,
             returned_id,
@@ -5211,7 +5324,13 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
             panic!("each actual Aura pauses the mass return before the remaining members");
         };
         assert_eq!(*player, P0);
-        assert_eq!(*returned_id, *aura);
+        let aura = *returned_id;
+        assert!(auras.contains(&aura));
+        assert!(
+            !answered_auras.contains(&aura),
+            "each Aura pauses exactly once"
+        );
+        answered_auras.push(aura);
         assert!(legal_targets.contains(&TargetRef::Object(hosts[1])));
         let pending = runner
             .state()
@@ -5225,12 +5344,9 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
         let deliveries = group.instruction_deliveries.as_ref().unwrap();
         let group_id = group.logical_group_id;
         assert_eq!(deliveries.len(), 5);
-        assert_eq!(
-            deliveries
-                .iter()
-                .map(|delivery| delivery.binding)
-                .collect::<Vec<_>>(),
-            original
+        departure_assert_original_bindings(
+            deliveries.iter().map(|delivery| delivery.binding),
+            &original,
         );
         assert_eq!(result, ReturnResultId(7));
         assert!(pending.return_result_process.is_some());
@@ -5301,7 +5417,7 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
             let deliveries = group.instruction_deliveries.as_mut().unwrap();
             let current = deliveries
                 .iter()
-                .position(|delivery| delivery.binding.reference.object_id == *aura)
+                .position(|delivery| delivery.binding.reference.object_id == aura)
                 .unwrap();
             match fault {
                 0 => deliveries.push(deliveries[0].clone()),
@@ -5383,7 +5499,7 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
         assert_eq!(legacy_wire, unchanged_wire);
         departure_assert_private_result_views(runner.state());
         *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
-        assert_eq!(
+        departure_assert_original_bindings(
             runner
                 .state()
                 .active_change_zone_frame()
@@ -5396,9 +5512,8 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .map(|delivery| delivery.binding)
-                .collect::<Vec<_>>(),
-            original
+                .map(|delivery| delivery.binding),
+            &original,
         );
         runner
             .act(GameAction::ChooseTarget {
@@ -5406,7 +5521,7 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
             })
             .unwrap();
         assert_eq!(
-            runner.state().objects[aura]
+            runner.state().objects[&aura]
                 .attached_to
                 .and_then(|target| target.as_object()),
             Some(hosts[1])
@@ -5421,12 +5536,15 @@ fn departure_mass_return_after_aura_pauses(restore: u8) {
         unreachable!()
     };
     assert_eq!(records.len(), 5);
-    assert!(
-        records.iter().all(|record| record
-            .trigger_source_context
-            .as_ref()
-            .is_some_and(|context| original.contains(&context.identity))),
-        "every return record certifies its original graveyard incarnation"
+    departure_assert_original_bindings(
+        records.iter().map(|record| {
+            record
+                .trigger_source_context
+                .as_ref()
+                .expect("every return record certifies its original graveyard incarnation")
+                .identity
+        }),
+        &original,
     );
     let mut recorded: Vec<_> = records.iter().map(|record| record.object_id).collect();
     let mut expected = all;

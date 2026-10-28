@@ -11224,6 +11224,21 @@ pub(super) fn compute_sentence_leading_duration(chunks: &[ClauseChunk]) -> Vec<O
         } else {
             out[idx] = governing.clone();
         }
+        // CR 611.2a + CR 608.2c: the chunker can keep an earlier action
+        // with a conjunction-introduced window, then sever its next predicate.
+        // That window is leading for the coordinated run even though it is
+        // interior to this chunk. Recover it before parsing the next chunk;
+        // the earlier action must not acquire the later window. Quoted ability
+        // bodies own their windows independently of the enclosing instruction.
+        let lower = text.to_lowercase();
+        let unquoted = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
+        if let Some((duration, _)) =
+            nom_primitives::scan_last_at_word_boundaries(&unquoted, |input| {
+                preceded(tag("and "), terminated(parse_duration, tag(", "))).parse(input)
+            })
+        {
+            governing = Some(duration);
+        }
         if matches!(chunk.boundary_after, Some(ClauseBoundary::Sentence) | None) {
             governing = None;
         }
@@ -11290,6 +11305,36 @@ mod coordinated_duration_tests {
             compute_sentence_leading_duration(&chunks),
             vec![None, None, Some(Duration::UntilEndOfTurn), None,]
         );
+    }
+
+    #[test]
+    fn an_interior_window_shadows_the_run_but_quoted_windows_do_not_escape() {
+        for (head, expected) in [
+            (
+                "until your next turn, all permanents you control phase out, and until end of turn, your life total can't change",
+                Some(Duration::UntilEndOfTurn),
+            ),
+            (
+                "target creature gains \"{0}: Draw a card, and until your next turn, you gain protection from everything.\"",
+                None,
+            ),
+        ] {
+            let chunks = [
+                (head, Some(ClauseBoundary::Comma)),
+                ("and you gain protection from everything", Some(ClauseBoundary::Sentence)),
+                ("draw a card", None),
+            ]
+            .map(|(text, boundary_after)| ClauseChunk {
+                text: text.into(),
+                boundary_after,
+                leading_duration: None,
+            });
+            assert_eq!(
+                compute_sentence_leading_duration(&chunks),
+                vec![None, expected, None],
+                "{head}",
+            );
+        }
     }
 }
 
