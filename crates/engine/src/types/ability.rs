@@ -2900,6 +2900,30 @@ pub enum ChosenAttribute {
 }
 
 impl ChosenAttribute {
+    /// The chosen creature type, if this is a creature-type choice.
+    pub fn creature_type(&self) -> Option<&str> {
+        match self {
+            Self::CreatureType(chosen) => Some(chosen.as_str()),
+            Self::Color(_)
+            | Self::BasicLandType(_)
+            | Self::CardType(_)
+            | Self::OddOrEven(_)
+            | Self::CardName(_)
+            | Self::Number(_)
+            | Self::RevealedNumber(_)
+            | Self::Player(_)
+            | Self::TwoColors(_)
+            | Self::TributeOutcome(_)
+            | Self::Keyword(_)
+            | Self::Label(_)
+            | Self::Card(_)
+            | Self::Counter(_)
+            | Self::Direction(_)
+            | Self::CopiableSnapshot(_)
+            | Self::NotedManaSpent(_) => None,
+        }
+    }
+
     /// Which category of choice this represents.
     pub fn choice_type(&self) -> ChoiceType {
         match self {

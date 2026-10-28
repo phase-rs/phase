@@ -12303,22 +12303,21 @@ fn latched_relative_matches(
     let doubler_lki = &doubler.source.lki;
     match property {
         LatchedRelativeProperty::Another => watcher_id != doubler_id,
-        LatchedRelativeProperty::ChosenCreatureType => {
-            doubler_lki
-                .chosen_attributes
-                .iter()
-                .any(|attribute| match attribute {
-                    crate::types::ability::ChosenAttribute::CreatureType(chosen) => {
-                        super::filter::subtype_matches_with_changeling(
-                            chosen,
-                            &watcher.lki.subtypes,
-                            &watcher.lki.keywords,
-                            &state.all_creature_types,
-                        )
-                    }
-                    _ => false,
-                })
-        }
+        // CR 613.7: the last chosen creature type, as `GameObject::chosen_creature_type`
+        // reads it on the live path.
+        LatchedRelativeProperty::ChosenCreatureType => doubler_lki
+            .chosen_attributes
+            .iter()
+            .rev()
+            .find_map(crate::types::ability::ChosenAttribute::creature_type)
+            .is_some_and(|chosen| {
+                super::filter::subtype_matches_with_changeling(
+                    chosen,
+                    &watcher.lki.subtypes,
+                    &watcher.lki.keywords,
+                    &state.all_creature_types,
+                )
+            }),
         LatchedRelativeProperty::AttachedToDoubler => {
             watcher.attached_to.and_then(|target| target.as_object()) == Some(doubler_id)
         }

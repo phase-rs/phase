@@ -2946,6 +2946,35 @@ fn a_latched_doubler_keeps_its_chosen_type() {
 /// triggers twice. A doubler read from the live object (Elf) wouldn't double.
 #[test]
 fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
+    assert_eq!(
+        latched_throne_seam_board(&["Human"]),
+        2,
+        "Zidane's trigger and its additional trigger from the latched Human Throne"
+    );
+}
+
+/// CR 613.7: a re-chosen type supersedes the earlier one, as the live
+/// `IsChosenCreatureType` reads it (`GameObject::chosen_creature_type`, the
+/// last choice). A latched Throne that chose Human and then Elf doesn't double
+/// Zidane's (Human) trigger; one that chose Elf and then Human does.
+#[test]
+fn a_latched_doubler_reads_its_last_chosen_type() {
+    assert_eq!(
+        latched_throne_seam_board(&["Human", "Elf"]),
+        1,
+        "Human, then Elf"
+    );
+    assert_eq!(
+        latched_throne_seam_board(&["Elf", "Human"]),
+        2,
+        "Elf, then Human"
+    );
+}
+
+/// Zidane's triggers on the stack after the seam board: the capture latches
+/// P0's Throne with `chosen` (in choice order), then the live Throne reads Elf
+/// under P1 and the recorded change is collected.
+fn latched_throne_seam_board(chosen: &[&str]) -> usize {
     use engine::types::ability::{ChosenAttribute, ContinuousModification, Duration, TargetFilter};
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -2958,8 +2987,10 @@ fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
         .id();
     let mut runner = scenario.build();
     let state = runner.state_mut();
-    state.objects.get_mut(&throne).unwrap().chosen_attributes =
-        vec![ChosenAttribute::CreatureType("Human".to_string())];
+    state.objects.get_mut(&throne).unwrap().chosen_attributes = chosen
+        .iter()
+        .map(|chosen| ChosenAttribute::CreatureType(chosen.to_string()))
+        .collect();
     engine::game::layers::flush_layers(state);
 
     let evidence = state.control_change_evidence_for_test(throne);
@@ -2971,7 +3002,7 @@ fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
             .doublers
             .iter()
             .any(|doubler| doubler.source_id() == throne && doubler.controller() == P0),
-        "REACH: the capture latched P0's Human Throne"
+        "REACH: the capture latched P0's Throne"
     );
     assert!(
         observation
@@ -3008,15 +3039,11 @@ fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
             evidence,
         }],
     );
-    let zidane_triggers = state
+    state
         .stack
         .iter()
         .filter(|entry| entry.source_id == zidane && entry.controller == P0)
-        .count();
-    assert_eq!(
-        zidane_triggers, 2,
-        "Zidane's trigger and its additional trigger from the latched Human Throne"
-    );
+        .count()
 }
 
 /// A labelled synthetic "triggers an additional time" static with scope
