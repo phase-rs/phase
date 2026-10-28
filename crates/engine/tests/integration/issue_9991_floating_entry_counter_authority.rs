@@ -726,12 +726,10 @@ fn dark_intimations_additional_loyalty_is_doubled_as_part_of_entry() {
         let outcome = runner.cast(walker).resolve();
         // CR 306.5b + CR 122.6: both the four printed loyalty counters and
         // Dark Intimations' additional counter are entry counters, so Doubling
-        // Season doubles both. CR 616.1e: the controller may order the doubler and
-        // the rider (9 or 10); the engine applies the rider first, giving
-        // (4 + 1) * 2 = 10, without an ordering prompt (known simplification).
-        // The engine applies Doubling Season to AddCounter events, separately
-        // from the rider's ChangeZone replacement. No CR 616.1 ordering prompt
-        // or ordering candidates are surfaced for this single-doubler fixture.
+        // Season doubles both.
+        // CR 616.1g: the entry replacements establish four printed plus one
+        // additional loyalty counter before Doubling Season doubles their placement
+        // to ten; these effects do not offer a nine-versus-ten ordering choice.
         assert!(
             matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
             "with_dark={with_dark}: expected no ordering prompt in the per-placement model, got {:?}",
