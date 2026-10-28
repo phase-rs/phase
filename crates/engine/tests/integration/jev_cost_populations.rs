@@ -16,7 +16,7 @@ use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{Keyword, MorphCost};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::statics::{CostModifyMode, StaticMode};
@@ -1306,7 +1306,7 @@ fn locket_unnamed_and_actual_face_down_nonmatch() {
         add_locket(&mut scenario);
         let spell = scenario
             .add_creature_to_hand(P0, "Synthetic morph creature", 4, 4)
-            .with_keyword(Keyword::Morph(ManaCost::generic(2)))
+            .with_keyword(Keyword::Morph(MorphCost::Mana(ManaCost::generic(2))))
             .with_mana_cost(ManaCost::generic(4))
             .id();
         scenario.add_creature_to_graveyard(P0, "Synthetic morph creature", 4, 4);

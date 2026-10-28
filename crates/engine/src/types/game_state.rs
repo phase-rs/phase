@@ -56055,6 +56055,7 @@ mod tests {
     #[test]
     fn pending_player_scope_sacrifice_choice_decodes_without_entry_provenance() {
         let pending = PendingPlayerScopeSacrificeChoice {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,

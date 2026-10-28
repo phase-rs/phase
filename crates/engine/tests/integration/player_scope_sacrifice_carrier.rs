@@ -965,6 +965,7 @@ fn answer_edict_over_injected_carrier(
     };
     runner.state_mut().pending_player_scope_sacrifice_choice =
         Some(PendingPlayerScopeSacrificeChoice {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,
@@ -1099,6 +1100,7 @@ fn answer_ordering_over_injected_batch(
     };
     runner.state_mut().pending_player_scope_sacrifice_choice =
         Some(PendingPlayerScopeSacrificeChoice {
+            return_result_occurrence: None,
             ability: Box::new(ResolvedAbility::new(
                 Effect::Sacrifice {
                     target: TargetFilter::Any,

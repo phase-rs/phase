@@ -909,6 +909,7 @@ fn aggregate_and_multi_target_decisions_publish_no_attachment_fan_pick() {
     );
 
     let multi_target = |max_targets: usize| WaitingFor::MultiTargetSelection {
+        return_result_occurrence: None,
         player: P0,
         legal_targets: vec![attached, other],
         min_targets: 0,

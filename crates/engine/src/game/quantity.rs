@@ -10368,6 +10368,7 @@ pub(crate) fn player_count_matching_ids_for_ability(
 }
 
 /// The players `QuantityRef::PlayerCount { filter }` counts.
+#[cfg(test)]
 pub(crate) fn player_count_matching_ids(
     state: &GameState,
     filter: &PlayerFilter,

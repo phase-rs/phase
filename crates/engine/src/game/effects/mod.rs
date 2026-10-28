@@ -49548,6 +49548,7 @@ mod tests {
         state.resolving_stack_entry = Some(resolving);
         let carrier = |spans_replacement_pause: bool, resolving_entry: Option<ObjectId>| {
             PendingPlayerScopeSacrificeChoice {
+                return_result_occurrence: None,
                 ability: Box::new(ResolvedAbility::new(
                     Effect::Sacrifice {
                         target: TargetFilter::Any,

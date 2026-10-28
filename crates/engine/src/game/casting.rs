@@ -38556,6 +38556,7 @@ mod selected_cast_intent_tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::ExileGrantCostProvenance;
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::keywords::MorphCost;
     use crate::types::mana::{ManaRestriction, ManaUnit};
     use crate::types::phase::Phase;
 
@@ -38603,7 +38604,7 @@ mod selected_cast_intent_tests {
         scenario
             .add_creature_to_hand(P0, name, 4, 4)
             .with_mana_cost(ManaCost::generic(7))
-            .with_keyword(Keyword::Morph(ManaCost::generic(3)))
+            .with_keyword(Keyword::Morph(MorphCost::Mana(ManaCost::generic(3))))
             .id()
     }
 
