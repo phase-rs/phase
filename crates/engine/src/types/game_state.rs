@@ -29205,7 +29205,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
     Ok(())
 }
 
-fn validate_damage_source_authority(state: &GameState) -> Result<(), String> {
+pub(crate) fn validate_damage_source_authority(state: &GameState) -> Result<(), String> {
     if state.viewer_projection.is_some() {
         return Ok(());
     }

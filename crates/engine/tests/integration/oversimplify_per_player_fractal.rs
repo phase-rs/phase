@@ -3166,6 +3166,32 @@ fn departure_rewrite_lookup(
 fn departure_assert_private_result_views(state: &GameState) {
     use engine::game::derived_views::ClientGameStateRef;
     use engine::types::game_state::PendingTriggerOrder;
+    fn assert_private_owners(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                for (key, child) in fields {
+                    match key.as_str() {
+                        "return_result_process"
+                        | "expected_return_result_process"
+                        | "return_result_occurrence"
+                        | "active_return_result_occurrence" => {
+                            assert!(child.is_null(), "private result owner {key}: {child}");
+                        }
+                        "next_return_result_occurrence_id" | "next_return_result_process_id" => {
+                            assert_eq!(child, &serde_json::json!(1), "private allocator {key}");
+                        }
+                        _ => assert_private_owners(child),
+                    }
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    assert_private_owners(child);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut stored = state.clone();
     stored.pending_trigger_order = Some(PendingTriggerOrder {
         groups: vec![],
@@ -3181,18 +3207,11 @@ fn departure_assert_private_result_views(state: &GameState) {
             };
             assert!(projected.return_result_frames.is_empty());
             assert!(projected.resolution_stack.is_empty());
-            let plain = serde_json::to_string(&projected).unwrap();
+            let plain = serde_json::to_value(&projected).unwrap();
             let wire =
-                serde_json::to_string(&ClientGameStateRef::wrap(authoritative, viewer)).unwrap();
+                serde_json::to_value(&ClientGameStateRef::wrap(authoritative, viewer)).unwrap();
             for value in [plain, wire] {
-                assert!(
-                    !value.contains("return_result_process"),
-                    "independent process expectation is private"
-                );
-                assert!(
-                    !value.contains("return_result_occurrence"),
-                    "lookup selectors are private in current and stored prompts"
-                );
+                assert_private_owners(&value);
             }
         }
     }
@@ -4104,6 +4123,107 @@ fn departure_record_match_ignores_arrival_and_reincarnated_object() {
     }
     departure_drain_retained_public_program(&mut runner);
     departure_assert_program_complete(&runner, spell, 5, 2);
+}
+
+#[test]
+fn owned_mass_result_survives_simultaneous_damage_replacement_remainder_and_restore() {
+    use engine::game::scenario::{P0, P1};
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, DamageModification, DamageTargetFilter,
+        DamageTargetPlayerScope, Effect, PlayerFilter, QuantityExpr, ReplacementDefinition,
+        ReturnResultId,
+    };
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{InstructionResult, WaitingFor};
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionStateWire;
+    // Supplemental admitted typed composition, not a claim about a printed card.
+    // CR 608.2c + CR 120.4b: the complete exile result remains the same
+    // instruction's authority while simultaneous damage resumes its raw tail.
+    for restore in 0..3 {
+        for empty in [false, true] {
+            let (mut runner, spell, _) = departure_public_program_runner_with_setup(
+                false,
+                empty,
+                2,
+                |_| {
+                    let mut damage = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::DamageEachPlayer {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player_filter: PlayerFilter::All,
+                        },
+                    );
+                    damage.sub_ability = Some(Box::new(departure_gain_definition(7, P0)));
+                    (damage, vec![])
+                },
+                |state, _| {
+                    for (description, modification) in [
+                        ("double current hit", DamageModification::Double),
+                        (
+                            "add one to current hit",
+                            DamageModification::Plus {
+                                value: QuantityExpr::Fixed { value: 1 },
+                            },
+                        ),
+                    ] {
+                        state.pending_damage_replacements.push(
+                            ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                                .damage_target_filter(DamageTargetFilter::Player {
+                                    player: DamageTargetPlayerScope::Specific(P0),
+                                })
+                                .damage_modification(modification)
+                                .damage_replacement_oneshot_shield()
+                                .description(description.into()),
+                        );
+                    }
+                },
+            );
+            let WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("the paid canonical cast must pause on the first player's two real shields");
+            };
+            assert_eq!(*player, P0);
+            let index = candidates
+                .iter()
+                .position(|candidate| candidate.description == "double current hit")
+                .expect("the actual doubling choice is offered");
+            let continuation = runner.state().active_ability_continuation().unwrap();
+            assert!(continuation.chain.context.damage_opportunity.is_some());
+            let occurrence = continuation.return_result_occurrence.unwrap();
+            let frame = &runner.state().return_result_frames[&occurrence];
+            assert_eq!(frame.process, continuation.chain.return_result_process);
+            let InstructionResult::ZoneChanges(records) = &frame.results[&ReturnResultId(7)] else {
+                unreachable!()
+            };
+            assert_eq!(records.len(), if empty { 0 } else { 3 });
+            assert_eq!((runner.life(P0), runner.life(P1)), (20, 20));
+            *runner.state_mut() = match restore {
+                0 => runner.state().clone(),
+                1 => serde_json::from_value(serde_json::to_value(runner.state()).unwrap())
+                    .expect("the raw damage remainder retains its selected occurrence and process"),
+                2 => serde_json::from_value::<ResolutionStateWire>(
+                    serde_json::to_value(ResolutionStateWire::from_game_state(
+                        runner.state().clone(),
+                    ))
+                    .unwrap(),
+                )
+                .expect("the wire damage remainder retains the same owned invocation")
+                .into_game_state(),
+                _ => unreachable!(),
+            };
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            departure_assert_program_complete(&runner, spell, if empty { -3 } else { 2 }, -1);
+            assert!(runner.state().pending_replacement.is_none());
+            assert!(runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .all(|shield| shield.is_consumed));
+        }
+    }
 }
 
 #[test]

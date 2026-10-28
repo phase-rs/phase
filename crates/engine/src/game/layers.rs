@@ -263,11 +263,14 @@ fn is_numeric_pt_setter(modification: &ContinuousModification) -> bool {
     )
 }
 
-fn is_own_numeric_cda_definition(definition: &StaticDefinition) -> bool {
+fn is_own_cda_definition(definition: &StaticDefinition) -> bool {
     definition.mode == StaticMode::Continuous
         && definition.characteristic_defining
         && matches!(definition.affected, Some(TargetFilter::SelfRef))
-        && definition.modifications.iter().any(is_numeric_pt_setter)
+}
+
+fn is_own_numeric_cda_definition(definition: &StaticDefinition) -> bool {
+    is_own_cda_definition(definition) && definition.modifications.iter().any(is_numeric_pt_setter)
 }
 
 pub(crate) fn object_has_own_numeric_cda(source: &crate::game::game_object::GameObject) -> bool {
@@ -277,13 +280,12 @@ pub(crate) fn object_has_own_numeric_cda(source: &crate::game::game_object::Game
     })
 }
 
-/// Keep numeric CDA provenance separate from ordinary self-affecting statics
-/// and from resolution-created effects that happen to use the same setter.
-fn is_own_numeric_cda_effect(state: &GameState, effect: &ActiveContinuousEffect) -> bool {
+/// CR 604.3: an own CDA retains its printed provenance in every zone.
+/// Resolution-created effects that use the same modification are not CDAs.
+fn is_own_cda_effect(state: &GameState, effect: &ActiveContinuousEffect) -> bool {
     effect.transient_id.is_none()
         && effect.characteristic_defining
         && matches!(effect.affected_filter, TargetFilter::SelfRef)
-        && is_numeric_pt_setter(&effect.modification)
         && effect.def_index.is_some_and(|index| {
             state.objects.get(&effect.source_id).is_some_and(|source| {
                 source
@@ -291,7 +293,7 @@ fn is_own_numeric_cda_effect(state: &GameState, effect: &ActiveContinuousEffect)
                     .as_slice()
                     .get(index)
                     .is_some_and(|definition| {
-                        is_own_numeric_cda_definition(definition)
+                        is_own_cda_definition(definition)
                             && definition.modifications.get(effect.mod_index)
                                 == Some(&effect.modification)
                     })
@@ -299,7 +301,12 @@ fn is_own_numeric_cda_effect(state: &GameState, effect: &ActiveContinuousEffect)
         })
 }
 
-/// CR 604.3 + CR 613.4a: an own P/T CDA reaches its source in every represented
+/// CR 613.4a: keep Layer 7a numeric CDA ordering separate from other CDA layers.
+fn is_own_numeric_cda_effect(state: &GameState, effect: &ActiveContinuousEffect) -> bool {
+    is_numeric_pt_setter(&effect.modification) && is_own_cda_effect(state, effect)
+}
+
+/// CR 604.3: an own CDA reaches its source in every represented
 /// zone. Membership still comes from the ordinary zone authority, including
 /// phased-in battlefield objects and resolving stack objects.
 fn continuous_effect_candidate_ids(
@@ -307,7 +314,7 @@ fn continuous_effect_candidate_ids(
     effect: &ActiveContinuousEffect,
     zone_cache: &mut LayerZoneObjectCache,
 ) -> Vec<ObjectId> {
-    if is_own_numeric_cda_effect(state, effect) {
+    if is_own_cda_effect(state, effect) {
         return state
             .objects
             .get(&effect.source_id)

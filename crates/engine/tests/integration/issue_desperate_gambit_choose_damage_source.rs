@@ -4039,12 +4039,13 @@ fn inline_source_unsupported_actors_refuse_before_prompt_or_shield_even_when_bou
                         candidate_filter: TargetFilter::SpecificObject { id: source },
                     }));
                 }
-                let error = advance_inline_actor(&mut runner)
-                    .expect_err("unsupported actor must not become Controller");
-                assert!(
-                    error.contains("unsupported inline damage-source chooser"),
-                    "{error}"
-                );
+                // PassPriority completes the stack step even when its effect
+                // refuses an unsupported instruction. Refusal is observable as
+                // no prompt, continuation, or shield, not as an action error.
+                advance_inline_actor(&mut runner)
+                    .expect("the legal public priority action must complete");
+                assert_source_program_complete(&runner);
+                assert!(runner.state().return_result_frames.is_empty());
                 assert!(!matches!(
                     runner.state().waiting_for,
                     WaitingFor::DamageSourceChoice { .. }

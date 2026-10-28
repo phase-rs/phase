@@ -7856,6 +7856,11 @@ fn hand_reveal_player_references_keep_their_declared_identity_in_normal_export()
             !declarations.is_empty() && !references.is_empty(),
             "positive player-binding reach guard: {name}"
         );
+        assert_eq!(
+            declarations.len(),
+            1,
+            "one printed player target remains one declaration across its hand choice: {name}"
+        );
         assert!(
             references.iter().all(|group| declarations.contains(group)),
             "orphan player binding on {name}: {declarations:?}/{references:?}"

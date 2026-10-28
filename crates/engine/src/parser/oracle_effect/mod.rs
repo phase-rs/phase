@@ -37029,8 +37029,22 @@ fn chain_exile_until_hits_source(clauses: &[ClauseIr]) -> Option<ZoneChoiceCandi
 /// Feeds `ParseContext::chain_prior_hand_reveal_target` so a later same-chain
 /// "cast a spell from among those cards" anaphor (Silent-Blade Oni) can bind
 /// to that player's hand instead of the exile-only `ExiledBySource` default.
-fn clause_ir_hand_reveal_target(clause: &ClauseIr) -> Option<TargetFilter> {
+fn clause_ir_hand_reveal_target(
+    clause: &ClauseIr,
+    index: usize,
+    declarations: &mut PlayerDeclarations,
+    groups: &mut u32,
+) -> Option<TargetFilter> {
     match &clause.parsed.effect {
+        // CR 608.2c + CR 115.1: choosing from a revealed hand reads the
+        // player already announced by the reveal; it does not announce a
+        // second player target with the same filter.
+        Effect::RevealHand { .. } if has_explicit_player_target(&clause.parsed.effect) => {
+            Some(match clause.declared_player_group {
+                Some(group) => TargetFilter::DeclaredPlayer { group },
+                None => reference_to_declaration(declarations, groups, index),
+            })
+        }
         Effect::RevealHand { target, .. } => Some(target.clone()),
         _ => None,
     }
@@ -37174,6 +37188,9 @@ fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilt
 fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<ControllerRef> {
     match target {
         TargetFilter::Controller => Some(ControllerRef::You),
+        TargetFilter::DeclaredPlayer { group } => {
+            Some(ControllerRef::DeclaredPlayer { group: *group })
+        }
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
         TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
         TargetFilter::DefendingPlayer => Some(ControllerRef::DefendingPlayer),
@@ -46985,6 +47002,20 @@ fn parse_effect_chain_ir_body(
             TargetFilter::DeclaredPlayer { group } => Some(ControllerRef::DeclaredPlayer { group }),
             _ => None,
         });
+        let chain_prior_hand_reveal_target =
+            builder
+                .clauses()
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, clause)| {
+                    clause_ir_hand_reveal_target(
+                        clause,
+                        index,
+                        &mut declarations,
+                        &mut chain_declared_groups,
+                    )
+                });
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -47161,11 +47192,7 @@ fn parse_effect_chain_ir_body(
             // `RevealHand` target, so a later "cast a spell from among those
             // cards" anaphor (Silent-Blade Oni) binds to that player's hand
             // instead of the exile-only `ExiledBySource` default.
-            chain_prior_hand_reveal_target: builder
-                .clauses()
-                .iter()
-                .rev()
-                .find_map(clause_ir_hand_reveal_target),
+            chain_prior_hand_reveal_target,
             // CR 608.2c: the most-recent earlier same-chain mass ("each …")
             // population, so a later "They <grant>" anaphor binds to it rather
             // than reaching past it to the trigger's own subject (Ardbert,

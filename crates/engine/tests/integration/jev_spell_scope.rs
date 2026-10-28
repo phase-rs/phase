@@ -1688,7 +1688,8 @@ fn diplomacy_paid_spell_keeps_the_revealed_opponent_as_the_life_loss_recipient()
         runner.cast(spell).target_player(P1).resolve();
         let cards = match &runner.state().waiting_for {
             WaitingFor::ChooseFromZoneChoice { player, cards, .. }
-            | WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            | WaitingFor::EffectZoneChoice { player, cards, .. }
+            | WaitingFor::RevealChoice { player, cards, .. } => {
                 assert_eq!(*player, P0);
                 cards
             }
@@ -1761,25 +1762,16 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
         .with_subtypes(vec!["Forest"])
         .id();
     let mut runner = scenario.build();
-    runner.advance_to_phase(Phase::BeginCombat);
-    for _ in 0..16 {
-        if matches!(
-            runner.state().waiting_for,
-            WaitingFor::TriggerTargetSelection { .. }
-        ) {
-            break;
-        }
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
-        runner.act(GameAction::PassPriority).unwrap();
-    }
+    runner.advance_to_combat();
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::TriggerTargetSelection { .. }
     ));
-    runner.choose_first_legal_target().unwrap();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Object(swamp)),
+        })
+        .unwrap();
     runner.advance_until_stack_empty();
     let object = &runner.state().objects[&swamp];
     for kind in [CoreType::Land, CoreType::Creature, CoreType::Artifact] {
@@ -1940,7 +1932,7 @@ fn per_player_graveyard_choices_reanimate_the_complete_selected_set() {
     use super::jev_cost_populations::export_route_repair_db;
     use engine::game::scenario_db::GameScenarioDbExt;
     let db = export_route_repair_db();
-    for (name, generic, black) in [("Breach the Multiverse", 5, 2), ("Ghouls' Night Out", 4, 1)] {
+    for (name, generic, black) in [("Breach the Multiverse", 5, 2), ("Ghouls' Night Out", 3, 2)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         scenario.with_mana_pool(P0, spell_pool(generic, &vec![ManaType::Black; black]));

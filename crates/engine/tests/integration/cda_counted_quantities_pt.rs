@@ -2981,16 +2981,17 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
             }
             cda_full_source(runner.state(), lord);
             let before = runner.state().objects[&lord].incarnation;
-            assert!(
-                runner
-                    .act(GameAction::ActivateAbility {
-                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
-                        source_id: lord,
-                        ability_index: index
-                    })
-                    .is_err(),
-                "{hostile}"
-            );
+            // The public action boundary can report an unaffordable activation
+            // as a typed reversal. An ordinary applied result is never refusal.
+            let refused = match runner.act(GameAction::ActivateAbility {
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                source_id: lord,
+                ability_index: index,
+            }) {
+                Err(_) => true,
+                Ok(result) => !result.disposition.is_applied(),
+            };
+            assert!(refused, "{hostile}");
             assert_eq!(runner.state().objects[&lord].zone, Zone::Graveyard);
             assert_eq!(runner.state().objects[&lord].incarnation, before);
             assert_eq!(runner.state().players[0].mana_pool.total(), 5);

@@ -1382,6 +1382,11 @@ fn finish_typed_attack_creation(
             other => panic!("unexpected creation decision {other:?}"),
         }
     }
+    assert!(
+        runner.state().resolution_stack.is_empty(),
+        "every token-entry owner must settle before priority: {:?}",
+        runner.state().resolution_stack
+    );
     settled(&runner);
     if runner
         .state()

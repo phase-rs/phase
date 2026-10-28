@@ -1908,7 +1908,7 @@ fn static_preservation_figure_paid_conditional_forms_keep_complete_pt_and_keywor
         .core_types
         .contains(&CoreType::Artifact));
     assert_eq!(pt(&mut runner, decoy), (2, 3));
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
     assert_eq!(pt(&mut runner, figure), (8, 8));
     settled(&runner);
 }
@@ -2114,7 +2114,7 @@ fn static_preservation_basic_land_addition_and_setting_have_different_printed_ab
             .add_spell_to_hand(P0, name, false)
             .as_enchantment()
             .with_subtypes(vec!["Aura"])
-            .from_oracle_text(atomic.text.as_deref().unwrap())
+            .from_oracle_text_with_keywords(&["Enchant"], atomic.text.as_deref().unwrap())
             .with_mana_cost(cost(atomic.mana_cost.as_deref().unwrap()))
             .id();
         let bounce = scenario
@@ -2141,6 +2141,11 @@ fn static_preservation_basic_land_addition_and_setting_have_different_printed_ab
             .target_object(target)
             .resolve()
             .assert_hand_drawn(P0, 1);
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(engine::game::game_object::AttachTarget::Object(target)),
+            "the printed enchant keyword supplies the actual Aura host"
+        );
         engine::game::layers::evaluate_layers(runner.state_mut());
         let object = &runner.state().objects[&target];
         assert!(object.card_types.core_types.contains(&CoreType::Land));
@@ -2199,7 +2204,7 @@ fn static_preservation_aspect_paid_aura_recomputes_distinct_rounded_axes() {
         .add_spell_to_hand(P0, "Aspect of Wolf", false)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
-        .from_oracle_text(atomic.text.as_deref().unwrap())
+        .from_oracle_text_with_keywords(&["Enchant"], atomic.text.as_deref().unwrap())
         .with_mana_cost(cost("{1}{G}"))
         .id();
     let bounce = scenario
@@ -2214,6 +2219,11 @@ fn static_preservation_aspect_paid_aura_recomputes_distinct_rounded_axes() {
     let mut runner = scenario.build();
     fund(&mut runner, 1, &[ManaType::Green]);
     runner.cast(aura).target_object(target).resolve();
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(target)),
+        "the printed enchant keyword supplies the actual Aura host"
+    );
     assert_eq!(pt(&mut runner, target), (4, 5));
     assert_eq!(pt(&mut runner, decoy), (4, 6));
     settled(&runner);
@@ -2276,30 +2286,19 @@ fn static_preservation_icingdeath_real_death_token_keeps_quoted_pump_and_paid_eq
     );
     let equipment = tokens[0];
     settled(&runner);
+    let equip_index =
+        engine::game::casting::activated_ability_definitions(runner.state(), equipment)
+            .into_iter()
+            .find(|(_, ability)| {
+                ability.ability_tag == Some(engine::types::ability::AbilityTag::Equip)
+            })
+            .expect("the created token retains its synthesized paid equip ability")
+            .0;
     fund(&mut runner, 2, &[]);
     runner
-        .act(GameAction::Equip {
-            equipment_id: equipment,
-            target_id: target,
-        })
-        .unwrap();
-    let WaitingFor::EquipTarget {
-        player,
-        equipment_id,
-        valid_targets,
-    } = &runner.state().waiting_for
-    else {
-        panic!("the actual equip activation must announce its chosen creature");
-    };
-    assert_eq!((*player, *equipment_id), (P0, equipment));
-    assert!(valid_targets.contains(&target) && valid_targets.contains(&decoy));
-    runner
-        .act(GameAction::Equip {
-            equipment_id: equipment,
-            target_id: target,
-        })
-        .unwrap();
-    runner.advance_until_stack_empty();
+        .activate(equipment, equip_index)
+        .target_object(target)
+        .resolve();
     assert_eq!(
         runner.state().objects[&equipment].attached_to,
         Some(engine::game::game_object::AttachTarget::Object(target))
@@ -2595,6 +2594,10 @@ fn static_preservation_ghostfire_paid_damage_retains_colorless_cda() {
         .add_spell_to_hand_from_oracle(P0, "Ghostfire", true, atomic.text.as_deref().unwrap())
         .with_mana_cost(cost("{2}{R}"))
         .id();
+    let red_decoy = scenario
+        .add_spell_to_hand_from_oracle(P0, "Red card without a CDA", true, "")
+        .with_mana_cost(cost("{R}"))
+        .id();
     let mut runner = scenario.build();
     engine::game::layers::evaluate_layers(runner.state_mut());
     assert!(
@@ -2607,11 +2610,19 @@ fn static_preservation_ghostfire_paid_damage_retains_colorless_cda() {
             && definition.active_zones.contains(&Zone::Graveyard))
     );
     assert!(runner.state().objects[&spell].color.is_empty());
+    assert_eq!(
+        runner.state().objects[&red_decoy].color,
+        vec![ManaColor::Red]
+    );
     fund(&mut runner, 2, &[ManaType::Red]);
     runner.cast(spell).target_player(P1).resolve();
     assert_eq!(runner.state().players[1].life, 17);
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
     assert!(runner.state().objects[&spell].color.is_empty());
+    assert_eq!(
+        runner.state().objects[&red_decoy].color,
+        vec![ManaColor::Red]
+    );
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
     settled(&runner);
 }
@@ -3190,11 +3201,11 @@ fn modifier_owner_goddric_two_real_paid_entries_keep_dragon_and_its_own_granted_
     assert_eq!(pt(&mut runner, goddric), (5, 4));
     assert_eq!(pt(&mut runner, other), (2, 2));
     settled(&runner);
-    runner.advance_to_upkeep();
+    finish_to_next_upkeep(&mut runner);
     assert_eq!(pt(&mut runner, goddric), (3, 3));
     assert_eq!(
         runner.state().objects[&goddric].card_types.subtypes,
-        vec!["Human".to_owned(), "Peasant".to_owned()]
+        vec!["Human".to_owned(), "Noble".to_owned()]
     );
     assert!(!runner.state().objects[&goddric]
         .keywords

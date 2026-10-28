@@ -5246,7 +5246,7 @@ fn try_split_pump_compound(
             AbilityKind::Spell,
         )))
     };
-    Some(ParsedEffectClause {
+    let mut clause = ParsedEffectClause {
         optional_targeting: false,
         unlowered_guard: None,
         effect,
@@ -5258,7 +5258,17 @@ fn try_split_pump_compound(
         optional: false,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
-    })
+    };
+    // CR 611.2a: the clause shell may have peeled the second member's
+    // trailing window before this split. Its standalone parse cannot see that
+    // window; use the shared chain authority to restore it to unset children,
+    // while retaining the pump's independently stated window.
+    if let Some(window) = ctx.stated_clause_duration.clone() {
+        let pump_duration = clause.duration.clone();
+        clause = with_clause_chain_duration(clause, window);
+        clause.duration = pump_duration;
+    }
+    Some(clause)
 }
 
 /// CR 608.2d: build the modal keyword-grant half of a pump
@@ -13904,6 +13914,47 @@ mod entry_onset_tests {
 #[cfg(test)]
 mod retained_shipping_member_tests {
     use super::*;
+
+    #[test]
+    fn split_pump_keeps_its_window_and_the_peeled_restriction_window() {
+        let application = SubjectApplication {
+            affected: TargetFilter::ParentTarget,
+            target: None,
+            multi_target: None,
+            inherits_parent: true,
+            is_optional: false,
+            player_anaphor: None,
+        };
+        for pump_window in ["until end of turn", "until end of combat"] {
+            let mut context = ParseContext {
+                stated_clause_duration: Some(Duration::UntilEndOfTurn),
+                ..Default::default()
+            };
+            let text = format!("get +1/+0 {pump_window} and can't be blocked");
+            let clause = try_split_pump_compound(&text, &application, &context, false).unwrap();
+            let expected_pump = if pump_window == "until end of combat" {
+                Duration::UntilEndOfCombat
+            } else {
+                Duration::UntilEndOfTurn
+            };
+            assert_eq!(clause.duration, Some(expected_pump));
+            let child = clause.sub_ability.as_ref().unwrap();
+            assert_eq!(child.duration, Some(Duration::UntilEndOfTurn));
+            assert!(matches!(child.effect.as_ref(), Effect::GenericEffect {
+                duration: Some(Duration::UntilEndOfTurn), static_abilities, ..
+            } if static_abilities.iter().any(|definition| definition.mode == StaticMode::CantBeBlocked)));
+
+            context.stated_clause_duration = None;
+            let unbounded = try_split_pump_compound(&text, &application, &context, false).unwrap();
+            assert!(matches!(
+                unbounded.sub_ability.as_ref().unwrap().effect.as_ref(),
+                Effect::GenericEffect {
+                    duration: Some(Duration::Permanent),
+                    ..
+                }
+            ));
+        }
+    }
 
     // SHAPE: runtime counterparts are the existing jev_modifier_publication tests.
     #[test]

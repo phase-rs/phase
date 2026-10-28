@@ -3267,7 +3267,18 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             counters::drain_pending_counter_additions(state, events);
         }
         ResolutionFrame::CopyToken(_) => {
+            let depth = state.resolution_stack.len();
             token_copy::drain_pending_copy_token_resolution(state, events);
+            // CR 608.2c + CR 117.3b: finishing an entry choice can retire
+            // the last creation owner and expose its replacement dispatcher.
+            // Settle that exact parent before returning priority. A creation
+            // still awaiting its own choice does not cross this boundary.
+            if state.resolution_stack.len() < depth
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                drain_pending_continuation(state, events);
+                resume_resolution_frames(state, events);
+            }
         }
         ResolutionFrame::DebugCardEntries(_) => {
             crate::game::engine_debug::drain_pending_debug_card_entries(state, events);

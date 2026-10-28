@@ -1356,12 +1356,15 @@ pub(crate) fn park_resumed_opportunity_survivor(
             .is_some_and(|owned| replacement::same_damage_opportunity_work(owned, &opportunity))
     });
     ctx.opportunity = Rc::new(RefCell::new(opportunity));
-    let node =
+    let mut node =
         build_post_replacement_damage_node(&ctx, event).expect("the resumed survivor is damage");
     if let Some(frame) = state
         .active_ability_continuation_frame_mut()
         .filter(|_| owned_remainder)
     {
+        // This survivor is part of the same admitted invocation as its raw
+        // remainder; an independent replacement child never takes this arm.
+        node.bind_return_result_process(frame.pending.chain.return_result_process);
         let mut slot = &mut frame.pending.chain;
         // The final-event owner prepends its frozen gain after this splice.
         while slot.context.damage_opportunity.is_some()
@@ -1419,6 +1422,7 @@ fn stash_remaining_post_replacement_damage(
     if let Some(sub) = ability.sub_ability.as_ref() {
         append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
+    head.bind_return_result_process(ability.return_result_process);
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
 
@@ -1518,7 +1522,10 @@ fn stash_each_source_combined_continuation(
         }
     }
 
-    if let Some(head) = head_opt {
+    if let Some(mut head) = head_opt {
+        // CR 608.2c: synthesized damage nodes continue this invocation; their
+        // original reader tail must retain its independently selected process.
+        head.bind_return_result_process(ability.return_result_process);
         append_to_pending_continuation(state, Some(Box::new(head)));
     }
 }
@@ -1617,7 +1624,9 @@ pub(super) fn resolve_owned(
                     node.context.damage_opportunity = Some(opportunity.borrow().clone());
                     next = node.sub_ability.as_deref_mut();
                 }
-                super::resolve_ability_chain(state, &tail, events, 0)?;
+                // CR 608.2c: this tail is the same resolving instruction's
+                // remainder, including any already-bound instruction results.
+                super::resolve_resume_owned_ability_chain(state, &tail, events, 0)?;
             }
         }
         let completed = opportunity.borrow().clone();

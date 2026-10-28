@@ -9961,7 +9961,7 @@ fn extract_etb_counters_from_effect(
         Effect::ChangeZone {
             enter_with_counters,
             ..
-        } => enter_with_counters
+        } if EventModifiers::is_zone_redirect(effect) => enter_with_counters
             .iter()
             .map(|(counter_type, count)| {
                 // CR 109.5 + CR 614.12: "you" is the replacing ability's controller,
@@ -10009,6 +10009,19 @@ pub(super) struct EnterReplacementModifiers {
 }
 
 impl EventModifiers {
+    /// CR 614.1a + CR 614.6: only the event's own subject is redirected.
+    /// `Any` retains the legacy unqualified-event spelling; `ParentTarget`
+    /// names the event-bound object, including a found-card disposition.
+    fn is_zone_redirect(effect: &Effect) -> bool {
+        matches!(
+            effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef | TargetFilter::ParentTarget | TargetFilter::Any,
+                ..
+            }
+        )
+    }
+
     /// True if this single effect (ignoring sub_ability chain) is purely a
     /// ProposedEvent modifier with no additional resolution work.
     pub(super) fn is_event_modifier_effect(effect: &Effect) -> bool {
@@ -10019,8 +10032,8 @@ impl EventModifiers {
                 target: TargetFilter::SelfRef,
                 scope: EffectScope::Single,
                 ..
-            }
-            | Effect::ChangeZone { .. } => true,
+            } => true,
+            Effect::ChangeZone { .. } => Self::is_zone_redirect(effect),
             // CR 400.7d + CR 608.2k: a self counter placement whose count reads the
             // cost paid to cast the spell ("where X is the discarded card's mana
             // value") needs the `ResolvedAbility` that carries that referent. The
@@ -10104,7 +10117,7 @@ fn event_modifiers_for_ability(
                 _ => EtbTapState::Unspecified,
             };
         }
-        if redirect.is_none() {
+        if redirect.is_none() && EventModifiers::is_zone_redirect(&def.effect) {
             if let Effect::ChangeZone { destination, .. } = &*def.effect {
                 redirect = Some(*destination);
             }
@@ -12260,12 +12273,15 @@ fn candidate_materiality(
             // CR 614.6: a destination-redirecting ChangeZone (graveyard→exile,
             // etc.) is the material case. A ChangeZone whose destination equals
             // the proposed `to` zone is not a redirect.
-            Effect::ChangeZone { destination, .. } if proposed_to != Some(*destination) => {
+            Effect::ChangeZone { destination, .. }
+                if EventModifiers::is_zone_redirect(&def.effect)
+                    && proposed_to != Some(*destination) =>
+            {
                 return CandidateMateriality::Unconditional;
             }
             // CR 616.1b: a non-redirecting ChangeZone (destination matches the
             // proposed `to` zone) is not ordering-material on its own.
-            Effect::ChangeZone { .. } => {}
+            Effect::ChangeZone { .. } if EventModifiers::is_zone_redirect(&def.effect) => {}
             _ if effect_overrides_controller(&def.effect) => {
                 return CandidateMateriality::Unconditional;
             }

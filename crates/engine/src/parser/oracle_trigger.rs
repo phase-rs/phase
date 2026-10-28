@@ -60,6 +60,37 @@ mod revealed_result_following_condition_tests {
     }
 }
 
+#[cfg(test)]
+mod chosen_spell_quality_admission_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_quality_lists_keep_the_complete_payload_and_an_honest_head() {
+        let text = "Whenever you cast a spell with power, toughness, or loyalty equal to the chosen number, target artifact or creature becomes an artifact creature with base power and toughness X/X until end of turn, where X is the chosen number.";
+        let lower = text.to_lowercase();
+        let (condition, effect) = split_trigger(TextPair::new(text, &lower));
+        assert_eq!(condition, "Whenever you cast a spell with power, toughness, or loyalty equal to the chosen number");
+        assert_eq!(effect, "target artifact or creature becomes an artifact creature with base power and toughness X/X until end of turn, where X is the chosen number.");
+        let (mode, _) = parse_trigger_condition(&condition, &mut ParseContext::default());
+        assert!(matches!(mode, TriggerMode::Unknown(_)));
+        for actor in ["an opponent", "a player", "enchanted player"] {
+            let condition = format!("Whenever {actor} casts a spell with power, toughness, or loyalty equal to the chosen number");
+            let (mode, _) = parse_trigger_condition(&condition, &mut ParseContext::default());
+            assert!(matches!(mode, TriggerMode::Unknown(_)), "{actor}");
+        }
+
+        let (mode, definition) = parse_trigger_condition(
+            "Whenever you cast a spell with mana value, power, or toughness equal to the chosen number",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(mode, TriggerMode::SpellCast);
+        assert!(
+            matches!(definition.valid_card, Some(TargetFilter::Typed(ref filter))
+            if matches!(filter.properties.as_slice(), [FilterProp::AnyOf { props }] if props.len() == 3))
+        );
+    }
+}
+
 use super::oracle_effect::conditions::{
     parse_phase_name_set, source_saddled_filter, split_leading_conditional,
 };
@@ -12704,6 +12735,27 @@ fn spell_quality_equal_to_chosen_number_tail<'a>(
     Ok((rest, ()))
 }
 
+fn spell_chosen_number_quality_clause(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        all_consuming((
+            tag("with "),
+            separated_list1(
+                alt((tag(", or "), tag(", "), tag(" or "))),
+                alt((
+                    tag("mana value"),
+                    tag("power"),
+                    tag("toughness"),
+                    tag("loyalty"),
+                )),
+            ),
+            tag(" "),
+            spell_quality_equal_to_chosen_number_tail,
+        )),
+    )
+    .parse(input)
+}
+
 /// CR 202.3 + CR 208.1: Commas inside a spell-quality disjunction
 /// ("mana value, power, or toughness equal to …") are not the condition/effect
 /// boundary. Talion, the Kindly Lord is the motivating card.
@@ -20883,6 +20935,24 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             return Some((TriggerMode::SpellCast, def));
         }
 
+        // CR 608.2c: a spell-quality comparison is one complete qualifier,
+        // including its internal commas. Never let the permissive type fallback
+        // erase an unrepresented comparison (such as printed loyalty).
+        if nom_primitives::scan_at_word_boundaries(after.trim(), spell_chosen_number_quality_clause)
+            .is_some()
+        {
+            let Some(filter) = parse_spell_chosen_number_quality(after.trim()) else {
+                return Some(unknown_trigger_definition(lower));
+            };
+            let filter = TargetFilter::Typed(filter);
+            def.valid_card = Some(if is_another {
+                add_another_prop(filter)
+            } else {
+                filter
+            });
+            return Some((TriggerMode::SpellCast, def));
+        }
+
         // Truncate at ", " so any effect clause doesn't leak into the type
         // parser — but skip commas that continue an Oxford-comma type list
         // (CR 205.3a: "an Aura, Equipment, or Vehicle spell" is set-union
@@ -21086,6 +21156,15 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
                 };
                 def.valid_card = Some(filter);
                 return Some((TriggerMode::SpellCast, def));
+            }
+            // The same complete-comparison admission applies to every caster.
+            if nom_primitives::scan_at_word_boundaries(
+                spell_clause,
+                spell_chosen_number_quality_clause,
+            )
+            .is_some()
+            {
+                return Some(unknown_trigger_definition(lower));
             }
             // Handle "multicolored" as a spell property (not a type phrase)
             if scan_contains(spell_clause, "multicolored") {
