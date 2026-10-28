@@ -9,8 +9,9 @@ use crate::types::ability::{
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
     ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition,
+    ReplacementEventContext, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -925,20 +926,17 @@ fn stash_post_replacement_continuation(
     source: ObjectId,
     controller: Option<PlayerId>,
     applied: HashSet<AppliedReplacementKey>,
-    event_source: Option<ObjectId>,
-    event_source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
-    event_target: Option<TargetRef>,
-    event_amount: Option<i32>,
+    event_context: ReplacementEventContext,
 ) {
     state.install_post_replacement_drain(
         PostReplacementDrain {
             status: DrainStatus::Ready(continuation),
             source: Some(source),
             applied,
-            event_source,
-            event_source_identity,
-            event_target,
-            event_amount,
+            event_source: event_context.source_id,
+            event_source_identity: event_context.source_identity,
+            event_target: event_context.event_target,
+            event_amount: event_context.amount,
             // CR 109.5: "you" in the continuation is the REPLACING ability's
             // controller. Carried beside `source` rather than derived from it,
             // because `source` is the affected object on every zone-change
@@ -10449,16 +10447,18 @@ fn apply_single_replacement(
                         new_event.affected_object_id().unwrap_or(rid.source),
                         ability_controller,
                         replacement_applied.clone(),
-                        proposed_damage_source,
-                        proposed_damage_source_identity,
-                        // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
-                        // player (the drawing player) so an "any other player may"
-                        // execute (Zur's Weirding) can exclude them from the APNAP
-                        // fan-out. `None` for every other event kind (see the
-                        // `proposed_event_target` match above), so no existing
-                        // continuation's event-target slot changes.
-                        proposed_event_target.clone(),
-                        applied_amount,
+                        ReplacementEventContext {
+                            source_id: proposed_damage_source,
+                            source_identity: proposed_damage_source_identity,
+                            // CR 614.6 + CR 608.2d: carry the replaced Draw's affected
+                            // player (the drawing player) so an "any other player may"
+                            // execute (Zur's Weirding) can exclude them from the APNAP
+                            // fan-out. `None` for every other event kind (see the
+                            // `proposed_event_target` match above), so no existing
+                            // continuation's event-target slot changes.
+                            event_target: proposed_event_target.clone(),
+                            amount: applied_amount,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10496,10 +10496,12 @@ fn apply_single_replacement(
                         // it.
                         ability_controller,
                         replacement_applied.clone(),
-                        proposed_damage_source,
-                        proposed_damage_source_identity,
-                        proposed_event_target.clone(),
-                        applied_amount,
+                        ReplacementEventContext {
+                            source_id: proposed_damage_source,
+                            source_identity: proposed_damage_source_identity,
+                            event_target: proposed_event_target.clone(),
+                            amount: applied_amount,
+                        },
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {

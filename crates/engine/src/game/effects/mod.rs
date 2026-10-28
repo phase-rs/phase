@@ -14587,10 +14587,7 @@ fn advance_player_scope_sacrifice_collection(
     mut elected: Option<PlayerId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
-    loop {
-        let Some(&front) = pending.remaining_players.first() else {
-            break;
-        };
+    while let Some(&front) = pending.remaining_players.first() {
         let actors = pending
             .admitted_actors
             .as_ref()

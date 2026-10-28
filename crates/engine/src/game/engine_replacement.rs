@@ -2981,7 +2981,6 @@ pub(super) fn apply_post_replacement_effect(
         state,
         effect_def,
         subjects,
-        _spell_resolution,
         event,
         replacement_applied,
         &event_context,
@@ -2993,10 +2992,6 @@ fn apply_post_replacement_effect_with_event(
     state: &mut GameState,
     effect_def: &AbilityDefinition,
     subjects: ContinuationSubjects,
-    // CR 400.7d: for AmountSpentToCastSource ceilings the entering object's
-    // cast-payment stamp is authoritative — this spell-resolution context is
-    // intentionally unused (issue #6440). Kept so call sites stay stable.
-    _spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<&ReplacementEvent>,
     replacement_applied: HashSet<AppliedReplacementKey>,
     event_context: &crate::types::ability::ReplacementEventContext,
@@ -3313,7 +3308,7 @@ pub(crate) fn post_replacement_dispatch_is_live() -> bool {
 pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
-    spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
+    _spell_resolution: Option<&crate::types::game_state::PendingSpellResolution>,
     event: Option<ReplacementEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
@@ -3374,7 +3369,6 @@ pub(crate) fn apply_pending_post_replacement_effect(
                     affected: source,
                     controller: replacement_controller,
                 },
-                spell_resolution,
                 event.as_ref(),
                 replacement_applied,
                 &event_context,
