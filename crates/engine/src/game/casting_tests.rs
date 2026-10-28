@@ -16355,31 +16355,14 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
     ));
 }
 
-// Load the full Snuff Out export and drive public casting, alternative-cost
+// Load Snuff Out from the card database and drive public casting, alternative-cost
 // payment, and priority-based resolution so parser/export drift and announcement
 // carrier lifecycle regressions surface without bypassing action boundaries.
 #[test]
 fn snuff_out_from_card_database_alt_cost_destroys_target() {
-    use std::path::PathBuf;
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("client")
-        .join("public")
-        .join("card-data.json");
-    // The full export contains a deserialization quirk on an unrelated card
-    // in some builds. Extract Snuff Out's record directly via jq-style lookup
-    // so this regression test is robust to that.
-    let raw = std::fs::read_to_string(&path)
-        .expect("card-data.json must be readable (run ./scripts/gen-card-data.sh)");
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&raw).expect("card-data.json is a JSON object");
-    let snuff_value = map
-        .get("snuff out")
-        .expect("Snuff Out should be in the export keyed by lowercase name");
-    let snuff: crate::types::card::CardFace =
-        serde_json::from_value(snuff_value.clone()).expect("Snuff Out record parses as CardFace");
-    let snuff = &snuff;
+    let snuff = crate::test_support::shared_card_db()
+        .get_face_by_name("Snuff Out")
+        .expect("Snuff Out should be in the card database");
 
     let mut state = setup_game_at_main_phase();
     state.players[0].life = 20;
