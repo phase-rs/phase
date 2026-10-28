@@ -6155,7 +6155,7 @@ fn retain_reveal_choice_source_on_continuation(
     else {
         return Ok(());
     };
-    if !crate::game::filter::filter_contains_filter_prop(card_filter, &|prop| {
+    if !crate::types::ability::filter_contains_filter_prop(card_filter, &|prop| {
         matches!(prop, crate::types::ability::FilterProp::IsChosenColor)
     }) {
         return Ok(());

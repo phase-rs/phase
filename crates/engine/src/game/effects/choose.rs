@@ -664,7 +664,7 @@ pub(crate) fn bind_resolution_color_to_hand_readers(
             break;
         }
         if matches!(&node.effect, Effect::RevealHand { card_filter, .. }
-            if crate::game::filter::filter_contains_filter_prop(card_filter, &|prop| matches!(prop, crate::types::ability::FilterProp::IsChosenColor)))
+            if crate::types::ability::filter_contains_filter_prop(card_filter, &|prop| matches!(prop, crate::types::ability::FilterProp::IsChosenColor)))
         {
             node.trigger_source = Some(if let Some(mut capture) = node.trigger_source.clone() {
                 apply_choice_attributes(&mut capture.lki.chosen_attributes, choice_type, choice);
@@ -1121,7 +1121,7 @@ mod tests {
         assert_eq!(unchanged_draw, draw_before, "only the hand reader changes");
         let reader = draw.sub_ability.as_deref().unwrap();
         assert!(
-            matches!(&reader.effect, Effect::RevealHand {card_filter, ..} if crate::game::filter::filter_contains_filter_prop(card_filter, &|prop| matches!(prop, FilterProp::IsChosenColor)))
+            matches!(&reader.effect, Effect::RevealHand {card_filter, ..} if crate::types::ability::filter_contains_filter_prop(card_filter, &|prop| matches!(prop, FilterProp::IsChosenColor)))
         );
         assert_eq!(reader.trigger_source, original.trigger_source);
         assert!(state.objects[&id].chosen_attributes.is_empty());

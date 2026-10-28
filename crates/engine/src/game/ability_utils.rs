@@ -1018,7 +1018,9 @@ pub fn find_first_target_filter_in_chain(ability: &ResolvedAbility) -> Option<&T
     }
     fn from_definition(definition: &AbilityDefinition) -> Option<&TargetFilter> {
         if definition.target_choice_timing == TargetChoiceTiming::Stack {
-            if let Some(filter) = triggers::extract_target_filter_from_effect(&definition.effect) {
+            if let Some(filter) =
+                crate::types::ability::extract_target_filter_from_effect(&definition.effect)
+            {
                 return Some(filter);
             }
         }
@@ -9238,7 +9240,7 @@ fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<Target
         let mut preceding = preceding;
         if let Some(group) = node.declares_chosen_group {
             out.insert(group, preceding);
-            preceding = triggers::extract_target_filter_from_effect(&node.effect)
+            preceding = crate::types::ability::extract_target_filter_from_effect(&node.effect)
                 .filter(|filter| filter.denotes_battlefield_objects())
                 .map(|_| group);
         }
