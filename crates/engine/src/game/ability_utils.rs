@@ -370,6 +370,18 @@ pub(crate) fn bind_instruction_actor(
                 ControllerRef::ScopedPlayer => ability
                     .scoped_player
                     .or_else(|| super::quantity::triggering_event_player(state)),
+                // CR 608.2c + CR 608.2h: the actor names the predecessor's
+                // object, independently of this instruction's own recipient.
+                ControllerRef::ParentTargetOwner | ControllerRef::ParentTargetController
+                    if ability.effect_context_object.is_some() =>
+                {
+                    let snapshot = ability.effect_context_object.as_ref()?;
+                    Some(if matches!(reference, ControllerRef::ParentTargetOwner) {
+                        snapshot.lki.owner
+                    } else {
+                        snapshot.lki.controller
+                    })
+                }
                 reference => super::filter::controller_ref_player(
                     state,
                     ability.source_id,
@@ -13098,6 +13110,50 @@ mod tests {
         PreventionAmount, PreventionScope,
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
+
+    /// CR 608.2c + CR 608.2h: a previous object's metadata selects the actor,
+    /// even when the new instruction has a separately chosen recipient.
+    #[test]
+    fn instruction_actor_parent_metadata_precedes_its_own_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let predecessor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Predecessor".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&predecessor).unwrap().controller = PlayerId(0);
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Recipient".into(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&recipient).unwrap().controller = PlayerId(1);
+        let object = &state.objects[&predecessor];
+        let snapshot = crate::types::ability::CostPaidObjectSnapshot::capture(
+            object,
+            object.snapshot_for_mana_spent(),
+        );
+        for (actor, captured, direct) in [
+            (ControllerRef::ParentTargetOwner, PlayerId(1), PlayerId(0)),
+            (
+                ControllerRef::ParentTargetController,
+                PlayerId(0),
+                PlayerId(1),
+            ),
+        ] {
+            let mut ability = make_simple_ability(vec![TargetRef::Object(recipient)], predecessor);
+            ability.effect_context_object = Some(snapshot.clone());
+            ability.instruction_actor = Some(actor.clone().into());
+            assert_eq!(bind_instruction_actor(&state, &mut ability), Some(captured));
+            ability.effect_context_object = None;
+            ability.instruction_actor = Some(actor.into());
+            assert_eq!(bind_instruction_actor(&state, &mut ability), Some(direct));
+        }
+    }
 
     #[test]
     fn node_declaration_query_matches_production_role_boundaries() {

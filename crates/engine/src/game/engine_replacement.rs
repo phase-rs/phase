@@ -316,6 +316,18 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    let parked_battlefield_entry =
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| match &pending.proposed {
+                ProposedEvent::ZoneChange {
+                    object_id,
+                    to: Zone::Battlefield,
+                    ..
+                } => Some(*object_id),
+                _ => None,
+            });
     let result = super::replacement::continue_replacement(state, index, events);
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
@@ -1676,6 +1688,13 @@ fn handle_replacement_choice_inner(
                 {
                     effects::drain_pending_continuation(state, events);
                 }
+                return Ok(state.waiting_for.clone());
+            }
+            // CR 608.2c + CR 615.5: preventing an instruction's event completes
+            // that event, not its enclosing ability. Its parked later work
+            // still follows the prevention's own post-effect.
+            if parked_battlefield_entry.is_none() {
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
                 return Ok(state.waiting_for.clone());
             }
             // CR 608.3e: If the ETB was prevented during spell resolution,
@@ -3926,6 +3945,66 @@ pub(super) fn resume_pending_liminal_token_entry(
 
 #[cfg(test)]
 mod tests {
+    /// CR 608.2c + CR 615.5: a prevented damage event leaves its spell's
+    /// later instruction alive, just as a declined prevention does.
+    #[test]
+    fn optional_damage_prevention_resumes_the_spells_later_instruction() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DamageTargetFilter, DamageTargetPlayerScope, Effect,
+            EffectKind, PreventionAmount, ReplacementDefinition, ReplacementMode,
+        };
+        use crate::types::replacements::ReplacementEvent;
+        for accept in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            scenario
+                .add_enchantment_from_oracle(P1, "Synthetic optional prevention", "")
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                        .prevention_shield(PreventionAmount::All)
+                        .damage_target_filter(DamageTargetFilter::Player {
+                            player: DamageTargetPlayerScope::Specific(P1),
+                        })
+                        .mode(ReplacementMode::Optional { decline: None })
+                        .execute(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                );
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic saved damage",
+                    true,
+                    "Synthetic saved damage deals 1 damage to target player. You gain 3 life.",
+                )
+                .with_mana_cost(crate::types::mana::ManaCost::zero())
+                .id();
+            let mut runner = scenario.build();
+            let cast = runner.cast(spell).target_player(P1).resolve();
+            assert!(matches!(
+                cast.final_waiting_for(),
+                crate::types::game_state::WaitingFor::ReplacementChoice { player: P1, .. }
+            ));
+            assert_eq!(runner.life(P0), 20);
+            let mut events = cast.events().to_vec();
+            events.extend(
+                runner
+                    .act(crate::types::actions::GameAction::ChooseReplacement {
+                        index: usize::from(!accept),
+                    })
+                    .unwrap()
+                    .events,
+            );
+            assert_eq!(runner.life(P0), 23);
+            assert_eq!(runner.life(P1), if accept { 20 } else { 19 });
+            assert_eq!(events.iter().filter(|event| matches!(event,
+                crate::types::events::GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. } if *source_id == spell)).count(), 1);
+            assert_eq!(
+                runner.state().objects[&spell].zone,
+                crate::types::zones::Zone::Graveyard
+            );
+            assert!(runner.state().stack.is_empty());
+        }
+    }
     use std::collections::HashSet;
 
     use super::super::game_object::GameObject;

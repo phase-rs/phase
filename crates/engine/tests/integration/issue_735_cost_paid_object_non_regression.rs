@@ -76,7 +76,13 @@ fn synthetic_declared_and_carried_owner_library_subjects_keep_their_counter_acto
         let definition = &runner.state().objects[&spell].abilities[0];
         let mut node = Some(definition);
         let mut actors = Vec::new();
+        let mut clauses = Vec::new();
         while let Some(current) = node {
+            clauses.push((
+                current.effect.clone(),
+                current.instruction_actor.clone(),
+                current.sub_link,
+            ));
             assert!(!matches!(*current.effect, Effect::Unimplemented { .. }));
             if matches!(*current.effect, Effect::PutCounter { .. }) {
                 actors.push(
@@ -101,7 +107,9 @@ fn synthetic_declared_and_carried_owner_library_subjects_keep_their_counter_acto
                 .resolve()
         };
         for (actor, object) in [(P1, recipient), (P0, independent)] {
-            assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == object)).count(), 1, "{text}");
+            assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == object)).count(), 1,
+                "{text}; expected actor={actor:?}, recipient={object:?}; counters={:?}; clauses={clauses:?}",
+                outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { .. })).collect::<Vec<_>>());
         }
         assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::EffectResolved { kind: EffectKind::PutCounter, source_id, .. } if *source_id == spell)).count(), 2);
         assert_eq!(
