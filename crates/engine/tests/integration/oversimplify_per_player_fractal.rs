@@ -5509,10 +5509,15 @@ fn departure_assert_retirement_preflight(
         assert!(
             serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap()).is_err()
         );
-        assert!(serde_json::from_value::<ResolutionStateWire>(
-            serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone())).unwrap()
-        )
-        .is_err());
+        // The current writer validates before serializing. Start the hostile
+        // read fixture from the valid envelope so both boundaries are tested.
+        assert!(
+            serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone())).is_err()
+        );
+        let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("the intact paid prompt writes a valid current envelope");
+        wire["resolution_frames"] = serde_json::to_value(&hostile.resolution_stack).unwrap();
+        assert!(serde_json::from_value::<ResolutionStateWire>(wire).is_err());
         let mut runner = GameRunner::from_state(hostile);
         let before = serde_json::to_value(runner.state()).unwrap();
         assert!(runner.act(action.clone()).is_err());
@@ -5614,6 +5619,9 @@ fn departure_later_branch_retirement(batch: bool, movement: u8, deep: bool, rest
         scenario.add_creature(P0, "Later B", 2, 2).id(),
         scenario.add_creature(P1, "Later C", 2, 2).id(),
     ];
+    let unselected = scenario
+        .add_creature(P0, "Unselected later creature", 9, 9)
+        .id();
     let observer = scenario
         .add_enchantment_from_oracle(P0, "Later child observer", "")
         .with_trigger_definition(
@@ -5651,7 +5659,9 @@ fn departure_later_branch_retirement(batch: bool, movement: u8, deep: bool, rest
         let Effect::ChangeZone { target, .. } = &mut effect else {
             unreachable!()
         };
-        *target = filter;
+        // CR 601.2c: announced targets use an enumerable creature population;
+        // SpecificObject is a resolution-time binding, not a target selector.
+        *target = TargetFilter::Typed(engine::types::ability::TypedFilter::creature());
         root.effect = Box::new(effect);
         root.multi_target = Some(MultiTargetSpec::fixed(3, 3));
     }
@@ -6033,6 +6043,12 @@ fn departure_later_branch_retirement(batch: bool, movement: u8, deep: bool, rest
             .all(|record| !record.co_departed.contains(&selected[1])));
     }
     assert_eq!(runner.state().objects[&selected[2]].zone, destination);
+    assert_eq!(runner.state().objects[&unselected].zone, Zone::Battlefield);
+    assert!(runner
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .all(|record| record.object_id != unselected));
     runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
     for _ in 0..16 {
         if runner.state().stack.is_empty() {
@@ -6069,7 +6085,7 @@ fn departure_merged_primary_excludes_independent_child_invalidation() {
 }
 
 fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
-    use engine::game::merge::{merge_object_onto, MergeSide};
+    use engine::game::merge::MergeSide;
     use engine::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, Effect, MultiTargetSpec, QuantityExpr,
         ReplacementDefinition, ReplacementMode, ReturnResultId, TargetFilter, TriggerDefinition,
@@ -6088,13 +6104,20 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
         .add_creature(P0, "Merged selected survivor", 3, 3)
         .id();
     let first = scenario
-        .add_creature(P0, "Earlier physical component", 4, 4)
+        .add_creature_to_hand(P0, "Earlier physical component", 4, 4)
+        .with_keyword(engine::types::keywords::Keyword::Mutate(ManaCost::zero()))
+        .with_mana_cost(ManaCost::zero())
         .id();
     let last = scenario
-        .add_creature(P0, "Later commander component", 5, 5)
+        .add_creature_to_hand(P0, "Later commander component", 5, 5)
+        .with_keyword(engine::types::keywords::Keyword::Mutate(ManaCost::zero()))
+        .with_mana_cost(ManaCost::zero())
         .id();
     let peer = scenario
         .add_creature(P1, "Ordinary selected peer", 2, 2)
+        .id();
+    let unselected = scenario
+        .add_creature(P0, "Unselected merged peer", 9, 9)
         .id();
     let observer = scenario
         .add_enchantment_from_oracle(P0, "Merged stable observer", "")
@@ -6115,12 +6138,8 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
     let Effect::ChangeZone { target, .. } = root.effect.as_mut() else {
         unreachable!()
     };
-    *target = TargetFilter::Or {
-        filters: vec![
-            TargetFilter::SpecificObject { id: survivor },
-            TargetFilter::SpecificObject { id: peer },
-        ],
-    };
+    // CR 601.2c: choose exactly the survivor and peer from legal creatures.
+    *target = TargetFilter::Typed(engine::types::ability::TypedFilter::creature());
     root.multi_target = Some(MultiTargetSpec::fixed(2, 2));
     root.declares_return_result = Some(ReturnResultId(7));
     // Read only the ordinary peer's known two power. The expected two-member
@@ -6170,23 +6189,42 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
         .get_mut(&last)
         .unwrap()
         .is_commander = true;
-    let mut setup = vec![];
-    // CR 730.3 + CR 903.9b + CR 903.9c: real merge ordering places a
-    // component choice on either side of the selected survivor's own request.
-    merge_object_onto(
-        runner.state_mut(),
-        first,
-        survivor,
-        MergeSide::Top,
-        &mut setup,
-    );
-    merge_object_onto(
-        runner.state_mut(),
-        last,
-        survivor,
-        MergeSide::Bottom,
-        &mut setup,
-    );
+    // CR 702.140a + CR 702.140c + CR 730.2b: each resolving mutating
+    // creature has left the stack before the public side choice absorbs it.
+    // The component ordering then brackets the survivor's own departure.
+    for (component, side) in [(first, MergeSide::Top), (last, MergeSide::Bottom)] {
+        runner
+            .cast(component)
+            .casting_variant(engine::types::game_state::CastingVariant::Mutate)
+            .target_objects(&[survivor])
+            .commit();
+        assert_eq!(runner.state().objects[&component].zone, Zone::Stack);
+        runner.advance_until_stack_empty();
+        let WaitingFor::MutateMergeChoice {
+            player,
+            merging_id,
+            target_id,
+        } = runner.state().waiting_for
+        else {
+            panic!("the real mutating spell must reach its public merge choice");
+        };
+        assert_eq!(player, P0);
+        assert_eq!(merging_id, component);
+        assert_eq!(target_id, survivor);
+        assert!(runner.state().stack.is_empty());
+        runner
+            .act(GameAction::ChooseMutateMergeSide { side })
+            .unwrap();
+        assert!(!runner.state().players[0].hand.contains(&component));
+        assert!(!runner.state().battlefield.contains(&component));
+        assert_eq!(runner.state().objects[&component].zone, Zone::Battlefield);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
     assert_eq!(
         runner.state().objects[&survivor].merged_components,
         vec![first, survivor, last]
@@ -6481,6 +6519,12 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
         ));
         runner.act(GameAction::PassPriority).unwrap();
     }
+    assert_eq!(runner.state().objects[&unselected].zone, Zone::Battlefield);
+    assert!(runner
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .all(|record| record.object_id != unselected));
     departure_assert_program_complete(&runner, spell, 3, 0);
 }
 

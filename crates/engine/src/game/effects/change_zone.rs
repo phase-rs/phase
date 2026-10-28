@@ -16,11 +16,10 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
     PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneOpponentChooserPurpose,
+    WaitingFor, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::{EtbTapState, Zone};
 
 /// CR 303.4f + CR 701.23a: Search effects that put an Aura onto the battlefield
@@ -641,32 +640,6 @@ pub(crate) use crate::game::zone_pipeline::{
     apply_zone_delivery_tail, deliver_replaced_zone_change, execute_zone_move, ZoneDeliveryResult,
     ZoneMoveResult,
 };
-
-/// Records the identity/proposal boundary before an Aura or copy-target prompt
-/// returns control after delivery. Replacement-ordering pauses replace this
-/// anticipated event with the authoritative `PendingReplacement` proposal.
-pub(crate) fn anticipated_zone_change_delivery(
-    state: &GameState,
-    object_id: ObjectId,
-    destination: Zone,
-    source_id: ObjectId,
-    face_down_in_exile: crate::types::ability::ExileConcealment,
-) -> Option<PendingZoneChangeDelivery> {
-    let object = state.objects.get(&object_id)?;
-    let mut expected_event =
-        ProposedEvent::zone_change(object_id, object.zone, destination, Some(source_id));
-    if let ProposedEvent::ZoneChange {
-        face_down_in_exile: conceal,
-        ..
-    } = &mut expected_event
-    {
-        *conceal = face_down_in_exile;
-    }
-    Some(PendingZoneChangeDelivery::new(
-        ObjectIncarnationRef::from_object(object),
-        expected_event,
-    ))
-}
 
 fn append_effect_resolved_after_counter_pause(
     state: &mut GameState,

@@ -34613,6 +34613,7 @@ impl GameState {
     /// live. This exists so the dispatcher keeps talking to `GameState`.
     ///
     /// [`ResolutionStack::begin_active_post_replacement_dispatch`]: super::resolution::ResolutionStack::begin_active_post_replacement_dispatch
+    #[cfg(test)]
     pub(crate) fn begin_post_replacement_dispatch(
         &mut self,
     ) -> Option<(

@@ -1864,25 +1864,6 @@ pub(crate) fn anticipated_zone_change_delivery(
     Some(PendingZoneChangeDelivery::new(member, expected_event))
 }
 
-/// Preserve the original selected member even if a replacement child has
-/// already moved its storage id. Only post-delivery tails certify Moved here.
-pub(crate) fn retain_zone_change_pause(
-    state: &GameState,
-    anticipated: Option<PendingZoneChangeDelivery>,
-    events: &[GameEvent],
-) -> Option<PendingZoneChangeDelivery> {
-    let mut boundary = anticipated?;
-    if let Some(pending) = state.pending_replacement.as_ref().filter(|pending| {
-        matches!(pending.delivery_boundary_event(), ProposedEvent::ZoneChange { object_id, .. }
-            if *object_id == boundary.member.object_id)
-    }) {
-        boundary.expected_event = pending.delivery_boundary_event().clone();
-    } else {
-        boundary.append_delivery_events(events);
-    }
-    Some(boundary)
-}
-
 /// Materialize the ordinary uniform requests admitted by historical saves.
 /// Explicit legacy loading uses the same reconstruction as the runtime fallback
 /// so saving an undrained legacy batch writes a complete current request queue.
