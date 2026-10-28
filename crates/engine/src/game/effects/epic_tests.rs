@@ -987,6 +987,7 @@ fn equal_snapshot_epic_group_auto_orders() {
         .all(|entry| entry.controller == P1 && entry.source_id == swarm));
 
     let hand = state.players[1].hand.len();
+    assert!(hand > 0, "reach-guard: each copy has a card to count");
     let snakes = snakes_of(state, P1);
     advance_until(&mut runner, |state| {
         state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. })

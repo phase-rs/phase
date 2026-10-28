@@ -42560,8 +42560,9 @@ mod tests {
         }
     }
 
-    /// V14 (CR 702.50a): a viewer projection keeps `epic_effects` whole, so an
-    /// `EpicCopy` handle it carries decodes through the transport path. The
+    /// V14 (CR 702.50a): pins that a projected `EpicCopy` handle (here a planted
+    /// delayed-trigger carrier) still names an entry: a viewer projection keeps
+    /// `epic_effects` whole, so the handle decodes through the transport path. The
     /// carrier is a delayed trigger: a projection clears `stack_trigger_firings`,
     /// so a projected triggered stack entry of any kind fails the bare decode's
     /// firing-coherence check before the handle check runs.

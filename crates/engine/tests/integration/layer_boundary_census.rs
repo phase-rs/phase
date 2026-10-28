@@ -32,6 +32,8 @@
 //!   `crates/engine/src`, test items and inline `mod` blocks included: `EpicEffectId` is a
 //!   field type only of `Effect::EpicCopy`. The decode check that refuses a dangling Epic
 //!   handle recognizes that one serialized shape, so a second carrier type would escape it.
+//!   Item macros (such as `declare_game_state!`, which declares `GameState`'s fields) are
+//!   scanned by token: one whose tokens name `EpicEffectId` is a hit.
 //!
 //! Fail-closed limits: a `#[cfg(test)]` on a statement inside a library function is not
 //! honoured (the statement is scanned as library code), and a `#[path]` inside an inline
@@ -1055,6 +1057,16 @@ fn items_fields_naming(file: &str, items: &[syn::Item], marker: &str) -> Vec<Fie
                         collect(file, inner, marker, out);
                     }
                 }
+                syn::Item::Macro(m)
+                    if flatten(&m.mac.tokens).iter().any(|token| token == marker) =>
+                {
+                    out.push((
+                        file.to_string(),
+                        flatten(&m.mac.path).concat(),
+                        None,
+                        "macro".to_string(),
+                    ));
+                }
                 _ => {}
             }
         }
@@ -1153,6 +1165,10 @@ fn the_field_census_flags_planted_epic_handles() {
     one_hit(
         "inline module",
         "mod m { pub struct S { a: crate::types::identifiers::EpicEffectId } }",
+    );
+    one_hit(
+        "item macro",
+        "declare_game_state! { pub x: Option<EpicEffectId>, }",
     );
     let local = fields_naming(
         "<planted>",
