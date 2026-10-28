@@ -17000,10 +17000,6 @@ fn resolve_chain_body(
     }
     let ability = &actor_bound;
 
-    if deal_damage::replacement_recipient_is_missing(state, ability) {
-        return skip_instruction_and_dependents(state, ability, events, depth);
-    }
-
     // CR 608.2d (override) + CR 701.9b (analogous) + CR 109.4: A random
     // `Effect::Choose` ("choose a player at random") or `Effect::ChooseFromZone`
     // ("choose one of them at random") is resolved here, at the chain resolution
@@ -17304,6 +17300,14 @@ fn resolve_chain_body(
         {
             return Ok(());
         }
+    }
+
+    // CR 608.2c + CR 615.5: first select this instruction's conditional branch.
+    // A recipient required only by a false branch cannot suppress the next
+    // independently conditioned rider. A selected branch still requires its
+    // own exact recipient before any optional choice or effect executes.
+    if deal_damage::replacement_recipient_is_missing(state, ability) {
+        return skip_instruction_and_dependents(state, ability, events, depth);
     }
 
     // Per-iteration optionality must reach the rebound singleton ability before
@@ -22607,6 +22611,117 @@ mod tests {
                 outcome.assert_zone(&[spell], Zone::Graveyard);
                 assert!(outcome.state().stack.is_empty());
             }
+        }
+    }
+
+    /// CR 608.2c + CR 608.2h + CR 615.5: a false source-type branch does not
+    /// need its object recipient; the next rider can read the original LKI.
+    #[test]
+    fn prevention_gate_precedes_its_missing_object_recipient() {
+        use crate::types::ability::ReplacementEventContext;
+        use crate::types::identifiers::ObjectIdentityBinding;
+        for first_gate_matches in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let old_source = scenario
+                .add_artifact_from_oracle(P1, "Original noncreature", "")
+                .id();
+            let host = scenario
+                .add_enchantment_from_oracle(P0, "Rider host", "")
+                .id();
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            let original = ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&state.objects[&old_source]),
+                Zone::Battlefield,
+            );
+            let mut events = Vec::new();
+            crate::game::zones::move_to_zone(state, old_source, Zone::Exile, &mut events);
+            crate::game::zones::move_to_zone(state, old_source, Zone::Battlefield, &mut events);
+            let returned = state.objects.get_mut(&old_source).unwrap();
+            returned.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+            returned.base_card_types = returned.card_types.clone();
+            returned.power = Some(2);
+            returned.toughness = Some(5);
+            returned.base_power = Some(2);
+            returned.base_toughness = Some(5);
+            assert!(!original.reference.is_current(state));
+            let creature = TargetFilter::Typed(TypedFilter::creature());
+            let noncreature = TargetFilter::Not {
+                filter: Box::new(creature.clone()),
+            };
+            let mut head = ResolvedAbility::new(
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::PostReplacementDamageSource,
+                    damage_source: None,
+                    excess: None,
+                },
+                vec![],
+                host,
+                P0,
+            );
+            head.condition = Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                filter: if first_gate_matches {
+                    noncreature.clone()
+                } else {
+                    creature.clone()
+                },
+            });
+            let mut later = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 7 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                host,
+                P0,
+            );
+            later.condition = Some(AbilityCondition::PostReplacementDamageSourceMatchesFilter {
+                filter: if first_gate_matches {
+                    creature
+                } else {
+                    noncreature
+                },
+            });
+            let mut tail = ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                host,
+                P0,
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            later.sub_ability = Some(Box::new(tail));
+            head.sub_ability = Some(Box::new(later));
+            head.capture_replacement_event_recursive(&ReplacementEventContext {
+                source_id: Some(old_source),
+                source_identity: Some(original),
+                event_target: Some(TargetRef::Player(P0)),
+                amount: Some(1),
+            });
+            assert!(deal_damage::replacement_recipient_is_missing(state, &head));
+            events.clear();
+            resolve_ability_chain(state, &head, &mut events, 1).unwrap();
+            assert_eq!(
+                state.players[0].life,
+                if first_gate_matches { 23 } else { 30 }
+            );
+            assert_eq!(state.objects[&old_source].damage_marked, 0);
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, GameEvent::DamageDealt { .. })));
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. }
+                if *source_id == host))
+                    .count(),
+                if first_gate_matches { 1 } else { 2 }
+            );
         }
     }
 

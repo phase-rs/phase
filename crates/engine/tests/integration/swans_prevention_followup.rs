@@ -2191,6 +2191,10 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                 assert!(parsed.parse_warnings.is_empty());
                 let rider = parsed.abilities[0].sub_ability.as_ref().unwrap();
                 assert!(matches!(rider.condition, Some(engine::types::ability::AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. })));
+                let rider_shape =
+                    std::iter::successors(Some(rider.as_ref()), |node| node.sub_ability.as_deref())
+                        .map(|node| (node.effect.clone(), node.condition.clone(), node.sub_link))
+                        .collect::<Vec<_>>();
                 let damage = || Effect::DealDamage {
                     amount: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Any,
@@ -2364,6 +2368,19 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                         _ => None,
                     })
                     .expect("outer conditional rider is genuinely parked");
+                let continued_shape = std::iter::successors(Some(continued.as_ref()), |node| {
+                    node.sub_ability.as_deref()
+                })
+                .map(|node| {
+                    (
+                        node.effect.clone(),
+                        node.condition.clone(),
+                        node.sub_link,
+                        node.targets.clone(),
+                        node.context.replacement_event.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
                 if reenter {
                     let returned = &runner.state().objects[&outer];
                     assert_eq!(returned.zone, Zone::Battlefield);
@@ -2433,7 +2450,9 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                 );
                 assert_eq!(
                     runner.state().players[1].life,
-                    20 - i32::from(!creature_outer && !missing_outer)
+                    20 - i32::from(!creature_outer && !missing_outer),
+                    "reflection: creature={creature_outer}, missing={missing_outer}, reenter={reenter}, accept={accept}; rider={rider_shape:?}; continued={continued_shape:?}; events={:?}",
+                    events.iter().filter(|event| matches!(event, GameEvent::DamageDealt { .. } | GameEvent::DamagePrevented { .. } | GameEvent::EffectResolved { .. })).collect::<Vec<_>>()
                 );
                 assert_eq!(
                     runner.state().players[p2.0 as usize].life,
