@@ -3732,7 +3732,10 @@ fn legacy_effect(x: &Effect) -> bool {
                     .as_ref()
                     .is_some_and(|d| legacy_definition(d))
         }
-        Effect::EpicCopy { spell } => contains_legacy_event_ref(spell),
+        // CR 603.3b: the handle carries no event reference, and every member of
+        // an `EpicCopy` group fires off the one upkeep event, so the legacy
+        // batch prompt this flag feeds is never consulted for it.
+        Effect::EpicCopy { .. } => false,
         Effect::CreateDelayedTrigger { effect, .. } => legacy_definition(effect),
         Effect::CreateDrawReplacement { replacement_effect } => legacy_effect(replacement_effect),
         Effect::RollDie { count, results, .. } => {

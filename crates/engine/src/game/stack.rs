@@ -7070,19 +7070,8 @@ mod tests {
         state.objects.insert(source_id, source);
         state.objects.insert(copy_id, copy);
 
-        let mut root = ResolvedAbility::new(
-            Effect::EpicCopy {
-                spell: Box::new(ResolvedAbility::new(
-                    Effect::Investigate,
-                    Vec::new(),
-                    source_id,
-                    PlayerId(0),
-                )),
-            },
-            Vec::new(),
-            source_id,
-            PlayerId(0),
-        );
+        let mut root =
+            ResolvedAbility::new(Effect::Investigate, Vec::new(), source_id, PlayerId(0));
         root.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::Investigate,
             Vec::new(),
@@ -7123,10 +7112,6 @@ mod tests {
             ability.cast_occurrence.is_none()
                 && ability.sub_ability.as_deref().is_none_or(graph_is_clear)
                 && ability.else_ability.as_deref().is_none_or(graph_is_clear)
-                && match &ability.effect {
-                    Effect::EpicCopy { spell } => graph_is_clear(spell),
-                    _ => true,
-                }
         }
 
         assert_eq!(state.objects[&source_id].cast_occurrence, Some(occurrence));

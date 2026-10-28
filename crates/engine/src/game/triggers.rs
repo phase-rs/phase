@@ -14837,9 +14837,15 @@ fn collect_matching_delayed_triggers(
     // CR 702.50a: Epic effects are a persistent rest-of-game generator (never
     // stored as a `DelayedTrigger`, so cleanup never purges them). At the
     // beginning of each controller's upkeep, synthesize a fresh `EpicCopy`
-    // trigger from each stored effect and fire it through the same path.
-    for effect in &state.epic_effects {
-        let synth = super::effects::epic::epic_upkeep_trigger(effect);
+    // trigger from each stored effect and fire it through the same path. Each
+    // trigger names the first entry whose snapshot resolves identically to its
+    // own, so equal snapshots share one handle and their triggers compare,
+    // order and serialize as one.
+    for (index, effect) in state.epic_effects.iter().enumerate() {
+        let synth = super::effects::epic::epic_upkeep_trigger(
+            state.canonical_epic_effect_id(index),
+            effect,
+        );
         if let Some((event_index, trigger_event)) = delayed_trigger_event_with_index(
             &synth.condition,
             events,

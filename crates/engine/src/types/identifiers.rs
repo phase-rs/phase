@@ -58,6 +58,12 @@ pub struct ExtraPhaseId(pub u64);
 #[serde(transparent)]
 pub struct TrackedSetId(pub u64);
 
+/// CR 702.50a: Names one rest-of-game Epic effect by its position in
+/// `GameState::epic_effects`, which only grows, so a position is a stable identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EpicEffectId(pub u64);
+
 /// CR 603.7: Monotonic identity of one installed delayed triggered ability.
 ///
 /// This is deliberately distinct from its source object: multiple delayed

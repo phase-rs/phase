@@ -21,7 +21,8 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId, LEGACY_INCARNATION,
+    CardId, EpicEffectId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId,
+    LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -22276,15 +22277,16 @@ pub enum Effect {
         #[serde(default)]
         starting_loyalty_from_casualty_sacrifice: bool,
     },
-    /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. Carries a snapshot
-    /// of the Epic spell's resolved ability captured when the Epic spell
-    /// resolved; resolving this effect puts a copy of that spell (minus its epic
-    /// ability) onto the stack under the controller. Created by
-    /// `game::effects::epic::arm_epic` as the body of a recurring delayed
-    /// triggered ability, so it fires at the beginning of each of the
+    /// CR 702.50a + CR 707.10: Epic's recurring upkeep copy. The snapshot of
+    /// the Epic spell's resolved ability, captured when the Epic spell
+    /// resolved, lives in `EpicEffect.spell` (`GameState::epic_effects`); this
+    /// effect names it by handle. Resolving it puts a copy of that spell (minus
+    /// its epic ability) onto the stack under the controller. Synthesized by
+    /// `game::effects::epic::epic_upkeep_trigger` as the body of a recurring
+    /// delayed triggered ability, so it fires at the beginning of each of the
     /// controller's upkeeps for the rest of the game.
     EpicCopy {
-        spell: Box<ResolvedAbility>,
+        epic: EpicEffectId,
     },
     /// CR 707.12: Create a copy of a card/object in its zone and cast that
     /// copy while the resolving spell or ability continues resolving.
@@ -28444,8 +28446,8 @@ impl Effect {
             // (`collect_target_slots` / `collect_target_slot_specs`), mirroring
             // `MoveCounters`/`Attach`; all other forms host on the controller or
             // source and declare no target.
-            // CR 702.50a: EpicCopy carries its targets inside the snapshotted
-            // spell ability, not in a top-level `target` field.
+            // CR 702.50a: EpicCopy's targets live inside the `EpicEffect`
+            // snapshot its handle names, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
             // CR 614.11: CreateDrawReplacement is non-targeted — "you would
@@ -29939,7 +29941,7 @@ impl Effect {
 }
 
 macro_rules! define_effect_quantity_walk {
-    ([$($mut_:tt)?]; $name:ident; $as_ref:ident; $as_deref:ident) => {
+    ([$($mut_:tt)?]; $name:ident) => {
     /// Visits every `QuantityExpr` carried by this effect —
     /// including the secondary quantity slots that `count_expr()` (the
     /// PRIMARY count/amount accessor) intentionally does not expose, such as
@@ -29947,8 +29949,8 @@ macro_rules! define_effect_quantity_walk {
     /// `Dig::keep_count_expr`, `PutSticker::max_ticket_cost`, dynamic
     /// `PtValue::Quantity` power/toughness, and `ChangeZone`'s
     /// (conditional) entry counters — and recurses through variants that
-    /// embed another `Effect`/`ResolvedAbility` (`CreateDrawReplacement`,
-    /// `CreatePlaneswalkReplacement`, `EpicCopy`).
+    /// embed another `Effect` (`CreateDrawReplacement`,
+    /// `CreatePlaneswalkReplacement`).
     ///
     /// Nested domain types that carry their own quantities are walked
     /// through composed exhaustive sub-visitors (each a no-wildcard match on
@@ -29999,21 +30001,6 @@ macro_rules! define_effect_quantity_walk {
                 | LibraryPosition::NthFromTop { .. } => {}
                 LibraryPosition::BeneathTop { depth } => f(depth),
                 LibraryPosition::RandomWithinTop { n } => f(n),
-            }
-        }
-        fn visit_resolved_ability<'a>(
-            ability: &'a $($mut_)? ResolvedAbility,
-            f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr),
-        ) {
-            ability.effect.$name(f);
-            if let Some(repeat_for) = ability.repeat_for.$as_ref() {
-                f(repeat_for);
-            }
-            if let Some(sub) = ability.sub_ability.$as_deref() {
-                visit_resolved_ability(sub, f);
-            }
-            if let Some(else_branch) = ability.else_ability.$as_deref() {
-                visit_resolved_ability(else_branch, f);
             }
         }
         match self {
@@ -30143,12 +30130,10 @@ macro_rules! define_effect_quantity_walk {
                     f(q);
                 }
             }
-            Effect::EpicCopy { spell, .. } => {
-                // The epic copy is a full `ResolvedAbility` chain; walk its
-                // effect (and continuation branches) so its quantity slots
-                // are not invisible to callers.
-                visit_resolved_ability(spell, f);
-            }
+            // CR 702.50a + CR 707.10: the handle names the stored `EpicEffect`
+            // snapshot, a deferred payload the copy evaluates in its own
+            // resolution, so the trigger carries no quantity of its own.
+            Effect::EpicCopy { .. } => {}
             Effect::CastCopyOfCard { count, .. } => {
                 if let Some(q) = count {
                     f(q);
@@ -30614,8 +30599,8 @@ macro_rules! define_effect_quantity_walk {
 }
 
 impl Effect {
-    define_effect_quantity_walk!([]; for_each_quantity_expr; as_ref; as_deref);
-    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut; as_mut; as_deref_mut);
+    define_effect_quantity_walk!([]; for_each_quantity_expr);
+    define_effect_quantity_walk!([mut]; for_each_quantity_expr_mut);
 
     /// Every [`AbilityDefinition`] this effect carries as a DIRECT executable
     /// payload, together with the [`NestedDefinitionEdge`] it hangs from.
@@ -41947,6 +41932,27 @@ impl PartialEq for ResolvedAbility {
 impl Eq for ResolvedAbility {}
 
 impl ResolvedAbility {
+    /// CR 707.10 + CR 400.7: whether a copy of `self` resolves exactly as a copy
+    /// of `other`. `PartialEq` compares `cost_paid_objects` by object id only (see
+    /// its doc), but a copy uses the objects paid for its own original (CR 707.10)
+    /// and each record names one incarnation of that object (CR 400.7), so the
+    /// records must match in full. Cost records ride the root /
+    /// sub / else chain that `add_cost_paid_records_recursive` writes.
+    pub(crate) fn resolves_identically_to(&self, other: &Self) -> bool {
+        self == other && self.cost_paid_records_match_recursive(other)
+    }
+
+    fn cost_paid_records_match_recursive(&self, other: &Self) -> bool {
+        let chains_match = |a: &Option<Box<Self>>, b: &Option<Box<Self>>| match (a, b) {
+            (Some(a), Some(b)) => a.cost_paid_records_match_recursive(b),
+            (None, None) => true,
+            _ => false,
+        };
+        self.cost_paid_objects == other.cost_paid_objects
+            && chains_match(&self.sub_ability, &other.sub_ability)
+            && chains_match(&self.else_ability, &other.else_ability)
+    }
+
     /// CR 400.7d + CR 608.2k: True when this resolved ability tree reads the
     /// cost-paid object — i.e. references `ObjectScope::CostPaidObject` in a
     /// magnitude / P-T expression, `TargetFilter::CostPaidObject`, or
@@ -42436,12 +42442,9 @@ impl ResolvedAbility {
     }
 
     /// Stamp or clear one cast coordinate on every complete ability graph
-    /// stored by this node, including the spell snapshot embedded by Epic.
+    /// stored by this node.
     pub fn set_cast_occurrence_recursive(&mut self, occurrence: Option<CastOccurrence>) {
         self.cast_occurrence = occurrence;
-        if let Effect::EpicCopy { spell } = &mut self.effect {
-            spell.set_cast_occurrence_recursive(occurrence);
-        }
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.set_cast_occurrence_recursive(occurrence);
         }
@@ -42453,9 +42456,6 @@ impl ResolvedAbility {
     pub(crate) fn normalize_cast_occurrence_for_loop_recursive(&mut self) {
         if let Some(occurrence) = self.cast_occurrence.as_mut() {
             occurrence.turn_journal_index = 0;
-        }
-        if let Effect::EpicCopy { spell } = &mut self.effect {
-            spell.normalize_cast_occurrence_for_loop_recursive();
         }
         if let Some(sub) = self.sub_ability.as_mut() {
             sub.normalize_cast_occurrence_for_loop_recursive();
@@ -42475,10 +42475,6 @@ impl ResolvedAbility {
                 .else_ability
                 .as_deref()
                 .is_none_or(|branch| branch.cast_occurrence_matches_recursive(occurrence))
-            && match &self.effect {
-                Effect::EpicCopy { spell } => spell.cast_occurrence_matches_recursive(occurrence),
-                _ => true,
-            }
     }
 
     pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {
@@ -42746,6 +42742,26 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.clear_trigger_identity_recursive();
+        }
+    }
+
+    /// CR 104.4b: Rewrites every `Effect::EpicCopy` handle on this chain (root,
+    /// then the `sub_ability` / `else_ability` nesting
+    /// `clear_trigger_identity_recursive` descends) through `rename`. Used by
+    /// `GameState::normalize_for_loop` to compare in-flight upkeep copies by
+    /// the snapshot their handles name rather than by position.
+    pub(crate) fn rename_epic_effect_handles_recursive(
+        &mut self,
+        rename: &impl Fn(EpicEffectId) -> EpicEffectId,
+    ) {
+        if let Effect::EpicCopy { epic } = &mut self.effect {
+            *epic = rename(*epic);
+        }
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.rename_epic_effect_handles_recursive(rename);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.rename_epic_effect_handles_recursive(rename);
         }
     }
 
@@ -45638,34 +45654,6 @@ mod tests {
             position: LibraryPosition::BeneathTop { depth: fixed(72) },
             arranger: None,
         };
-        let mut nested = ResolvedAbility::new(
-            Effect::Draw {
-                count: fixed(81),
-                target: TargetFilter::Controller,
-            },
-            vec![],
-            ObjectId(1),
-            crate::types::player::PlayerId(0),
-        );
-        nested.repeat_for = Some(fixed(82));
-        nested.sub_ability = Some(Box::new(ResolvedAbility::new(
-            Effect::GainLife {
-                amount: fixed(83),
-                player: TargetFilter::Controller,
-            },
-            vec![],
-            ObjectId(1),
-            crate::types::player::PlayerId(0),
-        )));
-        nested.else_ability = Some(Box::new(ResolvedAbility::new(
-            Effect::Draw {
-                count: fixed(84),
-                target: TargetFilter::Controller,
-            },
-            vec![],
-            ObjectId(1),
-            crate::types::player::PlayerId(0),
-        )));
         for (mut effect, expected) in [
             (token, vec![11, 12, 13, 14]),
             (movement, vec![21, 22]),
@@ -45674,12 +45662,6 @@ mod tests {
             (mana, vec![51]),
             (die, vec![61, 62]),
             (placement, vec![71, 72]),
-            (
-                Effect::EpicCopy {
-                    spell: Box::new(nested),
-                },
-                vec![81, 82, 83, 84],
-            ),
         ] {
             let mut addresses = Vec::new();
             let mut shared = Vec::new();
@@ -45779,18 +45761,6 @@ mod tests {
                     position: LibraryPosition::BeneathTop { depth },
                     ..
                 } => assert_eq!([value(count), value(depth)], [171, 172]),
-                Effect::EpicCopy { spell } => {
-                    assert!(
-                        matches!(&spell.effect, Effect::Draw { count, .. } if *count == fixed(181))
-                    );
-                    assert_eq!(spell.repeat_for, Some(fixed(182)));
-                    assert!(
-                        matches!(&spell.sub_ability.as_ref().unwrap().effect, Effect::GainLife { amount, .. } if *amount == fixed(183))
-                    );
-                    assert!(
-                        matches!(&spell.else_ability.as_ref().unwrap().effect, Effect::Draw { count, .. } if *count == fixed(184))
-                    );
-                }
                 _ => panic!("fixture must exercise its concrete carrier"),
             }
         }

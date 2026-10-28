@@ -7404,6 +7404,74 @@ mod tests {
         }
     }
 
+    /// CR 702.50a + CR 707.10 + CR 400.2: an in-flight Epic upkeep copy names its
+    /// snapshot by handle, so the stack carries no copy of the snapshot's payment
+    /// record; the one snapshot is the stored `EpicEffect`, which is redacted. A
+    /// hidden mana source latched in it reaches no viewer through the stack.
+    #[test]
+    fn in_flight_epic_copy_trigger_discloses_no_hidden_mana_source() {
+        let fixture = payment_fixture();
+        let mut state = fixture.state.clone();
+        crate::game::effects::epic::arm_epic(
+            &mut state,
+            fixture.paid,
+            fixture.owner,
+            fixture.ability.clone(),
+        );
+        state.active_player = fixture.owner;
+        state.phase = crate::types::phase::Phase::Upkeep;
+        crate::game::triggers::check_delayed_triggers(
+            &mut state,
+            &[GameEvent::PhaseChanged {
+                phase: crate::types::phase::Phase::Upkeep,
+            }],
+        );
+        let top = state
+            .stack
+            .back()
+            .expect("reach-guard: the Epic trigger is on the stack");
+        assert!(
+            matches!(top.kind, StackEntryKind::TriggeredAbility { .. })
+                && matches!(
+                    top.ability().map(|ability| &ability.effect),
+                    Some(Effect::EpicCopy { .. })
+                ),
+            "reach-guard: the stack top is the triggered EpicCopy"
+        );
+        assert_eq!(
+            payment_arrays_under(&state, "/epic_effects/").len(),
+            2,
+            "reach-guard: the stored snapshot latches root and sub payment arrays"
+        );
+        assert!(
+            payment_arrays_under(&state, "/stack/").is_empty(),
+            "the in-flight trigger holds only the handle, no snapshot payment record"
+        );
+
+        for (viewer, view) in [
+            (
+                "opponent",
+                filter_state_for_viewer(&state, fixture.opponent),
+            ),
+            ("spectator", filter_state_for_unseated_viewer(&state)),
+        ] {
+            for prefix in ["/stack/", "/epic_effects/"] {
+                for (path, carried) in payment_arrays_under(&view, prefix) {
+                    assert_eq!(
+                        carried[0].lki.name, HIDDEN_CARD_NAME,
+                        "{viewer} {path}: the hidden mana source is still named"
+                    );
+                    assert!(carried[0].lki.card_types.is_empty(), "{viewer} {path}");
+                }
+            }
+            assert_eq!(
+                payment_arrays_under(&view, "/epic_effects/").len(),
+                2,
+                "{viewer}: the projection keeps the stored snapshot's payment arrays"
+            );
+        }
+    }
+
     /// CR 702.110b + CR 400.2: a `CreatureExploited` record whose sacrificed victim is now
     /// hidden is redacted whole, exactly like a `ZoneChanged` record of a hidden object.
     /// SHAPE test: the event is seeded directly as the current trigger event.
