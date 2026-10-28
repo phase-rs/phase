@@ -21144,9 +21144,15 @@ enum OtherThanFirstSpellActor {
     EnchantedPlayer,
 }
 
+#[derive(Clone, Copy)]
+enum NonFirstExclusionForm {
+    Definite,
+    Possessive,
+}
+
 /// CR 603.2: this event qualifier is fire-time only, unlike a CR 603.4
-/// intervening-if condition. The recognizer owns the predicate only after it
-/// reaches the marker, so a malformed repeated qualifier fails closed.
+/// intervening-if condition. A recognized exclusion determiner commits the
+/// predicate, so a malformed repeated qualifier or tail fails closed.
 fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse {
     // `parse_trigger_condition` passes the complete trigger head (including
     // "whenever"), while direct classifier tests pass its payload. Normalize
@@ -21190,37 +21196,61 @@ fn parse_other_than_first_spell_trigger(input: &str) -> OtherThanFirstSpellParse
     };
     let Ok((after_marker, first_qualifier)) = alt((
         terminated(
-            take_until(" spell other than the first "),
-            tag::<_, _, OracleError<'_>>(" spell other than the first "),
+            take_until(" spell other than "),
+            tag::<_, _, OracleError<'_>>(" spell other than "),
         ),
-        value("", tag("spell other than the first ")),
+        value("", tag("spell other than ")),
     ))
     .parse(after_actor) else {
+        return OtherThanFirstSpellParse::NotCandidate;
+    };
+    let Ok((after_determiner, form)) = alt((
+        value(
+            NonFirstExclusionForm::Definite,
+            tag::<_, _, OracleError<'_>>("the first "),
+        ),
+        value(NonFirstExclusionForm::Possessive, tag("your first ")),
+    ))
+    .parse(after_marker) else {
         return OtherThanFirstSpellParse::NotCandidate;
     };
     let Ok((after_repeated, repeated_qualifier)) = alt((
         terminated(take_until(" spell "), tag(" spell ")),
         value("", tag::<_, _, OracleError<'_>>("spell ")),
     ))
-    .parse(after_marker) else {
+    .parse(after_determiner) else {
         return OtherThanFirstSpellParse::Rejected;
     };
-    let pronoun_is_valid = match actor {
-        OtherThanFirstSpellActor::You => {
+    let tail_is_valid = match (form, actor) {
+        (NonFirstExclusionForm::Possessive, OtherThanFirstSpellActor::You) => {
+            all_consuming(tag::<_, _, OracleError<'_>>("each turn"))
+                .parse(after_repeated)
+                .is_ok()
+        }
+        (
+            NonFirstExclusionForm::Possessive,
+            OtherThanFirstSpellActor::Opponent
+            | OtherThanFirstSpellActor::AnyPlayer
+            | OtherThanFirstSpellActor::EnchantedPlayer,
+        ) => false,
+        (NonFirstExclusionForm::Definite, OtherThanFirstSpellActor::You) => {
             all_consuming(tag::<_, _, OracleError<'_>>("you cast each turn"))
                 .parse(after_repeated)
                 .is_ok()
         }
-        OtherThanFirstSpellActor::Opponent
-        | OtherThanFirstSpellActor::AnyPlayer
-        | OtherThanFirstSpellActor::EnchantedPlayer => all_consuming(alt((
+        (
+            NonFirstExclusionForm::Definite,
+            OtherThanFirstSpellActor::Opponent
+            | OtherThanFirstSpellActor::AnyPlayer
+            | OtherThanFirstSpellActor::EnchantedPlayer,
+        ) => all_consuming(alt((
             tag::<_, _, OracleError<'_>>("that player casts each turn"),
             tag("they cast each turn"),
         )))
         .parse(after_repeated)
         .is_ok(),
     };
-    if !pronoun_is_valid {
+    if !tail_is_valid {
         return OtherThanFirstSpellParse::Rejected;
     }
     let parse_qualifier = |qualifier: &str| {

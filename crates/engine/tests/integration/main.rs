@@ -55,6 +55,7 @@ mod anya_merciless_angel_5920;
 mod appended_token_batch_replacement_order;
 mod april_oneil_card_types_among_spells_cast;
 mod arashin_sovereign_self_tuck;
+mod arcbound_tracker_nonfirst_spell;
 mod archdruids_charm_search_destination;
 mod archmage_ascension_gated_draw_replacement;
 mod archnemesis_you_attack_enchanted_player;
