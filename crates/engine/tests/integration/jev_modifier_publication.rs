@@ -1834,7 +1834,7 @@ fn static_preservation_complete_faces_survive_both_normal_loaders() {
                     assert!(
                         face.triggers.iter().any(|trigger| matches!(
                             &trigger.mode,
-                            engine::types::ability::TriggerMode::Unknown(description)
+                            engine::types::TriggerMode::Unknown(description)
                                 if description == "whenever you cast a spell with power, toughness, or loyalty equal to the chosen number"
                         )),
                         "the independent multi-comma trigger head remains honest"

@@ -1174,7 +1174,8 @@ pub(crate) fn parse_enchanted_is_type(
     // before its general continuous-predicate branch. Claim a complete basic
     // land-type predicate here as well as on the single-static route, so the
     // general subtype setter cannot retain the land's printed abilities.
-    if let Some(modifications) = parse_land_type_change_modifications(is_rest_lower) {
+    if let Some(land_modifications) = parse_land_type_change_modifications(is_rest_lower) {
+        modifications.extend(land_modifications);
         return Some(
             StaticDefinition::continuous()
                 .affected(TargetFilter::Typed(
@@ -3246,4 +3247,56 @@ pub(crate) fn parse_creature_type_change_subject(subject: &str) -> Option<Target
     .parse(subject)
     .ok()
     .map(|(_, filter)| filter)
+}
+
+#[cfg(test)]
+mod attached_basic_land_prefix_tests {
+    use super::*;
+    use crate::types::ability::BasicLandType;
+
+    #[test]
+    fn complete_static_entries_preserve_explicit_removal_before_additive_land_type() {
+        // Grammar preservation controls, not Oracle or runtime-support claims.
+        let cases = [
+            (
+                "Enchanted land loses all abilities and is an Island in addition to its other types.",
+                vec![
+                    ContinuousModification::RemoveAllAbilities,
+                    ContinuousModification::AddSubtype {
+                        subtype: "Island".to_string(),
+                    },
+                ],
+            ),
+            (
+                "Enchanted land is an Island in addition to its other types.",
+                vec![ContinuousModification::AddSubtype {
+                    subtype: "Island".to_string(),
+                }],
+            ),
+            (
+                "Enchanted land is an Island.",
+                vec![ContinuousModification::SetBasicLandType {
+                    land_type: BasicLandType::Island,
+                }],
+            ),
+        ];
+        for (text, modifications) in cases {
+            let expected = StaticDefinition::continuous()
+                .affected(TargetFilter::Typed(
+                    TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+                ))
+                .modifications(modifications)
+                .description(text.to_string());
+            assert_eq!(
+                crate::parser::oracle_static::parse_static_line(text),
+                Some(expected.clone()),
+                "single static entry: {text}"
+            );
+            assert_eq!(
+                crate::parser::oracle_static::parse_static_line_multi(text),
+                vec![expected],
+                "multi static entry: {text}"
+            );
+        }
+    }
 }
