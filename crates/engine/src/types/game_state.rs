@@ -45188,7 +45188,7 @@ mod tests {
     #[test]
     fn lazy_boxed_map_is_unallocated_while_empty() {
         let mut map: LazyBoxedMap<u64, u32> = LazyBoxedMap::default();
-        assert!(map.0.is_none() && map.is_empty() && map.len() == 0);
+        assert!(map.0.is_none() && map.is_empty());
         assert_eq!(map.remove(&1), None);
         map.retain(|_, _| true);
         assert!(map.0.is_none());
