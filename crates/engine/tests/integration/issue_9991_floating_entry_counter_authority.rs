@@ -329,21 +329,17 @@ fn add_dark(scenario: &mut GameScenario, owner: PlayerId, zone: Zone) -> ObjectI
         .id()
 }
 
-fn add_walker(scenario: &mut GameScenario, owner: PlayerId, bolas: bool) -> ObjectId {
-    let (name, subtype, oracle) = if bolas {
-        ("Nicol Bolas, Dragon-God", "Bolas", BOLAS)
-    } else {
-        ("Chandra, Torch of Defiance", "Chandra", CHANDRA)
-    };
-    scenario
-        .add_spell_to_hand(owner, name, false)
-        .as_planeswalker_with_loyalty(subtype, 4)
-        .as_legendary()
-        .from_oracle_text(oracle)
-        // Inline Oracle faces omit printed loyalty; restore that metadata after
-        // parsing, as add_planeswalker_from_oracle does for battlefield fixtures.
-        .as_planeswalker_with_loyalty(subtype, 4)
-        .with_mana_cost(if bolas {
+enum WalkerFixture {
+    Bolas,
+    Chandra,
+}
+
+fn add_walker(scenario: &mut GameScenario, owner: PlayerId, fixture: WalkerFixture) -> ObjectId {
+    let (name, subtype, oracle, mana_cost) = match fixture {
+        WalkerFixture::Bolas => (
+            "Nicol Bolas, Dragon-God",
+            "Bolas",
+            BOLAS,
             ManaCost::Cost {
                 shards: vec![
                     ManaCostShard::Blue,
@@ -353,13 +349,27 @@ fn add_walker(scenario: &mut GameScenario, owner: PlayerId, bolas: bool) -> Obje
                     ManaCostShard::Red,
                 ],
                 generic: 0,
-            }
-        } else {
+            },
+        ),
+        WalkerFixture::Chandra => (
+            "Chandra, Torch of Defiance",
+            "Chandra",
+            CHANDRA,
             ManaCost::Cost {
                 shards: vec![ManaCostShard::Red, ManaCostShard::Red],
                 generic: 2,
-            }
-        })
+            },
+        ),
+    };
+    scenario
+        .add_spell_to_hand(owner, name, false)
+        .as_planeswalker_with_loyalty(subtype, 4)
+        .as_legendary()
+        .from_oracle_text(oracle)
+        // Inline Oracle faces omit printed loyalty; restore that metadata after
+        // parsing, as add_planeswalker_from_oracle does for battlefield fixtures.
+        .as_planeswalker_with_loyalty(subtype, 4)
+        .with_mana_cost(mana_cost)
         .id()
 }
 
@@ -445,7 +455,7 @@ fn dark_intimations_two_graveyard_copies_add_two_loyalty_once_each() {
     scenario.at_phase(Phase::PreCombatMain);
     let a = add_dark(&mut scenario, P0, Zone::Graveyard);
     let b = add_dark(&mut scenario, P0, Zone::Graveyard);
-    let walker = add_walker(&mut scenario, P0, true);
+    let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
     fund(&mut scenario, P0, 1);
     let mut runner = scenario.build();
     let outcome = runner.cast(walker).resolve();
@@ -498,8 +508,8 @@ fn dark_intimations_filters_bolas_subtype_not_all_planeswalkers() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let dark = add_dark(&mut scenario, P0, Zone::Graveyard);
-    let chandra = add_walker(&mut scenario, P0, false);
-    let bolas = add_walker(&mut scenario, P0, true);
+    let chandra = add_walker(&mut scenario, P0, WalkerFixture::Chandra);
+    let bolas = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
     fund(&mut scenario, P0, 2);
     let mut runner = scenario.build();
     assert_cast_trigger(&runner, dark);
@@ -525,7 +535,7 @@ fn dark_intimations_functions_only_in_the_graveyard() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let dark = add_dark(&mut scenario, P0, zone);
-        let walker = add_walker(&mut scenario, P0, true);
+        let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
         fund(&mut scenario, P0, 1);
         let mut runner = scenario.build();
         assert_cast_trigger(&runner, dark);
@@ -557,7 +567,7 @@ fn dark_intimations_on_the_stack_does_not_supply_a_rider() {
         scenario.add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE);
         scenario.add_card_to_library_top(P0, "Draw for Dark Intimations");
         let dark = add_dark(&mut scenario, P0, source_zone);
-        let walker = add_walker(&mut scenario, P0, true);
+        let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
         fund(&mut scenario, P0, 2);
         let mut runner = scenario.build();
         if source_zone == Zone::Hand {
@@ -594,7 +604,7 @@ fn dark_intimations_uses_the_graveyard_owners_cast_trigger() {
     scenario.at_phase(Phase::PreCombatMain);
     let p0_dark = add_dark(&mut scenario, P0, Zone::Graveyard);
     let p1_dark = add_dark(&mut scenario, P1, Zone::Graveyard);
-    let walker = add_walker(&mut scenario, P1, true);
+    let walker = add_walker(&mut scenario, P1, WalkerFixture::Bolas);
     fund(&mut scenario, P1, 1);
     let mut runner = scenario.build();
     make_p1_active(&mut runner);
@@ -620,7 +630,7 @@ fn dark_intimations_source_departure_does_not_gate_the_rider() {
         scenario.at_phase(Phase::PreCombatMain);
         scenario.add_enchantment_from_oracle(P0, "Leyline of Anticipation", LEYLINE);
         let dark = add_dark(&mut scenario, P0, Zone::Graveyard);
-        let walker = add_walker(&mut scenario, P0, true);
+        let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
         let recollect = scenario
             .add_spell_to_hand_from_oracle(P0, "Recollect", false, RECOLLECT)
             .with_mana_cost(ManaCost::Cost {
@@ -680,7 +690,7 @@ fn dark_intimations_stifled_trigger_neither_exiles_nor_installs() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let dark = add_dark(&mut scenario, P0, Zone::Graveyard);
-        let walker = add_walker(&mut scenario, P0, true);
+        let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
         let stifle = scenario
             .add_spell_to_hand_from_oracle(P0, "Stifle", true, STIFLE)
             .with_mana_cost(ManaCost::Cost {
@@ -720,7 +730,7 @@ fn dark_intimations_additional_loyalty_is_doubled_as_part_of_entry() {
         if with_dark {
             add_dark(&mut scenario, P0, Zone::Graveyard);
         }
-        let walker = add_walker(&mut scenario, P0, true);
+        let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
         fund(&mut scenario, P0, 1);
         let mut runner = scenario.build();
         let outcome = runner.cast(walker).resolve();
@@ -749,7 +759,7 @@ fn dark_intimations_uses_its_owner_after_its_spell_was_stolen() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let dark = add_dark(&mut scenario, P0, Zone::Hand);
-    let walker = add_walker(&mut scenario, P0, true);
+    let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
     let discarded = scenario.add_card_to_hand(P0, "Discard instead of Bolas");
     let drawn = scenario.add_card_to_library_top(P1, "Stolen sorcery draw");
     let commandeer = scenario
@@ -813,7 +823,7 @@ fn dark_intimations_rider_follows_bolas_after_commandeer() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let dark = add_dark(&mut scenario, P0, Zone::Graveyard);
-    let walker = add_walker(&mut scenario, P0, true);
+    let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
     let commandeer = scenario
         .add_spell_to_hand_from_oracle(P1, "Commandeer", true, COMMANDEER)
         .with_mana_cost(ManaCost::Cost {
@@ -895,7 +905,7 @@ fn dark_intimations_rider_rejects_bolas_after_remand_and_recast() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let dark = add_dark(&mut scenario, P0, Zone::Graveyard);
-        let walker = add_walker(&mut scenario, P0, true);
+        let walker = add_walker(&mut scenario, P0, WalkerFixture::Bolas);
         let remand = scenario
             .add_spell_to_hand_from_oracle(P0, "Remand", true, REMAND)
             .with_mana_cost(ManaCost::Cost {
