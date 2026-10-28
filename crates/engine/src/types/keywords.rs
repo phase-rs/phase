@@ -183,15 +183,30 @@ impl MorphCost {
 pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::ReturnToHand { .. } => true,
+        // CR 107.3d: a morph cost's X is chosen immediately before paying it, but
+        // variable non-mana morph costs are not supported yet, so only fixed
+        // counts are accepted.
         AbilityCost::Discard {
+            count,
             selection,
             self_scope,
             ..
-        } => !self_scope.is_source_card() && *selection != CardSelectionMode::Random,
-        AbilityCost::PayLife { .. } => true,
-        AbilityCost::Reveal { .. } => true,
+        } => {
+            matches!(count, QuantityExpr::Fixed { .. })
+                && !self_scope.is_source_card()
+                && *selection != CardSelectionMode::Random
+        }
+        AbilityCost::PayLife { amount } => matches!(amount, QuantityExpr::Fixed { .. }),
+        // CR 107.3d: variable non-mana morph costs are not supported yet (the
+        // turn-face-up flow has no X choice for non-mana counts), so a symbolic
+        // reveal count is unsupported rather than read as 0.
+        AbilityCost::Reveal { count, .. } => matches!(count, QuantityExpr::Fixed { .. }),
         AbilityCost::Sacrifice(cost) => {
-            matches!(cost.requirement, SacrificeRequirement::Count { .. })
+            // `u32::MAX` is the parser sentinel for "X" / "any number of".
+            matches!(
+                cost.requirement,
+                SacrificeRequirement::Count { count } if count != u32::MAX
+            )
         }
         AbilityCost::Mana { .. } => true,
         AbilityCost::ManaDynamic { .. }
@@ -5964,6 +5979,31 @@ mod tests {
         AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 3 },
         }
+    }
+
+    // CR 107.3d + CR 702.37e: variable non-mana morph costs are not supported
+    // yet, so symbolic or sentinel counts must not be accepted as payable morph
+    // costs (they stay unsupported in coverage).
+    #[test]
+    fn morph_cost_support_requires_fixed_counts() {
+        assert!(is_ability_cost_supported_for_morph(&pay_life_cost()));
+        assert!(!is_ability_cost_supported_for_morph(
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }
+        ));
+        let sacrifice = |count| {
+            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::new(
+                TargetFilter::Any,
+                crate::types::ability::SacrificeRequirement::Count { count },
+            ))
+        };
+        assert!(is_ability_cost_supported_for_morph(&sacrifice(1)));
+        assert!(!is_ability_cost_supported_for_morph(&sacrifice(u32::MAX)));
     }
 
     /// One distinctive sample per payload-bearing `Keyword` variant.

@@ -10,20 +10,18 @@ use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::game::effects::cast_from_zone;
-use crate::game::filter::{
-    filter_contains_filter_prop, retarget_chosen_card_type_to_creature_type,
-};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
-    ActivationManaPaymentRestriction, ActivationRestriction, AdditionalCost, CardPlayMode,
-    CastManaSpentMetric, CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType,
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, CostReduction, CounterSourceRider,
-    DamageRedirectTarget, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
-    GuardReading, ManaProduction, ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
+    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
+    AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission, CastingPermission,
+    CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
+    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
+    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
+    VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -8999,15 +8997,13 @@ fn guard_owner(body: &AbilityDefinition, parent: Option<&Effect>) -> bool {
     match parent {
         // O1a — CR 614.1a + CR 608.2n.
         Some(Effect::CastFromZone { .. }) => {
-            cast_from_zone::graveyard_destination_rider(&body.effect, body.condition.as_ref())
-                .is_some()
+            graveyard_destination_rider(&body.effect, body.condition.as_ref()).is_some()
         }
         // O1b — CR 608.2c + CR 614.1a. Exile only: the counter path's library/hand
         // redirect rides `countered_spell_zone`, never a sub-ability.
-        Some(Effect::Counter { .. }) => cast_from_zone::is_graveyard_exile_rider_subability(
-            &body.effect,
-            body.condition.as_ref(),
-        ),
+        Some(Effect::Counter { .. }) => {
+            is_graveyard_exile_rider_subability(&body.effect, body.condition.as_ref())
+        }
         // R-a. CR-neutral hygiene, not a rules claim: the parent already records this
         // clause's unsupportedness, and a second gap over the same defect double-counts it
         // — the same per-unit suppression rule `swallow_check` applies via its
@@ -10199,7 +10195,7 @@ fn unsupported_residual(gap: &str, description: &Option<String>) -> AbilityDefin
 fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
     let refused = match &*def.effect {
         Effect::AddTargetReplacement { replacement, .. } => {
-            crate::game::effects::add_target_replacement::replacement_install_is_refused(
+            crate::types::ability::replacement_install_is_refused(
                 replacement,
                 def.duration.as_ref(),
             )
@@ -10213,7 +10209,7 @@ fn demote_lifetimes_in_ability(def: &mut AbilityDefinition) {
         Effect::PreventDamage {
             prevention_duration,
             ..
-        } => crate::game::effects::prevent_damage::prevention_shield_is_refused(
+        } => crate::types::ability::prevention_shield_is_refused(
             prevention_duration.as_ref(),
             def.duration.as_ref(),
         ),

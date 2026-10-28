@@ -234,17 +234,19 @@ fn legacy_mass_library_order_prompt_is_current(
     }
 }
 
-/// CR 401.4 + CR 608.2c: whether a departure settled an open owner library
-/// arrangement (`settle_owner_library_arrangement_after_departure`).
+/// CR 608.2c: whether a departure settled an open resolution choice (an owner
+/// library arrangement or a player-scope sacrifice) through its handler
+/// (`settle_owner_library_arrangement_after_departure`,
+/// `settle_player_scope_sacrifice_after_departure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OwnerArrangementDepartureSettlement {
-    /// No arrangement was settled: none was open, its prompt still stands or
-    /// passed to the next owner, or its carrier was retired without
+pub(crate) enum DepartureSettlement {
+    /// Nothing was settled: no choice was open, its prompt still stands or
+    /// passed to the next chooser, or its carrier was retired without
     /// completion.
     NotSettled,
-    /// The departure settled the arrangement through its handler — the
-    /// collected orders moved, or the instruction completed with nothing
-    /// moved — and the resolution went on to its remaining instructions
+    /// The departure settled the choice through its handler — the collected
+    /// choices were carried out, or the instruction completed with nothing
+    /// left to do — and the resolution went on to its remaining instructions
     /// (CR 608.2m).
     Settled,
 }
@@ -261,15 +263,15 @@ pub(crate) enum OwnerArrangementDepartureSettlement {
 pub(crate) fn settle_owner_library_arrangement_after_departure(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) -> Result<OwnerArrangementDepartureSettlement, EngineError> {
+) -> Result<DepartureSettlement, EngineError> {
     match effects::change_zone::reconcile_owner_library_arrangement(state) {
         effects::change_zone::OwnerLibraryArrangementReconciliation::Unchanged
         | effects::change_zone::OwnerLibraryArrangementReconciliation::Retired => {
-            Ok(OwnerArrangementDepartureSettlement::NotSettled)
+            Ok(DepartureSettlement::NotSettled)
         }
         effects::change_zone::OwnerLibraryArrangementReconciliation::Prompted(chooser) => {
             state.priority_player = chooser;
-            Ok(OwnerArrangementDepartureSettlement::NotSettled)
+            Ok(DepartureSettlement::NotSettled)
         }
         effects::change_zone::OwnerLibraryArrangementReconciliation::Settle { chooser, cards } => {
             state.priority_player = chooser;
@@ -284,7 +286,116 @@ pub(crate) fn settle_owner_library_arrangement_after_departure(
                 | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(_) => {}
                 ResolutionChoiceOutcome::ActionResult(result) => events.extend(result.events),
             }
-            Ok(OwnerArrangementDepartureSettlement::Settled)
+            Ok(DepartureSettlement::Settled)
+        }
+    }
+}
+
+/// CR 800.4a + CR 101.4 + CR 608.2m: after a player leaves, continue an open
+/// player-scope sacrifice with the players and objects still in the game:
+/// republish the current chooser's prompt, settle it through this handler, or
+/// resume a batch whose CR 616.1 chooser left. Reports whether it settled, so
+/// a departed controller's spell the settlement continued is not retired.
+pub(crate) fn settle_player_scope_sacrifice_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<DepartureSettlement, EngineError> {
+    match effects::reconcile_player_scope_sacrifice(state) {
+        effects::PlayerScopeSacrificeReconciliation::Unchanged
+        | effects::PlayerScopeSacrificeReconciliation::Retired => {
+            Ok(DepartureSettlement::NotSettled)
+        }
+        effects::PlayerScopeSacrificeReconciliation::Prompted(chooser) => {
+            // The republished prompt always names a living chooser.
+            state.priority_player = chooser;
+            Ok(DepartureSettlement::NotSettled)
+        }
+        effects::PlayerScopeSacrificeReconciliation::Settle { chooser, cards } => {
+            // CR 800.4a: priority never names a player who has left the game.
+            if super::players::is_alive(state, chooser) {
+                state.priority_player = chooser;
+            }
+            let waiting_for = state.waiting_for.clone();
+            let outcome = handle_resolution_choice(
+                state,
+                waiting_for,
+                GameAction::SelectCards { cards },
+                events,
+            )?;
+            // CR 603.3d + CR 601.2c: a completed batch's observer drained by the
+            // answer can return its target prompt without writing it; adopt it as
+            // the answered route's reducer would.
+            adopt_departure_choice_outcome(state, events, outcome);
+            Ok(DepartureSettlement::Settled)
+        }
+        effects::PlayerScopeSacrificeReconciliation::Resume { departed_chooser } => {
+            // CR 800.4a: priority passes to the next player still in the game;
+            // `drain_pending_continuation` runs only under a priority wait.
+            set_priority(state, super::players::next_player(state, departed_chooser));
+            // CR 603.10a: the departure's own zone changes are not part of the
+            // sacrifice batch's event span (a resumed batch's span starts at the
+            // beginning of the buffer it is handed).
+            let base = events.len();
+            let mut resumed = Vec::new();
+            let resume = super::engine_replacement::resume_paused_player_scope_sacrifice(
+                state,
+                &mut resumed,
+            )?;
+            events.extend(resumed);
+            // CR 608.2c + CR 117.3b + CR 800.4j: the common priority boundary the
+            // answered routes end in: it finishes the resolution's remaining
+            // frames and settles a finished ability's carrier, giving priority to
+            // the active player (or the next living seat). Inert under a prompt;
+            // an instant or sorcery still owing its final part is left to the
+            // action boundary's final-part convergence (CR 608.2n).
+            resume_with_error_propagation(state, events)?;
+            // CR 603.2 + CR 603.10a: a concession is not scanned by the post-action
+            // pipeline, so the resumed batch's observers ("whenever a creature
+            // dies", "whenever a player sacrifices") are collected here, through
+            // the authority the answered sacrifice uses for its own batch.
+            if let Some(span) = resume.completed_batch {
+                if let Some(outcome) = batch_or_drain_observer_triggers(
+                    state,
+                    events,
+                    base + span.start,
+                    base + span.end,
+                    false,
+                ) {
+                    // No reducer adopts a departure's wait; adopt it here.
+                    adopt_departure_choice_outcome(state, events, outcome);
+                }
+            }
+            // `resume.next_wait` is deliberately not adopted: it is a clone of
+            // `state.waiting_for` taken inside the helper, and the boundary and
+            // collection above may since have replaced that wait.
+            Ok(DepartureSettlement::Settled)
+        }
+    }
+}
+
+/// CR 800.4a + CR 603.3d + CR 601.2c: a departure answers or settles an open
+/// resolution choice inside the concession, whose reducer adopts no handler
+/// outcome. Adopt the outcome exactly as the resolution-choice arm of
+/// `apply_action` adopts it on the answered route, so a prompt the handler
+/// returned without writing it (a drained trigger's target selection) reaches
+/// its player.
+fn adopt_departure_choice_outcome(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    outcome: ResolutionChoiceOutcome,
+) {
+    match outcome {
+        // `WaitingForWithInlineTriggers` only tells the answered route's
+        // post-action pipeline not to rescan; a departure runs no pipeline.
+        ResolutionChoiceOutcome::WaitingFor(waiting_for)
+        | ResolutionChoiceOutcome::WaitingForWithInlineTriggers(waiting_for) => {
+            state.waiting_for = waiting_for;
+        }
+        // `ActionResult::applied(std::mem::take(events), ..)` took the whole
+        // buffer; hand it back with the wait the action ended on.
+        ResolutionChoiceOutcome::ActionResult(result) => {
+            state.waiting_for = result.waiting_for;
+            events.extend(result.events);
         }
     }
 }
@@ -6535,62 +6646,63 @@ pub(super) fn handle_resolution_choice(
                     .expect("completed single Devour entry owns the active ChangeZone frame");
             }
 
-            if matches!(effect_kind, EffectKind::Sacrifice)
-                && state.pending_player_scope_sacrifice_choice.is_some()
-            {
+            if matches!(effect_kind, EffectKind::Sacrifice) {
                 // CR 101.4: If multiple players make choices for one
                 // instruction, collect those choices before the simultaneous
-                // sacrifice action happens.
-                let outcome = effects::advance_pending_player_scope_sacrifice_choice(
-                    state, player, &chosen, events,
+                // sacrifice action happens. CR 608.2c: only a carrier of this
+                // prompt's own instruction and resolution collects the answer.
+                if let Some(outcome) = effects::advance_pending_player_scope_sacrifice_choice(
+                    state, player, source_id, &chosen, events,
                 )
-                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-                match outcome {
-                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
-                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
-                    }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
-                        events_before_sacrifice,
-                        events_after_sacrifice,
-                        sacrificed_count,
-                    } => {
-                        effects::stamp_active_player_action_completion(
-                            state,
-                            source_id,
-                            crate::types::ability::EffectResolutionResult {
-                                cause: crate::types::ability::ThisWayCause::Sacrificed,
-                                count: sacrificed_count,
-                            },
-                        );
-                        // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
-                        // complete body of a paused post-replacement dispatch
-                        // (Devour). Retire that exact resident before its outer
-                        // ChangeZone iteration resumes; a chained ability
-                        // continuation remains its owner.
-                        if state.active_ability_continuation().is_none() {
-                            state.finish_active_paused_post_replacement_dispatch();
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    match outcome {
+                        effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
                         }
-                        set_priority(state, player);
-                        resume_with_error_propagation(state, events)?;
-                        if let Some(outcome) = batch_or_drain_observer_triggers(
-                            state,
-                            events,
+                        effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
+                        }
+                        effects::PendingPlayerScopeSacrificeOutcome::Completed {
                             events_before_sacrifice,
                             events_after_sacrifice,
-                            false,
-                        ) {
-                            return Ok(outcome);
+                            sacrificed_count,
+                        } => {
+                            effects::stamp_active_player_action_completion(
+                                state,
+                                source_id,
+                                crate::types::ability::EffectResolutionResult {
+                                    cause: crate::types::ability::ThisWayCause::Sacrificed,
+                                    count: sacrificed_count,
+                                },
+                            );
+                            // CR 614.12a + CR 614.13a: a direct sacrifice selection can be the
+                            // complete body of a paused post-replacement dispatch
+                            // (Devour). Retire that exact resident before its outer
+                            // ChangeZone iteration resumes; a chained ability
+                            // continuation remains its owner.
+                            if state.active_ability_continuation().is_none() {
+                                state.finish_active_paused_post_replacement_dispatch();
+                            }
+                            set_priority(state, player);
+                            resume_with_error_propagation(state, events)?;
+                            if let Some(outcome) = batch_or_drain_observer_triggers(
+                                state,
+                                events,
+                                events_before_sacrifice,
+                                events_after_sacrifice,
+                                false,
+                            ) {
+                                return Ok(outcome);
+                            }
+                            return Ok(ResolutionChoiceOutcome::WaitingFor(
+                                state.waiting_for.clone(),
+                            ));
                         }
-                        return Ok(ResolutionChoiceOutcome::WaitingFor(
-                            state.waiting_for.clone(),
-                        ));
                     }
                 }
             }

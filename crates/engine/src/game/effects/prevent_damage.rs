@@ -1,6 +1,6 @@
-use crate::game::effects::add_target_replacement::ReplacementDurationExpiry;
 use crate::game::effects::choose_damage_source;
 use crate::game::quantity::resolve_quantity;
+use crate::types::ability::{prevention_shield_is_refused, ReplacementDurationExpiry};
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
     EffectKind, EffectScope, FilterProp, PreventionAmount, PreventionScope, ReplacementDefinition,
@@ -348,7 +348,7 @@ pub fn resolve(
     // `extract_target_filter_from_effect` (the same predicate that mints the
     // target slot), so this can never disagree with targeting.
     let declared_recipient =
-        crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+        crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
 
     // CR 608.2c + CR 611.2c + CR 615.11 (issue #6682): resolve any
     // `TrackedSet` sentinel in the recipient/source filters to a CONCRETE
@@ -494,13 +494,9 @@ pub fn resolve(
             prevention_duration.as_ref().or(ability.duration.as_ref())
         )));
     }
-    let expiry = match crate::game::effects::add_target_replacement::expiry_from_duration(
-        prevention_duration.as_ref(),
-    ) {
+    let expiry = match crate::types::ability::expiry_from_duration(prevention_duration.as_ref()) {
         ReplacementDurationExpiry::Unstated => {
-            crate::game::effects::add_target_replacement::expiry_from_duration(
-                ability.duration.as_ref(),
-            )
+            crate::types::ability::expiry_from_duration(ability.duration.as_ref())
         }
         expiry => expiry,
     };
@@ -838,46 +834,6 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
-}
-
-/// CR 611.2a + CR 615: does the prevention-shield seam refuse this stated
-/// lifetime? THE authority for that question, shared by two consumers:
-///
-/// * `resolve` above, which turns a refusal into a hard `EffectError` rather
-///   than a successful no-op; and
-/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
-///   post-lowering honesty net, which demotes a refused line to
-///   `Effect::Unimplemented` so no card reports the shape as supported.
-///
-/// The fallback order mirrors `resolve`'s exactly — the clause's own
-/// `prevention_duration` first, the resolving ability's duration only when the
-/// clause states none — so the net and the install seam cannot disagree about
-/// which shape is supported.
-///
-/// Both refused classes are genuinely unenforceable HERE, for different
-/// reasons: `Unsupported` has no expiry stamp at all, and `GateControlled`
-/// promises a runtime applicability gate that only the bare untap-prevention
-/// rider carries (`add_target_replacement::stamp_for_as_long_as_controlled_gate`)
-/// — a prevention shield has no such gate, so it would install with no lifetime
-/// the engine can end.
-///
-/// Reachable, measured over the parsed corpus: Old Fat Spider Can't See Me
-/// chapter II states "for as long as this Saga remains on the battlefield" on a
-/// prevention clause, which lands in the refused set. Before this guard it
-/// resolved successfully and installed nothing.
-pub(crate) fn prevention_shield_is_refused(
-    prevention_duration: Option<&crate::types::ability::Duration>,
-    ability_duration: Option<&crate::types::ability::Duration>,
-) -> bool {
-    use crate::game::effects::add_target_replacement::expiry_from_duration;
-    let effective = match expiry_from_duration(prevention_duration) {
-        ReplacementDurationExpiry::Unstated => expiry_from_duration(ability_duration),
-        stated => stated,
-    };
-    matches!(
-        effective,
-        ReplacementDurationExpiry::GateControlled | ReplacementDurationExpiry::Unsupported
-    )
 }
 
 #[cfg(test)]

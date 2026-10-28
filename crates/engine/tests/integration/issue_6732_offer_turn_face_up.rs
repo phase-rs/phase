@@ -281,10 +281,10 @@ fn check_warbreak_morph_x() {
 /// A mana source whose own cost exiles it, plus two exile→graveyard
 /// replacements, forces a CR 616.1 ordering choice while the turn-face-up cost
 /// is being auto-tapped. `casting.rs` deliberately reports such a source as
-/// payable, so the offer above is right to include it — but the compatibility
-/// wrapper `pay_special_action_mana_cost` converts the resulting `Paused` into
-/// an error. That is why #4538 was asked to build a typed resume before the
-/// action could be offered.
+/// payable, so the offer above is right to include it; the action pays through
+/// `pay_special_action_mana_cost_with_resume`, whose typed continuation turns
+/// that pause into a resumable prompt instead of an error. That is the typed
+/// resume #4538 required before the action could be offered.
 ///
 /// The permanent must still be face down while the choice is open, and must flip
 /// exactly once the choice is answered.

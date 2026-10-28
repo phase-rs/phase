@@ -8693,6 +8693,230 @@ mod tests {
         );
     }
 
+    /// Production declaration path: a lone 2/2 facing a 2-loyalty planeswalker
+    /// attacks the planeswalker, not the player (no race, no blockers).
+    #[test]
+    fn root_attack_declaration_kills_lone_planeswalker() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let attacker = add_creature(&mut state, PlayerId(0), 2, 2);
+        let pw_card = CardId(state.next_object_id);
+        let pw = create_object(
+            &mut state,
+            pw_card,
+            PlayerId(1),
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pw).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(2);
+        obj.entered_battlefield_turn = Some(1);
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+        let session = AiSession::arc_from_game(&state);
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        assert!(
+            matches!(
+                root.as_slice(),
+                [(GameAction::DeclareAttackers { attacks, .. }, 1.0)]
+                    if attacks.iter().any(|(id, t)| *id == attacker
+                        && *t == engine::game::combat::AttackTarget::Planeswalker(pw))
+            ),
+            "got {root:?}"
+        );
+    }
+
+    fn add_planeswalker(state: &mut GameState, owner: PlayerId, loyalty: u32) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            "Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(loyalty);
+        obj.entered_battlefield_turn = Some(1);
+        id
+    }
+
+    /// Root-scored attack declaration for player 0 on a prepared board.
+    fn root_attacks(mut state: GameState) -> Vec<(ObjectId, engine::game::combat::AttackTarget)> {
+        state.turn_number = 2;
+        state.phase = Phase::DeclareAttackers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(&state);
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(17);
+        let session = AiSession::arc_from_game(&state);
+        let root = score_candidates_core(&state, PlayerId(0), &config, &session, None);
+        match root.as_slice() {
+            [(GameAction::DeclareAttackers { attacks, .. }, _)] => attacks.clone(),
+            other => panic!("expected one DeclareAttackers candidate, got {other:?}"),
+        }
+    }
+
+    /// Production declaration path: an untapped blocker that stops the lone
+    /// attacker means the planeswalker cannot be killed, so the attacker is not
+    /// sent at it (CR 509.1b: the defender chooses blocks).
+    #[test]
+    fn root_attack_declaration_skips_planeswalker_behind_blocker() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        let attacker = add_creature(&mut state, PlayerId(0), 2, 2);
+        add_creature(&mut state, PlayerId(1), 0, 4);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == attacker
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "attacker must still attack the player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != attacker || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "got {attacks:?}"
+        );
+    }
+
+    /// Production declaration path: with two equal-loyalty planeswalkers the
+    /// one carrying loyalty abilities is attacked, in either insertion order.
+    #[test]
+    fn root_attack_declaration_picks_planeswalker_with_abilities_in_both_orders() {
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter,
+        };
+        for engine_first in [true, false] {
+            let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+            let attacker = add_creature(&mut state, PlayerId(0), 5, 5);
+            let (engine_pw, _bare) = if engine_first {
+                let e = add_planeswalker(&mut state, PlayerId(1), 3);
+                (e, add_planeswalker(&mut state, PlayerId(1), 3))
+            } else {
+                let b = add_planeswalker(&mut state, PlayerId(1), 3);
+                (add_planeswalker(&mut state, PlayerId(1), 3), b)
+            };
+            for amount in [1, -2] {
+                let mut ability = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                );
+                ability.cost = Some(AbilityCost::Loyalty { amount });
+                std::sync::Arc::make_mut(&mut state.objects.get_mut(&engine_pw).unwrap().abilities)
+                    .push(ability);
+            }
+            let attacks = root_attacks(state);
+            assert!(
+                attacks.iter().any(|(id, t)| *id == attacker
+                    && *t == engine::game::combat::AttackTarget::Planeswalker(engine_pw)),
+                "engine_first={engine_first}: got {attacks:?}"
+            );
+        }
+    }
+
+    /// Production declaration path, mixed blocked/unblocked: a flyer the lone
+    /// blocker cannot stop kills the planeswalker, while the ground attacker the
+    /// blocker stops is not counted toward the kill.
+    #[test]
+    fn root_attack_declaration_counts_only_unblocked_attackers_toward_kill() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        let flyer = add_creature(&mut state, PlayerId(0), 2, 2);
+        state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let ground = add_creature(&mut state, PlayerId(0), 3, 3);
+        add_creature(&mut state, PlayerId(1), 0, 6);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == flyer
+                && *t == engine::game::combat::AttackTarget::Planeswalker(pw)),
+            "got {attacks:?}"
+        );
+        assert!(
+            attacks.iter().any(|(id, t)| *id == ground
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "blocked ground attacker must still attack the player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != ground || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "blocked ground attacker must not be sent at the planeswalker: {attacks:?}"
+        );
+    }
+
+    /// Production declaration path: while in Race objective, a kill that empties
+    /// face damage from all damaging attackers is ineligible even if blocked
+    /// attackers also swing. Here the 2/2 flyer connects while the 3/3 ground
+    /// attacker is absorbed by a 0/6 blocker; diverting the flyer to the planeswalker
+    /// would leave zero damage connecting to the player being raced.
+    #[test]
+    fn root_attack_declaration_race_guard_keeps_connecting_attacker_on_player() {
+        let mut state = GameState::new(engine::types::format::FormatConfig::standard(), 2, 42);
+        state.players[0].life = 12;
+        state.players[1].life = 20;
+        let flyer = add_creature(&mut state, PlayerId(0), 2, 2);
+        state
+            .objects
+            .get_mut(&flyer)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        let ground = add_creature(&mut state, PlayerId(0), 3, 3);
+        let blocker = add_creature(&mut state, PlayerId(1), 0, 6);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 2);
+
+        let config = create_config(AiDifficulty::Hard, Platform::Native);
+        assert_eq!(
+            crate::combat_ai::determine_attack_objective(
+                &state,
+                PlayerId(0),
+                &[PlayerId(1)],
+                &[flyer, ground],
+                &[blocker],
+                &config.profile,
+            ),
+            crate::combat_ai::CombatObjective::Race,
+            "board fixture must actually select CombatObjective::Race"
+        );
+
+        let attacks = root_attacks(state);
+        assert!(
+            attacks.iter().any(|(id, t)| *id == flyer
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "connecting flyer must stay on player while racing: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().any(|(id, t)| *id == ground
+                && *t == engine::game::combat::AttackTarget::Player(PlayerId(1))),
+            "blocked ground attacker must still attack player: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != flyer || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "connecting flyer must not be diverted to planeswalker: {attacks:?}"
+        );
+        assert!(
+            attacks.iter().all(|(id, t)| {
+                *id != ground || *t != engine::game::combat::AttackTarget::Planeswalker(pw)
+            }),
+            "blocked ground attacker must not be sent at planeswalker: {attacks:?}"
+        );
+    }
+
     #[test]
     fn root_combat_comparison_requires_context_but_root_scoring_reaches_it() {
         let (state, attacker) = free_for_all_attacker_root(false);

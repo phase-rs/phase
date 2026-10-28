@@ -1558,7 +1558,7 @@ static ORACLE_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::
     let creature: Vec<String> =
         serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
             .expect("oracle-subtypes.json well-formed");
-    crate::database::subtype_vocab::build_parser_subtype_vocabulary(&creature)
+    crate::types::card_type::build_parser_subtype_vocabulary(&creature)
 });
 
 fn oracle_subtypes() -> &'static [String] {

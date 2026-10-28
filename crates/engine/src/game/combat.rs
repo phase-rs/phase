@@ -6168,9 +6168,11 @@ pub enum CombatTaxPosture {
 ///
 /// An untaxed proposal is trivially affordable. A taxed one is probed with the
 /// same auto-tap payment authority `handle_pay_combat_tax` spends through
-/// (`pay_unless_cost` -> `pay_effect_mana_cost`). That spend has no resumable
-/// root, so a mana source whose own cost would pause for a replacement choice
-/// counts as unaffordable here, keeping the probe and the spend in agreement.
+/// (`pay_effect_mana_cost_with_resume` under the declaration's own
+/// `ManaAbilityResume::CombatTaxPayment` root). That spend suspends for a
+/// pre-spend mana choice exactly as the probe models it, so a replacement
+/// choice on an auto-tapped source and a choice-owing echo bonus are both
+/// payable here and the declaration commits only after they resolve.
 pub fn attack_tax_is_affordable(state: &GameState, attacks: &[(ObjectId, AttackTarget)]) -> bool {
     let Some((total_cost, _)) = compute_attack_tax(state, attacks) else {
         return true;
@@ -6180,7 +6182,7 @@ pub fn attack_tax_is_affordable(state: &GameState, attacks: &[(ObjectId, AttackT
         state.active_player,
         ObjectId(0),
         &total_cost,
-        super::casting::PausedManaPayment::Unresumable,
+        super::casting::PausedManaPayment::Resumable,
     )
 }
 
@@ -6200,7 +6202,7 @@ pub fn block_tax_is_affordable(
         player,
         ObjectId(0),
         &total_cost,
-        super::casting::PausedManaPayment::Unresumable,
+        super::casting::PausedManaPayment::Resumable,
     )
 }
 
@@ -6224,7 +6226,7 @@ pub fn pending_combat_tax_is_affordable(state: &GameState) -> bool {
         *player,
         ObjectId(0),
         total_cost,
-        super::casting::PausedManaPayment::Unresumable,
+        super::casting::PausedManaPayment::Resumable,
     )
 }
 
