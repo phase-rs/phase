@@ -82,9 +82,21 @@ fn instruction_actor_declared_library_subject_survives_conjugated_counter() {
             "{subject}: {:?}",
             counters[0].instruction_actor
         );
+        assert_eq!(counters[1].instruction_actor, None);
+        // An absent actor is the printed controller, independently of the
+        // preceding instruction's declared player (CR 109.5).
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Source", 1, 1).id();
+        let recipient = scenario.add_creature(P1, "Recipient", 1, 1).id();
+        let mut resolved = build_resolved_from_def_with_targets(
+            counters[1],
+            source,
+            P0,
+            vec![TargetRef::Object(recipient)],
+        );
         assert_eq!(
-            counters[1].instruction_actor,
-            Some(ControllerRef::You.into())
+            crate::game::ability_utils::bind_instruction_actor(&scenario.state, &mut resolved),
+            Some(P0),
         );
     }
 }
@@ -88571,8 +88583,24 @@ mod controller_anaphor_antecedent_writer_tests {
         );
         let json = to_json(&parsed);
         assert!(
-            has_effect_field(&json, "Dig", "player", &TargetFilter::ParentTarget),
+            has_effect_field(&json, "Dig", "player", &TargetFilter::Player),
             "{json}"
+        );
+        let instruction = &parsed.abilities[0];
+        assert_eq!(
+            instruction.instruction_actor,
+            Some(ControllerRef::TargetPlayer.into())
+        );
+        let group = instruction
+            .declares_chosen_group
+            .expect("the player target is declared");
+        let placement = instruction
+            .sub_ability
+            .as_deref()
+            .expect("the declared-player continuation");
+        assert_eq!(
+            placement.instruction_actor,
+            Some(ControllerRef::DeclaredPlayer { group }.into())
         );
     }
 

@@ -1697,50 +1697,59 @@ fn handle_replacement_choice_inner(
                 super::engine::resume_pending_continuation_if_priority(state, events)?;
                 return Ok(state.waiting_for.clone());
             }
-            // CR 608.3e: If the ETB was prevented during spell resolution,
-            // the permanent goes to the graveyard instead.
-            //
-            // CR 614.6: this graveyard fallback is a FRESH, never-consulted
-            // event — the consulted (and prevented) event was the battlefield
-            // ENTRY (`to: Battlefield`), so routing the fallback through the
-            // pipeline cannot double-apply: the prevention definition is
-            // Battlefield-scoped and cannot re-match a →Graveyard move. A
-            // board-wide `Moved` graveyard→exile redirect (Rest in Peace /
-            // Leyline of the Void) now fires on the discarded spell — the
-            // un-migrated twin of stack.rs's C2 prevented-permanent site. The
-            // dead continuation is cleared BEFORE the move so a CR 616.1
-            // ordering pause (two simultaneous redirects) cannot leave it for
-            // the next resume's epilogue to drain; on a pause, surface the
-            // parked prompt (its resume delivers the chosen event through the
-            // ZoneChange arm above).
-            if state.active_ability_continuation().is_some() {
-                let _ = state
-                    .clear_active_ability_continuation()
-                    .expect("replacement cancellation cannot clear a buried continuation");
-            }
-            if let Some(ctx) = state.take_active_spell_resolution() {
-                match crate::game::zone_pipeline::move_object(
-                    state,
-                    crate::game::zone_pipeline::ZoneMoveRequest::spell_resolution_default(
-                        ctx.object_id,
-                        Zone::Graveyard,
-                    ),
-                    events,
-                ) {
-                    crate::game::zone_pipeline::ZoneMoveResult::Done => {}
-                    crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
-                    | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                        return Ok(state.waiting_for.clone());
-                    }
-                }
-            }
-            state.waiting_for = WaitingFor::Priority {
-                player: state.active_player,
-            };
-            super::engine::resume_pending_continuation_if_priority(state, events)?;
-            Ok(state.waiting_for.clone())
+            finish_prevented_battlefield_entry(state, events)
         }
     }
+}
+
+/// CR 608.3e + CR 614.6: Finish a prevented permanent entry, proposing its
+/// graveyard fallback as a fresh zone event.
+fn finish_prevented_battlefield_entry(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 608.3e: If the ETB was prevented during spell resolution,
+    // the permanent goes to the graveyard instead.
+    //
+    // CR 614.6: this graveyard fallback is a FRESH, never-consulted
+    // event — the consulted (and prevented) event was the battlefield
+    // ENTRY (`to: Battlefield`), so routing the fallback through the
+    // pipeline cannot double-apply: the prevention definition is
+    // Battlefield-scoped and cannot re-match a →Graveyard move. A
+    // board-wide `Moved` graveyard→exile redirect (Rest in Peace /
+    // Leyline of the Void) now fires on the discarded spell — the
+    // un-migrated twin of stack.rs's C2 prevented-permanent site. The
+    // dead continuation is cleared BEFORE the move so a CR 616.1
+    // ordering pause (two simultaneous redirects) cannot leave it for
+    // the next resume's epilogue to drain; on a pause, surface the
+    // parked prompt (its resume delivers the chosen event through the
+    // ZoneChange arm above).
+    if state.active_ability_continuation().is_some() {
+        let _ = state
+            .clear_active_ability_continuation()
+            .expect("replacement cancellation cannot clear a buried continuation");
+    }
+    if let Some(ctx) = state.take_active_spell_resolution() {
+        match crate::game::zone_pipeline::move_object(
+            state,
+            crate::game::zone_pipeline::ZoneMoveRequest::spell_resolution_default(
+                ctx.object_id,
+                Zone::Graveyard,
+            ),
+            events,
+        ) {
+            crate::game::zone_pipeline::ZoneMoveResult::Done => {}
+            crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
+            | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                return Ok(state.waiting_for.clone());
+            }
+        }
+    }
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
+    super::engine::resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
 }
 
 /// CR 614.12a: Commit a pre-entry controller choice onto the exact parked
@@ -4674,22 +4683,11 @@ mod tests {
         );
     }
 
-    /// CR 608.3e + CR 614.6 discriminating test (fail-first): when a permanent
-    /// spell's ETB is fully prevented after a replacement choice
-    /// (`ReplacementResult::Prevented` while SpellResolution is active),
-    /// the graveyard fallback is a FRESH, never-consulted event — it must route
-    /// through the zone pipeline so a board-wide `Moved` graveyard→exile
-    /// redirect (Rest in Peace / Leyline of the Void) fires on the discarded
-    /// spell. The raw `move_to_zone` fallback dropped the redirect — the
-    /// un-migrated twin of the stack.rs C2 prevented-permanent site.
-    ///
-    /// STAGING NOTE: no ZoneChange registry applier can yield `Prevented`
-    /// today, so the natural entry-prevention pause is not constructible
-    /// end-to-end; the parked choice is staged as a regeneration-shield Destroy
-    /// prevention (the canonical `Prevented` producer) with
-    /// the SpellResolution frame set. The assertion target —
-    /// `handle_replacement_choice`'s Prevented-arm CR 608.3e fallback — is
-    /// driven through the real `GameAction::ChooseReplacement` resume entry.
+    /// CR 608.3e + CR 614.6: the prevented-entry fallback proposes a fresh
+    /// graveyard move, so a board-wide graveyard-to-exile replacement applies.
+    /// The current entry appliers do not produce `Prevented`; exercise that
+    /// boundary directly after proving a real, unrelated Destroy prevention
+    /// cannot consume the entry's spell-resolution frame.
     #[test]
     fn prevented_etb_graveyard_fallback_consults_moved_redirects() {
         use crate::types::ability::AbilityDefinition;
@@ -4751,8 +4749,7 @@ mod tests {
             convoked_creatures: vec![],
         });
 
-        // Staged Prevented producer: a regeneration shield on a creature being
-        // destroyed — choosing it yields `ReplacementResult::Prevented`.
+        // A real non-entry prevention must leave the paused permanent alone.
         let bear = make_creature(&mut state, PlayerId(0), "Bear");
         state
             .objects
@@ -4804,6 +4801,14 @@ mod tests {
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
             .expect("resume replacement choice");
 
+        assert_eq!(state.objects[&spell].zone, Zone::Stack);
+        assert_eq!(state.active_spell_resolution().unwrap().object_id, spell);
+        assert!(state.objects[&bear].tapped);
+        assert!(state.objects[&bear].replacement_definitions[0].is_consumed);
+
+        finish_prevented_battlefield_entry(&mut state, &mut Vec::new())
+            .expect("finish the prevented-entry boundary");
+        assert!(state.active_spell_resolution().is_none());
         assert_eq!(
             state.objects[&spell].zone,
             Zone::Exile,

@@ -37,6 +37,54 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
+/// CR 608.2c: the declared player looks at and chooses from their own library;
+/// the activating player does not supply a replacement library antecedent.
+#[test]
+fn ashnods_cylix_declared_player_keeps_their_library_and_choice() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cylix = scenario.add_artifact_from_oracle(P0, "Ashnod's Cylix",
+        "{3}, {T}: Target player looks at the top three cards of their library, puts one of them back on top of their library, then exiles the rest.").id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]); 3],
+    );
+    scenario.with_library_top(
+        P0,
+        &["Activator first", "Activator second", "Activator third"],
+    );
+    scenario.with_library_top(P1, &["Target first", "Target second", "Target third"]);
+    let own_library = scenario.state.players[0].library.clone();
+    let target_library = scenario.state.players[1].library.clone();
+    let kept = target_library[1];
+    let mut runner = scenario.build();
+    let outcome = runner.activate(cylix, 0).target_player(P1).resolve();
+    let (player, cards) = match outcome.final_waiting_for() {
+        WaitingFor::ChooseFromZoneChoice { player, cards, .. }
+        | WaitingFor::EffectZoneChoice { player, cards, .. } => (*player, cards),
+        other => panic!("the target must choose a looked-at card, got {other:?}"),
+    };
+    assert_eq!(player, P1);
+    assert_eq!(cards.len(), 3);
+    assert!(target_library.iter().all(|card| cards.contains(card)));
+    assert!(own_library.iter().all(|card| !cards.contains(card)));
+    runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .unwrap();
+    assert_eq!(runner.state().players[0].library, own_library);
+    assert_eq!(runner.state().players[1].library.len(), 1);
+    assert!(runner.state().players[1].library.contains(&kept));
+    assert!(target_library
+        .iter()
+        .filter(|card| **card != kept)
+        .all(|card| runner.state().objects[card].zone == Zone::Exile));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
 fn assert_restored_state(restored: &GameState, prepared: &GameState) {
     let mut expected = prepared.clone();
     // This runtime invalidation counter is deliberately omitted from saved games.

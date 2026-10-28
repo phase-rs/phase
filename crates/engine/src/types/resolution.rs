@@ -8567,16 +8567,17 @@ mod tests {
             &mut spell,
             CardId(143),
             PlayerId(0),
-            "Regenerating bear".to_string(),
+            "Entry replacement".to_string(),
             Zone::Battlefield,
         );
         spell
             .objects
             .get_mut(&bear)
             .expect("fixture bear exists")
-            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Destroy)
-            .regeneration_shield()
-            .description("Regenerate".to_string())]
+            .replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Battlefield)
+            .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
+            .description("Entry replacement".to_string())]
         .into();
         let pending_spell_resolution = PendingSpellResolution {
             object_id: spell_id,
@@ -8593,12 +8594,7 @@ mod tests {
             convoked_creatures: Vec::new(),
         };
         spell.pending_replacement = Some(crate::types::game_state::PendingReplacement {
-            proposed: ProposedEvent::Destroy {
-                object_id: bear,
-                source: None,
-                cant_regenerate: false,
-                applied: HashSet::new(),
-            },
+            proposed: ProposedEvent::zone_change(spell_id, Zone::Stack, Zone::Battlefield, None),
             sacrifice_provenance: None,
             candidates: vec![ReplacementId {
                 source: bear,
@@ -8629,6 +8625,7 @@ mod tests {
             .into_game_state();
         apply_as_current(&mut spell, GameAction::ChooseReplacement { index: 0 })
             .expect("spell fixture resumes through the real replacement action");
+        assert_eq!(spell.objects[&spell_id].zone, Zone::Battlefield);
         assert!(spell.active_spell_resolution().is_none());
         assert_reserializes_current_only(spell);
 
