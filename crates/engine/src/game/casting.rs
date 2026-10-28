@@ -30539,7 +30539,6 @@ fn activate_with_cost_carrier(
     // CR 602.2: the record captured before payment is required to place the
     // ability; without one the activation can't complete legally and is
     // reversed (never recorded from post-payment facts).
-    let mut resolved = resolved;
     let record = take_activation_record(&mut resolved, player)?;
     // CR 602.2b + CR 601.2h + CR 608.2h: `resolved.context.cost_removed_counter_amount`
     // already holds this activation's cost-removed counter count: the count was

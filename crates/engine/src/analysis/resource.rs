@@ -5803,7 +5803,10 @@ fn live_history_reads(state: &GameState) -> HistoryReads {
         }
     }
     for (_source, _idx, def) in loop_window_replacement_defs(state) {
-        reads = reads.or(scan::replacement_definition_history(state, def));
+        reads = reads.or(scan::replacement_definition_history(
+            def,
+            state.replacement_rider(def),
+        ));
     }
     for effect in &state.transient_continuous_effects {
         reads = reads.or(scan::transient_effect_history(effect));
@@ -28179,17 +28182,17 @@ mod tests {
         ));
     }
 
-    /// CR 732.2a + CR 615.5: a shield's history reads include those of the runtime
-    /// continuation it names, read through the arena. Control: the same shield naming
-    /// no continuation reads nothing.
+    /// CR 732.2a + CR 615.5: a live shield's history reads include those of the runtime
+    /// continuation its handle names. The scanner walks the rider it is passed, and
+    /// `live_history_reads` resolves the handle to that rider. Control: the same shield
+    /// naming no continuation reads nothing.
     #[test]
     fn replacement_history_reads_the_named_continuation() {
-        use crate::game::ability_scan::replacement_definition_history;
         let mut state = GameState::new_two_player(42);
-        let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone);
-        assert!(
-            !replacement_definition_history(&state, &shield).reads(HistoryMember::PlayerTurnsTaken)
-        );
+        state
+            .pending_damage_replacements
+            .push(ReplacementDefinition::new(ReplacementEvent::DamageDone));
+        assert!(!live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
         let id = state.install_replacement_continuation(ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Ref {
@@ -28201,9 +28204,8 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         ));
-        assert!(
-            replacement_definition_history(&state, &shield.runtime_execute(id))
-                .reads(HistoryMember::PlayerTurnsTaken)
-        );
+        state.pending_damage_replacements[0] =
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
+        assert!(live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
     }
 }
