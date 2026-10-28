@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "A planar-die special action whose auto-tapped mana source pauses (replacement-aware cost move or pre-spend echo choice) now parks as ManaAbilityResume::PlanarDieRoll { player, cost } in serialized pending mana-ability state; older full-game and P2P peers cannot decode the variant (PR #9791)"
+}

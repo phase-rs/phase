@@ -7,8 +7,8 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
     CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
     DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
-    PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
+    EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
+    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
 };
@@ -35,7 +35,8 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
     AppliedReplacementKey, BoundSearchFoundCandidate, BoundSearchFoundDisposition,
     BoundSearchFoundGrant, CopyTokenSpec, CounterMoveStage, CounterPlacement, DrawEventStage,
-    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenBatch,
+    EtbTapState, ProposedEvent, ReplacementId, SearchFoundDisposition, TokenAttackRequest,
+    TokenBatch,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -5230,6 +5231,7 @@ fn create_entry_copy_spec_for_replacement(
         additional_modifications: additional_modifications.clone(),
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at: duration.clone(),
         source_id: replacement_source,
         controller,
@@ -8301,6 +8303,7 @@ fn stage_transformed_entry_projection(
             source_id: entrant,
             controller,
             enters_attacking,
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,
@@ -12109,7 +12112,7 @@ fn as_enters_payment_shape(def: &ReplacementDefinition) -> bool {
         Effect::PayCost {
             cost: AbilityCost::PayLife { amount },
             ..
-        } if crate::game::effects::pay::is_pay_any_amount(amount)
+        } if crate::types::ability::is_pay_any_amount(amount)
     )
 }
 
@@ -14075,6 +14078,7 @@ mod tests {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
@@ -15133,6 +15137,7 @@ mod tests {
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,
@@ -18105,6 +18110,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -20048,6 +20054,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(999),
             controller: owner_controller,
@@ -23622,6 +23629,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
@@ -23650,6 +23658,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: chatterfang,
             controller: PlayerId(0),
@@ -23724,6 +23733,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -23814,6 +23824,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id,
             controller: PlayerId(0),
@@ -24040,6 +24051,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
@@ -24177,6 +24189,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -24300,6 +24314,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -24374,6 +24390,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(0),
@@ -24612,6 +24629,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(0),
             controller: PlayerId(1),
@@ -25142,6 +25160,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -25262,6 +25281,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -25444,6 +25464,7 @@ mod tests {
                 enter_with_counters: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(0),
                 controller: PlayerId(0),
@@ -26243,6 +26264,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],

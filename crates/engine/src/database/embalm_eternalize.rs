@@ -37,7 +37,7 @@
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, QuantityExpr,
-    TargetFilter,
+    TargetFilter, TokenAttackDestination,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::{EmbalmCost, EternalizeCost, Keyword};
@@ -184,6 +184,7 @@ fn token_copy_ability(
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: vec![],

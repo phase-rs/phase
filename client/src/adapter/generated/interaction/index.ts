@@ -45,7 +45,7 @@ export type InteractionManaAbilityActivationScope = "ofSpellType" | "any";
 
 export type InteractionManaZoneSpendPolarity = "from" | "notFrom";
 
-export type InteractionManaSpecialAction = "companionToHand" | "unlockDoor" | "plot" | "turnFaceUp" | "rollPlanarDie" | "endContinuousEffect";
+export type InteractionManaSpecialAction = "companionToHand" | "unlockDoor" | "plot" | "turnFaceUp" | "rollPlanarDie" | "endContinuousEffect" | "foretell";
 
 export type InteractionManaSpellCostCriterion = { "type": "manaValue", "data": { comparator: InteractionManaComparator, value: number, } } | { "type": "hasXInCost" };
 

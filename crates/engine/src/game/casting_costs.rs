@@ -334,8 +334,8 @@ fn split_first_residual_payment(residual: AbilityCost) -> (AbilityCost, Option<A
 }
 
 pub(crate) fn split_declared_mana_addition_and_residual(
-    state: &GameState,
-    pending: &PendingCast,
+    state: Option<&GameState>,
+    pending: Option<&PendingCast>,
     cost: AbilityCost,
 ) -> Result<DeclaredManaSplit, EngineError> {
     match cost {
@@ -345,6 +345,15 @@ pub(crate) fn split_declared_mana_addition_and_residual(
             payment_mode: None,
         }),
         AbilityCost::ManaDynamic { quantity } => {
+            let (state, pending) = match (state, pending) {
+                (Some(s), Some(p)) => (s, p),
+                _ => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot resolve dynamic mana quantity without game state and pending cast"
+                            .to_string(),
+                    ));
+                }
+            };
             let amount =
                 super::quantity::resolve_quantity_with_targets(state, &quantity, &pending.ability)
                     .max(0) as u32;
@@ -355,6 +364,15 @@ pub(crate) fn split_declared_mana_addition_and_residual(
             })
         }
         AbilityCost::KeywordCostOfCastSpell { keyword } => {
+            let (state, pending) = match (state, pending) {
+                (Some(s), Some(p)) => (s, p),
+                _ => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot resolve keyword cost without game state and pending cast"
+                            .to_string(),
+                    ));
+                }
+            };
             let cost =
                 super::keywords::effective_keyword_mana_cost(state, pending.object_id, keyword)
                     .ok_or_else(|| {
@@ -421,7 +439,7 @@ pub(crate) fn additional_cost_declaration_is_offerable(
         return Ok(false);
     }
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
-    let split = split_declared_mana_addition_and_residual(state, pending, cost)?;
+    let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
     if let Some(residual) = split.residual.as_ref() {
         if !residual.is_payable(state, player, pending.object_id) {
             return Ok(false);
@@ -1697,6 +1715,36 @@ pub(crate) fn finish_pending_cost_or_cast(
                 pending,
             ));
         }
+        // CR 118.9d + CR 601.2b: a one-shot optional cost (Buyback) handed over
+        // with an alternative cost (Bolas's Citadel) or behind a keyword-cost
+        // queue is still offered. Mirror the ordinary optional-cost dispatch: the
+        // deferred required cost (an imposed tax) takes its place in the flow so
+        // it is paid after the decision.
+        let optional_cost = optional_cost.clone();
+        pending.additional_cost_flow = pending
+            .deferred_required_additional_cost
+            .take()
+            .map(AdditionalCost::Required);
+        // CR 601.2b: an optional cost with no legal object choice is skipped as
+        // if the player declined to pay it.
+        if !additional_cost_declaration_is_offerable(
+            state,
+            player,
+            &pending,
+            optional_cost.clone(),
+        )? {
+            return finish_pending_cost_or_cast(state, player, pending, events);
+        }
+        return Ok(make_optional_cost_choice(
+            state,
+            player,
+            AdditionalCost::Optional {
+                cost: optional_cost,
+                repeatability: crate::types::ability::AdditionalCostRepeatability::Once,
+            },
+            0,
+            pending,
+        ));
     }
 
     // CR 601.2b/c: General deferred target selection — fires after an optional
@@ -3688,6 +3736,26 @@ fn auto_activate_spell_mana_abilities_before_deferred_sacrifice(
         &mut simulated_events,
         events_before,
     );
+    // CR 601.2g-h + CR 605.4a + CR 608.2d: a skipped multi-type mana echo owes
+    // exactly one chosen bonus BEFORE the spend, even on this deferred route.
+    // The same shared authority every other spell/activation/effect root uses
+    // settles it here, rooting the suspension in this cast's own pending mana
+    // payment. Without it the preview admits a bonus-dependent cast that the
+    // live spend then rejects as "Cannot pay mana cost". A pause must keep the
+    // simulated state so the finalizer can surface the choice and retain the
+    // outer cast for its exact resume.
+    if let Err(err) = super::casting::settle_pre_spend_echoes(
+        &mut simulated,
+        player,
+        &simulated_events,
+        events_before,
+        resume,
+        None,
+    ) {
+        *state = simulated;
+        *events = simulated_events;
+        return Err(err);
+    }
     validate_deferred_spell_sacrifices_at_commit(&simulated, player, pending)?;
     simulated.pending_cast = previous_pending;
     *state = simulated;
@@ -8499,6 +8567,96 @@ pub(super) fn committed_required_cast_cost(
     }
 }
 
+/// CR 118.9 + CR 401.5 + CR 601.2a: Active alternative ability cost granted by an
+/// object-level permission in exile (ExileWithAltAbilityCost / PlayFromExile) or on
+/// the top of the library (Bolas's Citadel). Single-authority extraction for the
+/// additional-cost authority.
+fn elected_cast_alternative_ability_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    casting_variant: CastingVariant,
+    casting_permission_index: Option<CastingPermissionIndex>,
+) -> Option<AbilityCost> {
+    let obj = state.objects.get(&object_id)?;
+    if obj.zone == Zone::Exile {
+        let selected_permission = casting_permission_index
+            .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index));
+        selected_permission
+            .into_iter()
+            .find_map(|p| match p {
+                crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
+                    cost,
+                    granted_to,
+                    ..
+                } if granted_to.is_none() || *granted_to == Some(player) => Some(cost.clone()),
+                crate::types::ability::CastingPermission::PlayFromExile {
+                    alt_ability_cost: Some(cost),
+                    granted_to,
+                    ..
+                } if *granted_to == player => Some(cost.clone()),
+                _ => None,
+            })
+            .or_else(|| {
+                super::casting::elected_exile_permission_source(
+                    state,
+                    player,
+                    object_id,
+                    Some(casting_variant),
+                    casting_permission_index,
+                )
+                .and_then(|source| {
+                    super::casting::exile_static_permission_extra_cost(
+                        state, player, object_id, source,
+                    )
+                    .filter(|extra| {
+                        matches!(extra.mode, crate::types::statics::CastCostMode::Alternative)
+                    })
+                    .map(|extra| extra.cost)
+                })
+            })
+    } else if state.object_in_players_zone(obj, Zone::Library, player) {
+        super::casting::top_of_library_alt_ability_cost_for_object(state, player, object_id)
+    } else {
+        None
+    }
+}
+
+fn modal_declared_non_mana_additional_cost(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> Option<AbilityCost> {
+    let obj = state.objects.get(&object_id)?;
+    let modal = obj.modal.as_ref()?;
+    let chosen_modes = &ability.context.chosen_modes;
+    if chosen_modes.is_empty() {
+        return None;
+    }
+    let mut additional_costs = Vec::new();
+    if let Some(entwine_cost) =
+        super::casting_targets::extract_entwine_additional_cost(modal, chosen_modes)
+    {
+        additional_costs.push(entwine_cost);
+    }
+    if let Some(escalate_cost) = super::casting_targets::escalate_cost_for_selected_modes_count(
+        state,
+        player,
+        object_id,
+        chosen_modes.len(),
+    ) {
+        additional_costs.push(escalate_cost);
+    }
+    match additional_costs.len() {
+        0 => None,
+        1 => additional_costs.pop(),
+        _ => Some(AbilityCost::Composite {
+            costs: additional_costs,
+        }),
+    }
+}
+
 fn merge_required_additional_cost(
     additional: Option<AdditionalCost>,
     imposed: Option<AbilityCost>,
@@ -8725,11 +8883,14 @@ fn check_additional_cost_or_pay_with_kept_cost(
 
     let flash_additional =
         flash_timing_non_mana_additional_cost(state, player, object_id, cast_timing_permission);
+    let modal_additional =
+        modal_declared_non_mana_additional_cost(state, player, object_id, &ability);
     let obj_additional = state
         .objects
         .get(&object_id)
         .and_then(|obj| obj.additional_cost.clone())
         .or(flash_additional);
+    let obj_additional = merge_required_additional_cost(obj_additional, modal_additional);
     let imposed_required_cost = combined_imposed_additional_cast_cost(
         state,
         player,
@@ -8772,7 +8933,6 @@ fn check_additional_cost_or_pay_with_kept_cost(
     } else {
         effective_offering_additional_cost(state, player, object_id)
     };
-    let conspire_additional = effective_conspire_additional_cost(state, player, object_id);
 
     let (additional, deferred_required, additional_cost_source) =
         if let Some(AdditionalCost::Required(ref req)) = legacy_obj_additional {
@@ -8827,16 +8987,6 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 imposed_required_cost.clone().map(AdditionalCost::Required),
                 SpellCostSource::Offering,
             )
-        } else if let Some(conspire) = conspire_additional {
-            // CR 702.78a: statics-granted Conspire (Wort, the Raidmother /
-            // Rassilon, the War President). Printed Conspire sets
-            // `obj.additional_cost` and is caught by the `obj_additional.is_some()`
-            // arm above, so this arm fires only for the granted path.
-            (
-                Some(conspire),
-                imposed_required_cost.clone().map(AdditionalCost::Required),
-                SpellCostSource::Other,
-            )
         } else {
             (None, None, SpellCostSource::Other)
         };
@@ -8887,7 +9037,12 @@ fn check_additional_cost_or_pay_with_kept_cost(
             // the alternative cost. Hand the additional-cost authority the
             // queued keyword costs and the required cost.
             pending.additional_cost_queue = additional_cost_queue;
-            pending.additional_cost_flow = additional.clone().or(deferred_required.clone());
+            // CR 118.9d: imposed costs (Terror of the Peaks) apply to the alternative
+            // cost even when no other additional cost exists.
+            pending.additional_cost_flow = additional
+                .clone()
+                .or(deferred_required.clone())
+                .or(imposed_required_cost.clone().map(AdditionalCost::Required));
             pending.additional_cost_source = additional_cost_source;
             if additional.is_some() {
                 pending.deferred_required_additional_cost =
@@ -8952,6 +9107,52 @@ fn check_additional_cost_or_pay_with_kept_cost(
                 pending,
             ));
         }
+    }
+
+    // CR 118.9 + CR 118.9d + CR 401.5 + CR 601.2a/b/f/h: Active alternative ability
+    // cost from exile (ExileWithAltAbilityCost / PlayFromExile) or top of library
+    // (Bolas's Citadel). Paid before additional costs; queued keyword costs and
+    // required additional costs (e.g. Entwine) are attached to `pending` so they
+    // are collected and paid on the alternative cost per CR 118.9d.
+    let alt_ability_cost = elected_cast_alternative_ability_cost(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        casting_permission_index,
+    );
+    if let Some(alt_cost) = alt_ability_cost {
+        let mut pending = pending_cast_keeping(
+            object_id,
+            card_id,
+            ability,
+            cost.clone(),
+            &lock,
+            &kept_sacrifices,
+        );
+        pending.base_cost = base_cost.clone();
+        pending.casting_variant = casting_variant;
+        pending.casting_permission_index = casting_permission_index;
+        pending.cast_timing_permission = cast_timing_permission;
+        pending.distribute = distribute.clone();
+        pending.origin_zone = origin_zone;
+        pending.payment_mode = payment_mode;
+        pending.alternative_cost_election =
+            crate::types::game_state::SpellAlternativeCostElection::Accepted;
+        pending.ability.context.alternative_mana_cost_paid = true;
+        pending.additional_cost_queue = additional_cost_queue;
+        // CR 118.9d: imposed costs (Terror of the Peaks) apply to the alternative
+        // cost even when no other additional cost exists.
+        pending.additional_cost_flow = additional
+            .clone()
+            .or(deferred_required.clone())
+            .or(imposed_required_cost.clone().map(AdditionalCost::Required));
+        pending.additional_cost_source = additional_cost_source;
+        if additional.is_some() {
+            pending.deferred_required_additional_cost =
+                required_cost_from_additional(deferred_required.clone());
+        }
+        return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
     if !additional_cost_queue.is_empty() {
@@ -9230,102 +9431,6 @@ fn check_additional_cost_or_pay_with_kept_cost(
             pending,
             events,
         );
-    }
-
-    // CR 118.9 + CR 119.4: ExileWithAltAbilityCost — non-mana alternative cost
-    // (e.g. Nashi's "pay life equal to its mana value rather than paying its
-    // mana cost"). The mana cost was already overridden to zero in
-    // `casting::cast_spell` via `alt_cost_from_exile`; here we route the stored
-    // `AbilityCost` through `pay_additional_cost` so dynamic-quantity refs
-    // (`ObjectManaValue { CostPaidObject }`, etc.) resolve at cast time
-    // against the spell's mana value. Single-authority — `AbilityCost::PayLife` and friends
-    // are paid through the same pipeline as flashback's non-mana cost.
-    let alt_ability_cost = state.objects.get(&object_id).and_then(|obj| {
-        if obj.zone == Zone::Exile {
-            // CR 611.2a: Restrict to the exact permission instance selected for
-            // this cast (`casting_permission_index`), not a scan of every exile
-            // permission on the object. `casting::cast_spell`'s `alt_cost_from_exile`
-            // already zeroes the mana cost only for that same selected permission
-            // (see `casting.rs`'s mirrored `selected_permission` lookup); charging
-            // the `AbilityCost` body from an unscoped scan would let an object
-            // with two overlapping `PlayFromExile`/`ExileWithAltAbilityCost` grants
-            // (e.g. a normal grant plus an Inside Information-class grant) pay the
-            // OTHER grant's alt cost instead of the one actually elected.
-            let selected_permission = casting_permission_index
-                .and_then(|CastingPermissionIndex(index)| obj.casting_permissions.get(index));
-            selected_permission
-                .into_iter()
-                .find_map(|p| match p {
-                    crate::types::ability::CastingPermission::ExileWithAltAbilityCost {
-                        cost,
-                        granted_to,
-                        ..
-                    } if granted_to.is_none() || *granted_to == Some(player) => Some(cost.clone()),
-                    // CR 118.9 + CR 119.4 + CR 305.1: Inside Information class —
-                    // the alt cost lives on the `PlayFromExile` grant itself (see
-                    // `types::ability::CastingPermission::PlayFromExile::alt_ability_cost`)
-                    // so the same grant can also authorize land plays, which
-                    // never reach this spell-cost pipeline and so stay unaffected.
-                    // Mirrors the `ExileWithAltAbilityCost` arm above.
-                    crate::types::ability::CastingPermission::PlayFromExile {
-                        alt_ability_cost: Some(cost),
-                        granted_to,
-                        ..
-                    } if *granted_to == player => Some(cost.clone()),
-                    _ => None,
-                })
-                .or_else(|| {
-                    // CR 118.9: Valgavoth — an `ExileCastPermission` static's
-                    // ALTERNATIVE extra-cost. The mana cost was zeroed in
-                    // `cast_spell`; pay the alt cost here.
-                    //
-                    // CR 601.2a: Read the rider from the source this cast commits
-                    // to so the alt cost paid matches the elected permission, not a
-                    // second active permission for the same exiled spell.
-                    super::casting::elected_exile_permission_source(
-                        state,
-                        player,
-                        object_id,
-                        Some(casting_variant),
-                        casting_permission_index,
-                    )
-                    .and_then(|source| {
-                        super::casting::exile_static_permission_extra_cost(
-                            state, player, object_id, source,
-                        )
-                        .filter(|extra| {
-                            matches!(extra.mode, crate::types::statics::CastCostMode::Alternative)
-                        })
-                        .map(|extra| extra.cost)
-                    })
-                })
-        } else if state.object_in_players_zone(obj, Zone::Library, player) {
-            // CR 401.5 + CR 118.9 + CR 601.2a: Top-of-library cast with an
-            // alt-cost rider (Bolas's Citadel: "pay life equal to its mana
-            // value rather than paying its mana cost").
-            super::casting::top_of_library_alt_ability_cost_for_object(state, player, object_id)
-        } else {
-            None
-        }
-    });
-    if let Some(alt_cost) = alt_ability_cost {
-        let mut pending = pending_cast_keeping(
-            object_id,
-            card_id,
-            ability,
-            cost.clone(),
-            &lock,
-            &kept_sacrifices,
-        );
-        pending.base_cost = base_cost.clone();
-        pending.casting_variant = casting_variant;
-        pending.casting_permission_index = casting_permission_index;
-        pending.cast_timing_permission = cast_timing_permission;
-        pending.distribute = distribute;
-        pending.origin_zone = origin_zone;
-        pending.payment_mode = payment_mode;
-        pending.additional_cost_flow = imposed_required_cost.clone().map(AdditionalCost::Required);
-        return pay_additional_cost(state, player, alt_cost, pending, events);
     }
 
     // CR 702.138a: Escape's additional cost is the residual after extracting the
@@ -10769,8 +10874,8 @@ fn pay_additional_cost_with_source(
         }
         AbilityCost::Composite { costs } => {
             let split = split_declared_mana_addition_and_residual(
-                state,
-                &pending,
+                Some(state),
+                Some(&pending),
                 AbilityCost::Composite { costs },
             )?;
             return continue_after_declared_mana_split(state, player, pending, split, events);
@@ -11554,6 +11659,11 @@ pub(super) fn build_effective_additional_cost_queue(
     additional_cost_queue.extend(effective_gift_additional_cost_instances(
         state, player, object_id,
     ));
+    // CR 702.78a: Conspire (printed or granted) is an optional additional cost.
+    additional_cost_queue.extend(
+        effective_conspire_additional_cost(state, player, object_id)
+            .map(|cost| AdditionalCostInstance::new(AdditionalCostOrigin::Other, cost)),
+    );
     additional_cost_queue
 }
 
@@ -17341,6 +17451,17 @@ fn finalize_mana_payment_with_resume(
             }
             Ok(state.waiting_for.clone())
         }
+        // CR 605.4a + CR 608.2d + CR 601.2g-h: an auto-tapped multi-type
+        // mana-echo pauses for its SingleColor choice BEFORE the spend, with
+        // this exact outer payment as its typed continuation. Retain the outer
+        // cast so answering resumes this same finalizer with the bonus in the
+        // pool, rather than reporting "Cannot pay mana cost".
+        Err(_) if state.pending_triggered_mana_resume.is_some() => {
+            if state.pending_cast.is_none() {
+                state.pending_cast = Some(pending_for_restore);
+            }
+            Ok(state.waiting_for.clone())
+        }
         Err(err) => {
             if matches!(
                 &err,
@@ -17765,6 +17886,15 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         // CR 601.2h + CR 605.3b + CR 616.1: See the ordinary payment resume
         // above. A Phyrexian choice does not change the cursor ownership.
         Err(_) if super::casting::mana_ability_cost_payment_is_paused(state) => {
+            if state.pending_cast.is_none() {
+                state.pending_cast = Some(pending_for_restore);
+            }
+            Ok(state.waiting_for.clone())
+        }
+        // CR 605.4a + CR 608.2d + CR 601.2g-h: same echo-choice suspension as
+        // the ordinary finalizer above — retain the cast so answering resumes
+        // this same payment with the bonus in the pool.
+        Err(_) if state.pending_triggered_mana_resume.is_some() => {
             if state.pending_cast.is_none() {
                 state.pending_cast = Some(pending_for_restore);
             }
@@ -23268,6 +23398,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -27345,8 +27476,8 @@ battlefield, then shuffle.";
         pending.base_cost = Some(ManaCost::zero());
 
         let split = split_declared_mana_addition_and_residual(
-            runner.state(),
-            &pending,
+            Some(runner.state()),
+            Some(&pending),
             AbilityCost::Composite {
                 costs: vec![
                     AbilityCost::Waterbend {

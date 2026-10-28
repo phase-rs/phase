@@ -221,6 +221,75 @@ pub(super) fn handle_replacement_choice(
     )
 }
 
+/// What resuming a parked player-scope sacrifice batch produced.
+pub(crate) struct PausedPlayerScopeSacrificeResume {
+    /// The wait the caller must adopt, when the resume left a prompt open.
+    pub(crate) next_wait: Option<WaitingFor>,
+    /// CR 603.2 + CR 603.10a: the completed batch's own event span in the
+    /// buffer the helper was handed. Its observers belong to whichever
+    /// collector scans that buffer: the replacement action's post-action
+    /// pipeline, or the departure settlement.
+    pub(crate) completed_batch: Option<std::ops::Range<usize>>,
+}
+
+/// CR 101.4 + CR 616.1: resume a simultaneous player-scope sacrifice batch
+/// parked on a CR 616.1 choice. Collects no triggers: it reports the wait the
+/// caller must adopt and the completed batch's own event span, and the caller's
+/// collector observes that span (CR 603.2).
+pub(crate) fn resume_paused_player_scope_sacrifice(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<PausedPlayerScopeSacrificeResume, EngineError> {
+    let Some(sacrifice_source_id) = state
+        .pending_player_scope_sacrifice_choice
+        .as_ref()
+        .map(|pending| pending.ability.source_id)
+    else {
+        return Ok(PausedPlayerScopeSacrificeResume {
+            next_wait: None,
+            completed_batch: None,
+        });
+    };
+    match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    {
+        effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {
+            Ok(PausedPlayerScopeSacrificeResume {
+                next_wait: None,
+                completed_batch: None,
+            })
+        }
+        // The paused members' events stay in the carrier's deferred span, so
+        // nothing of the batch is observable yet.
+        effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
+            Ok(PausedPlayerScopeSacrificeResume {
+                next_wait: Some(state.waiting_for.clone()),
+                completed_batch: None,
+            })
+        }
+        effects::PendingPlayerScopeSacrificeOutcome::Completed {
+            events_before_sacrifice,
+            events_after_sacrifice,
+            sacrificed_count,
+        } => {
+            effects::stamp_active_player_action_completion(
+                state,
+                sacrifice_source_id,
+                crate::types::ability::EffectResolutionResult {
+                    cause: crate::types::ability::ThisWayCause::Sacrificed,
+                    count: sacrificed_count,
+                },
+            );
+            effects::drain_pending_continuation(state, events);
+            Ok(PausedPlayerScopeSacrificeResume {
+                next_wait: (!matches!(state.waiting_for, WaitingFor::Priority { .. }))
+                    .then(|| state.waiting_for.clone()),
+                completed_batch: Some(events_before_sacrifice..events_after_sacrifice),
+            })
+        }
+    }
+}
+
 fn handle_replacement_choice_inner(
     state: &mut GameState,
     index: usize,
@@ -1268,35 +1337,10 @@ fn handle_replacement_choice_inner(
                 // CR 101.4: a simultaneous each-player sacrifice paused by a
                 // CR 616.1 replacement choice resumes the already-announced
                 // remaining sacrifices before any parked continuation can run.
-                let sacrifice_source_id = state
-                    .pending_player_scope_sacrifice_choice
-                    .as_ref()
-                    .map(|pending| pending.ability.source_id)
-                    .expect("active sacrifice choice owns its source identity");
-                match effects::drain_pending_player_scope_sacrifice_after_replacement(state, events)
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                {
-                    effects::PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice => {}
-                    effects::PendingPlayerScopeSacrificeOutcome::PausedForReplacement => {
-                        waiting_for = state.waiting_for.clone();
-                    }
-                    effects::PendingPlayerScopeSacrificeOutcome::Completed {
-                        sacrificed_count,
-                        ..
-                    } => {
-                        effects::stamp_active_player_action_completion(
-                            state,
-                            sacrifice_source_id,
-                            crate::types::ability::EffectResolutionResult {
-                                cause: crate::types::ability::ThisWayCause::Sacrificed,
-                                count: sacrificed_count,
-                            },
-                        );
-                        effects::drain_pending_continuation(state, events);
-                        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                            waiting_for = state.waiting_for.clone();
-                        }
-                    }
+                // CR 603.2: the completed batch lies inside this action's buffer,
+                // which the post-action pipeline scans; it is not collected here.
+                if let Some(next) = resume_paused_player_scope_sacrifice(state, events)?.next_wait {
+                    waiting_for = next;
                 }
             }
 
@@ -2724,6 +2768,13 @@ pub(super) fn handle_copy_target_choice(
         // only the liminal entry's PRESENCE matters here: it is what says this commit will park
         // an entry that later needs realizing.
         let has_liminal_entry = state.liminal_entries.contains_key(&source_id);
+        // CR 508.4: how many tokens of the batch exist once this entry is
+        // realized; the continuation parked behind a pause counts its own
+        // tokens from zero, so its request has to start past them.
+        let entrants_through_this_entry = state
+            .liminal_entries
+            .get(&source_id)
+            .map_or(0, |entry| entry.created_ids.len() + 1);
         let copy_continuation = state.liminal_entries.get(&source_id).and_then(|entry| {
             entry.copy_resume.as_ref().and_then(|copy| {
                 (entry.remaining_count > 0).then(|| {
@@ -2821,9 +2872,12 @@ pub(super) fn handle_copy_target_choice(
                 },
             );
         }
-        if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
+        if let Some((owner, mut copy, enter_tapped, enter_with_counters, remaining_count)) =
             copy_continuation.clone()
         {
+            copy.attack_request = copy
+                .attack_request
+                .after_entrants(entrants_through_this_entry);
             counter_pause_post_actions.push(PendingCounterPostAction::ContinueCopyTokenCreation {
                 owner,
                 copy,
@@ -5836,6 +5890,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(1),
             controller: PlayerId(0),
@@ -5922,6 +5977,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -5964,6 +6021,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6067,6 +6125,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6126,6 +6186,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6246,6 +6307,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6304,6 +6367,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: replacement_source,
             controller: PlayerId(0),
@@ -6460,6 +6524,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
@@ -6536,6 +6601,8 @@ mod tests {
                     owner: crate::types::ability::TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -6601,6 +6668,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: jinnie_source,
             controller: PlayerId(0),
@@ -8653,6 +8721,7 @@ mod tests {
                 additional_modifications: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: entering_aura,
                 controller: PlayerId(0),
@@ -9315,6 +9384,7 @@ mod tests {
                 source_id: ObjectId(999),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,

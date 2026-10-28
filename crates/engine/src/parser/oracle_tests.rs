@@ -5655,13 +5655,13 @@ fn chosen_creature_type_spell_cast_trigger_filters_are_retargeted() {
             .unwrap_or_else(|| panic!("{name} SpellCast trigger must retain its spell filter"));
 
         assert!(
-            crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+            crate::types::ability::filter_contains_filter_prop(valid_card, &|prop| {
                 matches!(prop, FilterProp::IsChosenCreatureType)
             }),
             "{name} trigger must match the persisted chosen creature type: {trigger:#?}"
         );
         assert!(
-            !crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+            !crate::types::ability::filter_contains_filter_prop(valid_card, &|prop| {
                 matches!(prop, FilterProp::IsChosenCardType)
             }),
             "{name} trigger must not retain a card-type discriminator: {trigger:#?}"
@@ -6033,6 +6033,77 @@ fn journey_of_discovery_modal_up_to_two_additional_lands() {
             panic!("expected GenericEffect additional-land grant as second mode, got {other:?}")
         }
     }
+}
+
+/// Test that Entwine with a non-mana cost (Solar Tide) is parsed correctly.
+/// Solar Tide: "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Sacrifice two lands."
+#[test]
+fn solar_tide_entwine_non_mana_cost() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Sacrifice two lands.",
+        "Solar Tide",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let modal = r.modal.expect("Solar Tide is a modal spell");
+    assert_eq!(modal.mode_count, 2, "Solar Tide must have exactly 2 modes");
+    // CR 702.42a: the em-dash cost is extracted as a non-mana Entwine keyword;
+    // `synthesize_entwine` later copies it onto the ModalChoice.
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Entwine(crate::types::keywords::EntwineCost::NonMana(
+                AbilityCost::Sacrifice { .. }
+            ))
+        )),
+        "expected non-mana Entwine keyword, got {:?}",
+        r.extracted_keywords
+    );
+
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "one ability per mode: {:?}",
+        r.abilities
+    );
+}
+
+#[test]
+fn entwine_composite_cost_with_unimplemented_leg_is_rejected() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Pay 2 life, frobnicate a permanent.",
+        "Test Entwine",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Entwine(_))),
+        "composite Entwine cost with an unimplemented leg must not be accepted: {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn entwine_rejects_unconsumed_trailing_condition() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Pay 2 life if you control an artifact.",
+        "Test Conditional Entwine",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Entwine(_))),
+        "Entwine line with unconsumed trailing condition must be rejected: {:?}",
+        r.extracted_keywords
+    );
 }
 
 #[test]
@@ -32816,6 +32887,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: vec![],
@@ -33054,6 +33126,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],
@@ -33172,6 +33245,8 @@ fn guard_walk_reaches_every_continuous_modification_carrier() {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -35456,6 +35531,127 @@ fn ir_facade_demotes_a_refused_granter_name() {
         &*def.effect,
         Effect::Unimplemented { name, .. } if name == "granter_reference_unreached"
     )));
+}
+
+/// CR 607.2a + CR 406.6 + CR 603.3: Tidehollow Sculler / Mesmeric Fiend print two
+/// linked triggered abilities with no "until" wording, so the return is a real
+/// triggered ability (respondable, CR 603.3) and not a CR 610.3 duration. The ETB
+/// exile carries no duration, and the LTB moves the card linked to the source
+/// (`ExiledBySource`) out of exile into its owner's hand.
+#[test]
+fn tidehollow_sculler_ltb_returns_linked_exile_without_duration() {
+    let oracle = "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card.\n\
+                  When this creature leaves the battlefield, return the exiled card to its owner's hand.";
+    let result = parse(
+        oracle,
+        "Tidehollow Sculler",
+        &[],
+        &["Artifact", "Creature"],
+        &[],
+    );
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .expect("must have ETB trigger");
+    let mut cursor = etb.execute.as_deref();
+    while let Some(def) = cursor {
+        assert_eq!(
+            def.duration, None,
+            "two-trigger wording has no CR 610.3 duration"
+        );
+        cursor = def.sub_ability.as_deref();
+    }
+
+    let ltb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::LeavesBattlefield)
+        .expect("must have LTB trigger");
+    let execute = ltb.execute.as_deref().expect("LTB must have execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ),
+        "LTB must return the linked exiled card to hand, got {:?}",
+        execute.effect
+    );
+}
+
+/// CR 607.2a: an exiled card published by an outer instruction remains the
+/// antecedent when its hand-return consumer is parsed in a nested body.
+#[test]
+fn nested_exiled_card_returns_keep_the_enclosing_chain_binding() {
+    fn ability_contains_tracked_return(def: &crate::types::ability::AbilityDefinition) -> bool {
+        fn effect_contains_tracked_return(effect: &Effect) -> bool {
+            match effect {
+                Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+                | Effect::ChangeZoneAll {
+                    destination: Zone::Hand,
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+                | Effect::Bounce {
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                } => true,
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    ability_contains_tracked_return(effect)
+                }
+                _ => false,
+            }
+        }
+
+        effect_contains_tracked_return(&def.effect)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_contains_tracked_return)
+    }
+
+    let cases = [
+        (
+            "delayed",
+            "When this creature enters, exile target creature. At the beginning of the next end step, return the exiled card to its owner's hand.",
+        ),
+        (
+            "reflexive",
+            "When this creature enters, exile target creature. When you do, return the exiled card to its owner's hand.",
+        ),
+        (
+            "continuation",
+            "When this creature enters, exile target creature. If you do, return the exiled card to its owner's hand.",
+        ),
+    ];
+
+    for (form, oracle) in cases {
+        let result = parse(oracle, "Nested Exile Return", &[], &["Creature"], &[]);
+        let has_tracked_return = result.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(ability_contains_tracked_return)
+        });
+        assert!(
+            has_tracked_return,
+            "{form} return must retain the enclosing TrackedSet binding; parsed: {:#?}",
+            result.triggers
+        );
+    }
 }
 
 /// CR 603.2 + CR 603.10 + CR 603.3a + CR 613.1b: Risky Move, verbatim, parses

@@ -17,8 +17,8 @@ use crate::types::ability::{
     ControllerRef, CopiableValues, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
     EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
     PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TokenAttackDestination,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -37,7 +37,7 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EntryChoices, ProposedEvent, TokenHostRequest, TokenSpec,
+    CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest, TokenSpec,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -506,6 +506,7 @@ pub(crate) fn resolve_with_host_override(
         count,
         owner_filter,
         enters_attacking,
+        attack_destination,
         fallback_supertypes,
         token_statics,
         etb_counters,
@@ -523,6 +524,7 @@ pub(crate) fn resolve_with_host_override(
             owner,
             attach_to,
             enters_attacking,
+            attack_destination,
             supertypes,
             static_abilities,
             enter_with_counters,
@@ -534,9 +536,10 @@ pub(crate) fn resolve_with_host_override(
             colors.clone(),
             keywords.clone(),
             *tapped,
-            resolve_quantity_with_targets(state, count, ability).max(0) as u32,
+            count,
             owner,
             *enters_attacking,
+            attack_destination.clone(),
             supertypes.clone(),
             static_abilities.clone(),
             enter_with_counters.clone(),
@@ -550,15 +553,18 @@ pub(crate) fn resolve_with_host_override(
             vec![],
             vec![],
             false,
-            1,
+            &QuantityExpr::Fixed { value: 1 },
             &TargetFilter::Controller,
             false,
+            TokenAttackDestination::ControllerChooses,
             vec![],
             vec![],
             vec![],
             None,
         ),
     };
+    let (count, enters_attacking, attack_request) =
+        resolve_token_batch(state, ability, count, enters_attacking, &attack_destination);
     // CR 608.2b: a declared player whose target was illegal creates no token.
     let Some(token_owner) = resolve_token_owner(state, ability, owner_filter) else {
         return no_token(state, ability, events);
@@ -635,6 +641,7 @@ pub(crate) fn resolve_with_host_override(
         &fallback_toughness,
         tapped,
         enters_attacking,
+        attack_request,
         token_statics,
         resolved_etb_counters,
         host_request,
@@ -704,6 +711,52 @@ pub(crate) fn resolve_with_host_override(
     });
 
     Ok(())
+}
+
+/// CR 508.4 + CR 608.2h: how many tokens a token instruction creates, whether
+/// they enter attacking, and at what, resolved once for the instruction.
+pub(crate) fn resolve_token_batch(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    count: &QuantityExpr,
+    enters_attacking: bool,
+    destination: &TokenAttackDestination,
+) -> (u32, bool, TokenAttackRequest) {
+    // CR 508.4: "or a planeswalker they control" also allows that player's
+    // planeswalker. No such choice is offered, so the tokens attack the
+    // player, as effects/myriad.rs does.
+    let (count, named) = match destination {
+        TokenAttackDestination::ControllerChooses => {
+            let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
+            return (count, enters_attacking, TokenAttackRequest::Unspecified);
+        }
+        TokenAttackDestination::Player { player, scope: _ } => (
+            resolve_quantity_with_targets(state, count, ability).max(0) as u32,
+            TokenAttackRequest::named(crate::game::filter::ability_controller_ref_player(
+                state, ability, player,
+            )),
+        ),
+        TokenAttackDestination::EachPlayer { filter, scope: _ } => {
+            // CR 608.2c + CR 608.2h: the players are enumerated once;
+            // TokenAttackRequest::for_entrant seats each created token by its creation ordinal.
+            let players = crate::game::quantity::player_count_matching_ids_for_ability(
+                state, filter, ability,
+            );
+            (
+                u32::try_from(players.len()).unwrap_or(u32::MAX),
+                TokenAttackRequest::named(players),
+            )
+        }
+    };
+    if !enters_attacking {
+        return (count, false, TokenAttackRequest::Unspecified);
+    }
+    match named {
+        Some(request) => (count, true, request),
+        // CR 508.4: the instruction named its destination, so the tokens are never
+        // seated at one it did not name.
+        None => (count, false, TokenAttackRequest::Unspecified),
+    }
 }
 
 /// CR 122.6 + CR 614.1c + CR 608.2h: Resolve a created token's "enters with N
@@ -808,6 +861,7 @@ fn build_token_spec(
     fallback_toughness: &PtValue,
     tapped: bool,
     enters_attacking: bool,
+    attack_request: TokenAttackRequest,
     mut static_abilities: Vec<crate::types::ability::StaticDefinition>,
     enter_with_counters: Vec<(CounterType, u32)>,
     attach_to: TokenHostRequest,
@@ -876,6 +930,7 @@ fn build_token_spec(
         enter_with_counters,
         tapped,
         enters_attacking,
+        attack_request,
         sacrifice_at: ability.duration.clone(),
         source_id: ability.source_id,
         controller: ability.controller,
@@ -1447,6 +1502,9 @@ fn apply_create_token_batch(
         };
     }
 
+    // CR 508.4: a resume carries the earlier ids so they are republished, but a
+    // token's destination is selected by its ordinal among the tokens this call
+    // creates, so the carried ids do not shift it.
     let prefix_len = initial_created_ids.len();
     let mut created_ids = initial_created_ids;
     created_ids.reserve(final_count as usize);
@@ -1534,7 +1592,15 @@ fn apply_create_token_batch(
 
         // CR 508.4: Token enters attacking — not declared as attacker.
         if spec.enters_attacking {
-            crate::game::combat::enter_attacking(state, obj_id, spec.source_id, spec.controller);
+            crate::game::combat::enter_attacking_at_destination(
+                state,
+                obj_id,
+                spec.source_id,
+                spec.controller,
+                &spec
+                    .attack_request
+                    .for_entrant(created_ids.len() - prefix_len),
+            );
         }
 
         // CR 122.6a: Place counters on the token as it enters the battlefield.
@@ -1565,6 +1631,10 @@ fn apply_create_token_batch(
                     })
                     .collect();
                 let remaining_count = final_count.saturating_sub(index + 1);
+                let mut resume_spec = spec.clone();
+                resume_spec.attack_request = spec
+                    .attack_request
+                    .after_entrants(created_ids.len() - prefix_len + 1);
                 let post_actions = vec![
                     PendingCounterPostAction::FinalizeTokenEntry {
                         object_id: obj_id,
@@ -1576,7 +1646,7 @@ fn apply_create_token_batch(
                     },
                     PendingCounterPostAction::ContinueTokenCreation {
                         owner,
-                        spec: spec.clone(),
+                        spec: resume_spec,
                         enter_tapped,
                         remaining_count,
                     },
@@ -2581,6 +2651,7 @@ fn liminal_token_entry_finalization_action(
         source_id: entry.source_id,
         controller: entry.controller,
         enters_attacking: entry.enters_attacking,
+        attack_destination: entry.attack_destination.clone(),
         attach_to: entry.attach_to,
         sacrifice_at: entry.sacrifice_at.clone(),
         created_ids: entry.created_ids.clone(),
@@ -2604,6 +2675,7 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
         source_id,
         controller,
         enters_attacking,
+        attack_destination,
         attach_to,
         sacrifice_at,
         created_ids,
@@ -2630,7 +2702,13 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     crate::game::restrictions::record_token_created(state, object_id);
 
     if enters_attacking {
-        crate::game::combat::enter_attacking(state, object_id, source_id, controller);
+        crate::game::combat::enter_attacking_at_destination(
+            state,
+            object_id,
+            source_id,
+            controller,
+            &attack_destination,
+        );
     }
     if let Some(host) = attach_to {
         match host {
@@ -3203,7 +3281,7 @@ fn condition_invariant_for_token(
 /// `TargetFilter::Controller`), its `count` is a literal `Fixed` (no
 /// source-relative quantity), it does not enter attacking (combat reads the
 /// source), and it is not attached to a host (attachment reads the source's
-/// target). The remaining fields are characteristics bound but unconstrained
+/// target). The remaining fields are bound but unconstrained
 /// here: a spec can still read its source (a `Source`-scoped P/T quantity, a
 /// static stamped with its creator, CR 201.5a), so a consumer that treats
 /// members as interchangeable compares their resolved specs (`admits_bulk_run`).
@@ -3225,6 +3303,7 @@ pub(crate) fn token_effect_is_source_independent(ability: &ResolvedAbility) -> b
         owner,
         attach_to,
         enters_attacking,
+        attack_destination: _,
         supertypes: _,
         static_abilities: _,
         enter_with_counters: _,
@@ -3424,6 +3503,7 @@ fn try_resolve_copy_batch(
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: _,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords,
@@ -3571,6 +3651,7 @@ pub(crate) fn copy_probe_spec_for(
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at,
         source_id,
         controller,
@@ -3625,6 +3706,7 @@ pub(crate) fn resolve_token_spec(
         owner,
         attach_to,
         enters_attacking,
+        attack_destination,
         supertypes,
         static_abilities,
         enter_with_counters,
@@ -3633,8 +3715,9 @@ pub(crate) fn resolve_token_spec(
         return None;
     };
 
-    let count = resolve_quantity_with_targets(state, count, ability).max(0) as u32;
     let token_owner = resolve_token_owner(state, ability, owner)?;
+    let (count, enters_attacking, attack_request) =
+        resolve_token_batch(state, ability, count, *enters_attacking, attack_destination);
     let host_request = TokenHostRequest::from_binding(
         attach_to.is_some(),
         attach_to
@@ -3656,7 +3739,8 @@ pub(crate) fn resolve_token_spec(
         power,
         toughness,
         *tapped,
-        *enters_attacking,
+        enters_attacking,
+        attack_request,
         static_abilities.clone(),
         resolved_etb_counters,
         host_request,
@@ -5343,6 +5427,208 @@ mod tests {
         assert_eq!(a.subtypes, vec!["Soldier"]);
     }
 
+    /// A three-player state in P0's combat with no attackers yet, plus an
+    /// ability source P0 controls.
+    fn attacking_token_board() -> (GameState, ObjectId) {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 3, 42);
+        state.combat = Some(crate::game::combat::CombatState::default());
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Token Maker".to_string(),
+            Zone::Battlefield,
+        );
+        (state, source)
+    }
+
+    fn goblin_token_effect(
+        attack_destination: crate::types::ability::TokenAttackDestination,
+    ) -> Effect {
+        Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Goblin".to_string()],
+            colors: vec![ManaColor::Red],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: true,
+            attack_destination,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        }
+    }
+
+    /// CR 508.4 + CR 508.4a: an instruction that names its defender but whose
+    /// referent identifies no player creates its token without attacking. The
+    /// twin proves the token otherwise enters attacking in this very state.
+    #[test]
+    fn named_destination_with_no_player_creates_a_token_that_is_not_attacking() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let (mut state, source) = attacking_token_board();
+        let mut events = Vec::new();
+        let named = ResolvedAbility::new(
+            goblin_token_effect(TokenAttackDestination::Player {
+                player: ControllerRef::DefendingPlayer,
+                scope: NamedDefenderScope::Player,
+            }),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &named, &mut events).unwrap();
+        let named_token = state.last_created_token_ids[0];
+
+        let twin = ResolvedAbility::new(
+            goblin_token_effect(TokenAttackDestination::ControllerChooses),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        resolve(&mut state, &twin, &mut events).unwrap();
+        let twin_token = state.last_created_token_ids[0];
+
+        let attackers: Vec<ObjectId> = state
+            .combat
+            .as_ref()
+            .unwrap()
+            .attackers
+            .iter()
+            .map(|a| a.object_id)
+            .collect();
+        assert!(
+            attackers.contains(&twin_token),
+            "reach guard: an unspecified destination enters attacking; attackers={attackers:?}"
+        );
+        assert!(
+            state.objects.contains_key(&named_token)
+                && state.objects[&named_token].zone == Zone::Battlefield,
+            "the named-destination token is created"
+        );
+        assert!(
+            !attackers.contains(&named_token),
+            "no player was identified, so the token is not attacking"
+        );
+    }
+
+    /// CR 608.2c: an instruction that names each player a filter lists creates
+    /// one token for each listed player; with nobody listed it creates none and
+    /// nothing attacks. The elimination twin lists a player in the same
+    /// state.
+    #[test]
+    fn each_player_destination_with_nobody_listed_creates_no_token() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+        use crate::types::proposed_event::TokenAttackRequest;
+
+        let (mut state, source) = attacking_token_board();
+        let ability = ResolvedAbility::new(
+            goblin_token_effect(TokenAttackDestination::ControllerChooses),
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let destination = TokenAttackDestination::EachPlayer {
+            filter: PlayerFilter::HasLostTheGame,
+            scope: NamedDefenderScope::Player,
+        };
+        let one = QuantityExpr::Fixed { value: 1 };
+
+        assert_eq!(
+            resolve_token_batch(&state, &ability, &one, true, &destination),
+            (0, false, TokenAttackRequest::Unspecified)
+        );
+
+        state.players[1].is_eliminated = true;
+        assert_eq!(
+            resolve_token_batch(&state, &ability, &one, true, &destination),
+            (
+                1,
+                true,
+                TokenAttackRequest::Named {
+                    first: PlayerId(1),
+                    rest: vec![],
+                }
+            ),
+            "reach guard: one listed player is one token seated at that player"
+        );
+    }
+
+    /// CR 508.4: a batch's tokens are seated at the destinations its request
+    /// lists, in creation order.
+    #[test]
+    fn token_batch_is_seated_at_each_requested_destination_in_order() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::proposed_event::{TokenAttackRequest, TokenCharacteristics};
+
+        let (mut state, source) = attacking_token_board();
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Goblin".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Goblin".to_string()],
+                supertypes: vec![],
+                colors: vec![ManaColor::Red],
+                keywords: vec![],
+            },
+            script_name: "Goblin".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request: TokenAttackRequest::Named {
+                first: PlayerId(1),
+                rest: vec![PlayerId(2)],
+            },
+            sacrifice_at: None,
+            source_id: source,
+            controller: PlayerId(0),
+            attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+        };
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Tapped,
+            count: 2,
+            appended: Vec::new(),
+            applied: std::collections::HashSet::new(),
+        };
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let created = state.last_created_token_ids.clone();
+        assert_eq!(created.len(), 2, "reach guard: both tokens were created");
+        let seats: Vec<Option<AttackTarget>> = created
+            .iter()
+            .map(|id| {
+                state
+                    .combat
+                    .as_ref()
+                    .unwrap()
+                    .attackers
+                    .iter()
+                    .find(|a| a.object_id == *id)
+                    .map(|a| a.attack_target)
+            })
+            .collect();
+        assert_eq!(
+            seats,
+            vec![
+                Some(AttackTarget::Player(PlayerId(1))),
+                Some(AttackTarget::Player(PlayerId(2)))
+            ]
+        );
+    }
+
     #[test]
     fn liminal_copy_token_trigger_state_serializes() {
         let mut state = GameState::new_two_player(42);
@@ -5474,6 +5760,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -5537,6 +5825,7 @@ mod tests {
                 source_id,
                 controller,
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 created_ids: Vec::new(),
@@ -5915,6 +6204,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -6003,6 +6294,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -6048,6 +6341,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -6083,6 +6378,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -6116,6 +6413,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -6175,6 +6474,8 @@ mod tests {
                 owner: TargetFilter::ParentTargetController,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -7325,6 +7626,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7402,6 +7704,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7481,6 +7784,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7552,6 +7856,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7632,6 +7937,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -7719,6 +8025,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: Some(TargetFilter::ParentTarget),
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -7824,6 +8132,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: source,
             controller: PlayerId(0),
@@ -8387,6 +8696,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -8454,6 +8764,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -8524,6 +8835,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(101),
             controller: PlayerId(0),
@@ -8601,6 +8913,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(102),
             controller: PlayerId(0),
@@ -8657,6 +8970,7 @@ mod tests {
             enter_with_counters: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(100),
             controller: PlayerId(0),
@@ -8723,6 +9037,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(
@@ -8847,6 +9163,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             enters_attacking: false,
+            attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,
@@ -9114,6 +9431,7 @@ mod tests {
                 source_id,
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: Some(Duration::UntilEndOfCombat),
                 remaining_count: 0,
@@ -9128,6 +9446,7 @@ mod tests {
                     additional_modifications: Vec::new(),
                     tapped: false,
                     enters_attacking: false,
+                    attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                     sacrifice_at: Some(Duration::UntilEndOfCombat),
                     source_id,
                     controller: PlayerId(0),
@@ -9251,6 +9570,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -9292,6 +9613,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -10783,6 +11105,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(CounterType::Plus1Plus1, rider)],
