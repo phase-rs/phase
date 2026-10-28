@@ -307,6 +307,9 @@ pub(crate) fn apply_zone_exit_cleanup(
                 // "isn't prepared" intervening-if recheck (CR 603.4) reads
                 // this exit value, not the trigger-time appearance.
                 was_prepared: obj.prepared.is_some(),
+                // CR 608.2h: intensity at zone exit, for a departed source's
+                // "its intensity" read.
+                intensity: obj.intensity,
                 // CR 608.2h: The attachment set as it stood BEFORE the departure
                 // sever (CR 701.3d) cleared it, so a source-referential intervening-if
                 // re-checked at resolution ("if this creature is enchanted" — Dreampod
@@ -1776,6 +1779,15 @@ pub(crate) fn move_to_zone_with_entry_flags(
         to,
         zone_change_record.attachments.clone(),
     );
+
+    // CR 800.4a + CR 603.6c: the player-leaves-game procedure names how this
+    // object leaves its zone, so the record carries it before it is journaled.
+    if let Some(leaving) = state
+        .leaving_game_departure
+        .take_if(|leaving| leaving.object_id == object_id)
+    {
+        zone_change_record.departure = leaving.departure;
+    }
 
     // Command-zone routes select between the ordinary command container and
     // the owner-specific Attraction/Contraption containers. Stack routes have

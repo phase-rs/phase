@@ -516,10 +516,12 @@ fn on_shortcut_byte_identical_to_pre_pr7_golden() {
         .replace(", cast_mana_value: None", "")
         .replace(", new_total: LifeTotalReading(None)", "")
         .replace(", was_prepared: false", "")
+        .replace(", departure: Moved", "")
         // `attack_target` was added to the combat status after the golden was cut;
         // no combat is live in this fixture, so its derived value is None (CR 506.3).
         .replace(", attack_target: None", "")
-        .replace(", attack_target_identity: None", "");
+        .replace(", attack_target_identity: None", "")
+        .replace(", intensity: 0", "");
     for owner in 0..2 {
         for controller in 0..2 {
             event_stream = event_stream.replace(

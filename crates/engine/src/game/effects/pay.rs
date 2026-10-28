@@ -2,7 +2,7 @@ use crate::game::costs::{self, PaymentFailure, PaymentOutcome};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::targeting::resolve_effect_player_ref;
 use crate::game::{casting, casting_costs};
-use crate::types::ability::{AbilityCost, Effect, QuantityExpr, QuantityRef};
+use crate::types::ability::{is_pay_any_amount, AbilityCost, Effect};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
 use crate::types::mana::ManaCost;
@@ -27,22 +27,6 @@ pub(crate) fn max_pay_any_life_amount(state: &GameState, payer: PlayerId) -> u32
     } else {
         0
     }
-}
-
-/// CR 107.1c + CR 107.14: Detect a "pay any amount of X" shape — the parser
-/// emits `QuantityExpr::Ref { QuantityRef::Variable { name: "X" } }` for
-/// these prompts (Galvanic Discharge, etc.). A fixed or dynamic reference
-/// (e.g., `Fixed { 2 }` or `Power { CostPaidObject }`) is paid unconditionally.
-/// Shared by the resolution prompt below, the pre-entry payment shape
-/// predicate (`replacement::as_enters_payment_shape`), and the as-enters
-/// payment builder (`parse_as_enters_pay`).
-pub(crate) fn is_pay_any_amount(amount: &QuantityExpr) -> bool {
-    matches!(
-        amount,
-        QuantityExpr::Ref {
-            qty: QuantityRef::Variable { name },
-        } if name == "X"
-    )
 }
 
 /// CR 118.1 + CR 119.4b: Resolve the life-payment channel owned by a concrete
@@ -451,7 +435,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ChooseOneOfKind, ManaProduction, ManaSpendRestriction,
-        TargetFilter,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};

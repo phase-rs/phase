@@ -5117,7 +5117,9 @@ card into your hand at the beginning of your next end step.";
             runner.state(),
             &runner.state().objects[&source],
         ));
-        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController);
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesController {
+            side: crate::types::triggers::ControlChangeSide::Loses,
+        });
         trigger.valid_card = Some(TargetFilter::SpecificObject { id: sword });
         trigger.execute = None;
         runner

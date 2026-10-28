@@ -9295,12 +9295,12 @@ fn parse_cecil_dark_knight_then_if_life_threshold_gate_structure() {
             scope: EffectScope::Single,
             ..
         } => {
-            // The parser today emits `ParentTarget` here — "transform it"
-            // refers back to the Untap target (the trigger source).
+            // CR 608.2c: "transform it" names the source the preceding
+            // "untap ~" named, so it binds to the source directly.
             assert_eq!(
                 *target,
-                TargetFilter::ParentTarget,
-                "Transform.target must be ParentTarget — 'transform it' inherits the Untap target",
+                TargetFilter::SelfRef,
+                "Transform.target must be SelfRef — 'transform it' names the Untap's source",
             );
         }
         other => panic!("nested sub_ability effect must be a single Transform, got {other:?}"),
@@ -11165,20 +11165,98 @@ fn trigger_murktide_leaves_your_graveyard() {
     );
 }
 
-/// CR 603.2 + CR 613.3 + #1522: "When you lose control of ~" — Sigil of
-/// Corruption ability on Khârn the Betrayer. Maps to ChangesController with
-/// valid_card = SelfRef so the trigger fires only when this specific permanent
-/// changes controller. Execute draws 2 for the previous controller (the trigger
-/// fires before layer re-evaluation, so the previous controller still holds Khârn
-/// at trigger-scan time).
+/// CR 603.2 + CR 603.10d + #1522: "When you lose control of ~" — Sigil of
+/// Corruption ability on Khârn the Betrayer. Maps to ChangesController
+/// `{ side: Loses }` with valid_card = SelfRef so the trigger fires only when
+/// this specific permanent changes controller. Execute draws 2 for the previous
+/// controller (CR 603.10d: the ability looks back in time to the pre-change
+/// controller, who controls the trigger).
 #[test]
 fn trigger_when_you_lose_control_maps_to_changes_controller() {
     let def = parse_trigger_line(
         "When you lose control of ~, draw two cards.",
         "Khârn the Betrayer",
     );
-    assert_eq!(def.mode, TriggerMode::ChangesController);
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Loses
+        }
+    );
     assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// CR 603.2 + CR 603.10 + CR 603.3a: Risky Move's second ability, verbatim.
+/// "When you gain control of ~ from another player" maps to ChangesController
+/// `{ side: Gains }` with valid_card = SelfRef; "from another player" adds no
+/// constraint (CR 110.2: a control change always comes from the prior
+/// controller) so `valid_target` stays empty. The body is the shared
+/// choose-creature-and-opponent coin-flip chain and must not leak
+/// `Unimplemented` (the reach guard for
+/// `trigger_gain_control_hostile_shapes_stay_unknown`).
+#[test]
+fn trigger_when_you_gain_control_from_another_player_maps_to_gains() {
+    let def = parse_trigger_line(
+        "When you gain control of this enchantment from another player, choose a creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains control of that creature.",
+        "Risky Move",
+    );
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(def.valid_target, None);
+    let execute = def.execute.as_ref().expect("execute ability");
+    assert!(
+        !has_unimplemented(execute),
+        "Risky Move's body leaked Unimplemented: {execute:?}"
+    );
+}
+
+/// CR 603.2 + CR 603.10: the bare "Whenever you gain control of ~" class — no
+/// "from another player" suffix — is rules-identical and maps to `Gains`.
+#[test]
+fn trigger_whenever_you_gain_control_bare_maps_to_gains() {
+    let def = parse_trigger_line("Whenever you gain control of ~, draw a card.", "Example");
+    assert_eq!(
+        def.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        }
+    );
+    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+}
+
+/// Hostile shapes stay `Unknown` (honest coverage gaps): a counterparty other
+/// than "another player" and a lose-side line with a "from" suffix are not the
+/// recognised grammar. Paired with a positive in the same test so the negatives
+/// are not vacuous.
+#[test]
+fn trigger_gain_control_hostile_shapes_stay_unknown() {
+    let positive = parse_trigger_line(
+        "When you gain control of ~ from another player, draw a card.",
+        "Example",
+    );
+    assert_eq!(
+        positive.mode,
+        TriggerMode::ChangesController {
+            side: ControlChangeSide::Gains
+        },
+        "reach guard: the recognised grammar parses"
+    );
+    for text in [
+        "When you gain control of ~ from an opponent, draw a card.",
+        "When you lose control of ~ from another player, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Example");
+        assert!(
+            matches!(def.mode, TriggerMode::Unknown(_)),
+            "{text:?} must stay Unknown, got {:?}",
+            def.mode
+        );
+    }
 }
 
 /// CR 603.2c: Batched "one or more permanents … leave the battlefield" uses the plural
@@ -15129,6 +15207,179 @@ fn bubbling_muck_delayed_trigger_taps_for_mana_class_general() {
             ..
         } if colors == &vec![ManaColor::Black]
     ));
+}
+
+#[test]
+fn molten_tide_delayed_trigger_you_tap_mountain_for_mana() {
+    // CR 603.7b + CR 106.12a: Molten Tide's real Oracle text is an instant
+    // that creates an until-end-of-turn delayed trigger. The inner condition
+    // is keyword-stripped by `try_parse_whenever_this_turn` before
+    // `parse_trigger_condition` runs, so the "you tap " actor arm of
+    // `parse_taps_for_mana_actor_line` must accept the missing "whenever "
+    // keyword. Reverting that arm reproduces `TriggerMode::Unknown`, which
+    // has no matcher and never fires.
+    let parsed = parse_oracle_text(
+        "Until end of turn, whenever you tap a Mountain for mana, add an additional {R}.",
+        "Molten Tide",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    for ability in &parsed.abilities {
+        assert_no_unimplemented(ability);
+    }
+    let ability = parsed
+        .abilities
+        .iter()
+        .find(|a| matches!(*a.effect, Effect::CreateDelayedTrigger { .. }))
+        .expect("Molten Tide must parse a CreateDelayedTrigger");
+
+    // Outer window is the until-end-of-turn cleanup purge (CR 603.7b).
+    assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger, .. },
+        effect,
+        ..
+    } = &*ability.effect
+    else {
+        panic!(
+            "expected WheneverEvent delayed trigger, got {:?}",
+            ability.effect
+        );
+    };
+
+    // Inner trigger must be a real TapsForMana matcher, NOT the Unknown fallback.
+    assert_eq!(trigger.mode, TriggerMode::TapsForMana);
+    assert!(
+        !matches!(trigger.mode, TriggerMode::Unknown(_)),
+        "inner trigger must not be Unknown (Unknown has no matcher and never fires)"
+    );
+
+    // valid_card is the Mountain subtype filter scoped to lands the trigger
+    // source's controller tapped ("you tap" = ControllerRef::You).
+    match &trigger.valid_card {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Mountain".to_string())),
+                "valid_card must filter on Subtype(Mountain), got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you tap\" imposes a You controller constraint on the tapped land"
+            );
+        }
+        other => panic!("expected Typed Mountain filter, got {other:?}"),
+    }
+    assert_eq!(
+        trigger.valid_target,
+        Some(TargetFilter::Controller),
+        "\"you tap\" binds the tapper to the trigger source's controller"
+    );
+    assert_eq!(
+        trigger.taps_for_mana_produced, None,
+        "\"for mana\" with no color constraint imposes no produced-mana filter"
+    );
+
+    // CR 106.4 + CR 603.7d: subjectless body — implicit controller deposit;
+    // tapper == controller on every firing, unlike High Tide's subject-led
+    // Recipient{TriggeringPlayer}.
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { colors, contribution: ManaContribution::Additional },
+                target: None,
+                ..
+            } if colors == &vec![ManaColor::Red]
+        ),
+        "inner effect must be subjectless additional red mana, got {:?}",
+        effect.effect
+    );
+}
+
+#[test]
+fn selesnya_loft_gardens_chaos_delayed_echo_is_taps_for_mana() {
+    // CR 603.7b + CR 106.12a: Selesnya Loft Gardens' chaos ability creates an
+    // until-end-of-turn delayed trigger over the shared you-tap actor ("you
+    // tap a land for mana" — same arm as Molten Tide). Its body is the
+    // mana-echo production ("add one mana of any type that land produced"),
+    // which the choice contract resolves to exactly one chosen mana at
+    // runtime; the parser pins the shape here so the runtime regression in
+    // `selesnya_loft_gardens_mixed_mana_choice.rs` cannot pass on a fallback.
+    // Reverting the you-tap arm reproduces `TriggerMode::Unknown` inside.
+    let parsed = parse_oracle_text(
+        "If an effect would create one or more tokens, it creates twice that many of those tokens instead.\nIf an effect would put one or more counters on a permanent, it puts twice that many of those counters on that permanent instead.\nWhenever chaos ensues, until end of turn, whenever you tap a land for mana, add one mana of any type that land produced.",
+        "Selesnya Loft Gardens",
+        &[],
+        &["Plane".to_string()],
+        &[],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChaosEnsues)
+        .expect("Selesnya must parse a ChaosEnsues trigger");
+    let delayed = trigger
+        .execute
+        .as_ref()
+        .expect("chaos trigger must carry its delayed-creation body");
+    let Effect::CreateDelayedTrigger {
+        condition: DelayedTriggerCondition::WheneverEvent { trigger: inner, .. },
+        effect,
+        ..
+    } = &*delayed.effect
+    else {
+        panic!(
+            "expected WheneverEvent delayed trigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(inner.mode, TriggerMode::TapsForMana);
+    assert!(
+        !matches!(inner.mode, TriggerMode::Unknown(_)),
+        "inner trigger must not be Unknown (Unknown has no matcher and never fires)"
+    );
+    match &inner.valid_card {
+        Some(TargetFilter::Typed(tf)) => {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land),
+                "valid_card must filter on Land, got {:?}",
+                tf.type_filters
+            );
+            assert_eq!(
+                tf.controller,
+                Some(ControllerRef::You),
+                "\"you tap\" imposes a You controller constraint on the tapped land"
+            );
+        }
+        other => panic!("expected Typed Land filter, got {other:?}"),
+    }
+    assert_eq!(
+        inner.valid_target,
+        Some(TargetFilter::Controller),
+        "\"you tap\" binds the tapper to the trigger source's controller"
+    );
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                target: None,
+                ..
+            }
+        ),
+        "inner effect must be subjectless mana-echo production, got {:?}",
+        effect.effect
+    );
+    assert_eq!(
+        delayed.duration,
+        Some(Duration::UntilEndOfTurn),
+        "outer window is the until-end-of-turn cleanup purge (CR 603.7b)"
+    );
 }
 
 #[test]
@@ -38566,7 +38817,7 @@ fn a_perpetual_zone_list_subject_in_a_trigger_never_lowers_to_a_pump() {
 /// `TriggeringSource`, so Valki exiles itself and its ETB re-fires.
 #[test]
 fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lift() {
-    use crate::game::effects::reveal_hand::effect_parks_reveal_card_choice;
+    use crate::types::ability::effect_parks_reveal_card_choice;
 
     // (i) Valki, God of Lies — verbatim ETB.
     let valki = parse_trigger_line(
@@ -40291,6 +40542,259 @@ fn prepared_gate_rejects_nonsource_grammar_matrix() {
             "the trigger body must still parse for {text:?}"
         );
     }
+}
+
+// ── #9179: combat-history relative clauses and the self-blocker anaphor ──
+
+const CATHEDRAL_MEMBRANE_ORACLE: &str = "({W/P} can be paid with either {W} or 2 life.)\nDefender\nWhen this creature dies during combat, it deals 6 damage to each creature it blocked this combat.";
+const DEFIANT_VANGUARD_ORACLE: &str = "When this creature blocks, at end of combat, destroy it and all creatures it blocked this turn.\n{5}, {T}: Search your library for a Rebel permanent card with mana value 4 or less, put it onto the battlefield, then shuffle.";
+
+fn parse_card(
+    text: &str,
+    name: &str,
+    keywords: &[&str],
+    types: &[&str],
+    subtypes: &[&str],
+) -> crate::parser::oracle::ParsedAbilities {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    parse_oracle_text(
+        text,
+        name,
+        &owned(keywords),
+        &owned(types),
+        &owned(subtypes),
+    )
+}
+
+fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+            relation: CombatRelation::BlockedBySubject { scope },
+            subject: CombatRelationSubject::Source,
+        }]),
+    )
+}
+
+/// The target of the first effect in `def`'s chain that `select` accepts,
+/// descending through sub-abilities and delayed-trigger bodies.
+fn find_chain_target(
+    def: &AbilityDefinition,
+    select: fn(&Effect) -> Option<&TargetFilter>,
+) -> Option<&TargetFilter> {
+    if let Some(target) = select(&def.effect) {
+        return Some(target);
+    }
+    if let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect {
+        if let Some(target) = find_chain_target(effect, select) {
+            return Some(target);
+        }
+    }
+    def.sub_ability
+        .as_deref()
+        .and_then(|sub| find_chain_target(sub, select))
+}
+
+fn destroy_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Destroy { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+fn return_to_hand_target(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Bounce { target, .. } | Effect::ChangeZone { target, .. } => Some(target),
+        _ => None,
+    }
+}
+
+/// P5 — CR 509.1g + CR 608.2i + CR 611.2a: Cathedral Membrane, verbatim. The
+/// mass damage is restricted to the creatures the source blocked this combat,
+/// and "this combat" is not amputated into an effect duration.
+#[test]
+fn cathedral_membrane_damage_is_restricted_to_what_it_blocked_this_combat() {
+    let parsed = parse_card(
+        CATHEDRAL_MEMBRANE_ORACLE,
+        "Cathedral Membrane",
+        &["Defender"],
+        &["Artifact", "Creature"],
+        &["Phyrexian", "Wall"],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone)
+        .expect("the dies trigger must parse");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    match &*execute.effect {
+        Effect::DamageAll { amount, target, .. } => {
+            assert_eq!(*amount, QuantityExpr::Fixed { value: 6 });
+            assert_eq!(
+                *target,
+                blocked_by_source_creatures(CombatHistoryScope::ThisCombat)
+            );
+        }
+        other => panic!("expected DamageAll, got {other:?}"),
+    }
+    assert_eq!(
+        execute.duration, None,
+        "\"this combat\" belongs to the relative clause, not to the effect"
+    );
+}
+
+/// P5 + P7 — Defiant Vanguard, verbatim. "destroy it" names the Vanguard (the
+/// self-blocker pin), and the anaphoric continuation "all creatures it blocked
+/// this turn" binds its "it" to the source through the continuation pin — the
+/// continuation is otherwise parsed under a blank context, which the pronoun
+/// gate refuses. No duration anywhere in the chain.
+#[test]
+fn defiant_vanguard_destroys_itself_and_creatures_it_blocked_this_turn() {
+    let parsed = parse_card(
+        DEFIANT_VANGUARD_ORACLE,
+        "Defiant Vanguard",
+        &[],
+        &["Creature"],
+        &["Human", "Rebel"],
+    );
+    let trigger = parsed
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::Blocks)
+        .expect("the block trigger must parse");
+    let execute = trigger.execute.as_deref().expect("trigger body");
+    assert_eq!(execute.duration, None);
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = &*execute.effect
+    else {
+        panic!("expected CreateDelayedTrigger, got {:?}", execute.effect);
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase {
+            phase: Phase::EndCombat
+        }
+    );
+    // Reach guard: the compound split ran, and its primary acted on the source.
+    assert!(
+        matches!(
+            &*effect.effect,
+            Effect::Destroy {
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "\"destroy it\" must name the Vanguard itself, got {:?}",
+        effect.effect
+    );
+    assert_eq!(effect.duration, None);
+    let sub = effect
+        .sub_ability
+        .as_deref()
+        .expect("reach guard: the continuation must be chained");
+    match &*sub.effect {
+        Effect::DestroyAll { target, .. } => assert_eq!(
+            *target,
+            blocked_by_source_creatures(CombatHistoryScope::ThisTurn),
+            "the continuation's \"it\" must name the source"
+        ),
+        other => panic!("expected DestroyAll, got {other:?}"),
+    }
+    assert_eq!(sub.duration, None);
+}
+
+/// P6 — CR 509.3a + CR 608.2k: the self-subject intransitive block condition
+/// pins a bare "it" to the source. Conditions that name another object, fuse
+/// "becomes blocked", have a typed subject, or are not block conditions do not.
+#[test]
+fn self_subject_intransitive_block_condition_pins_it_to_source() {
+    for condition in ["When ~ blocks", "Whenever ~ attacks or blocks"] {
+        assert_eq!(
+            trigger_object_pronoun_ref_for_condition(condition, &TargetFilter::SelfRef),
+            Some(TargetFilter::SelfRef),
+            "{condition}"
+        );
+    }
+    for (condition, subject) in [
+        ("Whenever ~ blocks a creature", TargetFilter::SelfRef),
+        (
+            "Whenever ~ blocks or becomes blocked",
+            TargetFilter::SelfRef,
+        ),
+        ("Whenever ~ attacks", TargetFilter::SelfRef),
+        (
+            "Whenever a creature you control blocks",
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        ),
+    ] {
+        assert_eq!(
+            trigger_object_pronoun_ref_for_condition(condition, &subject),
+            None,
+            "{condition}"
+        );
+    }
+}
+
+/// P6 — the pin reaches printed trigger bodies through the real parse path:
+/// Cinder Wall and Wall of Junk act on themselves at end of combat, and Zephyr
+/// Spirit returns itself immediately. A chain-declared target still outranks
+/// the pin (CR 608.2c).
+#[test]
+fn self_blocker_trigger_bodies_act_on_the_source() {
+    for (name, text, keywords, types, select) in [
+        (
+            "Cinder Wall",
+            "Defender\nWhen this creature blocks, destroy it at end of combat.",
+            &["Defender"][..],
+            &["Creature"][..],
+            destroy_target as fn(&Effect) -> Option<&TargetFilter>,
+        ),
+        (
+            "Wall of Junk",
+            "Defender (This creature can't attack.)\nWhen this creature blocks, return it to its owner's hand at end of combat. (Return it only if it's on the battlefield.)",
+            &["Defender"][..],
+            &["Artifact", "Creature"][..],
+            return_to_hand_target,
+        ),
+        (
+            "Ceremonial Guard",
+            "When this creature attacks or blocks, destroy it at end of combat.",
+            &[][..],
+            &["Creature"][..],
+            destroy_target,
+        ),
+        (
+            "Zephyr Spirit",
+            "When this creature blocks, return it to its owner's hand.",
+            &[][..],
+            &["Creature"][..],
+            return_to_hand_target,
+        ),
+    ] {
+        let parsed = parse_card(text, name, keywords, types, &[]);
+        let trigger = parsed
+            .triggers
+            .iter()
+            .find(|t| matches!(t.mode, TriggerMode::Blocks | TriggerMode::AttacksOrBlocks))
+            .unwrap_or_else(|| panic!("{name}: the block trigger must parse"));
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert_eq!(
+            find_chain_target(execute, select),
+            Some(&TargetFilter::SelfRef),
+            "{name}: \"it\" must name the blocker itself"
+        );
+    }
+
+    let def = parse_trigger_line(
+        "Whenever Test Wall blocks, tap target creature. Destroy it at end of combat.",
+        "Test Wall",
+    );
+    let execute = def.execute.as_deref().expect("trigger body");
+    assert_eq!(
+        find_chain_target(execute, destroy_target),
+        Some(&TargetFilter::ParentTarget),
+        "a chain-declared target outranks the self-blocker pin"
+    );
 }
 
 // --- #9179 (A): the "during <window>" qualifier of an event-trigger head ---

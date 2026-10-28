@@ -1,6 +1,6 @@
 //! Converts `data/known-tokens.toml` (the human-reviewable catalog generated
 //! by the `tokens-gen` bin) into JSON at build time for the runtime embed in
-//! `game/token_presets.rs`.
+//! `types/token_presets.rs`.
 //!
 //! Why: parsing the ~5.9MB catalog with `toml`/`toml_edit` costs ~1s per
 //! process in debug builds, and nextest runs every test in its own process —

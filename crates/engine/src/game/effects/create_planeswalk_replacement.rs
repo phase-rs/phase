@@ -55,23 +55,23 @@ pub fn resolve(
     shield.planeswalk_scope =
         Some(crate::types::ability::PlaneswalkReplacementScope::PlanarDieOnly);
     // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
-    match crate::game::effects::add_target_replacement::expiry_from_duration(
-        ability.duration.as_ref(),
-    ) {
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Explicit(
-            expiry,
-        ) => shield.expiry = Some(expiry),
+    match crate::types::ability::expiry_from_duration(ability.duration.as_ref()) {
+        crate::types::ability::ReplacementDurationExpiry::Explicit(expiry) => {
+            shield.expiry = Some(expiry)
+        }
         // CR 611.2a: the controller-scoped class, named here rather than
         // re-derived — this resolver's own comment above ("Duration::
         // UntilNextTurnOf { Controller }") is exactly this arm.
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::ExplicitControllerNextTurn => {
-            shield.expiry = Some(crate::types::ability::RestrictionExpiry::UntilPlayerNextTurn {
-                player: ability.controller,
-            });
+        crate::types::ability::ReplacementDurationExpiry::ExplicitControllerNextTurn => {
+            shield.expiry = Some(
+                crate::types::ability::RestrictionExpiry::UntilPlayerNextTurn {
+                    player: ability.controller,
+                },
+            );
         }
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unstated => {}
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::GateControlled
-        | crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unsupported => {
+        crate::types::ability::ReplacementDurationExpiry::Unstated => {}
+        crate::types::ability::ReplacementDurationExpiry::GateControlled
+        | crate::types::ability::ReplacementDurationExpiry::Unsupported => {
             // CR 611.2a: do not install a planeswalk replacement with a stated
             // duration this lifecycle cannot enforce.
             return Ok(());

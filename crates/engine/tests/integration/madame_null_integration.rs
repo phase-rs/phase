@@ -119,6 +119,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             recorded_turn_number: 0,
             is_suspected: false,
             was_prepared: false,
+            departure: engine::types::game_state::ZoneDeparture::Moved,
         }),
     });
 }
@@ -234,6 +235,7 @@ fn lki_fallback_resolves_source_power_after_zone_change() {
             is_suspected: false,
             was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         },
     );
     set_etb_event(&mut state, dead_id);

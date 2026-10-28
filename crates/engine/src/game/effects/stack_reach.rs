@@ -671,7 +671,7 @@ fn names_resolution_product(effect: &Effect) -> bool {
             super::filter_references_tracked_set(filter)
                 || crate::game::filter::filter_contains_last_created(filter)
                 || crate::game::filter::filter_contains_last_zone_changed(filter)
-                || crate::game::filter::filter_contains(filter, &|inner| {
+                || crate::types::ability::filter_contains(filter, &|inner| {
                     matches!(inner, TargetFilter::LastRevealed)
                 })
         })

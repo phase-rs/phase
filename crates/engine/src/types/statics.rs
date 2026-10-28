@@ -856,6 +856,7 @@ fn special_action_registry_str(action: SpecialAction) -> &'static str {
         SpecialAction::TurnFaceUp => "TurnFaceUp",
         SpecialAction::RollPlanarDie => "RollPlanarDie",
         SpecialAction::EndContinuousEffect => "EndContinuousEffect",
+        SpecialAction::Foretell => "Foretell",
     }
 }
 
@@ -870,6 +871,8 @@ fn special_action_from_registry_str(s: &str) -> Option<SpecialAction> {
         // CR 116.2c: this arm is NOT compiler-forced (`_ => None` below) —
         // omitting it silently breaks the registry string round-trip.
         "EndContinuousEffect" => Some(SpecialAction::EndContinuousEffect),
+        // CR 116.2h: same non-compiler-forced registry round-trip obligation.
+        "Foretell" => Some(SpecialAction::Foretell),
         _ => None,
     }
 }

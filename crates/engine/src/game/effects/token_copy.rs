@@ -519,21 +519,31 @@ fn drain_copy_token_resolution(
             // populate) → empty set → byte-identical to the prior
             // `HashSet::new()`. A *different* source's replacement (Doubling
             // Season's rid) is absent from the seed and still applies (#1511).
+            appended: Vec::new(),
             applied: state
                 .post_replacement_token_choice_applied
                 .clone()
                 .unwrap_or_default(),
         };
 
-        let window_start = events.len();
         match crate::game::replacement::replace_event(state, proposed, events) {
             crate::game::replacement::ReplacementResult::Execute(event) => {
-                let completed =
-                    super::token::apply_create_token_after_replacement(state, event, events);
-                // CR 614.1a + CR 608.2c: this batch's created referent includes
-                // any batch a replacement appended to it. The frame is taken, so
-                // the apply assigned the ledger with this batch's own ids.
-                super::token::publish_replacement_appended_tokens(state, &events[window_start..]);
+                // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
+                // authority leaves the ledger as this batch's whole created
+                // referent, appended batches included: own batch first on
+                // completion, `[]` after a batch paused with more of the event
+                // still to deliver (the event publishes to this frame when it
+                // finishes), and the ids so far after its last batch, a copy
+                // batch, paused. `Suppress`: this frame's drain emits the
+                // effect's terminal `EffectResolved{CopyTokenOf}`, so no pause
+                // of the event owes one.
+                let completed = super::token::apply_create_token_after_replacement_with_created_ids(
+                    state,
+                    event,
+                    Vec::new(),
+                    crate::types::game_state::PendingEffectResolutionEvent::Suppress,
+                    events,
+                );
                 if !completed {
                     pending
                         .created_ids
@@ -571,7 +581,12 @@ fn drain_copy_token_resolution(
 /// Park a copy-token owner as the direct paused frame, or below the complete
 /// child stack its batch raised. The captured boundary preserves the actual
 /// parent/child relationship without searching for a buried CopyToken frame.
-fn park_copy_token_after_current_batch(
+///
+/// The single authority for re-parking a CopyToken owner around a child stack,
+/// shared with the token-event delivery authority
+/// (`token::drive_token_event_delivery`), which detaches the owner while it
+/// delivers a compound CreateToken event.
+pub(crate) fn park_copy_token_after_current_batch(
     state: &mut GameState,
     pending: PendingCopyTokenResolution,
     stack_depth_before_batch: ChildStackDepth,
@@ -698,6 +713,17 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     initial_created_ids: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
 ) -> CopyTokenApplyStatus {
+    // CR 800.4b + CR 707.2: a token copy is a created token like any other; when
+    // its settled controller has left the game none of this batch is created.
+    // Returning before any per-token or liminal work keeps the created referent
+    // to what an earlier pass of this batch already created; every caller
+    // publishes `created_ids` into the ledger that owns the batch.
+    if super::token::token_creator_has_left_game(state, token_owner) {
+        return CopyTokenApplyStatus {
+            created_ids: initial_created_ids,
+            completion: CopyTokenApplyCompletion::Completed,
+        };
+    }
     let CopyTokenSpec {
         mut values,
         display,
@@ -1414,15 +1440,11 @@ pub(crate) fn continue_copy_token_entry_after_aura_host(
         return false;
     }
     // CR 707.2: the paused token is done; drive the rest of the batch. Publication
-    // mirrors the sibling `ContinueCopyTokenCreation` resume arm exactly — a fresh
-    // `created_ids` from the continuation, EXTENDED into whichever ledger owns the
-    // batch — because `finish_non_liminal_copy_token_entry`'s `ResumedBatch` sink
-    // has already published THIS token into both of them, and assigning the
-    // continuation's list wholesale would drop it.
-    if tail.remaining_count == 0 {
-        return true;
-    }
-    let status = apply_copy_token_after_replacement(
+    // goes through the shared resume authority, `resume_copy_token_batch_remainder`,
+    // whose doc says where the continuation's ids land and why THIS token, already
+    // published by `finish_non_liminal_copy_token_entry`'s `ResumedBatch` sink,
+    // stays in the referent.
+    resume_copy_token_batch_remainder(
         state,
         tail.owner,
         *tail.copy,
@@ -1430,10 +1452,7 @@ pub(crate) fn continue_copy_token_entry_after_aura_host(
         tail.enter_with_counters,
         tail.remaining_count,
         events,
-    );
-    let completion = status.completion;
-    extend_copy_batch_created_ids(state, status.created_ids);
-    matches!(completion, CopyTokenApplyCompletion::Completed)
+    )
 }
 
 /// CR 614.12a + CR 707.2: resume a non-liminal copy-token entry that paused on
@@ -1596,12 +1615,9 @@ pub(crate) fn continue_copy_token_after_entry_payment(
         }
     }
     // CR 707.2: the paused token is done; drive the rest of the batch.
-    // Publication mirrors the sibling `ContinueCopyTokenCreation` resume arm
-    // exactly (see `continue_copy_token_entry_after_aura_host`).
-    if tail.remaining_count == 0 {
-        return true;
-    }
-    let status = apply_copy_token_after_replacement(
+    // Publication goes through the shared resume authority,
+    // `resume_copy_token_batch_remainder`.
+    resume_copy_token_batch_remainder(
         state,
         tail.owner,
         *tail.copy,
@@ -1609,30 +1625,67 @@ pub(crate) fn continue_copy_token_after_entry_payment(
         tail.enter_with_counters,
         tail.remaining_count,
         events,
-    );
-    let completion = status.completion;
-    extend_copy_batch_created_ids(state, status.created_ids);
-    matches!(completion, CopyTokenApplyCompletion::Completed)
+    )
 }
 
-/// CR 111.1 + CR 707.2: fold a RESUMED copy-batch continuation's created ids into
-/// whichever ledger owns the batch.
+/// CR 707.2 + CR 608.2c: drive the rest of a paused copy batch and publish its ids
+/// after the referent the creating event built so far. The single authority for
+/// every post-action that restarts a paused batch (counter pause, Aura host,
+/// copied entry payment).
 ///
-/// Single authority for that bulk republish, shared by every post-action arm that
-/// restarts a paused batch. The two destinations are not interchangeable: while a
-/// `CopyToken` frame is live its `created_ids` buffer is assigned WHOLESALE onto
-/// ledger 3 at the drain, so extending ledger 3 directly would be overwritten;
-/// with no frame, ledger 3 is the only destination there is.
+/// While a CopyToken owner is active, its `created_ids` buffer is the referent
+/// (assigned wholesale onto `last_created_token_ids` at its drain), so the
+/// continuation's ids extend it. With none — the plain `Effect::Token` route, or a
+/// compound token event whose cursor re-parked the owner below this pause — the
+/// ledger is the destination, holding what the pause left there plus the token
+/// that just finished (on the plain route, the event's referent so far; under the
+/// compound cursor, possibly only the paused batch's ids, which the cursor
+/// reconciles against the ids it already holds when it resumes). It is handed to
+/// the continuation as its `initial_created_ids` prefix, so a pause inside the
+/// continuation republishes it rather than a continuation-local list, and the
+/// completed list replaces it.
 ///
-/// `extend`, never assign: the id of the token whose own entry just finished has
-/// already been published by `token::record_last_created_copy_batch_token`, and
-/// assigning the continuation's list wholesale would drop it.
-pub(crate) fn extend_copy_batch_created_ids(state: &mut GameState, created_ids: Vec<ObjectId>) {
-    if let Some(pending) = state.active_copy_token_mut() {
-        pending.created_ids.extend(created_ids);
-    } else {
-        state.last_created_token_ids.extend(created_ids);
+/// The token whose own entry just finished is already in whichever destination
+/// owns the batch (`token::record_last_created_copy_batch_token` published it,
+/// from the counter pause's finalize post-action or through
+/// `finish_non_liminal_copy_token_entry`'s `ResumedBatch` sink): extending the
+/// owner's buffer keeps it, and with no owner it is part of the prefix the
+/// completed list starts with.
+pub(crate) fn resume_copy_token_batch_remainder(
+    state: &mut GameState,
+    owner: crate::types::player::PlayerId,
+    copy: CopyTokenSpec,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
+    remaining_count: u32,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if remaining_count == 0 {
+        return true;
     }
+    let initial_created_ids = if state.active_copy_token().is_some() {
+        Vec::new()
+    } else {
+        std::mem::take(&mut state.last_created_token_ids)
+    };
+    let status = apply_copy_token_after_replacement_with_created_ids(
+        state,
+        owner,
+        copy,
+        enter_tapped,
+        enter_with_counters,
+        remaining_count,
+        initial_created_ids,
+        events,
+    );
+    // The owner neither appears nor drains inside this continuation (the
+    // non-liminal batch loop never drains it, and the remainder repeats the paused
+    // batch's non-liminal shape), so this read agrees with the one above.
+    match state.active_copy_token_mut() {
+        Some(pending) => pending.created_ids.extend(status.created_ids),
+        None => state.last_created_token_ids = status.created_ids,
+    }
+    matches!(status.completion, CopyTokenApplyCompletion::Completed)
 }
 
 /// CR 707.2 / CR 707.9: Complete copy-token entry and apply remaining copy

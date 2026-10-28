@@ -137,6 +137,12 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // same-event sibling triggers, so they commute. The conservative prompt
     // remains fail-closed until that per-source proof is structural.
     "adaptive training post",
+    // Woodwork Prodigy: its source-local prepared intervening-if
+    // ("if this creature isn't prepared") and the corresponding BecomePrepared
+    // write targeting SelfRef are disjoint for same-event sibling triggers,
+    // so they commute. The conservative prompt remains fail-closed until that
+    // per-source proof is structural.
+    "woodwork prodigy",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer

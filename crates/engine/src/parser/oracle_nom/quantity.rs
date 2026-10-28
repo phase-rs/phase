@@ -5804,7 +5804,7 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // would turn a conservative never-fires into an over-permit. Those sites are covered by the
         // `coverage.rs` classifier instead.
         EnteredControlBinding::EntryEvent(player) => {
-            if !crate::game::restrictions::ledger_filter_is_evaluable(&filter) {
+            if !crate::types::ability::ledger_filter_is_evaluable(&filter) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Fail,
@@ -7096,7 +7096,39 @@ pub(crate) fn parse_attachment_referent_prop(input: &str) -> OracleResult<'_, Fi
             },
             alt((tag(" attached to them"), tag(" attached to that player"))),
         ),
+        // CR 303.4b + CR 303.4m: the LITERAL "enchanted player" noun phrase is
+        // the same referent as the anaphoric "them"/"that player" arms above —
+        // the player this source Aura is attached to. Kept as one shared tail
+        // combinator ([`parse_enchanted_player_attachment_tail`]) because the
+        // type-phrase suffix cascade also calls it, with its own leading-space
+        // handling, so the phrase string has exactly one home.
+        preceded(tag(" "), parse_enchanted_player_attachment_tail),
     ))
+    .parse(input)
+}
+
+/// CR 303.4b + CR 303.4m: source-relative attachment tail with the LITERAL
+/// player referent — `"attached to enchanted player"` (Curse of Misfortunes'
+/// "a Curse attached to enchanted player" reference population).
+///
+/// Two entry points, one phrase: [`parse_attachment_referent_prop`] consumes
+/// the `" attached to <referent>"` tail (leading space included) for the
+/// quantity/condition count sites, while the type-phrase suffix cascade
+/// (`oracle_target::parse_type_phrase_folding_with_ctx`) calls this trimmed
+/// form directly as a postnominal noun-phrase modifier. `enchanted player` is
+/// SELF-referential (CR 303.4b/303.4m): the referent is the player the ability's
+/// source is attached to, resolved live through `ControllerRef::EnchantedPlayer`,
+/// so it is safe in a filter — unlike the OBJECT referents (`it`,
+/// `that creature`), which need per-clause recipient/declared-slot binding.
+pub(crate) fn parse_enchanted_player_attachment_tail(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::AttachedTo {
+            to: AttachmentReferent::Player {
+                player: ControllerRef::EnchantedPlayer,
+            },
+        },
+        tag("attached to enchanted player"),
+    )
     .parse(input)
 }
 
@@ -7169,22 +7201,35 @@ fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, Qua
 
 fn parse_for_each_blocking_source_type(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, tf) = parse_type_filter_word(input)?;
-    let (rest, _) = alt((
-        tag(" blocking it"),
-        tag(" blocking ~"),
-        tag(" blocking this creature"),
-    ))
-    .parse(rest)?;
+    let (rest, prop) = parse_blocking_source_referent(rest)?;
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![tf],
                 controller: None,
-                properties: vec![FilterProp::BlockingSource],
+                properties: vec![prop],
             }),
         },
     ))
+}
+
+/// CR 509.1g: the " blocking <source>" referent — " blocking it" /
+/// " blocking ~" / " blocking this creature" → `FilterProp::BlockingSource`
+/// (a creature blocking the ability's SOURCE object). The single authority for
+/// this referent, shared by the "for each creature blocking it" quantity and
+/// the "<count> creature(s) is/are blocking it" condition. "it" binds the
+/// source; a host-relative "it" (an Aura's enchanted creature) is not modeled.
+pub(crate) fn parse_blocking_source_referent(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::BlockingSource,
+        alt((
+            tag(" blocking it"),
+            tag(" blocking ~"),
+            tag(" blocking this creature"),
+        )),
+    )
+    .parse(input)
 }
 
 fn parse_for_each_recipient_shared_quality(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -7643,8 +7688,9 @@ mod tests {
     use super::*;
     use crate::parser::oracle_quantity::parse_for_each_clause;
     use crate::types::ability::{
-        AggregateFunction, ControllerRef, FilterProp, ObjectProperty, PlayerFilter, QuantityRef,
-        SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, AttachmentReferent, ControllerRef, FilterProp, ObjectProperty,
+        PlayerFilter, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -9519,6 +9565,53 @@ mod tests {
             },
             other => panic!("expected ObjectCount, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_attachment_referent_prop_enchanted_player() {
+        // CR 303.4b + CR 303.4m: "the object or player an Aura is attached to is
+        // called enchanted", and "enchanted [object or player]" in a permanent's
+        // ability names whatever that permanent is attached to. The shared
+        // referent map already carries this value for the anaphoric "them" /
+        // "that player" arms; the literal "enchanted player" phrase is the same
+        // referent and must map to the same typed value (Curse of Misfortunes'
+        // "a Curse attached to enchanted player" reference population).
+        let (rest, prop) = parse_attachment_referent_prop(" attached to enchanted player").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            prop,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player {
+                    player: ControllerRef::EnchantedPlayer
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn parse_enchanted_player_attachment_tail_stops_at_clause_boundary() {
+        // The tail combinator is also called directly by the type-phrase suffix
+        // cascade, where it is handed trimmed text and must leave the following
+        // clause for the enclosing parser.
+        let (rest, prop) = parse_enchanted_player_attachment_tail(
+            "attached to enchanted player, put it onto the battlefield",
+        )
+        .unwrap();
+        assert_eq!(rest, ", put it onto the battlefield");
+        assert_eq!(
+            prop,
+            FilterProp::AttachedTo {
+                to: AttachmentReferent::Player {
+                    player: ControllerRef::EnchantedPlayer
+                }
+            }
+        );
+        // Sibling: an OBJECT referent ("enchanted creature") is a different
+        // population and stays out of this phrase.
+        assert!(
+            parse_enchanted_player_attachment_tail("attached to enchanted creature").is_err(),
+            "\"enchanted creature\" must not bind the player referent"
+        );
     }
 
     #[test]

@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use super::ability::ControllerRef;
 use super::ability::{
     AbilityCost, ActivationRestriction, CardSelectionMode, Comparator, CostObjectCount,
-    CostReduction, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    CostReduction, FilterProp, QuantityExpr, SacrificeRequirement, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
@@ -97,6 +98,145 @@ pub enum EvokeCost {
 pub enum EchoCost {
     Mana(ManaCost),
     NonMana(AbilityCost),
+}
+
+/// CR 702.42a: Entwine cost — pay additional cost to choose all modes of a modal spell.
+/// Most Entwine cards use a pure mana cost (e.g., Journey of Discovery "Entwine {2}{G}"),
+/// but some use non-mana costs (e.g., Solar Tide "Entwine—Sacrifice two lands.").
+/// Mirrors `EvokeCost`/`FlashbackCost`/`CyclingCost` so the non-mana portion
+/// composes through the existing `AbilityCost` / `pay_additional_cost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", from = "EntwineCostWire")]
+pub enum EntwineCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+/// Deserialization shape for `EntwineCost`. Entwine was previously stored as a
+/// bare `ManaCost`; previously exported card data (and fixtures) still carry
+/// that form, so it is read as `EntwineCost::Mana`. Serialization always emits
+/// the tagged `Mana`/`NonMana` wrapper.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntwineCostWire {
+    Tagged(EntwineCostTagged),
+    LegacyMana(ManaCost),
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "data")]
+enum EntwineCostTagged {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<EntwineCostWire> for EntwineCost {
+    fn from(wire: EntwineCostWire) -> Self {
+        match wire {
+            EntwineCostWire::Tagged(EntwineCostTagged::Mana(cost))
+            | EntwineCostWire::LegacyMana(cost) => EntwineCost::Mana(cost),
+            EntwineCostWire::Tagged(EntwineCostTagged::NonMana(cost)) => EntwineCost::NonMana(cost),
+        }
+    }
+}
+
+/// CR 702.37a + CR 702.37e: Morph cost — either a mana cost (most morph cards,
+/// e.g. Exalted Angel "{2}{W}{W}") or a non-mana cost (Fathom Seer "Return two
+/// Islands you control to their owner's hand", Gathan Raiders "Discard a card",
+/// Zombie Cutthroat "Pay 5 life", Ruthless Ripper "Reveal a black card in your
+/// hand"). Mirrors `EvokeCost`/`BuybackCost`/`CyclingCost`/`EchoCost` so non-mana
+/// costs compose through the existing `AbilityCost` pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum MorphCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
+
+impl From<ManaCost> for MorphCost {
+    fn from(cost: ManaCost) -> Self {
+        Self::Mana(cost)
+    }
+}
+
+impl From<AbilityCost> for MorphCost {
+    fn from(cost: AbilityCost) -> Self {
+        Self::NonMana(cost)
+    }
+}
+
+impl MorphCost {
+    /// CR 702.37e: Returns true if the morph cost is supported by the engine.
+    pub fn is_supported(&self) -> bool {
+        match self {
+            Self::Mana(_) => true,
+            Self::NonMana(cost) => is_ability_cost_supported_for_morph(cost),
+        }
+    }
+}
+
+/// CR 702.37e + CR 118.1: Supported non-mana cost shapes for morph: ReturnToHand,
+/// Discard (chosen from hand only), PayLife, Reveal, Sacrifice (fixed count only),
+/// and Mana. Aggregate sacrifice requirements and random/source-card discards are
+/// rejected until prompt semantics exist. Composite is suppressed until
+/// transaction rollback / pause continuations are implemented.
+pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::ReturnToHand { .. } => true,
+        // CR 107.3d: a morph cost's X is chosen immediately before paying it, but
+        // variable non-mana morph costs are not supported yet, so only fixed
+        // counts are accepted.
+        AbilityCost::Discard {
+            count,
+            selection,
+            self_scope,
+            ..
+        } => {
+            matches!(count, QuantityExpr::Fixed { .. })
+                && !self_scope.is_source_card()
+                && *selection != CardSelectionMode::Random
+        }
+        AbilityCost::PayLife { amount } => matches!(amount, QuantityExpr::Fixed { .. }),
+        // CR 107.3d: variable non-mana morph costs are not supported yet (the
+        // turn-face-up flow has no X choice for non-mana counts), so a symbolic
+        // reveal count is unsupported rather than read as 0.
+        AbilityCost::Reveal { count, .. } => matches!(count, QuantityExpr::Fixed { .. }),
+        AbilityCost::Sacrifice(cost) => {
+            // `u32::MAX` is the parser sentinel for "X" / "any number of".
+            matches!(
+                cost.requirement,
+                SacrificeRequirement::Count { count } if count != u32::MAX
+            )
+        }
+        AbilityCost::Mana { .. } => true,
+        AbilityCost::ManaDynamic { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::ExileMaterials { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::ExileWithAggregate { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::PaySpeed { .. }
+        | AbilityCost::Unattach
+        | AbilityCost::UnattachFrom { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Behold { .. }
+        | AbilityCost::Composite { .. }
+        | AbilityCost::OneOf { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
+        | AbilityCost::PerCounter { .. }
+        | AbilityCost::KeywordCostOfCastSpell { .. }
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::Unimplemented { .. } => false,
+    }
 }
 
 /// CR 702.103a + CR 118.9: Bestow cost — the alternative cost paid to cast the
@@ -859,7 +999,7 @@ pub enum Keyword {
 
     // Additional common keywords with ManaCost
     Prowl(ManaCost),
-    Morph(ManaCost),
+    Morph(MorphCost),
     Megamorph(ManaCost),
     /// CR 702.187b: Mayhem {cost} — cast from graveyard if you discarded this
     /// card this turn, paying the mayhem cost rather than its mana cost.
@@ -914,7 +1054,7 @@ pub enum Keyword {
     /// `EchoCost::NonMana(AbilityCost::Discard { .. })`.
     Echo(EchoCost),
     /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
-    Entwine(ManaCost),
+    Entwine(EntwineCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
     /// CR 702.77a: Reinforce N—[cost] means "[Cost], Discard this card:
@@ -1303,6 +1443,11 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// CR 702.37a/e: Construct a Morph keyword from either a ManaCost or AbilityCost.
+    pub fn morph(cost: impl Into<MorphCost>) -> Self {
+        Self::Morph(cost.into())
+    }
+
     /// Whether this keyword should appear in the battlefield card's compact
     /// badge strip. The strip communicates abilities that remain relevant to
     /// the object as a permanent: combat, protection, live characteristics,
@@ -2774,7 +2919,7 @@ impl FromStr for Keyword {
                 }
                 "unearth" => return Ok(Keyword::Unearth(parse_keyword_mana_cost(p))),
                 "prowl" => return Ok(Keyword::Prowl(parse_keyword_mana_cost(p))),
-                "morph" => return Ok(Keyword::Morph(parse_keyword_mana_cost(p))),
+                "morph" => return Ok(Keyword::Morph(MorphCost::Mana(parse_keyword_mana_cost(p)))),
                 "megamorph" => return Ok(Keyword::Megamorph(parse_keyword_mana_cost(p))),
                 "mayhem" => return Ok(Keyword::Mayhem(parse_keyword_mana_cost(p))),
                 "madness" => return Ok(Keyword::Madness(parse_keyword_mana_cost(p))),
@@ -2819,7 +2964,11 @@ impl FromStr for Keyword {
                     )))
                 }
                 "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
-                "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
+                "entwine" => {
+                    return Ok(Keyword::Entwine(EntwineCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "affinity" => {
                     if let Some(tf) = parse_affinity_type(p) {
                         return Ok(Keyword::Affinity(tf));
@@ -3671,7 +3820,13 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         }
         "Unearth" => Ok(Keyword::Unearth(mana(data)?)),
         "Prowl" => Ok(Keyword::Prowl(mana(data)?)),
-        "Morph" => Ok(Keyword::Morph(mana(data)?)),
+        "Morph" => {
+            if let Ok(morph_cost) = serde_json::from_value::<MorphCost>(data.clone()) {
+                Ok(Keyword::Morph(morph_cost))
+            } else {
+                Ok(Keyword::Morph(MorphCost::Mana(mana(data)?)))
+            }
+        }
         "Megamorph" => Ok(Keyword::Megamorph(mana(data)?)),
         // CR 702.187b: MTGJSON may provide bare "Mayhem"; the Oracle parser
         // overwrites with the real mana cost extracted from reminder text.
@@ -3744,7 +3899,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // CR 702.153a
         "Casualty" => Ok(Keyword::Casualty(uint(data))),
         // CR 702.42a
-        "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        "Entwine" => {
+            // `EntwineCost`'s `from = "EntwineCostWire"` shim already accepts the
+            // legacy bare `ManaCost` payload (`EntwineCostWire::LegacyMana`), so
+            // this is the single authority for both the legacy and tagged shapes.
+            // A malformed payload surfaces the `EntwineCost` error instead of
+            // being silently re-read as a bare `ManaCost`.
+            serde_json::from_value::<EntwineCost>(data.clone())
+                .map(Keyword::Entwine)
+                .map_err(|e| format!("Entwine: {e}"))
+        }
         // CR 702.120a: accept both legacy ManaCost format and new AbilityCost tagged format.
         "Escalate" => {
             if let Ok(cost) = serde_json::from_value::<AbilityCost>(data.clone()) {
@@ -4082,6 +4246,21 @@ pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Card data exported before `EntwineCost` gained its `Mana`/`NonMana` wrapper
+    /// stored Entwine as a bare `ManaCost`; it must still load as `Mana`.
+    #[test]
+    fn entwine_cost_reads_legacy_bare_mana_cost() {
+        let tagged = EntwineCost::Mana(ManaCost::generic(2));
+        let json = serde_json::to_value(&tagged).unwrap();
+        assert_eq!(json["type"], "Mana");
+        let legacy = serde_json::to_value(ManaCost::generic(2)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<EntwineCost>(legacy).unwrap(),
+            tagged
+        );
+        assert_eq!(serde_json::from_value::<EntwineCost>(json).unwrap(), tagged);
+    }
     use crate::types::ability::Effect;
 
     // SHAPE: CR 702.5a + CR 205.3m: the single-leg adapter must retain the
@@ -5802,6 +5981,31 @@ mod tests {
         }
     }
 
+    // CR 107.3d + CR 702.37e: variable non-mana morph costs are not supported
+    // yet, so symbolic or sentinel counts must not be accepted as payable morph
+    // costs (they stay unsupported in coverage).
+    #[test]
+    fn morph_cost_support_requires_fixed_counts() {
+        assert!(is_ability_cost_supported_for_morph(&pay_life_cost()));
+        assert!(!is_ability_cost_supported_for_morph(
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }
+        ));
+        let sacrifice = |count| {
+            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::new(
+                TargetFilter::Any,
+                crate::types::ability::SacrificeRequirement::Count { count },
+            ))
+        };
+        assert!(is_ability_cost_supported_for_morph(&sacrifice(1)));
+        assert!(!is_ability_cost_supported_for_morph(&sacrifice(u32::MAX)));
+    }
+
     /// One distinctive sample per payload-bearing `Keyword` variant.
     ///
     /// Kept in lockstep with `payload_variant_name` below, which fails to
@@ -5850,7 +6054,7 @@ mod tests {
             Keyword::Ninjutsu(mc("{2}{R}")),
             Keyword::CommanderNinjutsu(mc("{2}{R}")),
             Keyword::Prowl(mc("{2}{R}")),
-            Keyword::Morph(mc("{2}{R}")),
+            Keyword::morph(pay_life_cost()),
             Keyword::Megamorph(mc("{2}{R}")),
             Keyword::Mayhem(mc("{2}{R}")),
             Keyword::Madness(mc("{2}{R}")),
@@ -5883,7 +6087,7 @@ mod tests {
             Keyword::Buyback(BuybackCost::NonMana(pay_life_cost())),
             Keyword::Casualty(3),
             Keyword::Echo(EchoCost::NonMana(pay_life_cost())),
-            Keyword::Entwine(mc("{2}{R}")),
+            Keyword::Entwine(EntwineCost::NonMana(pay_life_cost())),
             Keyword::Outlast(mc("{2}{R}")),
             Keyword::Scavenge(mc("{2}{R}")),
             Keyword::Reinforce {
@@ -6437,7 +6641,9 @@ mod tests {
             Keyword::Buyback(BuybackCost::Mana(mc("{3}"))),
             Keyword::Echo(EchoCost::Mana(mc("{1}{R}"))),
             Keyword::Blitz(BlitzCost::Mana(mc("{2}{R}"))),
+            Keyword::Entwine(EntwineCost::Mana(mc("{2}{R}"))),
             Keyword::Disguise(DisguiseCost::Mana(mc("{1}{W/U}"))),
+            Keyword::morph(mc("{2}{R}")),
             Keyword::Ward(WardCost::Mana(mc("{2}"))),
             Keyword::Ward(WardCost::Waterbend(mc("{4}"))),
             Keyword::Ward(WardCost::Compound(vec![
