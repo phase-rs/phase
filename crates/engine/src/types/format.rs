@@ -76,7 +76,7 @@ pub struct FormatMetadata {
 /// Exhaustiveness comes from `EnumIter`, not from the length of a hand-written
 /// array, which is why no `BUILTINS` constant exists here to drift from the
 /// declaration below. The in-crate precedents for an `EnumIter` derive are
-/// `parser/oracle_ir/feature.rs` and `parser/oracle_ir/diagnostic.rs`;
+/// `parser/oracle_ir/feature.rs` and `types/oracle_diagnostic.rs`;
 /// `types/keywords.rs` and `types/statics.rs` carry the same IDIOM — a derived
 /// figure rather than a hand-maintained one — but through `strum::EnumCount`,
 /// not `EnumIter`.

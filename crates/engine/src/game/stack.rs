@@ -5478,7 +5478,7 @@ fn ability_has_no_legal_resolution_targets(
         // etc.), all of which are ALWAYS resolvable. Testing raw `target_filter()`
         // here would fork from that authority and silently drop an auto-accepted
         // "you may put a creature from your hand …" trigger (Kaalia et al.).
-        (super::triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        (crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some()
             && slots.is_empty())
             || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
     });
@@ -7070,19 +7070,8 @@ mod tests {
         state.objects.insert(source_id, source);
         state.objects.insert(copy_id, copy);
 
-        let mut root = ResolvedAbility::new(
-            Effect::EpicCopy {
-                spell: Box::new(ResolvedAbility::new(
-                    Effect::Investigate,
-                    Vec::new(),
-                    source_id,
-                    PlayerId(0),
-                )),
-            },
-            Vec::new(),
-            source_id,
-            PlayerId(0),
-        );
+        let mut root =
+            ResolvedAbility::new(Effect::Investigate, Vec::new(), source_id, PlayerId(0));
         root.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::Investigate,
             Vec::new(),
@@ -7123,10 +7112,6 @@ mod tests {
             ability.cast_occurrence.is_none()
                 && ability.sub_ability.as_deref().is_none_or(graph_is_clear)
                 && ability.else_ability.as_deref().is_none_or(graph_is_clear)
-                && match &ability.effect {
-                    Effect::EpicCopy { spell } => graph_is_clear(spell),
-                    _ => true,
-                }
         }
 
         assert_eq!(state.objects[&source_id].cast_occurrence, Some(occurrence));
@@ -10452,6 +10437,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -10691,6 +10678,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -12226,6 +12215,7 @@ mod tests {
                 enter_with_counters: vec![],
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(1),
                 controller: PlayerId(0),
@@ -12309,6 +12299,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -12574,6 +12566,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

@@ -160,8 +160,10 @@ impl FromIterator<ManaColor> for LifePaymentColors {
 pub struct CostPermissionContext {
     /// CR 118.14 + CR 609.4b: preserve whether the concession also covers {C}.
     pub mana_spend_permission: Option<super::ability::ManaSpendPermission>,
-    /// CR 119.8 budget: maximum life this player can spend on Phyrexian-shape
-    /// shards in this payment (respects CantLoseLife → 0).
+    /// CR 119.8 budget: maximum number of 2-life payments this player can
+    /// afford for Phyrexian-shape shards in this payment (respects
+    /// CantLoseLife → 0). `life_costs::max_phyrexian_life_payments` owns the
+    /// floor-division, so this is a payment count, not a life total.
     pub max_life: u32,
     /// CR 107.4f + CR 118.3b: colors for which the player may pay 2 life
     /// rather than 1 colored mana (K'rrik-style grants).
@@ -435,11 +437,12 @@ impl ActivationManaColorConstraint {
 /// Only special actions that pay a mana cost *through the mana pool* with a
 /// restriction-aware payment context belong here. CR 116.2m / CR 709.5e door
 /// unlock is one such action (its unlock cost routes through
-/// `pay_special_action_mana_cost`). CR 116.2b turn-face-up is another: the
-/// `GameAction::TurnFaceUp` handler now derives the morph/disguise/manifest cost
-/// (`game::morph::turn_face_up_prepare`, CR 702.37e / CR 702.168d / CR 701.40b)
-/// and pays it through `PaymentContext::SpecialAction(TurnFaceUp)` before flipping
-/// the permanent, so a `TurnFaceUp`-restricted mana's runtime gate
+/// `pay_special_action_mana_cost_with_resume`). CR 116.2b turn-face-up is
+/// another: the `GameAction::TurnFaceUp` handler now derives the
+/// morph/disguise/manifest cost (`game::morph::turn_face_up_prepare`, CR 702.37e
+/// / CR 702.168d / CR 701.40b) and pays it through
+/// `PaymentContext::SpecialAction(TurnFaceUp)` before flipping the permanent, so
+/// a `TurnFaceUp`-restricted mana's runtime gate
 /// ([`ManaRestriction::OnlyForSpecialAction(SpecialAction::TurnFaceUp)`]) is live
 /// there and correctly rejected for every other context. A card whose spend
 /// restriction names only production-live branches (Overgrown Zealot; Creeping
@@ -481,6 +484,11 @@ pub enum SpecialAction {
     /// is the correctness win this variant buys over charging the cost through
     /// an unlabelled payment context.
     EndContinuousEffect,
+    /// CR 116.2h + CR 702.143a: Paying {2} to exile a card with foretell from
+    /// hand face down as a special action. The payment is not a cast or an
+    /// activation, so mana restricted to spells or activated abilities MUST be
+    /// rejected here, while special-action-restricted mana is eligible.
+    Foretell,
 }
 
 /// CR 106.6: The ability-activation half of a "spend only to cast [X] spell or
@@ -1108,6 +1116,7 @@ fn special_action_rank(value: SpecialAction) -> u8 {
         SpecialAction::TurnFaceUp => 3,
         SpecialAction::RollPlanarDie => 4,
         SpecialAction::EndContinuousEffect => 5,
+        SpecialAction::Foretell => 6,
     }
 }
 
@@ -2572,6 +2581,41 @@ impl ManaCost {
             *generic += value * x_count as u32;
         }
     }
+}
+
+/// Parse an MTGJSON mana cost string (e.g. "{2}{W}{U}") into the engine's ManaCost type.
+pub fn parse_mtgjson_mana_cost(s: &str) -> ManaCost {
+    let s = s.trim();
+    if s.is_empty() {
+        return ManaCost::NoCost;
+    }
+
+    let mut generic: u32 = 0;
+    let mut shards = Vec::new();
+
+    // CR 107.4: `ManaCostShard::from_str` is the single authority for the
+    // symbol→shard mapping. Routing every symbol through it keeps the loader
+    // from drifting out of sync with the rest of the engine — previously this
+    // function kept its own hand-maintained list that recognized mono-Phyrexian
+    // (`{W/P}`) but not Phyrexian-hybrid (`{G/U/P}`) symbols, silently dropping
+    // the pip from compleated planeswalkers and undercounting their cost by 1
+    // (issue #1416, same class as #493's `{C/W}` drop). Anything `from_str`
+    // doesn't recognize is either a bare number (generic mana) or ignorable.
+    for segment in s.split('{').filter(|seg| !seg.is_empty()) {
+        let symbol = segment.trim_end_matches('}');
+        let symbol = symbol.to_ascii_uppercase();
+        match ManaCostShard::from_str(&symbol) {
+            Ok(shard) => shards.push(shard),
+            Err(_) => {
+                // A bare number is generic mana; any other unknown symbol is ignored.
+                if let Ok(n) = symbol.parse::<u32>() {
+                    generic += n;
+                }
+            }
+        }
+    }
+
+    ManaCost::Cost { shards, generic }
 }
 
 impl Default for ManaCost {

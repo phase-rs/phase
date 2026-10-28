@@ -62,8 +62,8 @@ use crate::types::ability::{
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
     SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter, TypedFilter,
-    ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -2368,7 +2368,9 @@ pub(super) fn parse_targeted_action_ast(
                 .as_ref()
                 .is_some_and(|spec| matches!(spec.min, QuantityExpr::Fixed { value: 0 }))
         {
-            aggregate_return.map(|(_, constraint)| constraint)
+            aggregate_return
+                .as_ref()
+                .map(|(_, constraint)| constraint.clone())
         } else {
             if aggregate_return.is_some() {
                 target = parse_target_with_syntax(original_target_text, ctx).0;
@@ -2386,17 +2388,57 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             BounceSelection::Targeted
         };
-        let is_mass = is_mass || count.is_some();
-        let origin = super::infer_origin_zone(rest_lower).or_else(|| {
-            matches!(
-                target,
-                TargetFilter::TrackedSetFiltered {
-                    caused_by: Some(ThisWayCause::Exiled),
-                    ..
-                }
-            )
-            .then_some(crate::types::zones::Zone::Exile)
-        });
+        // CR 607.2a + CR 406.6: "return the exiled card to its owner's hand" in
+        // a printed ability linked to an earlier exile ability (Tidehollow
+        // Sculler, Mesmeric Fiend, Ashiok's Erasure) names the card exiled by the
+        // linked ability, which resolved separately. When there is no earlier
+        // same-chain exile producer, bind it durably to `ExiledBySource` so it
+        // resolves from the source's linked-exile ledger (LKI-snapshotted on
+        // leaving the battlefield, CR 603.10a) rather than a chain-local
+        // `TrackedSet(0)` sentinel. A return to the battlefield keeps its binding: that class
+        // is paired with its ETB exile by
+        // `detect_etb_exile_ltb_return`, which keys on the `TrackedSet` shape.
+        // This binding applies only to the linked hand-return wording. Other
+        // non-battlefield returns (for example a granted delayed return to a
+        // graveyard) retain their normal antecedent and zone semantics.
+        let target_text_lower = target_text.trim().to_ascii_lowercase();
+        let names_linked_exiled_card =
+            all_consuming((tag::<_, _, OracleError<'_>>("the exiled card"), space0, eof))
+                .parse(target_text_lower.as_str())
+                .is_ok();
+        let returns_to_hand = matches!(dest, Some(ref d) if d.zone == Zone::Hand);
+        let target = if returns_to_hand
+            && ctx.current_ability_exile_cost_zone.is_none()
+            && names_linked_exiled_card
+        {
+            resolve_singular_exiled_card_target(ctx.chain_has_prior_exile_producer, target)
+        } else {
+            target
+        };
+        // `ExiledBySource` denotes the complete linked set (CR 607.3), even
+        // when the printed phrase is singular. Lower it through the existing
+        // set-wide ChangeZoneAll path so copied ETB abilities return every card.
+        let is_mass = is_mass
+            || count.is_some()
+            || (returns_to_hand && matches!(&target, TargetFilter::ExiledBySource));
+        let origin = super::infer_origin_zone(rest_lower)
+            .or_else(|| {
+                matches!(
+                    target,
+                    TargetFilter::TrackedSetFiltered {
+                        caused_by: Some(ThisWayCause::Exiled),
+                        ..
+                    }
+                )
+                .then_some(crate::types::zones::Zone::Exile)
+            })
+            // CR 406.6 + CR 607.2a: a card linked as "exiled with" the source lives in
+            // exile, so the return is a `ChangeZone` out of exile — `Effect::Bounce`
+            // only moves battlefield/graveyard/stack objects.
+            .or_else(|| {
+                matches!(target, TargetFilter::ExiledBySource)
+                    .then_some(crate::types::zones::Zone::Exile)
+            });
         // CR 400.7: A returned card's target filter must be scoped to its origin
         // zone. Without this, "return target ... card from your graveyard to the
         // battlefield" enumerates legal targets on the battlefield (the default
@@ -3702,6 +3744,7 @@ pub(super) fn parse_search_and_creation_ast(
                 target,
                 source_filter,
                 enters_attacking,
+                attack_destination,
                 tapped,
                 count,
                 extra_keywords,
@@ -3712,6 +3755,7 @@ pub(super) fn parse_search_and_creation_ast(
                 count,
                 source_filter,
                 enters_attacking,
+                attack_destination,
                 tapped,
                 extra_keywords,
                 additional_modifications,
@@ -3729,6 +3773,7 @@ pub(super) fn parse_search_and_creation_ast(
                 attach_to,
                 static_abilities,
                 enters_attacking,
+                attack_destination,
                 ..
             }) => Some(SearchCreationImperativeAst::Token {
                 token: Box::new(TokenDescription {
@@ -3744,6 +3789,7 @@ pub(super) fn parse_search_and_creation_ast(
                     attach_to,
                     static_abilities,
                     enters_attacking,
+                    attack_destination,
                 }),
             }),
             _ => None,
@@ -3972,6 +4018,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count,
             source_filter,
             enters_attacking,
+            attack_destination,
             tapped,
             extra_keywords,
             additional_modifications,
@@ -3980,6 +4027,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             source_filter,
             enters_attacking,
+            attack_destination,
             tapped,
             count,
             extra_keywords,
@@ -3997,6 +4045,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             owner: TargetFilter::Controller,
             attach_to: token.attach_to,
             enters_attacking: token.enters_attacking,
+            attack_destination: token.attack_destination,
             // CR 205.4a: Preserve parsed token supertypes (legendary/snow).
             supertypes: token.supertypes,
             static_abilities: token.static_abilities,
@@ -10762,7 +10811,7 @@ pub(super) fn parse_destroy_ast(
         // supported lowering (the chain's anaphor rewrite collapses it to the
         // creature) and no printed producer, so it keeps the strict gap. The
         // untargeted resolution choice (Light of Judgment) passes through.
-        if crate::game::filter::filter_reads_declared_slot(&target)
+        if crate::types::ability::filter_reads_declared_slot(&target)
             && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
         {
             return None;
@@ -13325,7 +13374,7 @@ fn parse_context_set_referent<'a>(
                     // Eligibility first: an entry that reads a declared slot can
                     // never be the antecedent, so it is not evidence either way.
                     let eligible = entries.iter().filter(|entry| {
-                        !crate::game::filter::filter_reads_declared_slot(&entry.filter)
+                        !crate::types::ability::filter_reads_declared_slot(&entry.filter)
                     });
                     // An incomplete registry (any eligible entry without a
                     // chain-wide index) cannot prove the nearest declarer.
@@ -16289,6 +16338,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination: TokenAttackDestination::ControllerChooses,
                     supertypes: Vec::new(),
                     static_abilities: Vec::new(),
                     enter_with_counters: Vec::new(),
@@ -17523,7 +17573,7 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
         ImperativeFamilyAst::VentureIntoUndercity => Effect::VentureInto {
-            dungeon: crate::game::dungeon::DungeonId::Undercity,
+            dungeon: crate::types::dungeon::DungeonId::Undercity,
         },
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
         // CR 701.31c: An ability instructs a player to planeswalk.

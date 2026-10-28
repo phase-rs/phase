@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -390,6 +391,50 @@ pub fn fixed_noncreature_subtypes() -> impl Iterator<Item = &'static str> {
         .chain(BATTLE_SUBTYPES)
         .chain(PLANESWALKER_SUBTYPES)
         .copied()
+}
+
+/// CR 205.3: Lexical guard for subtype spellings. Rejects MTGJSON pollution and
+/// Oracle sentence fragments that are not valid subtype names.
+pub fn is_valid_subtype_spelling(candidate: &str) -> bool {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.len() > 48 {
+        return false;
+    }
+    let mut chars = candidate.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_uppercase() {
+        return false;
+    }
+    for c in chars {
+        if !(c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '\'') {
+            return false;
+        }
+    }
+    // Bare English function words / known MTGJSON garbage tokens.
+    !matches!(
+        candidate,
+        "The" | "You" | "and" | "or" | "and/or" | "of" | "Baddest," | "Elemental?"
+    )
+}
+
+/// Full parser subtype vocabulary: canonical noncreature tables plus validated
+/// creature subtypes (from committed `oracle-subtypes.json`). Sorted longest-first
+/// for prefix-safe matching.
+pub fn build_parser_subtype_vocabulary(creature_subtypes: &[String]) -> Vec<String> {
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    for subtype in fixed_noncreature_subtypes() {
+        set.insert(subtype.to_string());
+    }
+    for subtype in creature_subtypes {
+        if is_valid_subtype_spelling(subtype) {
+            set.insert(subtype.clone());
+        }
+    }
+    let mut list: Vec<String> = set.into_iter().collect();
+    list.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    list
 }
 
 /// CR 205.3i: Returns true if the given string is a land subtype.

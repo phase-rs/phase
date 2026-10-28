@@ -11,9 +11,9 @@ use crate::game::quantity::{
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming,
-    TargetDamageSourceBinding, TargetFilter, TargetRef,
+    names_resolution_chosen_recipient, DamageContextSnapshot, DamageSource, EachDamageRecipient,
+    Effect, EffectError, EffectKind, ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1626,45 +1626,6 @@ pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) ->
     )
 }
 
-/// CR 115.10a + CR 608.2d: does this `DealDamage` recipient filter DESCRIBE its
-/// recipient, so the controller chooses it while the damage is applied?
-///
-/// "Comet deals damage … to a creature or player" and "deal 2 damage to another
-/// creature you control" never use the word "target", so nothing is announced as
-/// the ability goes on the stack (CR 115.10a: only a thing identified by the word
-/// "target" is a target) and the recipient is chosen as the effect is applied
-/// (CR 115.10 + CR 608.2d). The shape is a population of battlefield objects, or
-/// one together with players ("a creature or player").
-///
-/// Everything else stays out, each on its own reading: a context reference (the
-/// source, an earlier target, an event participant) and an attachment host (CR
-/// 303.4b + CR 301.5f: "enchanted creature" is whatever the Aura is attached to)
-/// are determined, not chosen; a player-only recipient ("an opponent", "a
-/// player") names no object population and keeps its existing reading; and a
-/// filter that matches everything ("any target") is announced as a target.
-/// The parser (the timing) and the resolver (the prompt) both ask this one
-/// question, so a recipient the parser times for resolution is exactly one the
-/// resolver offers a choice for.
-pub(crate) fn names_resolution_chosen_recipient(target: &TargetFilter) -> bool {
-    if target.is_context_ref()
-        || target.contains_source_attachment_host()
-        || super::filter_refs_parent_target(target)
-    {
-        return false;
-    }
-    match target {
-        TargetFilter::Or { filters } => {
-            filters
-                .iter()
-                .all(|leg| leg.denotes_battlefield_objects() || matches!(leg, TargetFilter::Player))
-                && filters
-                    .iter()
-                    .any(TargetFilter::denotes_battlefield_objects)
-        }
-        leaf => leaf.denotes_battlefield_objects(),
-    }
-}
-
 /// CR 608.2d: is this `DealDamage` node still waiting to learn whom it damages —
 /// a described recipient ([`names_resolution_chosen_recipient`]) timed for
 /// resolution, with nothing bound to it yet and no division announced?
@@ -2945,7 +2906,7 @@ pub fn resolve_each_source_deals_damage(
     // UNLESS the amount reads the per-source `BatchSource` scope (CR 120.1:
     // "deals damage equal to its power" resolves per source object, never
     // against the ability source).
-    let per_source = crate::game::quantity::quantity_expr_contains_scope(
+    let per_source = crate::types::ability::quantity_expr_contains_scope(
         amount,
         crate::types::ability::ObjectScope::BatchSource,
     );

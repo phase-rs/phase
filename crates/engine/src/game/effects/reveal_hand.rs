@@ -4,35 +4,14 @@ use rand::seq::SliceRandom;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
-    TargetRef,
+    reveal_hand_parks_card_choice, Effect, EffectError, EffectKind, ParentTargetMissingReason,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
 };
-
-/// CR 608.2d + CR 701.20a: whether a hand reveal with this card filter and
-/// optionality parks a post-reveal card choice (`WaitingFor::RevealChoice`).
-pub(crate) fn reveal_hand_parks_card_choice(
-    card_filter: &TargetFilter,
-    choice_optional: bool,
-) -> bool {
-    choice_optional || !matches!(card_filter, TargetFilter::None)
-}
-
-/// CR 608.2d + CR 701.20a: "this effect parks a post-reveal card choice" over a
-/// whole `Effect` — read by the fan-out referent predicate, the trigger-lowering
-/// chosen-object boundary and the parser's per-player reveal-choice rule; the
-/// resolver's needs-choice test reads `reveal_hand_parks_card_choice` directly.
-pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
-    )
-}
 
 /// CR 701.20a / CR 701.20e: RevealHand — reveal or privately look at a target
 /// player's hand, then optionally let the caster choose a card.

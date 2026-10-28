@@ -1413,6 +1413,8 @@ fn dragonstorm_globe_counters_created_dragon_token() {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -3117,8 +3119,8 @@ fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
 /// IS eligible. Before this fix the unlock cost paid via
 /// `PaymentContext::Effect`, which rejects every restriction — the restricted
 /// {R} could not pay and the unlock failed. Reverting the
-/// `pay_special_action_mana_cost` wiring flips this assertion (the unlock
-/// would error "Cannot pay mana cost").
+/// `pay_special_action_mana_cost_with_resume` wiring flips this assertion (the
+/// unlock would error "Cannot pay mana cost").
 #[test]
 fn unlock_door_restricted_mana_pays_room_unlock_cost() {
     use crate::types::mana::{ManaRestriction, ManaType, ManaUnit, SpecialAction};
@@ -3255,7 +3257,8 @@ fn fund_restricted_pool(
 /// is paid through `PaymentContext::SpecialAction(TurnFaceUp)`, the permanent
 /// flips face up, a `TurnedFaceUp` event fires, and the pool empties. This is the
 /// positive reach-guard proving the payment routes through the real
-/// `pay_special_action_mana_cost` site, so R2/R3's negatives aren't vacuous.
+/// `pay_special_action_mana_cost_with_resume` site, so R2/R3's negatives aren't
+/// vacuous.
 #[test]
 fn turn_face_up_restricted_mana_funds_special_action() {
     use crate::types::mana::{ManaRestriction, SpecialAction};

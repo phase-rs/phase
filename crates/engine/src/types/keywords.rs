@@ -19,6 +19,8 @@ use super::ability::{
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
 
+pub use super::text_grammar::craft_materials_default;
+
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
 /// (e.g., "Tap three untapped white creatures you control").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,15 +185,30 @@ impl MorphCost {
 pub fn is_ability_cost_supported_for_morph(cost: &AbilityCost) -> bool {
     match cost {
         AbilityCost::ReturnToHand { .. } => true,
+        // CR 107.3d: a morph cost's X is chosen immediately before paying it, but
+        // variable non-mana morph costs are not supported yet, so only fixed
+        // counts are accepted.
         AbilityCost::Discard {
+            count,
             selection,
             self_scope,
             ..
-        } => !self_scope.is_source_card() && *selection != CardSelectionMode::Random,
-        AbilityCost::PayLife { .. } => true,
-        AbilityCost::Reveal { .. } => true,
+        } => {
+            matches!(count, QuantityExpr::Fixed { .. })
+                && !self_scope.is_source_card()
+                && *selection != CardSelectionMode::Random
+        }
+        AbilityCost::PayLife { amount } => matches!(amount, QuantityExpr::Fixed { .. }),
+        // CR 107.3d: variable non-mana morph costs are not supported yet (the
+        // turn-face-up flow has no X choice for non-mana counts), so a symbolic
+        // reveal count is unsupported rather than read as 0.
+        AbilityCost::Reveal { count, .. } => matches!(count, QuantityExpr::Fixed { .. }),
         AbilityCost::Sacrifice(cost) => {
-            matches!(cost.requirement, SacrificeRequirement::Count { .. })
+            // `u32::MAX` is the parser sentinel for "X" / "any number of".
+            matches!(
+                cost.requirement,
+                SacrificeRequirement::Count { count } if count != u32::MAX
+            )
         }
         AbilityCost::Mana { .. } => true,
         AbilityCost::ManaDynamic { .. }
@@ -2448,14 +2465,6 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// CR 702.167b: Public re-export of the default craft materials filter (the
-/// creature class) so keyword deserializers can request it without reaching into the
-/// `pub(crate)` parser module. The single authority remains
-/// `parser::oracle_keyword::craft_materials_filter`.
-pub fn craft_materials_default() -> TargetFilter {
-    crate::parser::oracle_keyword::craft_materials_default()
-}
-
 /// Parse a mana cost string into ManaCost. Supports both MTGJSON format ({1}{W})
 /// and simple format (1W, 2, W, etc.) for keyword parameters.
 fn parse_keyword_mana_cost(s: &str) -> ManaCost {
@@ -2569,7 +2578,7 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
             // subtype parser first so irregular plurals such as "Elves" are
             // canonicalized to their rules name ("Elf"). Unknown names are still
             // valid subtypes (for example, Daleks), so retain the generic fallback.
-            let subtype = crate::parser::oracle_util::parse_subtype(s)
+            let subtype = super::text_grammar::parse_subtype(s)
                 .filter(|(_, consumed)| *consumed == s.len())
                 .map(|(subtype, _)| subtype)
                 .unwrap_or_else(|| {
@@ -2607,12 +2616,12 @@ fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
 /// `Keyword::Unknown` fallthrough rather than silently dumping the raw text
 /// into a `TypeFilter::Subtype` (the bug fixed by issue #537).
 fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
-    use crate::parser::oracle_nom::enchant::{
+    use super::text_grammar::parse_zone_filter;
+    use super::text_grammar::OracleResult;
+    use super::text_grammar::{
         parse_enchant_attachment_qualifier, parse_enchant_controller_suffix,
         parse_enchant_player_base, parse_enchant_qualified_type_leg,
     };
-    use crate::parser::oracle_nom::error::OracleResult;
-    use crate::parser::oracle_nom::filter::parse_zone_filter;
     use nom::bytes::complete::tag;
     use nom::combinator::opt;
     use nom::sequence::preceded;
@@ -2621,22 +2630,17 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // Typed sub-combinator: optional " card" word with optional leading space
     // (the space is only required when a preceding type leg was consumed).
     fn parse_card_word(input: &str) -> OracleResult<'_, ()> {
-        let (rest, _) = opt(tag::<
-            &str,
-            &str,
-            crate::parser::oracle_nom::error::OracleError<'_>,
-        >(" "))
-        .parse(input)?;
         let (rest, _) =
-            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>("card")
-                .parse(rest)?;
+            opt(tag::<&str, &str, super::text_grammar::OracleError<'_>>(" ")).parse(input)?;
+        let (rest, _) =
+            tag::<&str, &str, super::text_grammar::OracleError<'_>>("card").parse(rest)?;
         Ok((rest, ()))
     }
 
     // Typed sub-combinator: " " + zone phrase.
     fn parse_leading_zone(input: &str) -> OracleResult<'_, crate::types::zones::Zone> {
         preceded(
-            tag::<&str, &str, crate::parser::oracle_nom::error::OracleError<'_>>(" "),
+            tag::<&str, &str, super::text_grammar::OracleError<'_>>(" "),
             parse_zone_filter,
         )
         .parse(input)
@@ -2686,11 +2690,10 @@ fn parse_enchant_target(s: &str) -> Option<TargetFilter> {
     // another Aura attached to it" (Daybreak Coronet) narrows the legal target
     // set to objects that already carry an attachment of the named kind.
     let (rest, attachment) = opt(parse_enchant_attachment_qualifier).parse(rest).ok()?;
-    let (rest, without_keyword) =
-        match crate::parser::oracle_target::parse_without_keyword_suffix(rest) {
-            Some((props, consumed)) => (&rest[consumed..], props),
-            None => (rest, Vec::new()),
-        };
+    let (rest, without_keyword) = match super::text_grammar::parse_without_keyword_suffix(rest) {
+        Some((props, consumed)) => (&rest[consumed..], props),
+        None => (rest, Vec::new()),
+    };
     if !rest.trim().is_empty() {
         return None;
     }
@@ -3492,7 +3495,7 @@ fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
                     tag("that is not in "),
                     tag("not in "),
                 )),
-                crate::parser::oracle_nom::primitives::parse_your_commanders_color_identity,
+                super::text_grammar::parse_your_commanders_color_identity,
             ),
         ),
         opt(tag(".")),
@@ -3510,7 +3513,7 @@ fn parse_protection_mana_value_filter(s: &str) -> Option<TypedFilter> {
 
     // "mana value N or less" / "mana value N or greater"
     let (rest, _) = tag::<_, _, E<'_>>("mana value ").parse(s).ok()?;
-    let (rest, n) = crate::parser::oracle_nom::primitives::parse_number(rest).ok()?;
+    let (rest, n) = super::text_grammar::parse_number(rest).ok()?;
     let (rest, comparator) = preceded(
         tag::<_, _, E<'_>>(" or "),
         alt((
@@ -5964,6 +5967,31 @@ mod tests {
         AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 3 },
         }
+    }
+
+    // CR 107.3d + CR 702.37e: variable non-mana morph costs are not supported
+    // yet, so symbolic or sentinel counts must not be accepted as payable morph
+    // costs (they stay unsupported in coverage).
+    #[test]
+    fn morph_cost_support_requires_fixed_counts() {
+        assert!(is_ability_cost_supported_for_morph(&pay_life_cost()));
+        assert!(!is_ability_cost_supported_for_morph(
+            &AbilityCost::PayLife {
+                amount: QuantityExpr::Ref {
+                    qty: crate::types::ability::QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            }
+        ));
+        let sacrifice = |count| {
+            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::new(
+                TargetFilter::Any,
+                crate::types::ability::SacrificeRequirement::Count { count },
+            ))
+        };
+        assert!(is_ability_cost_supported_for_morph(&sacrifice(1)));
+        assert!(!is_ability_cost_supported_for_morph(&sacrifice(u32::MAX)));
     }
 
     /// One distinctive sample per payload-bearing `Keyword` variant.

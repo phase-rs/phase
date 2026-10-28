@@ -10,6 +10,7 @@ import type {
   AiProposalSubmission,
   ContestClickInput,
   ContestDriveResult,
+  DebugHandRevealCapability,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -251,7 +252,9 @@ function describeCardDbError(err: unknown): string {
   return `: ${trimmed}`;
 }
 
-export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
+export class WasmAdapter
+  implements EngineAdapter, AiDecisionDiagnosticsCapability, DebugHandRevealCapability
+{
   private initialized = false;
   private disposed = false;
   private unregisterDiagnostics: (() => void) | null = null;
@@ -575,6 +578,25 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         ? await this.engine.getState()
         : await this.fallback!.getState();
       return unwrapClientGameState(wrapped);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /**
+   * Ask the engine to disclose every hand in this seat's projection (the
+   * "Show AI Hand" toggle). The engine honors it only for a seat with debug
+   * identity access; the next snapshot carries the result.
+   */
+  async setDebugHandReveal(enabled: boolean): Promise<void> {
+    // Every engine game install starts with hands hidden, so withdrawing the
+    // request from an engine that is not (or no longer) running is a no-op —
+    // e.g. the game page's cleanup racing adapter disposal.
+    if (!enabled && !this.initialized) return;
+    this.assertInitialized("setDebugHandReveal");
+    try {
+      if (this.engine) await this.engine.setDebugHandReveal(enabled);
+      else await this.fallback!.setDebugHandReveal(enabled);
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -1479,6 +1501,7 @@ interface MainThreadFallback {
     actor: PlayerId,
   ): Promise<InteractionPreview>;
   getState(): Promise<GameState>;
+  setDebugHandReveal(enabled: boolean): Promise<void>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(viewerId: number): Promise<LegalActionsResult>;
   getSnapshot(viewerId: number): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
@@ -1652,6 +1675,11 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const s = wasm.get_game_state();
         if (s === null) throw new Error("NOT_INITIALIZED: get_game_state returned null");
         return s as GameState;
+      }),
+
+    setDebugHandReveal: (enabled: boolean) =>
+      enqueue(() => {
+        wasm.set_debug_hand_reveal(enabled);
       }),
 
     getFilteredState: (viewerId: number) =>

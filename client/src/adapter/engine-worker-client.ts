@@ -381,6 +381,10 @@ export class EngineWorkerClient {
     );
   }
 
+  async setDebugHandReveal(enabled: boolean): Promise<void> {
+    await this.request<null>({ type: "setDebugHandReveal", enabled }, ENGINE_REQUEST_TIMEOUT_MS);
+  }
+
   async getLegalActions(viewerId: number): Promise<LegalActionsResult> {
     return this.request<LegalActionsResult>(
       { type: "getLegalActions", viewerId },
