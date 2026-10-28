@@ -3015,31 +3015,33 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        // DISCLOSED, PINNED GAP (backlog root cause 14) — NOT fixed by this change.
-        // The Camouflage line's "He gains hexproof and becomes colorless until end
-        // of turn" conjoins a keyword grant with a COLOUR change, and only the
-        // keyword survives: `oracle_effect/subject.rs`'s
-        // `try_parse_become_color_modification` has no "colorless" arm (it handles
-        // "all colors" / "every color" / a chosen colour), so the colour conjunct is
-        // dropped silently. That is a different root cause from this change's
-        // counter doubling, at a different seam, and is left for its own fix — the
-        // card is listed under root cause 14 in `docs/parser-misparse-backlog.md`
-        // precisely so it is not lost.
-        //
-        // The measured shape is pinned rather than merely described: when a
-        // colour-setting arm lands, the second assertion FAILS and whoever adds it
-        // is told to drop the backlog entry in the same change. Without this the
-        // card reads as fully modelled (`cargo coverage` reports it supported once
-        // the trigger is fixed) while still being wrong about colour.
+        // CR 105.2c + CR 611.2a: the same Camouflage instruction grants hexproof
+        // and sets an empty color vector on its source until end of turn.
         fn collect_mods(
             def: &crate::types::ability::AbilityDefinition,
             out: &mut Vec<crate::types::ability::ContinuousModification>,
         ) {
             if let Effect::GenericEffect {
-                static_abilities, ..
+                static_abilities,
+                duration,
+                target,
+                ..
             } = &*def.effect
             {
                 for st in static_abilities {
+                    if st.modifications.iter().any(|modification| {
+                        matches!(
+                            modification,
+                            crate::types::ability::ContinuousModification::SetColor { .. }
+                        )
+                    }) {
+                        assert_eq!(
+                            duration,
+                            &Some(crate::types::ability::Duration::UntilEndOfTurn)
+                        );
+                        assert_eq!(target, &None, "the self grant announces no target");
+                        assert_eq!(st.affected, Some(TargetFilter::SelfRef));
+                    }
                     out.extend(st.modifications.iter().cloned());
                 }
             }
@@ -3063,14 +3065,12 @@ mod tests {
             "reach-guard: the hexproof half of the Camouflage grant must parse, or the              colour assertion below is vacuous: {grants:?}"
         );
         assert!(
-            !grants.iter().any(|m| matches!(
+            grants.iter().any(|m| matches!(
                 m,
-                crate::types::ability::ContinuousModification::SetColor { .. }
+                crate::types::ability::ContinuousModification::SetColor { colors }
+                    if colors.is_empty()
             )),
-            "KNOWN GAP (parser-misparse-backlog root cause 14): the `becomes colorless` conjunct \
-             is still dropped. If this assertion now FAILS, a colour-setting arm landed — \
-             remove Ultimate Spider-Man from root cause 14 in \
-             docs/parser-misparse-backlog.md as part of that change: {grants:?}"
+            "Camouflage must retain the colorless companion alongside hexproof: {grants:?}"
         );
     }
 

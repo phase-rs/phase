@@ -3400,3 +3400,471 @@ fn modifier_owner_giant_slug_paid_delayed_choice_keeps_the_unbound_grant_honest(
         .any(|keyword| matches!(keyword, Keyword::Landwalk(_))));
     settled(&runner);
 }
+
+#[test]
+fn parser_owner_saga_natural_first_chapter_grant_expires_with_its_host() {
+    // Complete pinned Urza's Saga. CR 714.2b + CR 714.3a: playing the land
+    // produces the chapter trigger; no chapter or grant is installed by hand.
+    const ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — This Saga gains \"{T}: Add {C}.\"\nII — This Saga gains \"{2}, {T}: Create a 0/0 colorless Construct artifact creature token with 'This token gets +1/+1 for each artifact you control.'\"\nIII — Search your library for an artifact card with mana cost {0} or {1}, put it onto the battlefield, then shuffle.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let saga = scenario
+        .add_land_to_hand(P0, "Urza's Saga")
+        .as_enchantment()
+        .with_subtypes(vec!["Urza's", "Saga"])
+        .from_oracle_text(ORACLE)
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Boomerang",
+            true,
+            "Return target permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{U}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&saga].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: saga,
+            card_id,
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&saga]
+            .counters
+            .get(&CounterType::Lore),
+        Some(&1)
+    );
+    let granted = runner.state().objects[&saga]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == engine::types::ability::AbilityKind::Activated)
+        .expect("the actual first chapter must grant the mana activation");
+    assert!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.source_id == saga),
+        "positive reach guard: the parsed chapter installed its grant"
+    );
+    runner.activate(saga, granted).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+    settled(&runner);
+    finish_to_next_upkeep(&mut runner);
+    finish_to_next_upkeep(&mut runner);
+    assert_eq!(runner.state().active_player, P0);
+    assert!(
+        runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.source_id == saga),
+        "a duration-free chapter grant survives real cleanup while its host remains"
+    );
+    fund(&mut runner, 0, &[ManaType::Blue; 2]);
+    runner.cast(bounce).target_object(saga).resolve();
+    assert_eq!(runner.state().objects[&saga].zone, Zone::Hand);
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| effect.source_id == saga),
+        "host departure must retire the chapter grant rather than leave a Permanent effect"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+}
+
+#[test]
+fn parser_owner_real_pacifism_rule_restricts_only_its_host_and_ends_on_departure() {
+    use engine::game::combat::AttackTarget;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Enchanted attacker", 2, 3).id();
+    let sibling = scenario.add_creature(P0, "Unenchanted attacker", 3, 4).id();
+    let aura = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Pacifism",
+            false,
+            "Enchant creature\nEnchanted creature can't attack or block.",
+        )
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(cost("{1}{W}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    fund(&mut runner, 1, &[ManaType::White]);
+    runner.cast(aura).target_object(host).resolve();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&aura].attached_to, Some(host.into()));
+    settled(&runner);
+    runner.advance_to_combat();
+    assert!(runner
+        .declare_attackers(&[(host, AttackTarget::Player(P1))])
+        .is_err());
+    assert!(
+        runner
+            .declare_attackers(&[(sibling, AttackTarget::Player(P1))])
+            .is_ok(),
+        "a real unenchanted attacker proves the combat window and controller are valid"
+    );
+    runner.combat_damage();
+    runner.advance_to_phase(Phase::PostCombatMain);
+    fund(&mut runner, 1, &[ManaType::Blue]);
+    runner.cast(bounce).target_object(aura).resolve();
+    assert_eq!(runner.state().objects[&aura].zone, Zone::Hand);
+    settled(&runner);
+    // CR 611.3b: removing the source removes its static restriction.
+    assert!(engine::game::combat::get_valid_attacker_ids(runner.state()).contains(&host));
+}
+
+#[test]
+fn parser_owner_attached_restriction_keeps_pt_and_keyword_companions_through_public_cast() {
+    use engine::game::combat::AttackTarget;
+    // The actual Invisibility control establishes the printed restriction.
+    // The second source is explicitly a building-block composition, not Oracle
+    // attributed to a real card: it reaches the new restriction-first grammar.
+    for (name, oracle, composed) in [
+        (
+            "Invisibility",
+            "Enchant creature\nEnchanted creature can't be blocked except by Walls.",
+            false,
+        ),
+        (
+            "Restriction companion composition",
+            "Enchant creature\nEnchanted creature can't be blocked and has haste and gets +1/+1.",
+            true,
+        ),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario.add_creature(P0, "Aura host", 2, 3).id();
+        let sibling = scenario.add_creature(P0, "Unaffected sibling", 4, 5).id();
+        let blocker = scenario.add_creature(P1, "Non-Wall blocker", 6, 6).id();
+        let aura = scenario
+            .add_spell_to_hand_from_oracle(P0, name, false, oracle)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(cost("{U}{U}"))
+            .id();
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Disperse",
+                true,
+                "Return target nonland permanent to its owner's hand.",
+            )
+            .with_mana_cost(cost("{1}{U}"))
+            .id();
+        let mut runner = scenario.build();
+        fund(&mut runner, 0, &[ManaType::Blue; 2]);
+        runner.cast(aura).target_object(host).resolve();
+        assert_eq!(
+            pt(&mut runner, host),
+            if composed { (3, 4) } else { (2, 3) }
+        );
+        assert_eq!(
+            runner.state().objects[&host]
+                .keywords
+                .contains(&Keyword::Haste),
+            composed
+        );
+        assert_eq!(pt(&mut runner, sibling), (4, 5));
+        assert!(!runner.state().objects[&sibling]
+            .keywords
+            .contains(&Keyword::Haste));
+        settled(&runner);
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(host, AttackTarget::Player(P1))])
+            .unwrap();
+        for _ in 0..12 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::DeclareBlockers { .. }
+            ) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ));
+        assert!(runner.declare_blockers(&[(blocker, host)]).is_err());
+        runner.declare_blockers(&[]).unwrap();
+        runner.combat_damage();
+        assert_eq!(
+            runner.state().players[1].life,
+            if composed { 17 } else { 18 }
+        );
+        runner.advance_to_phase(Phase::PostCombatMain);
+        fund(&mut runner, 1, &[ManaType::Blue]);
+        runner.cast(bounce).target_object(aura).resolve();
+        assert_eq!(pt(&mut runner, host), (2, 3));
+        assert!(!runner.state().objects[&host]
+            .keywords
+            .contains(&Keyword::Haste));
+        settled(&runner);
+    }
+}
+
+#[test]
+fn parser_owner_cloud_blade_beam_announces_distinct_controllers_and_keeps_untapped_siblings() {
+    const ORACLE: &str = "Tiered (Choose one additional cost.)\n• Cross-Slash — {0} — Destroy target tapped creature.\n• Blade Beam — {1} — Destroy any number of target tapped creatures with different controllers.\n• Omnislash — {3}{W} — Destroy all tapped creatures.";
+    for same_controller in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P0, "First tapped target", 3, 3).id();
+        let second = scenario
+            .add_creature(
+                if same_controller { P0 } else { P1 },
+                "Second tapped target",
+                4,
+                4,
+            )
+            .id();
+        let untapped = scenario.add_creature(P1, "Untapped sibling", 5, 5).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Cloud's Limit Break", true, ORACLE)
+            .with_mana_cost(cost("{1}{W}"))
+            .id();
+        let mut runner = scenario.build();
+        for id in [first, second] {
+            runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+        }
+        fund(&mut runner, 2, &[ManaType::White]);
+        let result = runner
+            .cast(spell)
+            .modes(&[1])
+            .target_objects(&[first, second])
+            .try_resolve();
+        if same_controller {
+            assert!(
+                result.is_err(),
+                "the actual parsed Blade Beam must reject two targets with the same controller"
+            );
+            assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Battlefield);
+        } else {
+            result.unwrap();
+            assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+            assert_eq!(runner.state().objects[&untapped].zone, Zone::Battlefield);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            settled(&runner);
+        }
+    }
+}
+
+#[test]
+fn parser_owner_relative_tapped_population_reads_current_controller_and_status_at_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tapped = scenario.add_creature(P0, "Tapped member", 2, 3).id();
+    let untapped = scenario.add_creature(P0, "Untapped exclusion", 4, 5).id();
+    let foreign = scenario
+        .add_creature(P1, "Foreign tapped exclusion", 6, 7)
+        .id();
+    // Secondary grammar composition of the independently printed Throne of the
+    // God-Pharaoh population; this is not presented as a real card's Oracle.
+    let source = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Relative status composition",
+            "{1}: You gain life equal to the number of creatures you control that are tapped.",
+        )
+        .id();
+    scenario.add_artifact_from_oracle(P0, "Throne of the God-Pharaoh",
+        "At the beginning of your end step, each opponent loses life equal to the number of tapped creatures you control.");
+    let wisps = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Cerulean Wisps",
+            true,
+            "Target creature becomes blue until end of turn. Untap that creature.\nDraw a card.",
+        )
+        .with_mana_cost(cost("{U}"))
+        .id();
+    scenario.with_library_top(P0, &["Wisps independent draw"]);
+    let mut runner = scenario.build();
+    for id in [tapped, foreign] {
+        runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
+    }
+    fund(&mut runner, 1, &[]);
+    runner.activate(source, 0).resolve();
+    assert_eq!(
+        runner.state().players[0].life,
+        21,
+        "only the controlled tapped creature counts"
+    );
+    settled(&runner);
+    runner.advance_to_end_step();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().players[1].life,
+        19,
+        "the actual printed Throne independently reads the same one-member population"
+    );
+    settled(&runner);
+    fund(&mut runner, 0, &[ManaType::Blue]);
+    runner
+        .cast(wisps)
+        .target_object(tapped)
+        .resolve()
+        .assert_hand_drawn(P0, 1);
+    assert!(!runner.state().objects[&tapped].tapped);
+    assert!(runner.state().objects[&foreign].tapped);
+    assert!(!runner.state().objects[&untapped].tapped);
+    fund(&mut runner, 1, &[]);
+    runner.activate(source, 0).resolve();
+    assert_eq!(
+        runner.state().players[0].life,
+        21,
+        "the same parsed quantity must now see an empty live population"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    settled(&runner);
+}
+
+#[test]
+fn parser_owner_multiform_wonder_energy_pays_for_only_the_chosen_keyword_until_cleanup() {
+    const ORACLE: &str = "When this creature enters, you get {E}{E}{E} (three energy counters).\nPay {E}: This creature gains your choice of flying, vigilance, or lifelink until end of turn.\nPay {E}: This creature gets +2/-2 or -2/+2 until end of turn.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_to_hand(P0, "Multiform Wonder", 3, 3)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"])
+        .with_mana_cost(cost("{5}"))
+        .from_oracle_text(ORACLE)
+        .id();
+    let decoy = scenario.add_creature(P0, "Other creature", 2, 2).id();
+    scenario.with_library_top(P0, &["draw buffer"]);
+    scenario.with_library_top(P1, &["draw buffer"]);
+    let mut runner = scenario.build();
+    fund(&mut runner, 5, &[]);
+    runner.cast(source).resolve();
+    assert_eq!(runner.state().players[0].energy, 3);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    let menu = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == engine::types::ability::AbilityKind::Activated)
+        .expect("the real printed energy menu is an activation");
+    runner.activate(source, menu).resolve();
+    let WaitingFor::ChooseOneOfBranch {
+        player,
+        branch_descriptions,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the actual menu must pause for a resolution-time keyword branch");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        branch_descriptions,
+        &["gain flying", "gain vigilance", "gain lifelink"]
+    );
+    let index = branch_descriptions
+        .iter()
+        .position(|choice| choice.eq_ignore_ascii_case("gain lifelink"))
+        .unwrap();
+    runner.act(GameAction::ChooseBranch { index }).unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[0].energy, 2);
+    let keywords = &runner.state().objects[&source].keywords;
+    assert!(keywords.contains(&Keyword::Lifelink));
+    assert!(!keywords.contains(&Keyword::Flying));
+    assert!(!keywords.contains(&Keyword::Vigilance));
+    assert!(!runner.state().objects[&decoy]
+        .keywords
+        .contains(&Keyword::Lifelink));
+    settled(&runner);
+    finish_to_next_upkeep(&mut runner);
+    assert!(!runner.state().objects[&source]
+        .keywords
+        .contains(&Keyword::Lifelink));
+    assert_eq!(pt(&mut runner, source), (3, 3));
+    settled(&runner);
+}
+
+#[test]
+fn parser_owner_bedlam_complete_rule_reaches_public_block_validation() {
+    use engine::game::combat::AttackTarget;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 3).id();
+    let blocker = scenario
+        .add_creature(P1, "Otherwise legal blocker", 4, 5)
+        .id();
+    let bedlam = scenario
+        .add_spell_to_hand_from_oracle(P0, "Bedlam", false, "Creatures can't block.")
+        .as_enchantment()
+        .with_mana_cost(cost("{2}{R}{R}"))
+        .id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Disperse",
+            true,
+            "Return target nonland permanent to its owner's hand.",
+        )
+        .with_mana_cost(cost("{1}{U}"))
+        .id();
+    let mut runner = scenario.build();
+    fund(&mut runner, 2, &[ManaType::Red; 2]);
+    runner.cast(bedlam).resolve();
+    assert_eq!(runner.state().objects[&bedlam].zone, Zone::Battlefield);
+    settled(&runner);
+    // Use two otherwise identical public combat branches, with and without
+    // the real rule source. This distinguishes a rule from an inert residual.
+    let mut unrestricted = GameRunner::from_state(runner.state().clone());
+    fund(&mut unrestricted, 1, &[ManaType::Blue]);
+    unrestricted.cast(bounce).target_object(bedlam).resolve();
+    for (mut branch, restricted) in [(runner, true), (unrestricted, false)] {
+        branch.advance_to_combat();
+        branch
+            .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+            .unwrap();
+        for _ in 0..12 {
+            if matches!(
+                branch.state().waiting_for,
+                WaitingFor::DeclareBlockers { .. }
+            ) {
+                break;
+            }
+            branch.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            branch.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ));
+        let result = branch.declare_blockers(&[(blocker, attacker)]);
+        assert_eq!(result.is_err(), restricted);
+        if restricted {
+            branch.declare_blockers(&[]).unwrap();
+        }
+        branch.combat_damage();
+        assert_eq!(
+            branch.state().players[1].life,
+            if restricted { 18 } else { 20 }
+        );
+        settled(&branch);
+    }
+}

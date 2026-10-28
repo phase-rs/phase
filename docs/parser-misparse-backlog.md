@@ -4100,7 +4100,6 @@ This is the prioritized "fix N root causes → unlock M cards" backlog: the top 
 - True-Faith Censer
 - U.S.Agent, John Walker
 - Ultima, Origin of Oblivion
-- Ultimate Spider-Man
 - Unable to Scream
 - Uncontrolled Infestation
 - Unexpected Potential
