@@ -14142,6 +14142,14 @@ fn parse_damage_prevention_replacement(
         // avoids parser-context plumbing. Single building-block walker
         // (`each_target_filter_mut`) handles every target-bearing effect arm.
         rewrite_parent_target_controller_to_post_replacement_source(&mut followup_def);
+        // CR 615.5: a player-recipient shield's "that player" names the
+        // affected player; it does not name the prevented source's controller.
+        if matches!(
+            &def.damage_target_filter,
+            Some(DamageTargetFilter::Player { .. })
+        ) {
+            rewrite_replacement_event_recipient_to_post_replacement_target(&mut followup_def);
+        }
         // CR 615.5 + CR 608.2c: Object-anaphor rewrite for cohort 2 (Vigor
         // class). When the shield is event-driven (signalled by a typed
         // `valid_card_filter`), `ParentTarget` in the rider can only refer
@@ -33074,6 +33082,22 @@ mod opposition_agent_parser_tests {
             ls, None,
             "CR 615.1a: unsupported qualifiers must fail closed rather than dropping restrictions"
         );
+    }
+
+    #[test]
+    fn prevention_player_subject_and_source_controller_are_separate_actors() {
+        for (text, expected) in [
+            ("If damage would be dealt to a player, prevent that damage and that player puts a +1/+1 counter on this creature. You draw a card.", TargetFilter::PostReplacementDamageTarget),
+            ("If damage would be dealt to a player, prevent that damage. The source's controller puts a +1/+1 counter on this creature. You draw a card.", TargetFilter::PostReplacementSourceController),
+        ] {
+            let definition = parse_replacement_line(text, "Synthetic prevention actor")
+                .expect("complete prevention and actor clause");
+            let body = definition.execute.as_deref().expect("additional effect");
+            assert!(matches!(*body.effect, Effect::PutCounter { target: TargetFilter::SelfRef, .. }));
+            assert_eq!(body.instruction_actor.as_ref().and_then(|actor| actor.as_event()), Some(&expected));
+            assert_eq!(body.sub_ability.as_ref().expect("independent draw").instruction_actor,
+                Some(ControllerRef::You.into()));
+        }
     }
 
     #[test]

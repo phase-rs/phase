@@ -595,13 +595,7 @@ fn resolve_all_declined_opponent_may(
                 // steps, but the next independent instruction follows either
                 // branch. Join it to the else chain so a paused else retains
                 // sole ownership of when that tail resumes.
-                if let Some(tail) = std::iter::successors(sub.sub_ability.as_deref(), |node| {
-                    node.sub_ability.as_deref()
-                })
-                .find(|node| node.sub_link == SubAbilityLink::SequentialSibling)
-                {
-                    super::ability_utils::append_to_sub_chain(&mut else_resolved, tail.clone());
-                }
+                effects::append_independent_tail_to_else(&mut else_resolved, sub);
                 // CR 608.2c: the else branch resolves as the continuation of the
                 // stashed optional ability. Preserve a captured event-context
                 // target (such as the affected player of a replaced Draw) after

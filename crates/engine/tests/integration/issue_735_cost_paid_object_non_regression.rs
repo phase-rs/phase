@@ -437,7 +437,7 @@ fn synthetic_decline_owned_body_preserves_a_later_explicit_player_actor() {
         .resolve();
     let mut events = outcome.events().to_vec();
     assert!(
-        matches!(&runner.state().waiting_for, WaitingFor::EffectZoneChoice { player: P1, cards, .. }
+        matches!(&runner.state().waiting_for, WaitingFor::ChooseFromZoneChoice { player: P1, cards, .. }
         if cards.contains(&other) && cards.contains(&decoy)),
         "explicit player's counter choice: {:?}",
         runner.state().waiting_for

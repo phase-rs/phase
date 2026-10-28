@@ -5069,6 +5069,21 @@ fn starts_independent_instruction(node: &ResolvedAbility) -> bool {
     }
 }
 
+/// CR 608.2c: a branch owns its resolution steps; the next independent
+/// instruction follows either branch, including when that branch pauses.
+pub(crate) fn append_independent_tail_to_else(
+    branch: &mut ResolvedAbility,
+    skipped: &ResolvedAbility,
+) {
+    if let Some(tail) = std::iter::successors(skipped.sub_ability.as_deref(), |node| {
+        node.sub_ability.as_deref()
+    })
+    .find(|node| starts_independent_instruction(node))
+    {
+        super::ability_utils::append_to_sub_chain(branch, tail.clone());
+    }
+}
+
 /// CR 608.2c: the "if you do" gate `gate` reduced to what still happens after
 /// the optional action before it was DECLINED: `gate` itself, whose own
 /// condition reads false on the decline path so its own effect never runs,
@@ -17137,6 +17152,7 @@ fn resolve_chain_body(
             }
             if let Some(ref else_branch) = ability.else_ability {
                 let mut else_resolved = else_branch.as_ref().clone();
+                append_independent_tail_to_else(&mut else_resolved, ability);
                 if should_propagate_parent_targets(ability, &else_resolved) {
                     else_resolved.mirror_targets_from(ability);
                 }
@@ -17260,6 +17276,17 @@ fn resolve_chain_body(
                         apply_parent_chain_context(&mut sub_resolved, ability, None, state);
                     }
                     resolve_ability_chain(state, &sub_resolved, events, depth + 1)?;
+                } else if let Some(sibling) =
+                    std::iter::successors(sub.sub_ability.as_deref(), |node| {
+                        node.sub_ability.as_deref()
+                    })
+                    .find(|node| starts_independent_instruction(node) && node.condition.is_none())
+                {
+                    // CR 608.2c: a paused conditional head can have several
+                    // dependent steps before its next independent instruction.
+                    let mut sibling = sibling.clone();
+                    apply_parent_chain_context(&mut sibling, ability, None, state);
+                    resolve_ability_chain(state, &sibling, events, depth + 1)?;
                 }
             }
             return Ok(());
@@ -18623,7 +18650,16 @@ fn resolve_chain_body(
                 .sub_ability
                 .as_deref()
                 .is_some_and(|sub| {
-                    effect_refs_parent_target_metadata(&sub.effect)
+                    (effect_refs_parent_target_metadata(&sub.effect)
+                        || matches!(
+                            sub.instruction_actor
+                                .as_ref()
+                                .and_then(|actor| actor.as_controller()),
+                            Some(
+                                ControllerRef::ParentTargetController
+                                    | ControllerRef::ParentTargetOwner
+                            )
+                        ))
                         && !effect_requires_parent_target_object(&sub.effect)
                 })
                 .then(|| library_move_metadata_context_from_events(state, effect_events))
@@ -19498,6 +19534,7 @@ fn resolve_chain_body(
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
                     let mut else_resolved = else_branch.as_ref().clone();
+                    append_independent_tail_to_else(&mut else_resolved, sub);
                     // Inject revealed card IDs as targets for else branches following
                     // effects that write last_revealed_ids, so "Otherwise, put that
                     // card on the bottom of your library" knows which card to move.
@@ -22445,6 +22482,66 @@ mod tests {
     use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
     use crate::types::ability::ChooseOneOfKind;
     use crate::types::ability::SpentColor;
+
+    /// CR 608.2c: a false instruction skips its dependent steps while its
+    /// next independent instruction follows either the false or else path.
+    #[test]
+    fn false_instruction_keeps_its_independent_tail_after_dependent_steps_or_else() {
+        for with_else in [false, true] {
+            for dependent_step in [false, true] {
+                let gain = |value| {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value },
+                            player: TargetFilter::Controller,
+                        },
+                    )
+                };
+                let mut head = gain(99);
+                head.condition = Some(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::IsYourTurn),
+                });
+                if with_else {
+                    head.else_ability = Some(Box::new(gain(2)));
+                }
+                let mut tail = gain(3);
+                tail.sub_link = SubAbilityLink::SequentialSibling;
+                head.sub_ability = Some(if dependent_step {
+                    let mut dependent = gain(100);
+                    dependent.sub_ability = Some(Box::new(tail));
+                    Box::new(dependent)
+                } else {
+                    Box::new(tail)
+                });
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                let spell = scenario
+                    .add_spell_to_hand(P0, "Synthetic false instruction", false)
+                    .with_ability_definition(head)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let mut runner = scenario.build();
+                let outcome = runner.cast(spell).resolve();
+                assert_eq!(
+                    outcome.state().players[0].life,
+                    if with_else { 25 } else { 23 }
+                );
+                assert_eq!(
+                    outcome
+                        .events()
+                        .iter()
+                        .filter(|event| matches!(event,
+                    GameEvent::EffectResolved { kind: EffectKind::GainLife, source_id, .. }
+                    if *source_id == spell))
+                        .count(),
+                    if with_else { 2 } else { 1 }
+                );
+                outcome.assert_zone(&[spell], Zone::Graveyard);
+                assert!(outcome.state().stack.is_empty());
+            }
+        }
+    }
 
     /// CR 608.2c + CR 615.5: all four closed Event actors enter the existing
     /// random/coordinator boundaries through a real prevented-damage dispatch.

@@ -2096,7 +2096,21 @@ fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_
                 );
                 events.extend(runner.act(GameAction::PassPriority).unwrap().events);
             }
-            assert_eq!(runner.state().players[0].life, 23);
+            assert_eq!(
+                runner.state().players[0].life,
+                23,
+                "target_case={target_case}, pay={pay}, lives={:?}, life events={:?}",
+                runner
+                    .state()
+                    .players
+                    .iter()
+                    .map(|player| player.life)
+                    .collect::<Vec<_>>(),
+                events
+                    .iter()
+                    .filter(|event| matches!(event, GameEvent::LifeChanged { .. }))
+                    .collect::<Vec<_>>()
+            );
             assert_eq!(runner.state().players[1].life, 20);
             assert_eq!(runner.state().players[p2.0 as usize].life, 20);
             assert_eq!(
@@ -2413,7 +2427,9 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                 assert_eq!(
                     runner.state().players[0].life,
                     23,
-                    "outer damage is prevented; independent tail runs exactly once"
+                    "outer damage is prevented; independent tail runs exactly once; creature={creature_outer}, missing={missing_outer}, reenter={reenter}, accept={accept}, lives={:?}, life events={:?}",
+                    runner.state().players.iter().map(|player| player.life).collect::<Vec<_>>(),
+                    events.iter().filter(|event| matches!(event, GameEvent::LifeChanged { .. })).collect::<Vec<_>>()
                 );
                 assert_eq!(
                     runner.state().players[1].life,
