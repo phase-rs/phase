@@ -778,6 +778,33 @@ pub fn move_object_for_test(
     )
 }
 
+/// Whether `zones::move_to_zone` will reject moving `object` to `to` as a
+/// no-op. Its callers (below) run it before they build a
+/// proposal, so no replacement is consulted, consumed (`last_effect_count`,
+/// CR 616.1 choices) or prompted for a move that never happens.
+/// CR 111.8: a token that has left the battlefield can't move to another zone
+/// or come back onto the battlefield; it remains in its current zone and ceases
+/// to exist at the next SBA check (CR 704.5d). An exact CR 601.2a pending spell
+/// plus its announcement placeholder makes the retained-origin representation
+/// stack-resident until its delivery.
+/// CR 400.6 + CR 603.6d + CR 614.12: a Battlefield -> Battlefield move is not a
+/// zone change, so no event puts the permanent onto the battlefield for an
+/// "enters with" / "as enters" replacement — including the CR 306.5b /
+/// CR 310.4b intrinsic counters — to modify. CR 603.2g + CR 603.6a: and no
+/// enters-the-battlefield trigger event occurs.
+/// Callers: `move_object_with_terminal` (THE zone-change entry point) and
+/// `engine_debug::enter_battlefield_with_etb` (the sandbox consulting entry).
+pub(crate) fn zone_move_is_primitive_noop(
+    state: &GameState,
+    object: &GameObject,
+    to: Zone,
+) -> bool {
+    // CR 111.8: a token outside the battlefield (and not stack-resident) stays put.
+    zones::token_is_outside_battlefield_and_stack(state, object)
+        // CR 400.6 + CR 603.6d: Battlefield -> Battlefield is no entry event.
+        || (object.zone == Zone::Battlefield && to == Zone::Battlefield)
+}
+
 pub(crate) fn move_object_with_terminal(
     state: &mut GameState,
     req: ZoneMoveRequest,
@@ -799,26 +826,8 @@ pub(crate) fn move_object_with_terminal(
     // rejects as a no-op. These two are pure object-level reads with no game
     // effect, so testing them up front cannot change observable behavior — it
     // only avoids spending a one-shot replacement on a move that never happens.
-    {
-        let obj = state
-            .objects
-            .get(&req.object_id)
-            .expect("object exists (zone read above)");
-        // CR 111.8: A token that has left the battlefield can't change zones; it
-        // remains in place and ceases to exist at the next SBA (CR 111.7). An
-        // exact CR 601.2a pending spell plus its announcement placeholder makes
-        // the retained-origin representation stack-resident until this delivery.
-        if zones::token_is_outside_battlefield_and_stack(state, obj) {
-            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-        }
-        // CR 603.2g + CR 603.6a: A Battlefield -> Battlefield move does not put a
-        // permanent onto the battlefield — no entry event occurs, so no
-        // would-style replacement should be consulted (and the primitive would
-        // reject it as a no-op regardless), mirroring the `zones::move_to_zone`
-        // no-op guard.
-        if from_zone == Zone::Battlefield && req.to == Zone::Battlefield {
-            return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-        }
+    if zone_move_is_primitive_noop(state, object, req.to) {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
     }
 
     // Library-placement arm (W3). A `Some(placement)` request lands the object at

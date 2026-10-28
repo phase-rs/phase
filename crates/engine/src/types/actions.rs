@@ -1202,7 +1202,11 @@ pub enum DebugAction {
     /// Move an existing object to a different zone.
     /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs);
     /// a `Battlefield` destination also consults ETB replacements (enters tapped,
-    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`.
+    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`;
+    /// an object already on the battlefield, or a token that has left it (CR 111.8),
+    /// is not put onto the battlefield, so no replacement is consulted and nothing
+    /// enters; triggers and state-based actions are still checked, as for every
+    /// simulated move.
     /// When false, raw placement with no replacements, triggers, or SBAs; a
     /// planeswalker or battle still arrives with its printed loyalty / defense
     /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c).

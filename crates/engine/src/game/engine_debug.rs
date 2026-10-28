@@ -1079,19 +1079,33 @@ pub fn route_debug_create_to_battlefield(
 /// with counters, including the CR 306.5b / CR 310.4b intrinsic
 /// loyalty/defense counters, "as enters" choices), delivery, ETB triggers,
 /// then SBAs. A replacement choice parks on `state.waiting_for`. Shared by debug card
-/// creation and `MoveToZone { simulate: true }`; tokens that already left the
-/// battlefield stay put via the CR 111.8 delivery guard.
+/// creation and `MoveToZone { simulate: true }`. A move the zone primitive
+/// rejects as a no-op — an object already on the battlefield (CR 400.6 +
+/// CR 603.6d), or a token that has left it (CR 111.8) — builds no proposal
+/// (nothing is seeded, consulted or delivered) and runs only the trigger / SBA
+/// epilogue, through `zone_pipeline::zone_move_is_primitive_noop`, the guard the
+/// zone pipeline hoists ahead of its own consult.
 fn enter_battlefield_with_etb(
     state: &mut GameState,
     object_id: ObjectId,
     attach_to: Option<AttachTarget>,
     events: &mut Vec<GameEvent>,
 ) {
-    let from = state
-        .objects
-        .get(&object_id)
-        .map(|o| o.zone)
-        .unwrap_or(Zone::Hand);
+    let Some(object) = state.objects.get(&object_id) else {
+        return;
+    };
+    let from = object.zone;
+    // CR 400.6 + CR 603.6d + CR 111.8: an object already on the battlefield is
+    // not put onto it, and a token that has left the battlefield can't return —
+    // the pipeline's own pre-consult guard, so nothing is seeded, consulted or
+    // delivered for a move the zone primitive rejects. Like every other simulated
+    // move, triggers and state-based actions are still checked, so a stranded
+    // token ceases to exist (CR 704.5d).
+    if crate::game::zone_pipeline::zone_move_is_primitive_noop(state, object, Zone::Battlefield) {
+        super::triggers::process_triggers(state, events); // CR 603: Process triggers
+        super::sba::check_state_based_actions(state, events); // CR 704: Check SBAs
+        return;
+    }
 
     let mut proposed = ProposedEvent::ZoneChange {
         object_id,

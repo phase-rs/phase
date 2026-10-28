@@ -21,6 +21,10 @@
 //!   Every other enters-with replacement (Saga lore, "enters with N +1/+1
 //!   counters") stays skipped by the raw contract.
 //!
+//! Move to zone with simulate on an object already on the battlefield (or on a
+//! token that has left it) is no entry, so it consults and applies nothing
+//! (CR 400.6, CR 603.6d, CR 111.8).
+//!
 //! Every card is the committed fixture's verbatim Oracle face, and every entry
 //! goes through `create_debug_cards` (the engine entry both transports call) or
 //! `GameAction::Debug(DebugAction::MoveToZone)`.
@@ -28,10 +32,12 @@
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
 use engine::types::ability::AbilityCost;
 use engine::types::actions::{DebugAction, DebugCardCreationKind, GameAction};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -48,6 +54,7 @@ const DOUBLING_SEASON: &str = "Doubling Season";
 const VORINCLEX: &str = "Vorinclex, Monstrous Raider";
 const SPIKE_FEEDER: &str = "Spike Feeder";
 const HISTORY_OF_BENALIA: &str = "History of Benalia";
+const BLOODFELL_CAVES: &str = "Bloodfell Caves";
 
 /// Verbatim Oracle text of Shock.
 const SHOCK: &str = "Shock deals 2 damage to any target.";
@@ -75,6 +82,9 @@ fn board(setup: impl FnOnce(&mut GameScenario)) -> GameRunner {
     runner.state_mut().debug_mode = true;
     runner
 }
+
+/// A table with no battlefield fixtures.
+fn plain_board(_: &mut GameScenario) {}
 
 /// P0's Doubling Season: "If an effect would put one or more counters on a
 /// permanent you control, it puts twice that many of those counters on that
@@ -135,17 +145,48 @@ fn only_object_named(runner: &GameRunner, name: &str) -> ObjectId {
     ids[0]
 }
 
-/// Send `MoveToZone { to_zone: Battlefield, simulate }` through the action
-/// boundary.
-fn move_to_battlefield(runner: &mut GameRunner, object_id: ObjectId, simulate: bool) {
+/// Send `MoveToZone { to_zone, simulate }` through the action boundary and
+/// return the accepted action's events.
+fn move_to(
+    runner: &mut GameRunner,
+    object_id: ObjectId,
+    to_zone: Zone,
+    simulate: bool,
+) -> Vec<GameEvent> {
     runner
         .act(GameAction::Debug(DebugAction::MoveToZone {
             object_id,
-            to_zone: Zone::Battlefield,
+            to_zone,
             library_position: None,
             simulate,
         }))
-        .unwrap_or_else(|error| panic!("the debug move is accepted: {error:?}"));
+        .unwrap_or_else(|error| panic!("the debug move is accepted: {error:?}"))
+        .events
+}
+
+fn is_counter_added(event: &GameEvent) -> bool {
+    matches!(event, GameEvent::CounterAdded { .. })
+}
+
+fn is_zone_changed(event: &GameEvent) -> bool {
+    matches!(event, GameEvent::ZoneChanged { .. })
+}
+
+/// Assert a move put nothing onto the battlefield: no counter was put on
+/// anything and nothing changed zones.
+fn assert_no_entry_events(events: &[GameEvent], row: &str) {
+    assert!(
+        !events.iter().any(is_counter_added),
+        "{row}: no counter is put: {events:?}"
+    );
+    assert!(
+        !events.iter().any(is_zone_changed),
+        "{row}: nothing changes zones: {events:?}"
+    );
+}
+
+fn incarnation(runner: &GameRunner, id: ObjectId) -> u64 {
+    runner.state().objects[&id].incarnation
 }
 
 fn counter(runner: &GameRunner, id: ObjectId, counter_type: CounterType) -> Option<u32> {
@@ -290,7 +331,7 @@ fn debug_moved_planeswalker_enters_with_printed_loyalty_counters() {
             "{row}: precondition, no counters in the graveyard"
         );
 
-        move_to_battlefield(&mut runner, comet, simulate);
+        move_to(&mut runner, comet, Zone::Battlefield, simulate);
 
         assert_eq!(zone_of(&runner, comet), Zone::Battlefield, "{row}");
         assert_loyalty(&runner, comet, 5, &row);
@@ -370,7 +411,7 @@ fn raw_debug_placement_installs_printed_loyalty_without_a_replacement_choice() {
             );
             let comet = only_object_named(&runner, COMET);
             assert_eq!(zone_of(&runner, comet), Zone::Graveyard, "{row}");
-            move_to_battlefield(&mut runner, comet, false);
+            move_to(&mut runner, comet, Zone::Battlefield, false);
         } else {
             create(
                 &mut runner,
@@ -600,7 +641,7 @@ fn debug_entered_planeswalker_loyalty_follows_the_chosen_replacement_order() {
                         DebugCardCreationKind::Card,
                     );
                     let comet = only_object_named(&runner, COMET);
-                    move_to_battlefield(&mut runner, comet, true);
+                    move_to(&mut runner, comet, Zone::Battlefield, true);
                 }
                 ConsultingEntry::CreateToken => create(
                     &mut runner,
@@ -727,4 +768,529 @@ fn debug_created_planeswalker_pays_negative_loyalty_costs_from_its_counters() {
         assert_eq!(zone_of(&runner, elspeth), Zone::Battlefield, "{row}");
         assert_loyalty(&runner, elspeth, 2, &format!("{row}, resolved"));
     }
+}
+
+/// Send `id`, a permanent already on the battlefield, onto the battlefield by
+/// Move to zone with simulate, and assert the move put nothing onto the
+/// battlefield (CR 400.6: it is not a move from one zone to another): no
+/// `ZoneChanged` or `CounterAdded` event, the same object (no CR 400.7 new
+/// object) still on the battlefield, no trigger added to the stack (CR 603.6a:
+/// no event put a permanent onto the battlefield), nothing parked, and nothing
+/// asked.
+fn assert_battlefield_move_is_refused(runner: &mut GameRunner, id: ObjectId, row: &str) {
+    assert_eq!(
+        zone_of(runner, id),
+        Zone::Battlefield,
+        "{row}: precondition"
+    );
+    assert!(
+        is_priority(runner),
+        "{row}: precondition: {}",
+        short(&runner.state().waiting_for)
+    );
+    let before = incarnation(runner, id);
+    let stack = runner.state().stack.len();
+    let resolution_stack = runner.state().resolution_stack.len();
+
+    let events = move_to(runner, id, Zone::Battlefield, true);
+
+    assert!(
+        is_priority(runner),
+        "{row}: nothing is asked: {}",
+        short(&runner.state().waiting_for)
+    );
+    assert_no_entry_events(&events, row);
+    assert_eq!(zone_of(runner, id), Zone::Battlefield, "{row}");
+    assert_eq!(incarnation(runner, id), before, "{row}: the same object");
+    assert_eq!(
+        runner.state().stack.len(),
+        stack,
+        "{row}: no trigger is added"
+    );
+    assert_eq!(
+        runner.state().resolution_stack.len(),
+        resolution_stack,
+        "{row}: nothing is parked"
+    );
+}
+
+/// CR 400.6 + CR 603.6d + CR 614.12: Comet already on the battlefield, sent
+/// onto the battlefield by Move to zone with simulate, is not moved from one
+/// zone to another, so no event puts him onto the battlefield and his
+/// CR 306.5b loyalty counters — an effect of that event — are not put on him
+/// again. Doubling Season and Vorinclex modify counters being put on a
+/// permanent (CR 122.6); none are, so nothing is doubled and there is no order
+/// to choose (CR 616.1). His loyalty stays the count he had (CR 306.5c).
+/// Paired positive: the same simulated move of a Comet card in the graveyard
+/// enters him with five loyalty counters.
+///
+/// Red with the no-op guard reverted and the intrinsic seeding kept: the move
+/// put another five loyalty counters on Comet (ten on Doubling Season's
+/// board), and on the order-matters board it asked P0 to order the
+/// replacements.
+#[test]
+fn moving_a_battlefield_planeswalker_onto_the_battlefield_changes_nothing() {
+    type BoardSetup = fn(&mut GameScenario);
+    // (board, its fixtures, run_etb, kind, loyalty)
+    let rows: [(&str, BoardSetup, bool, DebugCardCreationKind, u32); 4] = [
+        ("plain", plain_board, true, DebugCardCreationKind::Card, 5),
+        ("plain", plain_board, true, DebugCardCreationKind::Token, 5),
+        (
+            "Doubling Season",
+            with_doubling_season,
+            true,
+            DebugCardCreationKind::Card,
+            10,
+        ),
+        (
+            "order matters",
+            with_order_matters,
+            false,
+            DebugCardCreationKind::Card,
+            5,
+        ),
+    ];
+    for (label, setup, run_etb, kind, loyalty) in rows {
+        let row = format!("{label} board, run_etb={run_etb}, {kind:?}");
+        let mut runner = board(setup);
+        create(&mut runner, COMET, P0, Zone::Battlefield, run_etb, kind);
+        let comet = only_object_named(&runner, COMET);
+        assert_loyalty(&runner, comet, loyalty, &format!("{row}, before"));
+
+        assert_battlefield_move_is_refused(&mut runner, comet, &row);
+
+        assert!(
+            runner.state().resolution_stack.is_empty(),
+            "{row}: nothing is parked"
+        );
+        assert_eq!(only_object_named(&runner, COMET), comet, "{row}");
+        assert_loyalty(&runner, comet, loyalty, &row);
+    }
+
+    // Paired positive: the same action shape enters a Comet card from the
+    // graveyard.
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        COMET,
+        P0,
+        Zone::Graveyard,
+        true,
+        DebugCardCreationKind::Card,
+    );
+    let comet = only_object_named(&runner, COMET);
+    assert_eq!(
+        zone_of(&runner, comet),
+        Zone::Graveyard,
+        "positive: precondition"
+    );
+    let events = move_to(&mut runner, comet, Zone::Battlefield, true);
+    assert!(
+        events.iter().any(is_zone_changed),
+        "positive: Comet enters: {events:?}"
+    );
+    assert!(
+        events.iter().any(is_counter_added),
+        "positive: his loyalty counters are put: {events:?}"
+    );
+    assert_eq!(zone_of(&runner, comet), Zone::Battlefield, "positive");
+    assert_loyalty(&runner, comet, 5, "positive");
+}
+
+/// CR 603.6d + CR 614.12: an "enters with", "as enters" or "enters tapped"
+/// ability applies as part of the event that puts the permanent onto the
+/// battlefield. A permanent already on the battlefield, sent onto the
+/// battlefield by Move to zone with simulate, is put there by no event, so
+/// none of them applies again: Spike Feeder keeps its two +1/+1 counters,
+/// History of Benalia keeps its one lore counter and its chapter II does not
+/// trigger (CR 714.2b), Invasion of Amonkhet asks for no protector
+/// (CR 310.9a + CR 310.12a), and an untapped Bloodfell Caves stays untapped.
+/// Paired positives: each replacement applied when the consulting creation
+/// entered the permanent. The refused move still checks state-based actions,
+/// as every simulated move does: a raw-placed Spike Feeder (0/0, no counters)
+/// gets no +1/+1 counter and is put into its owner's graveyard (CR 704.5f).
+///
+/// Red at base: the move re-applied every one of them — +1/+1 4, lore 2 with
+/// chapter II on the stack, a second protector choice, Bloodfell Caves
+/// tapped again, and two +1/+1 counters that kept the 0/0 Spike Feeder alive.
+#[test]
+fn moving_a_battlefield_permanent_onto_the_battlefield_reapplies_no_entry_replacement() {
+    let created = |name: &str| {
+        let mut runner = board(plain_board);
+        create(
+            &mut runner,
+            name,
+            P0,
+            Zone::Battlefield,
+            true,
+            DebugCardCreationKind::Card,
+        );
+        runner
+    };
+
+    // Spike Feeder: "This creature enters with two +1/+1 counters on it."
+    let mut runner = created(SPIKE_FEEDER);
+    let feeder = only_object_named(&runner, SPIKE_FEEDER);
+    assert_eq!(
+        counter(&runner, feeder, CounterType::Plus1Plus1),
+        Some(2),
+        "Spike Feeder, before"
+    );
+    assert_battlefield_move_is_refused(&mut runner, feeder, "Spike Feeder");
+    assert_eq!(
+        counter(&runner, feeder, CounterType::Plus1Plus1),
+        Some(2),
+        "Spike Feeder: no counter is put on it"
+    );
+
+    // History of Benalia: CR 714.3a, a lore counter as it enters, and its
+    // chapter I triggers.
+    let mut runner = created(HISTORY_OF_BENALIA);
+    let saga = only_object_named(&runner, HISTORY_OF_BENALIA);
+    assert_eq!(
+        counter(&runner, saga, CounterType::Lore),
+        Some(1),
+        "History of Benalia, before"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "History of Benalia, before: chapter I triggered"
+    );
+    assert_battlefield_move_is_refused(&mut runner, saga, "History of Benalia");
+    assert_eq!(
+        counter(&runner, saga, CounterType::Lore),
+        Some(1),
+        "History of Benalia: no lore counter is put on it"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "History of Benalia: CR 714.2b, chapter II does not trigger"
+    );
+
+    // Invasion of Amonkhet: the CR 614.12a protector choice as it enters.
+    let mut runner = created(SIEGE);
+    let choice = match &runner.state().waiting_for {
+        WaitingFor::NamedChoice {
+            player, options, ..
+        } => {
+            assert_eq!(
+                *player, P0,
+                "Invasion of Amonkhet, before: its controller chooses its protector"
+            );
+            options
+                .first()
+                .cloned()
+                .expect("an opponent can protect the Siege")
+        }
+        other => panic!(
+            "Invasion of Amonkhet, before: expected the protector choice, got {}",
+            short(other)
+        ),
+    };
+    runner
+        .act(GameAction::ChooseOption { choice })
+        .expect("the protector choice is accepted");
+    let siege = only_object_named(&runner, SIEGE);
+    assert_defense(&runner, siege, 4, "Invasion of Amonkhet, before");
+    assert_battlefield_move_is_refused(&mut runner, siege, "Invasion of Amonkhet");
+    assert_defense(&runner, siege, 4, "Invasion of Amonkhet");
+
+    // Bloodfell Caves: "This land enters tapped."
+    let mut runner = created(BLOODFELL_CAVES);
+    let caves = only_object_named(&runner, BLOODFELL_CAVES);
+    assert!(
+        runner.state().objects[&caves].tapped,
+        "Bloodfell Caves, before: it entered tapped"
+    );
+    runner
+        .act(GameAction::Debug(DebugAction::SetTapped {
+            object_id: caves,
+            tapped: false,
+        }))
+        .expect("the debug untap is accepted");
+    assert!(
+        !runner.state().objects[&caves].tapped,
+        "Bloodfell Caves, before: untapped"
+    );
+    assert_battlefield_move_is_refused(&mut runner, caves, "Bloodfell Caves");
+    assert!(
+        !runner.state().objects[&caves].tapped,
+        "Bloodfell Caves: it is not tapped again"
+    );
+
+    // A raw-placed Spike Feeder: its enters-with replacement was skipped, so it
+    // is a 0/0 on the battlefield until state-based actions are checked.
+    let row = "raw Spike Feeder";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        SPIKE_FEEDER,
+        P0,
+        Zone::Battlefield,
+        false,
+        DebugCardCreationKind::Card,
+    );
+    let feeder = only_object_named(&runner, SPIKE_FEEDER);
+    assert_eq!(
+        zone_of(&runner, feeder),
+        Zone::Battlefield,
+        "{row}: precondition, the raw placement checks no state-based actions"
+    );
+    assert_eq!(
+        counter(&runner, feeder, CounterType::Plus1Plus1),
+        None,
+        "{row}: precondition"
+    );
+
+    let events = move_to(&mut runner, feeder, Zone::Battlefield, true);
+
+    assert!(
+        !events.iter().any(is_counter_added),
+        "{row}: no counter is put: {events:?}"
+    );
+    let feeder = only_object_named(&runner, SPIKE_FEEDER);
+    assert_eq!(
+        zone_of(&runner, feeder),
+        Zone::Graveyard,
+        "{row}: CR 704.5f, the 0/0 creature is put into its owner's graveyard"
+    );
+    assert!(
+        is_priority(&runner),
+        "{row}: {}",
+        short(&runner.state().waiting_for)
+    );
+}
+
+/// CR 111.8: a token that has left the battlefield can't come back onto it;
+/// it remains in its zone and ceases to exist the next time state-based
+/// actions are checked (CR 704.5d). Move to zone with simulate checks them, so
+/// a token raw-moved to the graveyard and then sent onto the battlefield gets
+/// no enters-with counter (no event puts it onto the battlefield, CR 603.6d)
+/// and ceases to exist, exactly as when it is sent to a hand. Paired positive:
+/// a Comet card set up the same way does enter, with five loyalty counters.
+///
+/// Red at base on the Spike Feeder row, and with the no-op guard reverted (the
+/// intrinsic seeding kept) on both rows: the move put the token's entry
+/// counters (+1/+1 2; loyalty 5) on it in the graveyard before it ceased to
+/// exist.
+#[test]
+fn a_token_that_left_the_battlefield_stays_out_of_the_simulated_entry() {
+    // (token, the counter it enters with, how many)
+    let tokens = [
+        (COMET, CounterType::Loyalty, 5),
+        (SPIKE_FEEDER, CounterType::Plus1Plus1, 2),
+    ];
+    for (name, counter_type, count) in tokens {
+        for to_zone in [Zone::Battlefield, Zone::Hand] {
+            let row = format!("{name} token, simulated move to {to_zone:?}");
+            let mut runner = board(plain_board);
+            create(
+                &mut runner,
+                name,
+                P0,
+                Zone::Battlefield,
+                true,
+                DebugCardCreationKind::Token,
+            );
+            let token = only_object_named(&runner, name);
+            assert!(
+                runner.state().objects[&token].is_token,
+                "{row}: precondition"
+            );
+            assert_eq!(
+                counter(&runner, token, counter_type.clone()),
+                Some(count),
+                "{row}: precondition, it entered with its counters"
+            );
+
+            move_to(&mut runner, token, Zone::Graveyard, false);
+            let object = &runner.state().objects[&token];
+            assert_eq!(
+                object.zone,
+                Zone::Graveyard,
+                "{row}: precondition, the raw move checks no state-based actions"
+            );
+            assert!(
+                object.counters.is_empty(),
+                "{row}: precondition, CR 122.2: it left with no counters"
+            );
+
+            let events = move_to(&mut runner, token, to_zone, true);
+
+            assert_no_entry_events(&events, &row);
+            assert!(
+                !runner.state().objects.contains_key(&token),
+                "{row}: CR 111.8 + CR 704.5d, the token ceased to exist"
+            );
+            assert!(
+                is_priority(&runner),
+                "{row}: {}",
+                short(&runner.state().waiting_for)
+            );
+        }
+    }
+
+    // Paired positive: the card twin enters from the graveyard.
+    let row = "Comet card, simulated move to Battlefield";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        COMET,
+        P0,
+        Zone::Battlefield,
+        true,
+        DebugCardCreationKind::Card,
+    );
+    let comet = only_object_named(&runner, COMET);
+    assert_loyalty(&runner, comet, 5, &format!("{row}, before"));
+    move_to(&mut runner, comet, Zone::Graveyard, false);
+    assert_eq!(
+        zone_of(&runner, comet),
+        Zone::Graveyard,
+        "{row}: precondition"
+    );
+    let events = move_to(&mut runner, comet, Zone::Battlefield, true);
+    assert!(
+        events.iter().any(is_zone_changed),
+        "{row}: Comet enters: {events:?}"
+    );
+    assert_eq!(zone_of(&runner, comet), Zone::Battlefield, "{row}");
+    assert_loyalty(&runner, comet, 5, row);
+}
+
+/// Move `id` onto the battlefield through the zone pipeline's own entry
+/// (`ZoneMoveRequest::effect`), returning whether the move parked a choice and
+/// its events.
+fn pipeline_move_to_battlefield(runner: &mut GameRunner, id: ObjectId) -> (bool, Vec<GameEvent>) {
+    let mut events = Vec::new();
+    let parked = move_object_for_test(
+        runner.state_mut(),
+        ZoneMoveRequest::effect(id, Zone::Battlefield, id),
+        &mut events,
+    );
+    (parked, events)
+}
+
+/// The zone pipeline, the no-op predicate's other caller, still refuses both
+/// no-op moves before it consults any replacement: a permanent already on the
+/// battlefield (CR 400.6 + CR 603.6d) gets no enters-with counter, and a token
+/// in the graveyard stays there (CR 111.8). Paired positive: the same request
+/// enters a Spike Feeder card from the graveyard with its two +1/+1 counters.
+///
+/// Preservation: base reads the same. Red if either half of the shared
+/// predicate is dropped (Battlefield -> Battlefield: +1/+1 4 and loyalty 10;
+/// CR 111.8: the graveyard token gets two +1/+1 counters).
+#[test]
+fn the_zone_pipeline_refuses_battlefield_to_battlefield_and_a_returning_token() {
+    for (name, counter_type, count) in [
+        (SPIKE_FEEDER, CounterType::Plus1Plus1, 2),
+        (COMET, CounterType::Loyalty, 5),
+    ] {
+        let row = format!("{name} on the battlefield");
+        let mut runner = board(plain_board);
+        create(
+            &mut runner,
+            name,
+            P0,
+            Zone::Battlefield,
+            true,
+            DebugCardCreationKind::Card,
+        );
+        let id = only_object_named(&runner, name);
+        assert_eq!(
+            counter(&runner, id, counter_type.clone()),
+            Some(count),
+            "{row}: before"
+        );
+        let before = incarnation(&runner, id);
+
+        let (parked, events) = pipeline_move_to_battlefield(&mut runner, id);
+
+        assert!(!parked, "{row}: nothing is asked");
+        assert!(
+            events.is_empty(),
+            "{row}: refused before the consult: {events:?}"
+        );
+        assert_eq!(zone_of(&runner, id), Zone::Battlefield, "{row}");
+        assert_eq!(incarnation(&runner, id), before, "{row}: the same object");
+        assert_eq!(
+            counter(&runner, id, counter_type),
+            Some(count),
+            "{row}: no counter is put on it"
+        );
+    }
+
+    // CR 111.8: a token that has left the battlefield.
+    let row = "Spike Feeder token in the graveyard";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        SPIKE_FEEDER,
+        P0,
+        Zone::Battlefield,
+        true,
+        DebugCardCreationKind::Token,
+    );
+    let token = only_object_named(&runner, SPIKE_FEEDER);
+    assert!(
+        runner.state().objects[&token].is_token,
+        "{row}: precondition"
+    );
+    move_to(&mut runner, token, Zone::Graveyard, false);
+    assert_eq!(
+        zone_of(&runner, token),
+        Zone::Graveyard,
+        "{row}: precondition"
+    );
+
+    let (parked, events) = pipeline_move_to_battlefield(&mut runner, token);
+
+    assert!(!parked, "{row}: nothing is asked");
+    assert!(
+        events.is_empty(),
+        "{row}: refused before the consult: {events:?}"
+    );
+    assert_eq!(
+        zone_of(&runner, token),
+        Zone::Graveyard,
+        "{row}: it remains in its zone"
+    );
+    assert!(
+        runner.state().objects[&token].counters.is_empty(),
+        "{row}: no counter is put on it"
+    );
+
+    // Paired positive: a Spike Feeder card enters from the graveyard.
+    let row = "Spike Feeder card in the graveyard";
+    let mut runner = board(plain_board);
+    create(
+        &mut runner,
+        SPIKE_FEEDER,
+        P0,
+        Zone::Graveyard,
+        true,
+        DebugCardCreationKind::Card,
+    );
+    let feeder = only_object_named(&runner, SPIKE_FEEDER);
+    assert_eq!(
+        zone_of(&runner, feeder),
+        Zone::Graveyard,
+        "{row}: precondition"
+    );
+
+    let (parked, events) = pipeline_move_to_battlefield(&mut runner, feeder);
+
+    assert!(!parked, "{row}: nothing is asked");
+    assert!(
+        events.iter().any(is_zone_changed),
+        "{row}: it enters: {events:?}"
+    );
+    assert_eq!(zone_of(&runner, feeder), Zone::Battlefield, "{row}");
+    assert_eq!(
+        counter(&runner, feeder, CounterType::Plus1Plus1),
+        Some(2),
+        "{row}: it enters with two +1/+1 counters"
+    );
 }
