@@ -84,8 +84,10 @@
 //! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
 //! CR 603.10d control-change evidence tables (`control_change_captures`,
 //! `control_change_observations`, and their two `u64` id counters) landed.
-//! Both tables are empty outside a resolution, so they are boxed; `GameState`
-//! then measures 14,832 B, under the unchanged 14,848 ceiling.
+//! Both tables are empty outside a resolution, so they are lazily boxed
+//! (`LazyBoxedMap`: unallocated while empty, so an empty clone allocates
+//! nothing); `GameState` then measures 14,832 B, under the unchanged 14,848
+//! ceiling.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.

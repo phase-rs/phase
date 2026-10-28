@@ -173,8 +173,85 @@ fn is_zero_u64(value: &u64) -> bool {
     *value == 0
 }
 
-fn boxed_map_is_empty<K, V>(map: &impl std::ops::Deref<Target = BTreeMap<K, V>>) -> bool {
-    map.is_empty()
+/// A rarely-populated `BTreeMap` stored off `GameState`'s stack frame and
+/// allocated only while it holds an entry: `None` when empty (so cloning an
+/// empty table allocates nothing), collapsed back to `None` whenever it
+/// empties. Serializes exactly as the map it holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LazyBoxedMap<K, V>(Option<Box<BTreeMap<K, V>>>);
+
+impl<K, V> Default for LazyBoxedMap<K, V> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<K: Ord, V> LazyBoxedMap<K, V> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |map| map.len())
+    }
+
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.0.as_ref()?.get(key)
+    }
+
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.0.as_mut()?.get_mut(key)
+    }
+
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.0.iter().flat_map(|map| map.iter())
+    }
+
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.0.get_or_insert_with(Box::default).insert(key, value)
+    }
+
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let map = self.0.as_mut()?;
+        let removed = map.remove(key);
+        if map.is_empty() {
+            self.0 = None;
+        }
+        removed
+    }
+
+    pub fn retain(&mut self, keep: impl FnMut(&K, &mut V) -> bool) {
+        if let Some(map) = self.0.as_mut() {
+            map.retain(keep);
+            if map.is_empty() {
+                self.0 = None;
+            }
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl<K: Serialize, V: Serialize> Serialize for LazyBoxedMap<K, V> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            Some(map) => map.serialize(serializer),
+            None => BTreeMap::<K, V>::new().serialize(serializer),
+        }
+    }
+}
+
+impl<'de, K: Ord + Deserialize<'de>, V: Deserialize<'de>> Deserialize<'de> for LazyBoxedMap<K, V> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let map = BTreeMap::<K, V>::deserialize(deserializer)?;
+        Ok(Self((!map.is_empty()).then(|| Box::new(map))))
+    }
 }
 
 fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
@@ -24820,10 +24897,10 @@ declare_game_state! {
     /// pause; should one ever park, its entry is resolution-scoped residue,
     /// cleared at the next turn (no resolution spans a turn boundary), and is
     /// serialized so authoritative save/restore can't lose it.
-    /// Boxed: empty outside a resolution, so it stays off `GameState`'s stack
-    /// budget (`game_state_size`).
-    #[serde(default, skip_serializing_if = "boxed_map_is_empty")]
-    pub control_change_captures: Box<BTreeMap<u64, crate::types::events::ControlChangeLink>>,
+    /// Empty outside a resolution, so it is lazily boxed: off `GameState`'s
+    /// stack budget (`game_state_size`) and unallocated while empty.
+    #[serde(default, skip_serializing_if = "LazyBoxedMap::is_empty")]
+    pub control_change_captures: LazyBoxedMap<u64, crate::types::events::ControlChangeLink>,
     /// The next `control_change_captures` key.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_capture_id: u64,
@@ -24835,10 +24912,10 @@ declare_game_state! {
     /// action finishes, only entries a retained trigger-event carrier still
     /// names are kept (`release_unreferenced_control_change_observations`). An
     /// id with no entry authorizes nothing.
-    /// Boxed for the stack budget, like `control_change_captures`.
-    #[serde(default, skip_serializing_if = "boxed_map_is_empty")]
+    /// Lazily boxed, like `control_change_captures`.
+    #[serde(default, skip_serializing_if = "LazyBoxedMap::is_empty")]
     pub control_change_observations:
-        Box<BTreeMap<u64, crate::types::events::ControlChangeObservation>>,
+        LazyBoxedMap<u64, crate::types::events::ControlChangeObservation>,
     /// The next `control_change_observations` key.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_observation_id: u64,
@@ -32403,9 +32480,9 @@ impl GameState {
             last_effect_count: None,
             last_effect_counts_by_player: HashMap::new(),
             clause_minimum_snapshot: None,
-            control_change_captures: Box::default(),
+            control_change_captures: LazyBoxedMap::default(),
             next_control_change_capture_id: 0,
-            control_change_observations: Box::default(),
+            control_change_observations: LazyBoxedMap::default(),
             next_control_change_observation_id: 0,
             exiled_from_hand_this_resolution: 0,
             monarch: None,
@@ -44902,11 +44979,6 @@ mod tests {
         );
     }
 
-    /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate
-    /// incarnation-versioned LKI, but snapshots no pending trigger can consume
-    /// are history rather than a change to the recurring game state. A snapshot
-    /// still named by a trigger event remains rules-material and must distinguish
-    /// normalized states.
     /// CR 732.2a + CR 603.10d: a `ControllerChanged`'s evidence key is minted
     /// from a monotone counter; two positions that differ only in that key are
     /// the same position.
@@ -44972,6 +45044,48 @@ mod tests {
         );
     }
 
+    /// `LazyBoxedMap` holds no allocation while empty, collapses back to that
+    /// when emptied, and serializes as the plain map it holds.
+    #[test]
+    fn lazy_boxed_map_is_unallocated_while_empty() {
+        let mut map: LazyBoxedMap<u64, u32> = LazyBoxedMap::default();
+        assert!(map.0.is_none() && map.is_empty() && map.len() == 0);
+        assert_eq!(map.remove(&1), None);
+        map.retain(|_, _| true);
+        assert!(map.0.is_none());
+
+        assert_eq!(map.insert(1, 10), None);
+        assert_eq!(map.insert(2, 20), None);
+        *map.get_mut(&2).unwrap() += 1;
+        assert!(map.contains_key(&1) && map.get(&2) == Some(&21) && map.len() == 2);
+        assert_eq!(serde_json::to_string(&map).unwrap(), r#"{"1":10,"2":21}"#);
+        let decoded: LazyBoxedMap<u64, u32> = serde_json::from_str(r#"{"1":10,"2":21}"#).unwrap();
+        assert_eq!(decoded, map);
+
+        assert_eq!(map.remove(&1), Some(10));
+        map.retain(|_, _| false);
+        assert!(map.0.is_none(), "emptied by retain: back to no allocation");
+        map.insert(3, 30);
+        map.clear();
+        assert!(map.0.is_none());
+
+        let empty: LazyBoxedMap<u64, u32> = serde_json::from_str("{}").unwrap();
+        assert!(empty.0.is_none(), "an empty map decodes unallocated");
+        assert!(GameState::new_two_player(7)
+            .control_change_captures
+            .0
+            .is_none());
+        assert!(GameState::new_two_player(7)
+            .control_change_observations
+            .0
+            .is_none());
+    }
+
+    /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate
+    /// incarnation-versioned LKI, but snapshots no pending trigger can consume
+    /// are history rather than a change to the recurring game state. A snapshot
+    /// still named by a trigger event remains rules-material and must distinguish
+    /// normalized states.
     #[test]
     fn normalize_for_loop_prunes_unreferenced_lki_incarnations_but_keeps_referenced_snapshot() {
         use crate::types::ability::Effect;
