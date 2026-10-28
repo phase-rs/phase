@@ -696,6 +696,7 @@ pub fn record_zone_change(
         }
     }
     state.zone_changes_this_turn.push_back(record.clone());
+    state.record_independent_departure_for_live_child(record);
     state.record_zone_change_library_knowledge_stamp(record);
 
     if to_zone == Zone::Battlefield {

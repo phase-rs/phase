@@ -32,7 +32,9 @@ use super::ability_utils::{
 };
 use super::effects;
 use super::targeting;
-use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult, ZoneMoveTerminalResult};
+use super::zone_pipeline::{
+    self, ZoneMoveRequest, ZoneMoveResult, ZoneMoveTerminalOutcome, ZoneMoveTerminalResult,
+};
 
 /// A second carrier cannot begin while one is installed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -1165,35 +1167,9 @@ fn deliver_resolved_spell_off_stack(
             .expecting_origin(pin, Zone::Stack)
             .performed_by(controller);
     }
-    let anticipated = adventure_controller
-        .and_then(|_| zone_pipeline::anticipated_zone_change_delivery(state, &req));
-    let delivery_start = events.len();
     let result = zone_pipeline::move_object_with_terminal(state, req, events);
-    let delivery = anticipated.map(|anticipated| {
-        // Only the actual selected replacement boundary may replace the
-        // request-derived key. A child proposal for this holder is different.
-        let selected_move_already_delivered = zone_pipeline::zone_move_completion_from_delivery(
-            anticipated.member,
-            &events[delivery_start..],
-        ) == ZoneMoveCompletion::Moved;
-        let mut delivery = state.pending_zone_change_delivery_from_replacement()
-            .filter(|_| matches!(result, ZoneMoveTerminalResult::NeedsChoice(_))
-                && !selected_move_already_delivered)
-            .filter(|parked| parked.member == anticipated.member
-                && matches!(&parked.expected_event,
-                    crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, from: Zone::Stack, performed_by, .. }
-                        if *object_id == spell_id && *performed_by == adventure_controller))
-            .unwrap_or(anticipated);
-        if let ZoneMoveTerminalResult::Completed(completion) = &result {
-            delivery.record_terminal_completion(*completion)
-                .expect("one final-part delivery has one terminal outcome");
-        }
-        if !matches!(result, ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented | ZoneMoveCompletion::Remained)) {
-            delivery.append_delivery_events(&events[delivery_start..]);
-        }
-        delivery
-    });
-    if matches!(result, ZoneMoveTerminalResult::Completed(_)) {
+    let delivery = adventure_controller.and(result.delivery.clone());
+    if matches!(result.outcome, ZoneMoveTerminalOutcome::Completed(_)) {
         // CR 607.2b + CR 406.6: a spell exiled by Rod of
         // Absorption's per-object linked-source rider is "exiled
         // with" the trigger source that stamped it. Now that the
@@ -2375,8 +2351,8 @@ pub(super) fn finish_deferred_spell_resolution(
             return DeferredFinalPart::Parked;
         }
     }
-    match result {
-        ZoneMoveTerminalResult::Completed(_) => {
+    match result.outcome {
+        ZoneMoveTerminalOutcome::Completed(_) => {
             let earned = delivery
                 .as_ref()
                 .and_then(|delivery| earned_adventure_authority(state, live_controller, delivery));
@@ -2394,8 +2370,8 @@ pub(super) fn finish_deferred_spell_resolution(
         }
         // CR 616.1: a replacement-ordering choice parked the move; the
         // replacement-choice resume path delivers it.
-        ZoneMoveTerminalResult::NeedsChoice(_)
-        | ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+        ZoneMoveTerminalOutcome::NeedsChoice(_)
+        | ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
             if let Some(delivery) = delivery {
                 let debt = state
                     .resolving_spell_final_part
@@ -3649,8 +3625,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                         return 1;
                     }
                 }
-                match result {
-                    ZoneMoveTerminalResult::Completed(_) => {
+                match result.outcome {
+                    ZoneMoveTerminalOutcome::Completed(_) => {
                         earned_adventure = delivery.as_ref().and_then(|delivery| {
                             earned_adventure_authority(
                                 state,
@@ -3660,8 +3636,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             )
                         });
                     }
-                    ZoneMoveTerminalResult::NeedsChoice(_)
-                    | ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                    ZoneMoveTerminalOutcome::NeedsChoice(_)
+                    | ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
                         if let Some(delivery) = delivery {
                             state.resolving_spell_final_part = Some(OwedSpellFinalPart {
                                 spell: entry.id,

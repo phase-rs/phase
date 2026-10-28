@@ -3474,6 +3474,12 @@ pub enum LogicalZoneChangeTerminalOutcome {
     Moved {
         occurrence_ordinal: usize,
     },
+    /// CR 400.7 + CR 603.10a: independent work consumed the announced
+    /// incarnation. This immutable proof retires its observer reservation;
+    /// it is never an occurrence or result of this instruction.
+    RetiredByIndependentDeparture {
+        departure: Box<ZoneChangeRecord>,
+    },
     /// CR 800.4a: The object's owner left before this shared batch delivered
     /// the member. This is terminal for the original logical action, but it is
     /// not an ordinary replacement result and must not synthesize its original
@@ -3693,6 +3699,157 @@ impl<'de> Deserialize<'de> for LogicalZoneChangeGroup {
 }
 
 impl LogicalZoneChangeGroup {
+    /// Compare occurrence facts, excluding metadata finalized by the child's
+    /// collector after the physical departure was recorded.
+    pub(crate) fn same_departure_core(a: &ZoneChangeRecord, b: &ZoneChangeRecord) -> bool {
+        let stable = |record: &ZoneChangeRecord| {
+            let mut record = record.clone();
+            record.co_departed.clear();
+            if let Some(context) = record.trigger_source_context.as_mut() {
+                context.face_down = false;
+            }
+            record
+        };
+        stable(a) == stable(b)
+    }
+
+    fn validate_independent_departure(
+        &self,
+        index: usize,
+        departure: &ZoneChangeRecord,
+    ) -> Result<(), String> {
+        let member = self.prospective_battlefield_members[index].identity;
+        let coherent = departure.from_zone == Some(Zone::Battlefield)
+            && departure.to_zone != Zone::Battlefield
+            && departure.object_id == member.object_id
+            && departure.trigger_source_context().is_some_and(|context| {
+                context.identity == ObjectIdentityBinding::new(member, Zone::Battlefield)
+                    && context.lki.owner == departure.owner
+                    && context.lki.controller == departure.controller
+            })
+            && self.post_event_member_contexts[index].is_none()
+            && !self
+                .all_origin_occurrences
+                .iter()
+                .any(|occurrence| self.is_member_own_occurrence(member, occurrence))
+            && !self
+                .instruction_deliveries
+                .as_ref()
+                .is_some_and(|deliveries| {
+                    deliveries.iter().any(|delivery| {
+                        delivery.binding.reference == member
+                            && delivery.completion == Some(ZoneMoveCompletion::Moved)
+                    })
+                });
+        if coherent {
+            Ok(())
+        } else {
+            Err(format!(
+                "logical zone-change group {:?} has incoherent independent departure for {}:{}",
+                self.logical_group_id, member.object_id.0, member.incarnation
+            ))
+        }
+    }
+
+    /// CR 400.7 + CR 603.10a: retire only an announced original from a
+    /// certified child's actual departure. Never append or collect this proof.
+    pub(crate) fn record_independent_departure(
+        &mut self,
+        departure: &ZoneChangeRecord,
+    ) -> Result<(), String> {
+        if departure.from_zone != Some(Zone::Battlefield) || departure.to_zone == Zone::Battlefield
+        {
+            return Ok(());
+        }
+        let Some(index) = departure.trigger_source_context().and_then(|context| {
+            self.prospective_battlefield_members
+                .iter()
+                .position(|member| member.identity == context.identity.reference)
+        }) else {
+            return Ok(());
+        };
+        self.validate_independent_departure(index, departure)?;
+        match &self.terminal_outcomes[index] {
+            LogicalZoneChangeTerminalOutcome::Pending => {
+                self.terminal_outcomes[index] =
+                    LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                        departure: Box::new(departure.clone()),
+                    };
+                Ok(())
+            }
+            LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                departure: prior,
+            } if Self::same_departure_core(prior, departure) => Ok(()),
+            _ => Err(format!(
+                "logical zone-change group {:?} has conflicting independent departure",
+                self.logical_group_id
+            )),
+        }
+    }
+
+    pub(crate) fn merge_independent_departures(&mut self, resident: &Self) -> Result<(), String> {
+        if self.logical_group_id != resident.logical_group_id
+            || self.prospective_battlefield_members != resident.prospective_battlefield_members
+        {
+            return Err("independent departure recipient changed original membership".into());
+        }
+        for outcome in &resident.terminal_outcomes {
+            if let LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { departure } =
+                outcome
+            {
+                self.record_independent_departure(departure)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Legacy aggregate ownership is removed only when an actual retained
+    /// independent child certifies the original departure occurrence.
+    pub(crate) fn recover_certified_independent_departures(
+        &mut self,
+        certified: &[Box<ZoneChangeRecord>],
+    ) -> Result<(), String> {
+        if self.instruction_deliveries.is_some() {
+            return Ok(());
+        }
+        for departure in certified {
+            let Some(index) = departure.trigger_source_context().and_then(|context| {
+                self.prospective_battlefield_members
+                    .iter()
+                    .position(|member| member.identity == context.identity.reference)
+            }) else {
+                continue;
+            };
+            let member = self.prospective_battlefield_members[index].identity;
+            if matches!(
+                self.terminal_outcomes[index],
+                LogicalZoneChangeTerminalOutcome::Moved { .. }
+            ) {
+                self.all_origin_occurrences.retain(|occurrence| !matches!(&occurrence.event, GameEvent::ZoneChanged { record, .. } if record.object_id == member.object_id));
+                // Rebind only retained local ordinals after removing the
+                // certified child records; no new event is admitted.
+                for (ordinal, occurrence) in self.all_origin_occurrences.iter_mut().enumerate() {
+                    occurrence.ordinal = ordinal;
+                }
+                for (candidate, outcome) in self
+                    .prospective_battlefield_members
+                    .iter()
+                    .zip(self.terminal_outcomes.iter_mut())
+                {
+                    if let LogicalZoneChangeTerminalOutcome::Moved { occurrence_ordinal } = outcome
+                    {
+                        if candidate.identity != member {
+                            *occurrence_ordinal = self.all_origin_occurrences.iter().position(|occurrence| matches!(&occurrence.event, GameEvent::ZoneChanged { record, .. } if record.trigger_source_context().is_some_and(|context| context.identity.reference == candidate.identity))).ok_or("legacy primary prefix lost its original occurrence")?;
+                        }
+                    }
+                }
+                self.terminal_outcomes[index] = LogicalZoneChangeTerminalOutcome::Pending;
+            }
+            self.record_independent_departure(departure)?;
+        }
+        Ok(())
+    }
+
     /// Validates the invariant portion of a serialized owner while it may
     /// still be paused with pending members. Final settlement additionally
     /// calls [`Self::validate_complete`] once every member is terminal.
@@ -3875,6 +4032,9 @@ impl LogicalZoneChangeGroup {
                         }
                     }
                 }
+                LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { departure } => {
+                    self.validate_independent_departure(index, departure)?;
+                }
                 LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
                     if post_event_context.is_some() {
                         return Err(format!(
@@ -4046,6 +4206,20 @@ impl LogicalZoneChangeGroup {
             let source_identity = record
                 .trigger_source_context()
                 .map(|context| context.identity.reference);
+            if let Some(index) = source_identity.and_then(|identity| {
+                self.prospective_battlefield_members
+                    .iter()
+                    .position(|member| member.identity == identity)
+            }) {
+                if !matches!(
+                    self.terminal_outcomes[index],
+                    LogicalZoneChangeTerminalOutcome::Pending
+                ) {
+                    return Err(
+                        "primary occurrence conflicts with an existing terminal reservation".into(),
+                    );
+                }
+            }
             self.all_origin_occurrences
                 .push(LogicalZoneChangeOccurrence {
                     ordinal,
@@ -4109,6 +4283,7 @@ impl LogicalZoneChangeGroup {
         };
         match self.terminal_outcomes.get(index) {
             Some(LogicalZoneChangeTerminalOutcome::Moved { .. })
+            | Some(LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. })
             | Some(LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft) => Ok(()),
             Some(
                 LogicalZoneChangeTerminalOutcome::Pending
@@ -4360,6 +4535,12 @@ impl LogicalZoneChangeGroup {
             let pending = tail.iter().any(|(id, _)| *id == member.identity.object_id)
                 || paused.is_some_and(|paused| paused.member == member.identity);
             let completion = if pending {
+                if matches!(
+                    self.terminal_outcomes[index],
+                    LogicalZoneChangeTerminalOutcome::Moved { .. }
+                ) {
+                    return Err(missing());
+                }
                 None
             } else {
                 match self.terminal_outcomes[index] {
@@ -4378,6 +4559,7 @@ impl LogicalZoneChangeGroup {
                         Some(ZoneMoveCompletion::Prevented)
                     }
                     LogicalZoneChangeTerminalOutcome::Remained
+                    | LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }
                     | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
                         Some(ZoneMoveCompletion::Remained)
                     }
@@ -4467,12 +4649,6 @@ impl LogicalZoneChangeGroup {
                         .trigger_source_context()
                         .is_some_and(|context| context.identity == delivery.binding)
             });
-            let proven_pending_child = deliveries.iter().any(|delivery| {
-                delivery.completion.is_none()
-                    && record
-                        .trigger_source_context()
-                        .is_some_and(|context| context.identity == delivery.binding)
-            });
             let proven_paused = paused.is_some_and(|paused| {
                 paused
                     .delivery_events
@@ -4480,7 +4656,6 @@ impl LogicalZoneChangeGroup {
                     .any(|event| event == &occurrence.event)
             });
             if !proven_prefix
-                && !proven_pending_child
                 && !proven_paused
                 && !(battlefield_domain && record.from_zone != Some(Zone::Battlefield))
                 && !attempted.is_some_and(|attempted| !attempted.contains(&record.object_id))
@@ -4534,11 +4709,17 @@ impl LogicalZoneChangeGroup {
                 .iter()
                 .find(|d| d.binding.reference == paused.member)
                 .ok_or_else(invalid)?;
-            if *object_id != paused.member.object_id
+            if paused
+                .owner_group
+                .is_some_and(|owner| owner != self.logical_group_id)
+                || *object_id != paused.member.object_id
                 || delivery.binding.expected_zone != *from
                 || delivery.completion.is_some()
                 || tail.iter().any(|(id, _)| *id == *object_id)
             {
+                return Err(invalid());
+            }
+            if paused.terminal_completion == Some(ZoneMoveCompletion::Moved) && self.prospective_battlefield_members.iter().zip(&self.terminal_outcomes).any(|(member, outcome)| member.identity == paused.member && matches!(outcome, LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. })) {
                 return Err(invalid());
             }
             if let Some(completion) = paused.terminal_completion {
@@ -4713,6 +4894,9 @@ impl LogicalZoneChangeGroup {
                         member.identity.object_id.0, member.identity.incarnation
                     )
                 })?,
+            LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. } => {
+                return Err("independently retired original has no settlement source reservation".into());
+            }
             LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
                 return Err(format!(
                     "logical zone-change member {}:{} was abandoned when its owner left",
@@ -4827,6 +5011,9 @@ impl LogicalZoneChangeGroup {
                 }
                 LogicalZoneChangeTerminalOutcome::Prevented
                 | LogicalZoneChangeTerminalOutcome::Remained => {}
+                LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { departure } => {
+                    self.validate_independent_departure(index, departure)?;
+                }
                 LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {
                     if self
                         .post_event_member_contexts
@@ -4890,6 +5077,7 @@ impl LogicalZoneChangeGroup {
                 }
                 LogicalZoneChangeTerminalOutcome::Prevented
                 | LogicalZoneChangeTerminalOutcome::Remained
+                | LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }
                 | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => None,
                 LogicalZoneChangeTerminalOutcome::Pending => unreachable!(
                     "validate_complete rejects pending logical zone-change member outcomes"
@@ -4982,6 +5170,8 @@ pub enum PausedZoneChangeDeliveryCount {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingZoneChangeDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_group: Option<LogicalZoneChangeGroupId>,
     pub member: ObjectIncarnationRef,
     pub expected_event: ProposedEvent,
     pub delivery_events: Vec<GameEvent>,
@@ -5034,6 +5224,51 @@ pub(crate) struct ZoneChangeLibraryKnowledgeStamp {
 }
 
 impl PendingZoneChangeDelivery {
+    /// CR 400.7: the physical transfer alone certifies the original receipt.
+    /// Absorbed merge components are admitted only by the explicit component route.
+    pub(crate) fn capture_physical_delivery(&mut self, events: &[GameEvent], component: bool) {
+        let expected_from = match &self.expected_event {
+            ProposedEvent::ZoneChange { from, .. } => *from,
+            _ => return,
+        };
+        for event in events {
+            let GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+                record,
+            } = event
+            else {
+                continue;
+            };
+            if *object_id != self.member.object_id
+                || record.object_id != *object_id
+                || record.from_zone != *from
+                || record.to_zone != *to
+                || !record.trigger_source_context().is_some_and(|context| {
+                    context.identity == ObjectIdentityBinding::new(self.member, expected_from)
+                })
+                || !(*from == Some(expected_from) || (component && from.is_none()))
+            {
+                continue;
+            }
+            if self.delivery_events.iter().any(|event| {
+                matches!(event,
+                GameEvent::ZoneChanged { record: prior, .. }
+                    if LogicalZoneChangeGroup::same_departure_core(prior, record))
+            }) {
+                continue;
+            }
+            assert!(
+                self.delivery_events.is_empty(),
+                "primary receipt cannot contain a different physical occurrence"
+            );
+            self.delivery_events.push(event.clone());
+            self.record_terminal_completion(ZoneMoveCompletion::Moved)
+                .expect("physical primary transfer agrees with receipt");
+        }
+    }
+
     pub fn new(member: ObjectIncarnationRef, expected_event: ProposedEvent) -> Self {
         let face_down_in_exile = match &expected_event {
             ProposedEvent::ZoneChange {
@@ -5042,6 +5277,7 @@ impl PendingZoneChangeDelivery {
             _ => crate::types::ability::ExileConcealment::Public,
         };
         Self {
+            owner_group: None,
             member,
             expected_event,
             delivery_events: Vec::new(),
@@ -5056,20 +5292,7 @@ impl PendingZoneChangeDelivery {
     }
 
     pub fn append_delivery_events(&mut self, events: &[GameEvent]) {
-        self.delivery_events.extend_from_slice(events);
-        if self.terminal_completion.is_none()
-            && events.iter().any(|event| {
-                matches!(
-                    event,
-                    GameEvent::ZoneChanged { record, .. }
-                        if record
-                            .trigger_source_context()
-                            .is_some_and(|context| context.identity.reference == self.member)
-                )
-            })
-        {
-            self.terminal_completion = Some(ZoneMoveCompletion::Moved);
-        }
+        self.capture_physical_delivery(events, false);
     }
 
     pub fn record_terminal_completion(
@@ -7264,6 +7487,8 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
 /// name change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_primary: Option<PendingDelegatedZoneChangeDelivery>,
     pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// The request that paused for replacement/as-enters resolution. This lives
     /// beside an empty tail when the last member paused, so the resumed delivery
@@ -7332,6 +7557,29 @@ pub struct PendingBatchDeliveries {
     /// the full action settles so one co-departure/LKI batch is observable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_events: Vec<GameEvent>,
+}
+
+/// CR 730.3: physical components share one selected permanent's primary
+/// boundary, while auxiliary component records retain their real origins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingDelegatedZoneChangeDelivery {
+    pub delivery: PendingZoneChangeDelivery,
+    pub components: Vec<ObjectIdentityBinding>,
+    pub tail: Option<ZoneDeliveryTailContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ZoneDeliveryTailContext {
+    pub object_id: ObjectId,
+    pub from: Zone,
+    pub to: Zone,
+    pub cause: Option<ObjectId>,
+    pub source_id: Option<ObjectId>,
+    pub duration: Option<Duration>,
+    pub exile_controller: Option<PlayerId>,
+    pub exile_tracking: ZoneDeliveryExileTracking,
+    pub drain: PostReplacementDrainOwner,
+    pub library_placement: Option<LibraryPosition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -15043,6 +15291,12 @@ pub(crate) fn retained_forwarded_zone_selection(
 }
 
 pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<(), String> {
+    state
+        .resolution_stack
+        .validate_independent_departure_scopes()?;
+    state
+        .resolution_stack
+        .validate_delegated_zone_deliveries()?;
     validate_retained_payment_result_owners(state)?;
     for frame in state.resolution_stack.iter() {
         let group = match frame {
@@ -15054,6 +15308,53 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
             _ => None,
         };
         if let Some(group) = group {
+            group.validate_serialized_authority()?;
+            let retained_primary = match frame {
+                ResolutionFrame::ChangeZone(frame) => frame
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.paused_current.as_ref()),
+                ResolutionFrame::BatchDelivery(batch) => batch.paused_current.as_ref(),
+                _ => None,
+            };
+            for (member, outcome) in group
+                .prospective_battlefield_members
+                .iter()
+                .zip(&group.terminal_outcomes)
+            {
+                match outcome {
+                    LogicalZoneChangeTerminalOutcome::Pending
+                    | LogicalZoneChangeTerminalOutcome::Prevented
+                    | LogicalZoneChangeTerminalOutcome::Remained => {
+                        let certified_primary = retained_primary.is_some_and(|primary| primary.member == member.identity
+                            && primary.owner_group == Some(group.logical_group_id)
+                            && primary.terminal_completion == Some(ZoneMoveCompletion::Moved)
+                            && primary.delivery_events.len() == 1
+                            && primary.delivery_events.iter().all(|event| matches!(event, GameEvent::ZoneChanged { from: Some(Zone::Battlefield), record, .. } if record.trigger_source_context().is_some_and(|context| context.identity.reference == member.identity))));
+                        if !certified_primary
+                            && (!member.identity.is_current(state)
+                                || state
+                                    .objects
+                                    .get(&member.identity.object_id)
+                                    .is_none_or(|object| object.zone != Zone::Battlefield))
+                        {
+                            return Err(format!("logical zone-change group {:?} lacks original independent-departure authority", group.logical_group_id));
+                        }
+                    }
+                    LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                        departure,
+                    } => {
+                        if departure.recorded_turn_number == state.turn_number {
+                            let actual = state.zone_changes_this_turn.get(departure.turn_zone_change_index).ok_or("independent-departure proof names a missing physical occurrence")?;
+                            if !LogicalZoneChangeGroup::same_departure_core(departure, actual) {
+                                return Err("independent-departure proof disagrees with its physical occurrence".into());
+                            }
+                        }
+                    }
+                    LogicalZoneChangeTerminalOutcome::Moved { .. }
+                    | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => {}
+                }
+            }
             if let (Some(deliveries), Some(Some(selected))) = (
                 group.instruction_deliveries.as_ref(),
                 retained_forwarded_zone_selection(state, group.logical_group_id),
@@ -15107,6 +15408,9 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                 }
             }
             ResolutionFrame::BatchDelivery(batch) => {
+                if batch.delegated_primary.is_some() {
+                    continue;
+                }
                 if batch
                     .logical_zone_change_group
                     .instruction_deliveries
@@ -31274,6 +31578,9 @@ pub struct PostReplacementDrainDispatch {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PostReplacementDrain {
+    /// Exact retained logical ancestors authorized for this child subtree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independent_departure_ancestors: Option<Vec<LogicalZoneChangeGroupId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_creation_parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
     /// The work to run, and whether it has been taken yet.
@@ -31463,6 +31770,7 @@ impl PostReplacementDrain {
     pub fn ready(continuation: crate::types::ability::PostReplacementContinuation) -> Self {
         Self {
             status: DrainStatus::Ready(continuation),
+            independent_departure_ancestors: None,
             token_creation_parent: None,
             source: None,
             applied: HashSet::new(),
@@ -31484,6 +31792,9 @@ impl PostReplacementDrain {
 }
 
 impl PostReplacementDrainStack {
+    pub(crate) fn drains_mut(&mut self) -> impl Iterator<Item = &mut PostReplacementDrain> {
+        self.drains.iter_mut()
+    }
     pub fn is_empty(&self) -> bool {
         self.drains.is_empty()
     }
@@ -33185,6 +33496,8 @@ impl GameState {
         pending: PendingChangeZoneIteration,
         child_stack_start: ChildStackDepth,
     ) {
+        let group = pending.logical_zone_change_group.logical_group_id;
+        let has_children = self.resolution_stack.capture_child_boundary() > child_stack_start;
         match self
             .resolution_stack
             .capture_child_boundary()
@@ -33198,6 +33511,11 @@ impl GameState {
                 .resolution_stack
                 .insert_change_zone_parent_at_child_boundary(pending, child_stack_start)
                 .expect("paused ChangeZone owner must be inserted below its child stack"),
+        }
+        if has_children {
+            self.resolution_stack
+                .link_logical_parent_to_child_suffix(group, child_stack_start)
+                .expect("parked logical owner binds its exact independent child suffix");
         }
     }
 
@@ -33223,6 +33541,8 @@ impl GameState {
         pending: PendingChangeZoneIteration,
         child_stack_start: ChildStackDepth,
     ) {
+        let group = pending.logical_zone_change_group.logical_group_id;
+        let has_children = self.resolution_stack.capture_child_boundary() > child_stack_start;
         match self
             .resolution_stack
             .capture_child_boundary()
@@ -33236,6 +33556,11 @@ impl GameState {
                 .resolution_stack
                 .replace_change_zone_parent_at_child_boundary(pending, child_stack_start)
                 .expect("re-paused ChangeZone owner must remain below its child stack"),
+        }
+        if has_children {
+            self.resolution_stack
+                .link_logical_parent_to_child_suffix(group, child_stack_start)
+                .expect("parked logical owner binds its exact independent child suffix");
         }
     }
 
@@ -34298,6 +34623,15 @@ impl GameState {
             .begin_active_post_replacement_dispatch()
     }
 
+    pub(crate) fn record_independent_departure_for_live_child(
+        &mut self,
+        record: &ZoneChangeRecord,
+    ) {
+        self.resolution_stack
+            .record_independent_departure_for_live_child(record)
+            .expect("live independent departure retains its exact ancestor authority");
+    }
+
     /// Whether `dispatch` still owns the resident top of its OWN frame, found by
     /// identity rather than by position. Pure delegation.
     pub(crate) fn post_replacement_dispatch_is_resident_top(
@@ -34906,6 +35240,14 @@ impl GameState {
             } => (*object_id, *from),
             _ => return None,
         };
+        if let Some(retained) = self
+            .resolution_stack
+            .retained_zone_delivery_for_event(&expected_event)
+        {
+            if captured_member.is_none_or(|member| member == retained.member) {
+                return Some(retained.clone());
+            }
+        }
         let retained = self
             .resolution_stack
             .active_change_zone_or_post_replacement_child()
@@ -54650,17 +54992,64 @@ mod tests {
         let mut group =
             crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[first, peer]);
         let selected = group.instruction_binding(first).unwrap();
+        let mut child =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[first]);
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, first, Zone::Hand, &mut events);
+        child
+            .record_delivery_completion(first, ZoneMoveCompletion::Moved)
+            .unwrap();
+        crate::game::triggers::complete_logical_zone_trigger_collection(
+            &mut state,
+            &mut child,
+            &mut events,
+        )
+        .unwrap();
+        let GameEvent::ZoneChanged {
+            record: departure, ..
+        } = &events[0]
+        else {
+            panic!("actual child departure");
+        };
+        let departure = departure.clone();
+        group.record_independent_departure(&departure).unwrap();
+        let immutable = group.clone();
+        let mut finalized_child_copy = departure.clone();
+        finalized_child_copy.co_departed.push(ObjectId(999));
+        finalized_child_copy
+            .trigger_source_context
+            .as_mut()
+            .unwrap()
+            .face_down = true;
+        group
+            .record_independent_departure(&finalized_child_copy)
+            .unwrap();
+        assert_eq!(
+            group, immutable,
+            "later child metadata never refreshes the first proof snapshot"
+        );
+        let mut conflicting = departure.clone();
+        conflicting.turn_zone_change_index += 1;
+        assert!(group.record_independent_departure(&conflicting).is_err());
+        assert_eq!(
+            group, immutable,
+            "conflicting proof refuses without mutation"
+        );
+        assert!(group.append_delivery_events(&events).is_err());
+        assert_eq!(
+            group, immutable,
+            "child-as-primary promotion refuses without mutation"
+        );
         crate::game::zones::move_to_zone(&mut state, first, Zone::Battlefield, &mut events);
         assert_eq!(state.objects[&first].zone, selected.expected_zone);
         assert!(
             !group.instruction_member_is_current(&state, first),
-            "origin-only validation must not admit the successor"
+            "the successor is not the announced original"
         );
         group
             .record_delivery_completion(first, ZoneMoveCompletion::Remained)
             .unwrap();
+        let peer_start = events.len();
         crate::game::zones::move_to_zone(&mut state, peer, Zone::Hand, &mut events);
         group
             .record_delivery_completion(peer, ZoneMoveCompletion::Moved)
@@ -54668,32 +55057,101 @@ mod tests {
         crate::game::triggers::complete_logical_zone_trigger_collection(
             &mut state,
             &mut group,
-            &mut events,
+            &mut events[peer_start..],
         )
         .unwrap();
         assert_eq!(
-            group.all_origin_occurrences.len(),
+            events.len(),
             3,
-            "both child moves remain observable"
+            "both actual child moves and the normal peer remain observable"
         );
-        assert!(matches!(
-            group.terminal_outcomes[0],
-            LogicalZoneChangeTerminalOutcome::Moved { .. }
-        ));
+        assert_eq!(state.zone_changes_this_turn.len(), 3);
+        assert_eq!(
+            child.all_origin_occurrences.len(),
+            1,
+            "the real child retains its own collector"
+        );
+        assert_eq!(
+            group.all_origin_occurrences.len(),
+            1,
+            "the parent owns only its primary peer"
+        );
+        assert!(
+            matches!(&group.terminal_outcomes[0], LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { departure: proof } if **proof == *departure)
+        );
+        assert!(group.post_event_member_contexts[0].is_none());
+        assert!(group.settlement_member_source_context(0).is_err());
+        assert!(group.battlefield_departures().unwrap().is_empty());
         let records = settled_logical_zone_change_records(&group);
         assert_eq!(records.len(), 1);
-        assert_eq!(
-            records[0].object_id, peer,
-            "only the normal primary peer earns an instruction result"
-        );
+        assert_eq!(records[0].object_id, peer);
         assert_eq!(records[0].from_zone, Some(Zone::Graveyard));
+        let wire = serde_json::to_value(&group).unwrap();
+        assert_eq!(
+            serde_json::from_value::<LogicalZoneChangeGroup>(wire.clone()).unwrap(),
+            group
+        );
+        for corruption in 0..5 {
+            let mut invalid = group.clone();
+            match corruption {
+                0 => {
+                    invalid.instruction_deliveries.as_mut().unwrap()[0].completion =
+                        Some(ZoneMoveCompletion::Moved)
+                }
+                1 => {
+                    invalid.post_event_member_contexts[0] = departure.trigger_source_context.clone()
+                }
+                2 => {
+                    if let LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                        departure,
+                    } = &mut invalid.terminal_outcomes[0]
+                    {
+                        departure.from_zone = Some(Zone::Graveyard);
+                    }
+                }
+                3 => {
+                    if let LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                        departure,
+                    } = &mut invalid.terminal_outcomes[0]
+                    {
+                        departure
+                            .trigger_source_context
+                            .as_mut()
+                            .unwrap()
+                            .identity
+                            .reference
+                            .incarnation += 1;
+                    }
+                }
+                4 => {
+                    if let LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                        departure,
+                    } = &mut invalid.terminal_outcomes[0]
+                    {
+                        departure.owner = PlayerId(1);
+                    }
+                }
+                _ => unreachable!(),
+            }
+            assert!(serde_json::from_value::<LogicalZoneChangeGroup>(
+                serde_json::to_value(invalid).unwrap()
+            )
+            .is_err());
+        }
         let preserved = group.clone();
         assert!(group
             .record_delivery_completion(peer, ZoneMoveCompletion::Remained)
             .is_err());
         assert_eq!(
             group, preserved,
-            "a repeated receipt cannot replace completed history"
+            "a repeated primary receipt cannot replace completed history"
+        );
+        group
+            .record_abandoned_by_player_left(selected.reference)
+            .unwrap();
+        assert_eq!(
+            group, preserved,
+            "player-left cleanup preserves completed independent history"
         );
     }
 
@@ -54711,16 +55169,49 @@ mod tests {
         });
         let mut group = crate::game::triggers::allocate_logical_zone_change_group(&mut state, &ids);
         let pins = ids.map(|id| group.instruction_binding(id).unwrap().reference);
+        let mut child =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[ids[1]]);
         let mut events = Vec::new();
         crate::game::zones::move_to_zone(&mut state, ids[0], Zone::Exile, &mut events);
         crate::game::zones::move_to_zone(&mut state, ids[1], Zone::Hand, &mut events);
         crate::game::zones::move_to_zone(&mut state, ids[1], Zone::Battlefield, &mut events);
+        child
+            .record_delivery_completion(ids[1], ZoneMoveCompletion::Moved)
+            .unwrap();
+        child.append_delivery_events(&events[1..2]).unwrap();
+        child.validate_complete().unwrap();
         group.append_delivery_events(&events).unwrap();
         group.instruction_deliveries = None;
         let paused = PendingZoneChangeDelivery::new(
             pins[2],
             ProposedEvent::zone_change(ids[2], Zone::Battlefield, Zone::Exile, None),
         );
+        let mut bare_aggregate = group.clone();
+        let before = bare_aggregate.clone();
+        assert!(bare_aggregate
+            .recover_instruction_deliveries(
+                &[(ids[1], None)],
+                Some(&paused),
+                Some(Zone::Battlefield),
+                None,
+                None
+            )
+            .is_err());
+        assert_eq!(
+            bare_aggregate, before,
+            "bare aggregate ownership is genuinely ambiguous"
+        );
+        let certified = child
+            .all_origin_occurrences
+            .iter()
+            .filter_map(|occurrence| match &occurrence.event {
+                GameEvent::ZoneChanged { record, .. } => Some(record.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        group
+            .recover_certified_independent_departures(&certified)
+            .unwrap();
         group
             .recover_instruction_deliveries(
                 &[(ids[1], None)],
@@ -54740,7 +55231,7 @@ mod tests {
         group
             .validate_pending_instruction_deliveries(&[(ids[1], None)], Some(&paused), true)
             .unwrap();
-        let mut ambiguous = group.clone();
+        let mut ambiguous = bare_aggregate;
         ambiguous.instruction_deliveries = None;
         assert!(
             ambiguous
@@ -59197,6 +59688,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        delegated_primary: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),

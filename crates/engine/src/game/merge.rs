@@ -475,15 +475,33 @@ pub(crate) fn move_merged_permanent_on_leave(
     merged_id: ObjectId,
     dest: Zone,
     applied: &HashSet<AppliedReplacementKey>,
+    delivery: crate::types::game_state::PendingZoneChangeDelivery,
+    tail: crate::types::game_state::ZoneDeliveryTailContext,
     events: &mut Vec<GameEvent>,
-) -> BatchMoveResult {
+) -> zone_pipeline::BatchMoveTerminalResult {
     let Some(survivor) = state.objects.get(&merged_id) else {
-        return BatchMoveResult::Done;
+        return zone_pipeline::BatchMoveTerminalResult {
+            outcome: BatchMoveResult::Done,
+            delivery: Some(delivery),
+        };
     };
     if survivor.merged_components.is_empty() {
-        return BatchMoveResult::Done;
+        return zone_pipeline::BatchMoveTerminalResult {
+            outcome: BatchMoveResult::Done,
+            delivery: Some(delivery),
+        };
     }
     let components = survivor.merged_components.clone();
+    let bindings = components
+        .iter()
+        .map(|id| {
+            let object = &state.objects[id];
+            crate::types::identifiers::ObjectIdentityBinding::new(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(object),
+                object.zone,
+            )
+        })
+        .collect::<Vec<_>>();
 
     // CR 730.3 + CR 400.7: restore each physical card's own characteristics
     // before proposing its destination. Clearing this list also prevents the
@@ -509,12 +527,29 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(merged_id);
             }
+            let binding = bindings
+                .iter()
+                .find(|binding| binding.reference.object_id == component_id)
+                .expect("captured component pin");
             ZoneMoveRequest::merged_component(component_id, dest)
+                .expecting_origin(binding.reference, binding.expected_zone)
                 .with_replacement_applied(applied.clone())
         })
         .collect();
 
-    zone_pipeline::move_objects_simultaneously_then(state, requests, None, events)
+    zone_pipeline::move_objects_simultaneously_then_with_delegated_primary(
+        state,
+        requests,
+        None,
+        Some(
+            crate::types::game_state::PendingDelegatedZoneChangeDelivery {
+                delivery,
+                components: bindings,
+                tail: Some(tail),
+            },
+        ),
+        events,
+    )
 }
 
 /// CR 730.2d + CR 400.7 + CR 111.7: restore the survivor's intrinsic token-ness

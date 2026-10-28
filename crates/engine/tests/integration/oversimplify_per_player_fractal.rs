@@ -4915,6 +4915,7 @@ fn departure_mass_child_member(
             .unwrap();
         let group = &pending.logical_zone_change_group;
         let paused = pending.paused_current.as_ref().unwrap();
+        assert_eq!(paused.owner_group, Some(group.logical_group_id));
         assert_eq!(paused.member, original[paused_index].reference);
         assert!(matches!(
             paused.expected_event,
@@ -5056,16 +5057,23 @@ fn departure_mass_child_member(
                             member.identity == original[usize::from(!current_primary)].reference
                         })
                         .unwrap();
-                    assert!(
-                        matches!(
-                            group.terminal_outcomes[slot],
-                            engine::types::game_state::LogicalZoneChangeTerminalOutcome::Moved { .. }
-                        ),
-                        "a primary no-move must retain the child's real BF observer departure"
+                    departure_assert_independent_retirement(
+                        group,
+                        original[usize::from(!current_primary)],
+                        child_records[0],
                     );
+                    assert!(group.post_event_member_contexts[slot].is_none());
+                    departure_assert_child_observer_once(
+                        runner.state(),
+                        observer,
+                        child_records[0],
+                    );
+                } else {
+                    assert!(group.prospective_battlefield_members.is_empty());
                 }
             }
         }
+        let before_restore_group = group.clone();
         departure_assert_private_result_views(runner.state());
         if legacy {
             let mut saved = if restore == 1 {
@@ -5105,6 +5113,18 @@ fn departure_mass_child_member(
         } else {
             *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
         }
+        assert_eq!(
+            runner
+                .state()
+                .active_change_zone_frame()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .logical_zone_change_group,
+            before_restore_group,
+            "restore retains the original proof byte-for-byte"
+        );
         runner
             .act(GameAction::ChooseReplacement {
                 index: if pause == 0 && current_primary { 0 } else { 1 },
@@ -5140,6 +5160,19 @@ fn departure_mass_child_member(
             .is_some_and(|context| original.contains(&context.identity))),
         "only genuine primary records retain the original selected identities"
     );
+    if excluded && origin == Zone::Battlefield {
+        assert!(records
+            .iter()
+            .all(|record| !record.co_departed.contains(&invalidated)));
+        let child = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .find(|record| record.object_id == invalidated && record.to_zone == Zone::Hand)
+            .unwrap();
+        assert!(child.co_departed.iter().all(|id| !selected.contains(id)));
+        departure_assert_child_observer_once(runner.state(), observer, child);
+    }
     let completed_originals: Vec<_> = original
         .iter()
         .copied()
@@ -5200,6 +5233,1255 @@ fn departure_mass_child_member(
         primary_gain + observer_gain - i32::from(current_primary && !prevents),
         2,
     );
+}
+
+fn departure_assert_independent_retirement(
+    group: &engine::types::game_state::LogicalZoneChangeGroup,
+    original: engine::types::identifiers::ObjectIdentityBinding,
+    actual: &engine::types::game_state::ZoneChangeRecord,
+) {
+    use engine::types::game_state::LogicalZoneChangeTerminalOutcome;
+    let slot = group
+        .prospective_battlefield_members
+        .iter()
+        .position(|member| member.identity == original.reference)
+        .unwrap();
+    let LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { departure } =
+        &group.terminal_outcomes[slot]
+    else {
+        panic!("the original reservation must retain its independent physical departure");
+    };
+    // CR 400.7 + CR 603.10a: compare the actual original occurrence, never its
+    // same-ID successor. Collector-derived stamps/concealment may change later.
+    assert_eq!(
+        departure.trigger_source_context.as_ref().unwrap().identity,
+        original
+    );
+    let mut proof = departure.as_ref().clone();
+    let mut finalized = actual.clone();
+    proof.co_departed.clear();
+    finalized.co_departed.clear();
+    proof.trigger_source_context.as_mut().unwrap().face_down = false;
+    finalized.trigger_source_context.as_mut().unwrap().face_down = false;
+    assert_eq!(
+        proof, finalized,
+        "immutable occurrence key and complete stable core"
+    );
+    assert!(group.post_event_member_contexts[slot].is_none());
+    assert!(
+        group
+            .all_origin_occurrences
+            .iter()
+            .all(|occurrence| !matches!(
+                &occurrence.event, GameEvent::ZoneChanged { record, .. }
+                if record.recorded_turn_number == actual.recorded_turn_number
+                    && record.turn_zone_change_index == actual.turn_zone_change_index
+            )),
+        "a retirement witness is never a parent occurrence"
+    );
+    assert!(actual.co_departed.iter().all(|id| !group
+        .prospective_battlefield_members
+        .iter()
+        .any(|member| member.identity.object_id == *id)));
+    assert!(group
+        .all_origin_occurrences
+        .iter()
+        .all(|occurrence| !matches!(
+            &occurrence.event, GameEvent::ZoneChanged { record, .. }
+            if record.co_departed.contains(&original.reference.object_id)
+        )));
+}
+
+fn departure_assert_child_observer_once(
+    state: &GameState,
+    observer: ObjectId,
+    child: &engine::types::game_state::ZoneChangeRecord,
+) {
+    let matches_event = |event: &GameEvent| {
+        matches!(event,
+        GameEvent::ZoneChanged { record, .. }
+        if record.recorded_turn_number == child.recorded_turn_number
+            && record.turn_zone_change_index == child.turn_zone_change_index
+            && record.object_id == child.object_id)
+    };
+    let deferred = state
+        .deferred_triggers
+        .iter()
+        .filter(|context| {
+            context.pending.source_id == observer
+                && context
+                    .pending
+                    .trigger_event
+                    .as_ref()
+                    .is_some_and(&matches_event)
+        })
+        .count();
+    let pending = usize::from(state.pending_trigger.as_ref().is_some_and(|pending| {
+        pending.source_id == observer && pending.trigger_event.as_ref().is_some_and(&matches_event)
+    }));
+    let placed = state
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                engine::types::game_state::StackEntryKind::TriggeredAbility {
+                    source_id, trigger_event: Some(event), ..
+                } if *source_id == observer && matches_event(event)
+            )
+        })
+        .count();
+    // CR 603.2c: this actual child occurrence has exactly one genuine observer.
+    assert_eq!(deferred + pending + placed, 1);
+}
+
+fn departure_retained_primary(
+    state: &GameState,
+    original: engine::types::identifiers::ObjectIdentityBinding,
+) -> (
+    &engine::types::game_state::LogicalZoneChangeGroup,
+    Option<&engine::types::game_state::PendingZoneChangeDelivery>,
+) {
+    use engine::types::resolution::ResolutionFrame;
+    let mut owners = state.resolution_stack.iter().filter_map(|frame| {
+        let (group, paused) = match frame {
+            ResolutionFrame::ChangeZone(frame) => {
+                let pending = frame.pending.as_ref()?;
+                (
+                    &pending.logical_zone_change_group,
+                    pending.paused_current.as_ref(),
+                )
+            }
+            ResolutionFrame::BatchDelivery(batch) => (
+                &batch.logical_zone_change_group,
+                batch.paused_current.as_ref(),
+            ),
+            _ => return None,
+        };
+        group
+            .instruction_deliveries
+            .as_ref()?
+            .iter()
+            .any(|delivery| delivery.binding == original)
+            .then_some((group, paused))
+    });
+    let owner = owners
+        .next()
+        .expect("the original selected instruction remains resident");
+    assert!(
+        owners.next().is_none(),
+        "the original has exactly one primary owner"
+    );
+    owner
+}
+
+fn departure_fixture_branch(
+    selected: engine::types::ability::AbilityDefinition,
+) -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, PlayerFilter,
+    };
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChooseOneOf {
+            chooser: PlayerFilter::Controller,
+            branches: vec![
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                selected,
+            ],
+            kind: ChooseOneOfKind::Ordinary,
+        },
+    )
+}
+
+fn departure_assert_retirement_preflight(
+    state: &GameState,
+    original: engine::types::identifiers::ObjectIdentityBinding,
+    proof: bool,
+    delegation: bool,
+) {
+    use engine::types::game_state::LogicalZoneChangeTerminalOutcome;
+    use engine::types::identifiers::LogicalZoneChangeGroupId;
+    use engine::types::resolution::{ResolutionFrame, ResolutionStateWire};
+    let group_id = departure_retained_primary(state, original)
+        .0
+        .logical_group_id;
+    let action = match state.waiting_for {
+        WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
+        WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 1 },
+        _ => panic!("hostile fixtures start from an actual public prompt"),
+    };
+    let faults: Vec<_> = (0..6)
+        .filter(|fault| match fault {
+            0 | 1 => !delegation,
+            2 | 3 => proof,
+            4 | 5 => delegation,
+            _ => unreachable!(),
+        })
+        .collect();
+    for fault in faults {
+        let mut hostile = state.clone();
+        let mut frames = vec![];
+        while let Some(frame) = hostile.resolution_stack.last() {
+            let kind = frame.kind();
+            frames.push(hostile.resolution_stack.pop_expected(kind).unwrap());
+        }
+        let mut changed = false;
+        for frame in &mut frames {
+            if changed {
+                break;
+            }
+            if fault <= 1 {
+                if let ResolutionFrame::PostReplacement(drains) = frame {
+                    let mut value = serde_json::to_value(&*drains).unwrap();
+                    for drain in value["drains"].as_array_mut().unwrap() {
+                        let Some(ids) = drain["independent_departure_ancestors"].as_array_mut()
+                        else {
+                            continue;
+                        };
+                        if !ids.contains(&serde_json::to_value(group_id).unwrap()) {
+                            continue;
+                        }
+                        if fault == 0 {
+                            ids.push(serde_json::to_value(group_id).unwrap());
+                        } else {
+                            *ids =
+                                vec![serde_json::to_value(LogicalZoneChangeGroupId(u64::MAX - 1))
+                                    .unwrap()];
+                        }
+                        changed = true;
+                        break;
+                    }
+                    *drains = serde_json::from_value(value).unwrap();
+                }
+                continue;
+            }
+            if fault >= 4 {
+                if let ResolutionFrame::BatchDelivery(batch) = frame {
+                    if let Some(delegated) = &mut batch.delegated_primary {
+                        if fault == 4 {
+                            delegated.delivery.owner_group =
+                                Some(LogicalZoneChangeGroupId(u64::MAX - 1));
+                        } else {
+                            delegated.components.push(delegated.components[0]);
+                        }
+                        changed = true;
+                    }
+                }
+                continue;
+            }
+            let group = match frame {
+                ResolutionFrame::ChangeZone(frame) => frame
+                    .pending
+                    .as_mut()
+                    .map(|pending| &mut pending.logical_zone_change_group),
+                ResolutionFrame::BatchDelivery(batch) => Some(&mut batch.logical_zone_change_group),
+                _ => None,
+            };
+            let Some(group) = group else { continue };
+            if group.logical_group_id != group_id {
+                continue;
+            }
+            let slot = group
+                .prospective_battlefield_members
+                .iter()
+                .position(|member| member.identity == original.reference)
+                .unwrap();
+            let LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { departure } =
+                &mut group.terminal_outcomes[slot]
+            else {
+                panic!("the positive sibling reached an actual retirement proof");
+            };
+            if fault == 2 {
+                departure.from_zone = Some(Zone::Graveyard);
+            } else {
+                group.post_event_member_contexts[slot] = departure.trigger_source_context.clone();
+            }
+            changed = true;
+        }
+        assert!(
+            changed,
+            "every corruption must reach its intended retained authority"
+        );
+        for frame in frames.into_iter().rev() {
+            hostile.resolution_stack.push_inner(frame);
+        }
+        assert!(
+            serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap()).is_err()
+        );
+        assert!(serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone())).unwrap()
+        )
+        .is_err());
+        let mut runner = GameRunner::from_state(hostile);
+        let before = serde_json::to_value(runner.state()).unwrap();
+        assert!(runner.act(action.clone()).is_err());
+        assert_eq!(
+            serde_json::to_value(runner.state()).unwrap(),
+            before,
+            "malformed current authority refuses before public mutation"
+        );
+    }
+}
+
+fn departure_fixture_move(
+    id: ObjectId,
+    from: Zone,
+    to: Zone,
+) -> engine::types::ability::AbilityDefinition {
+    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+    let mut effect: Effect = serde_json::from_value(serde_json::json!({
+        "type": "ChangeZone", "origin": from, "destination": to,
+    }))
+    .unwrap();
+    let Effect::ChangeZone { target, .. } = &mut effect else {
+        unreachable!()
+    };
+    *target = TargetFilter::SpecificObject { id };
+    AbilityDefinition::new(AbilityKind::Spell, effect)
+}
+
+fn departure_assert_bound_child_scope(
+    state: &GameState,
+    group_id: engine::types::identifiers::LogicalZoneChangeGroupId,
+) {
+    use engine::types::resolution::ResolutionFrame;
+    let scopes: Vec<_> = state
+        .resolution_stack
+        .iter()
+        .filter_map(|frame| {
+            let ResolutionFrame::PostReplacement(_) = frame else {
+                return None;
+            };
+            Some(serde_json::to_value(frame).unwrap())
+        })
+        .collect();
+    assert!(
+        scopes.iter().any(
+            |frame| frame["data"]["drains"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|drain| drain["independent_departure_ancestors"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&serde_json::to_value(group_id).unwrap())))
+        ),
+        "the actual retained child root is bound to this exact parent group"
+    );
+}
+
+#[test]
+fn departure_mass_later_branch_answer_retires_original_before_second_pause() {
+    for restore in 0..3 {
+        for movement in 0..3 {
+            for deep in [false, true] {
+                departure_later_branch_retirement(false, movement, deep, restore);
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_batch_later_branch_answer_retires_original_before_second_pause() {
+    for restore in 0..3 {
+        for movement in 0..3 {
+            for deep in [false, true] {
+                departure_later_branch_retirement(true, movement, deep, restore);
+            }
+        }
+    }
+}
+
+fn departure_later_branch_retirement(batch: bool, movement: u8, deep: bool, restore: u8) {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, MultiTargetSpec, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, ReturnResultId, TargetFilter, TriggerDefinition,
+    };
+    use engine::types::game_state::{
+        InstructionResult, LogicalZoneChangeTerminalOutcome, ZoneMoveCompletion,
+    };
+    use engine::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::triggers::TriggerMode;
+    // CR 608.2c + CR 400.7: this synthetic instruction owns its announced
+    // originals; independently chosen child instructions cannot rebind them.
+    let destination = if batch { Zone::Hand } else { Zone::Exile };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let selected = [
+        scenario.add_creature(P0, "Later A", 3, 3).id(),
+        scenario.add_creature(P0, "Later B", 2, 2).id(),
+        scenario.add_creature(P1, "Later C", 2, 2).id(),
+    ];
+    let observer = scenario
+        .add_enchantment_from_oracle(P0, "Later child observer", "")
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Graveyard)
+                .valid_card(TargetFilter::SpecificObject { id: selected[1] })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        )
+        .id();
+    let mut root = departure_exile_definition(7);
+    let filter = TargetFilter::Or {
+        filters: selected
+            .iter()
+            .map(|id| TargetFilter::SpecificObject { id: *id })
+            .collect(),
+    };
+    if batch {
+        root.effect = Box::new(Effect::BounceAll {
+            target: filter,
+            destination: Some(destination),
+            count: None,
+        });
+    } else {
+        let mut effect: Effect = serde_json::from_value(serde_json::json!({
+            "type": "ChangeZone", "origin": "Battlefield", "destination": destination,
+        }))
+        .unwrap();
+        let Effect::ChangeZone { target, .. } = &mut effect else {
+            unreachable!()
+        };
+        *target = filter;
+        root.effect = Box::new(effect);
+        root.multi_target = Some(MultiTargetSpec::fixed(3, 3));
+    }
+    let mut reader = departure_dual_reader();
+    let mut current = Some(&mut reader);
+    while let Some(definition) = current {
+        if let Effect::GainLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: engine::types::ability::QuantityRef::ZoneChangeAggregate { to, .. },
+                },
+            ..
+        } = definition.effect.as_mut()
+        {
+            *to = Some(destination);
+        }
+        current = definition.sub_ability.as_deref_mut();
+    }
+    root.sub_ability = Some(Box::new(departure_fixture_branch(reader)));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Later branch selected instruction", false)
+        .with_ability_definition(root)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    for player in [P0, P1] {
+        for _ in 0..8 {
+            scenario.add_card_to_library_top(player, "Later library");
+        }
+    }
+    let mut runner = scenario.build();
+    let originals: Vec<_> = selected
+        .iter()
+        .map(|id| {
+            ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&runner.state().objects[id]),
+                Zone::Battlefield,
+            )
+        })
+        .collect();
+    let mut moving = if movement == 0 {
+        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+    } else {
+        departure_fixture_move(selected[1], Zone::Battlefield, Zone::Graveyard)
+    };
+    let second = if movement == 0 {
+        departure_fixture_branch(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
+    } else {
+        moving.declares_return_result = Some(ReturnResultId(91));
+        let mut child_reader = departure_gain_definition(91, P0);
+        let Effect::GainLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: engine::types::ability::QuantityRef::ZoneChangeAggregate { to, .. },
+                },
+            ..
+        } = child_reader.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        *to = Some(Zone::Graveyard);
+        departure_fixture_branch(child_reader)
+    };
+    if movement == 2 {
+        let mut back = departure_fixture_move(selected[1], Zone::Graveyard, Zone::Battlefield);
+        back.sub_ability = Some(Box::new(second));
+        moving.sub_ability = Some(Box::new(back));
+    } else {
+        moving.sub_ability = Some(Box::new(second));
+    }
+    // The deep sibling enters a second actual replacement dispatch, then resumes
+    // an ordinary written continuation after that nested child finishes.
+    let child = if deep {
+        let replacement = ReplacementDefinition::new(ReplacementEvent::LoseLife)
+            .quantity_modification(engine::types::ability::QuantityModification::Plus { value: 0 })
+            .execute(departure_fixture_branch(moving));
+        let object = runner.state_mut().objects.get_mut(&observer).unwrap();
+        object.replacement_definitions.push(replacement.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+        // CR 119.3: the nested modified loss pays exactly one real life.
+        let mut loss = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: Some(TargetFilter::SpecificPlayer { id: P0 }),
+            },
+        );
+        loss.sub_ability = Some(Box::new(departure_fixture_branch(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::NoOp,
+        ))));
+        departure_fixture_branch(loss)
+    } else {
+        departure_fixture_branch(moving)
+    };
+    for (id, decline) in [(selected[0], Some(Box::new(child))), (selected[2], None)] {
+        let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .active_zones(vec![Zone::Battlefield])
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(destination)
+            .mode(ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                decline,
+            });
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.replacement_definitions.push(replacement.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+    }
+    if batch {
+        runner.cast(spell).commit();
+    } else {
+        runner.cast(spell).target_objects(&selected).commit();
+    }
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the paid instruction reaches its first A replacement");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        matches!(runner.state().pending_replacement.as_ref().unwrap().proposed,
+        engine::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if object_id == selected[0])
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    let group_id = departure_retained_primary(runner.state(), originals[1])
+        .0
+        .logical_group_id;
+    let parent_occurrence = runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| {
+            use engine::types::resolution::ResolutionFrame;
+            match frame {
+            ResolutionFrame::ChangeZone(frame) => {
+                let pending = frame.pending.as_ref()?;
+                (pending.logical_zone_change_group.logical_group_id == group_id)
+                    .then_some(pending.pending_return_result_producer?.0)
+            }
+            ResolutionFrame::BatchDelivery(pending)
+                if pending.logical_zone_change_group.logical_group_id == group_id => {
+                match pending.completion.as_ref()? {
+                    engine::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+                        occurrence_id, ..
+                    } => Some(*occurrence_id),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+        })
+        .expect("the exact retained parent owns the unpublished result address");
+    let parent_process = runner.state().return_result_frames[&parent_occurrence].process;
+    assert!(parent_process.is_some());
+    for _ in 0..=usize::from(deep) {
+        let WaitingFor::ChooseOneOfBranch {
+            player, branches, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("a real child branch must pause before any B departure");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(branches.len(), 2);
+        let (group, _) = departure_retained_primary(runner.state(), originals[1]);
+        assert_eq!(group.logical_group_id, group_id);
+        let slot = group
+            .prospective_battlefield_members
+            .iter()
+            .position(|m| m.identity == originals[1].reference)
+            .unwrap();
+        assert_eq!(
+            group.terminal_outcomes[slot],
+            LogicalZoneChangeTerminalOutcome::Pending
+        );
+        assert!(group
+            .instruction_deliveries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|d| d.binding == originals[1])
+            .unwrap()
+            .completion
+            .is_none());
+        assert_eq!(
+            runner.state().objects[&selected[1]].incarnation,
+            originals[1].reference.incarnation
+        );
+        assert!(runner
+            .state()
+            .return_result_frames
+            .values()
+            .all(|frame| !frame.results.contains_key(&ReturnResultId(7))));
+        departure_assert_bound_child_scope(runner.state(), group_id);
+        departure_assert_retirement_preflight(runner.state(), originals[1], false, false);
+        *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseOneOfBranch { player: P0, .. }
+    ));
+    let (group, _) = departure_retained_primary(runner.state(), originals[1]);
+    assert_eq!(group.logical_group_id, group_id);
+    assert_eq!(
+        runner.state().return_result_frames[&parent_occurrence].process,
+        parent_process
+    );
+    assert!(runner
+        .state()
+        .return_result_frames
+        .values()
+        .all(|frame| !frame.results.contains_key(&ReturnResultId(7))));
+    let saved_group = group.clone();
+    let foreign_process = if movement != 0 {
+        let (id, frame) = runner
+            .state()
+            .return_result_frames
+            .iter()
+            .find(|(_, frame)| frame.results.contains_key(&ReturnResultId(91)))
+            .unwrap();
+        assert_ne!(
+            frame.process, parent_process,
+            "the actual completed child instruction has an independent process"
+        );
+        Some((*id, frame.clone()))
+    } else {
+        None
+    };
+    if movement != 0 {
+        let actual = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .find(|record| record.object_id == selected[1] && record.to_zone == Zone::Graveyard)
+            .unwrap();
+        departure_assert_independent_retirement(group, originals[1], actual);
+        departure_assert_child_observer_once(runner.state(), observer, actual);
+        assert!(group
+            .instruction_deliveries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|d| d.binding == originals[1])
+            .unwrap()
+            .completion
+            .is_none());
+        assert_eq!(
+            runner.state().objects[&selected[1]].incarnation,
+            originals[1].reference.incarnation + u64::from(movement)
+        );
+        departure_assert_retirement_preflight(runner.state(), originals[1], true, false);
+    }
+    *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+    assert_eq!(
+        departure_retained_primary(runner.state(), originals[1]).0,
+        &saved_group,
+        "restore preserves the complete immutable proof before parent drain"
+    );
+    if let Some((id, frame)) = &foreign_process {
+        assert_eq!(
+            &runner.state().return_result_frames[id],
+            frame,
+            "retirement delivery and restore preserve the independent child's result authority"
+        );
+    }
+    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    if deep {
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { player: P0, .. }
+            ),
+            "the ordinary continuation after the nested dispatch must also re-pause"
+        );
+        assert_eq!(
+            departure_retained_primary(runner.state(), originals[1])
+                .0
+                .logical_group_id,
+            group_id
+        );
+        if movement != 0 {
+            let actual = runner
+                .state()
+                .zone_changes_this_turn
+                .iter()
+                .find(|record| record.object_id == selected[1] && record.to_zone == Zone::Graveyard)
+                .unwrap();
+            departure_assert_independent_retirement(
+                departure_retained_primary(runner.state(), originals[1]).0,
+                originals[1],
+                actual,
+            );
+        }
+        *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    }
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the normal selected C must still reach its real replacement");
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(candidates.len(), 2);
+    let (group, paused) = departure_retained_primary(runner.state(), originals[1]);
+    assert_eq!(paused.unwrap().member, originals[2].reference);
+    assert_eq!(
+        group
+            .instruction_deliveries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|d| d.binding == originals[1])
+            .unwrap()
+            .completion,
+        Some(if movement == 0 {
+            ZoneMoveCompletion::Moved
+        } else {
+            ZoneMoveCompletion::Remained
+        })
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseOneOfBranch { player: P0, .. }
+    ));
+    let frame = runner
+        .state()
+        .return_result_frames
+        .values()
+        .find(|frame| frame.results.contains_key(&ReturnResultId(7)))
+        .unwrap();
+    let InstructionResult::ZoneChanges(records) = &frame.results[&ReturnResultId(7)] else {
+        unreachable!()
+    };
+    departure_assert_original_bindings(
+        records
+            .iter()
+            .map(|r| r.trigger_source_context.as_ref().unwrap().identity),
+        &originals
+            .iter()
+            .copied()
+            .filter(|binding| movement == 0 || binding.reference.object_id != selected[1])
+            .collect::<Vec<_>>(),
+    );
+    assert!(records.iter().all(|record| record.to_zone == destination));
+    if movement != 0 {
+        assert!(records
+            .iter()
+            .all(|record| !record.co_departed.contains(&selected[1])));
+    }
+    assert_eq!(runner.state().objects[&selected[2]].zone, destination);
+    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    for _ in 0..16 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    departure_assert_program_complete(
+        &runner,
+        spell,
+        if movement == 0 { 5 } else { 6 } - i32::from(deep),
+        2,
+    );
+}
+
+#[test]
+fn departure_merged_primary_survives_component_choices_and_restore() {
+    for restore in 0..3 {
+        departure_merged_primary(false, 0, restore);
+    }
+}
+
+#[test]
+fn departure_merged_primary_excludes_independent_child_invalidation() {
+    for restore in 0..3 {
+        for movement in 0..3 {
+            departure_merged_primary(true, movement, restore);
+        }
+    }
+}
+
+fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
+    use engine::game::merge::{merge_object_onto, MergeSide};
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, MultiTargetSpec, QuantityExpr,
+        ReplacementDefinition, ReplacementMode, ReturnResultId, TargetFilter, TriggerDefinition,
+    };
+    use engine::types::game_state::{
+        InstructionResult, LogicalZoneChangeTerminalOutcome, ZoneMoveCompletion,
+    };
+    use engine::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionFrame;
+    use engine::types::triggers::TriggerMode;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let survivor = scenario
+        .add_creature(P0, "Merged selected survivor", 3, 3)
+        .id();
+    let first = scenario
+        .add_creature(P0, "Earlier physical component", 4, 4)
+        .id();
+    let last = scenario
+        .add_creature(P0, "Later commander component", 5, 5)
+        .id();
+    let peer = scenario
+        .add_creature(P1, "Ordinary selected peer", 2, 2)
+        .id();
+    let observer = scenario
+        .add_enchantment_from_oracle(P0, "Merged stable observer", "")
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .valid_card(TargetFilter::SpecificObject { id: survivor })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        )
+        .id();
+    let mut root = departure_fixture_move(survivor, Zone::Battlefield, Zone::Hand);
+    let Effect::ChangeZone { target, .. } = root.effect.as_mut() else {
+        unreachable!()
+    };
+    *target = TargetFilter::Or {
+        filters: vec![
+            TargetFilter::SpecificObject { id: survivor },
+            TargetFilter::SpecificObject { id: peer },
+        ],
+    };
+    root.multi_target = Some(MultiTargetSpec::fixed(2, 2));
+    root.declares_return_result = Some(ReturnResultId(7));
+    // Read only the ordinary peer's known two power. The expected two-member
+    // result below derives from CR 730.3, without a merged-power premise.
+    let mut reader = departure_gain_definition(7, P0);
+    let Effect::GainLife {
+        amount:
+            QuantityExpr::Ref {
+                qty: engine::types::ability::QuantityRef::ZoneChangeAggregate { to, filter, .. },
+            },
+        ..
+    } = reader.effect.as_mut()
+    else {
+        unreachable!()
+    };
+    *to = Some(Zone::Hand);
+    *filter = TargetFilter::SpecificObject { id: peer };
+    root.sub_ability = Some(Box::new(departure_fixture_branch(reader)));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Merged selected pair", false)
+        .with_ability_definition(root)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    for player in [P0, P1] {
+        for _ in 0..8 {
+            scenario.add_card_to_library_top(player, "Merged library");
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&first)
+        .unwrap()
+        .is_commander = !independent;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&last)
+        .unwrap()
+        .is_commander = true;
+    let mut setup = vec![];
+    // CR 730.3 + CR 903.9b + CR 903.9c: real merge ordering places a
+    // component choice on either side of the selected survivor's own request.
+    merge_object_onto(
+        runner.state_mut(),
+        first,
+        survivor,
+        MergeSide::Top,
+        &mut setup,
+    );
+    merge_object_onto(
+        runner.state_mut(),
+        last,
+        survivor,
+        MergeSide::Bottom,
+        &mut setup,
+    );
+    assert_eq!(
+        runner.state().objects[&survivor].merged_components,
+        vec![first, survivor, last]
+    );
+    assert!(!runner.state().battlefield.contains(&first));
+    assert!(!runner.state().battlefield.contains(&last));
+    let originals: Vec<_> = [survivor, peer]
+        .iter()
+        .map(|id| {
+            ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&runner.state().objects[id]),
+                Zone::Battlefield,
+            )
+        })
+        .collect();
+    if independent {
+        let mut child = if movement == 0 {
+            AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+        } else {
+            departure_fixture_move(survivor, Zone::Battlefield, Zone::Exile)
+        };
+        let pause =
+            departure_fixture_branch(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp));
+        if movement == 2 {
+            let mut back = departure_fixture_move(survivor, Zone::Exile, Zone::Battlefield);
+            back.sub_ability = Some(Box::new(pause));
+            child.sub_ability = Some(Box::new(back));
+        } else {
+            child.sub_ability = Some(Box::new(pause));
+        }
+        let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .active_zones(vec![Zone::Battlefield])
+            .valid_card(TargetFilter::SpecificObject { id: first })
+            .destination_zone(Zone::Hand)
+            .mode(ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                decline: Some(Box::new(child)),
+            });
+        let object = runner.state_mut().objects.get_mut(&observer).unwrap();
+        object.replacement_definitions.push(replacement.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+    }
+    runner
+        .cast(spell)
+        .target_objects(&[survivor, peer])
+        .commit();
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("delegation must reach the first component's genuine public choice");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(candidates.len(), 2);
+    assert!(
+        matches!(runner.state().pending_replacement.as_ref().unwrap().proposed,
+        engine::types::proposed_event::ProposedEvent::ZoneChange { object_id, to: Zone::Hand, .. } if object_id == first)
+    );
+    if !independent {
+        assert_eq!(candidates[0].description, "Move to command zone");
+        assert_eq!(candidates[1].description, "Put into hand");
+    }
+    let (group, paused) = departure_retained_primary(runner.state(), originals[0]);
+    let outer_id = group.logical_group_id;
+    assert_eq!(group.instruction_deliveries.as_ref().unwrap().len(), 2);
+    let initial = paused.unwrap();
+    assert_eq!(initial.owner_group, Some(outer_id));
+    assert_eq!(initial.member, originals[0].reference);
+    assert!(initial.delivery_events.is_empty());
+    assert!(initial.terminal_completion.is_none());
+    assert!(
+        runner.state().objects[&survivor]
+            .merged_components
+            .is_empty(),
+        "delegation has already split the real wrapper"
+    );
+    let component_batch = runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| match frame {
+            ResolutionFrame::BatchDelivery(batch) if batch.delegated_primary.is_some() => {
+                Some(batch)
+            }
+            _ => None,
+        })
+        .expect("the exact retained component batch owns the delegated boundary");
+    assert!(component_batch
+        .logical_zone_change_group
+        .prospective_battlefield_members
+        .is_empty());
+    departure_assert_retirement_preflight(runner.state(), originals[0], false, true);
+    assert!(component_batch
+        .logical_zone_change_group
+        .instruction_deliveries
+        .as_ref()
+        .unwrap()
+        .is_empty());
+    *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+    runner
+        .act(GameAction::ChooseReplacement { index: 1 })
+        .unwrap();
+    if independent {
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { player: P0, .. }
+        ));
+        let (group, paused) = departure_retained_primary(runner.state(), originals[0]);
+        assert_eq!(group.logical_group_id, outer_id);
+        assert!(paused.unwrap().delivery_events.is_empty());
+        if movement != 0 {
+            let actual = runner
+                .state()
+                .zone_changes_this_turn
+                .iter()
+                .find(|record| record.object_id == survivor && record.to_zone == Zone::Exile)
+                .unwrap();
+            departure_assert_independent_retirement(group, originals[0], actual);
+            departure_assert_child_observer_once(runner.state(), observer, actual);
+        }
+        let before = group.clone();
+        *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+        assert_eq!(
+            departure_retained_primary(runner.state(), originals[0]).0,
+            &before
+        );
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    }
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the later commander must pause after the survivor's delegated request");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0].description, "Move to command zone");
+    assert_eq!(candidates[1].description, "Put into hand");
+    assert!(
+        matches!(runner.state().pending_replacement.as_ref().unwrap().proposed,
+        engine::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if object_id == last)
+    );
+    let (group, paused) = departure_retained_primary(runner.state(), originals[0]);
+    assert_eq!(group.logical_group_id, outer_id);
+    let receipt = paused.unwrap();
+    assert_eq!(receipt.owner_group, Some(outer_id));
+    let excluded = independent && movement != 0;
+    assert_eq!(
+        receipt.terminal_completion,
+        Some(if excluded {
+            ZoneMoveCompletion::Remained
+        } else {
+            ZoneMoveCompletion::Moved
+        })
+    );
+    assert_eq!(receipt.delivery_events.len(), usize::from(!excluded));
+    if !excluded {
+        assert!(
+            matches!(&receipt.delivery_events[0], GameEvent::ZoneChanged { record, .. }
+            if record.object_id == survivor && record.from_zone == Some(Zone::Battlefield) && record.to_zone == Zone::Hand)
+        );
+        assert!(!group.terminal_outcomes.iter().any(|outcome| matches!(
+            outcome,
+            LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }
+        )));
+    }
+    assert!(runner
+        .state()
+        .return_result_frames
+        .values()
+        .all(|frame| !frame.results.contains_key(&ReturnResultId(7))));
+    let saved_receipt = receipt.clone();
+    departure_assert_retirement_preflight(runner.state(), originals[0], excluded, true);
+    *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+    assert_eq!(
+        departure_retained_primary(runner.state(), originals[0])
+            .1
+            .unwrap(),
+        &saved_receipt
+    );
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .unwrap();
+    assert_eq!(runner.state().objects[&first].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&last].zone, Zone::Command);
+    for (id, destination) in [(first, Zone::Hand), (last, Zone::Command)] {
+        let components: Vec<_> = runner
+            .state()
+            .zone_changes_this_turn
+            .iter()
+            .filter(|record| record.object_id == id && record.to_zone == destination)
+            .collect();
+        assert_eq!(components.len(), 1);
+        assert_eq!(
+            components[0].from_zone, None,
+            "absorbed cards are real auxiliary deliveries"
+        );
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseOneOfBranch { player: P0, .. }
+    ));
+    let frame = runner
+        .state()
+        .return_result_frames
+        .values()
+        .find(|frame| frame.results.contains_key(&ReturnResultId(7)))
+        .unwrap();
+    let InstructionResult::ZoneChanges(records) = &frame.results[&ReturnResultId(7)] else {
+        unreachable!()
+    };
+    // CR 730.3: the typed pair selects one merged permanent and one peer.
+    departure_assert_original_bindings(
+        records
+            .iter()
+            .map(|record| record.trigger_source_context.as_ref().unwrap().identity),
+        &originals
+            .iter()
+            .copied()
+            .filter(|binding| !excluded || binding.reference.object_id != survivor)
+            .collect::<Vec<_>>(),
+    );
+    assert!(records
+        .iter()
+        .all(|record| record.from_zone == Some(Zone::Battlefield) && record.to_zone == Zone::Hand));
+    assert!(records
+        .iter()
+        .all(|record| record.object_id != first && record.object_id != last));
+    assert_eq!(runner.state().objects[&peer].zone, Zone::Hand);
+    if excluded {
+        assert_eq!(
+            runner.state().objects[&survivor].zone,
+            if movement == 2 {
+                Zone::Battlefield
+            } else {
+                Zone::Exile
+            }
+        );
+        assert_eq!(
+            runner.state().objects[&survivor].incarnation,
+            originals[0].reference.incarnation + u64::from(movement)
+        );
+        assert!(records
+            .iter()
+            .all(|record| !record.co_departed.contains(&survivor)));
+    } else {
+        assert_eq!(runner.state().objects[&survivor].zone, Zone::Hand);
+        assert_eq!(
+            runner
+                .state()
+                .zone_changes_this_turn
+                .iter()
+                .filter(|record| record.object_id == survivor
+                    && record.from_zone == Some(Zone::Battlefield)
+                    && record.to_zone == Zone::Hand)
+                .count(),
+            1
+        );
+    }
+    let actual = runner
+        .state()
+        .zone_changes_this_turn
+        .iter()
+        .find(|record| record.object_id == survivor && record.from_zone == Some(Zone::Battlefield))
+        .unwrap();
+    departure_assert_child_observer_once(runner.state(), observer, actual);
+    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    for _ in 0..16 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    departure_assert_program_complete(&runner, spell, 3, 0);
 }
 
 fn departure_restore_mass_owner(state: &GameState, restore: u8) -> GameState {

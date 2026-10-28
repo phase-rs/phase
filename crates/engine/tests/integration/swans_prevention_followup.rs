@@ -68,6 +68,7 @@ fn swans_followup_draws_for_damage_sources_controller() {
     state.last_effect_count = Some(1);
     state.install_post_replacement_drain(
         PostReplacementDrain {
+            independent_departure_ancestors: Some(Vec::new()),
             token_creation_parent: None,
             status: DrainStatus::Dispatching,
             source: None,

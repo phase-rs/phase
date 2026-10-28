@@ -11243,6 +11243,7 @@ fn apply_single_replacement_with_definition(
                     stash_post_replacement_continuation(
                         state,
                         PostReplacementDrain {
+                            independent_departure_ancestors: None,
                             status: DrainStatus::Ready(post),
                             source: Some(new_event.affected_object_id().unwrap_or(rid.source)),
                             controller: ability_controller,
@@ -11289,6 +11290,7 @@ fn apply_single_replacement_with_definition(
                     stash_post_replacement_continuation(
                         state,
                         PostReplacementDrain {
+                            independent_departure_ancestors: None,
                             status: DrainStatus::Ready(post),
                             source: Some(rid.source),
                             // CR 109.5: same authority as the Modified arm — the
@@ -20591,6 +20593,7 @@ mod tests {
             );
             let installed = state.install_post_replacement_drain(
                 PostReplacementDrain {
+                    independent_departure_ancestors: None,
                     token_creation_parent: None,
                     status: DrainStatus::Ready(PostReplacementContinuation::Template(Box::new(
                         lose_one_life(),

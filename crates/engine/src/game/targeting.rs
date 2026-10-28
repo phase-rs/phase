@@ -4791,6 +4791,7 @@ mod tests {
         // drain but whose prevented-event context is still readable (CR 615.5).
         state.install_post_replacement_drain(
             PostReplacementDrain {
+                independent_departure_ancestors: Some(Vec::new()),
                 token_creation_parent: None,
                 status: DrainStatus::Dispatching,
                 source: None,
@@ -4839,6 +4840,7 @@ mod tests {
         // `Dispatching` for the same reason as the sibling test above.
         state.install_post_replacement_drain(
             PostReplacementDrain {
+                independent_departure_ancestors: Some(Vec::new()),
                 token_creation_parent: None,
                 status: DrainStatus::Dispatching,
                 source: None,

@@ -1086,6 +1086,1168 @@ impl IdentifiedPostReplacementDispatch {
 }
 
 impl ResolutionStack {
+    fn logical_group_at(
+        &self,
+        slot: FrameSlot,
+    ) -> Option<&crate::types::game_state::LogicalZoneChangeGroup> {
+        match self.frames.get(slot)? {
+            ResolutionFrame::ChangeZone(frame) => frame
+                .pending
+                .as_ref()
+                .map(|pending| &pending.logical_zone_change_group),
+            ResolutionFrame::BatchDelivery(batch) => Some(&batch.logical_zone_change_group),
+            _ => None,
+        }
+    }
+
+    fn logical_group_at_mut(
+        &mut self,
+        slot: FrameSlot,
+    ) -> Option<&mut crate::types::game_state::LogicalZoneChangeGroup> {
+        match self.frames.get_mut(slot)? {
+            ResolutionFrame::ChangeZone(frame) => frame
+                .pending
+                .as_mut()
+                .map(|pending| &mut pending.logical_zone_change_group),
+            ResolutionFrame::BatchDelivery(batch) => Some(&mut batch.logical_zone_change_group),
+            _ => None,
+        }
+    }
+
+    /// The newly minted dispatch binds only exact retained parents and the
+    /// recipients already carried by enclosing dispatches.
+    pub(crate) fn independent_departure_dispatch_seed(
+        &self,
+        source: Option<ObjectId>,
+    ) -> Vec<crate::types::identifiers::LogicalZoneChangeGroupId> {
+        let Some(root) = self.active_post_replacement_parent_slot() else {
+            return Vec::new();
+        };
+        let mut recipients = Vec::new();
+        let mut slot = Some(root);
+        let mut direct_owner_seen = false;
+        while let Some(current) = slot {
+            match self.frames.get(current) {
+                Some(ResolutionFrame::PostReplacement(drains)) => {
+                    for drain in drains.drains() {
+                        if current == root || !matches!(drain.status, DrainStatus::Ready(_)) {
+                            for id in drain.independent_departure_ancestors.iter().flatten() {
+                                if !recipients.contains(id) {
+                                    recipients.push(*id);
+                                }
+                            }
+                        }
+                    }
+                }
+                Some(ResolutionFrame::ChangeZone(frame)) if !direct_owner_seen => {
+                    direct_owner_seen = true;
+                    if let Some(pending) = frame.pending.as_ref().filter(|pending| {
+                        pending
+                            .paused_current
+                            .as_ref()
+                            .is_some_and(|delivery| Some(delivery.member.object_id) == source)
+                    }) {
+                        let id = pending.logical_zone_change_group.logical_group_id;
+                        if !recipients.contains(&id) {
+                            recipients.push(id);
+                        }
+                    }
+                }
+                Some(ResolutionFrame::BatchDelivery(batch)) if !direct_owner_seen => {
+                    direct_owner_seen = true;
+                    if batch
+                        .paused_current
+                        .as_ref()
+                        .is_some_and(|delivery| Some(delivery.member.object_id) == source)
+                    {
+                        let id = batch.logical_zone_change_group.logical_group_id;
+                        if !recipients.contains(&id) {
+                            recipients.push(id);
+                        }
+                        if let Some(owner) = batch
+                            .delegated_primary
+                            .as_ref()
+                            .and_then(|delegated| delegated.delivery.owner_group)
+                        {
+                            if !recipients.contains(&owner) {
+                                recipients.push(owner);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+            slot = self.frames.below(current);
+        }
+        self.order_independent_recipients_below(root, &recipients)
+    }
+
+    fn order_independent_recipients_below(
+        &self,
+        root: FrameSlot,
+        recipients: &[crate::types::identifiers::LogicalZoneChangeGroupId],
+    ) -> Vec<crate::types::identifiers::LogicalZoneChangeGroupId> {
+        let mut ordered = Vec::new();
+        let mut slot = self.frames.below(root);
+        while let Some(current) = slot {
+            if let Some(group) = self.logical_group_at(current) {
+                if recipients.contains(&group.logical_group_id) {
+                    ordered.push(group.logical_group_id);
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        ordered
+    }
+
+    pub(crate) fn begin_active_post_replacement_dispatch_with_recipients(
+        &mut self,
+        recipients: Vec<crate::types::identifiers::LogicalZoneChangeGroupId>,
+    ) -> Option<(
+        crate::types::ability::PostReplacementContinuation,
+        IdentifiedPostReplacementDispatch,
+    )> {
+        let (continuation, dispatch) = self.begin_active_post_replacement_dispatch()?;
+        let root = self.frames.by_id(dispatch.frame())?;
+        let ordered = self.order_independent_recipients_below(root, &recipients);
+        let drains = self.post_replacement_frame_mut(dispatch.frame())?;
+        drains.resident_mut()?.independent_departure_ancestors = Some(ordered);
+        Some((continuation, dispatch))
+    }
+
+    /// CR 400.7 + CR 603.10a: a live child retires only explicitly bound
+    /// ancestor reservations, at the physical occurrence producer.
+    pub(crate) fn record_independent_departure_for_live_child(
+        &mut self,
+        record: &crate::types::game_state::ZoneChangeRecord,
+    ) -> Result<(), String> {
+        let mut root = self.frames.top();
+        while let Some(current) = root {
+            let recipients = match self.frames.get(current) {
+                Some(ResolutionFrame::PostReplacement(drains)) => drains
+                    .drains()
+                    .filter(|drain| !matches!(drain.status, DrainStatus::Ready(_)))
+                    .flat_map(|drain| {
+                        drain
+                            .independent_departure_ancestors
+                            .iter()
+                            .flatten()
+                            .copied()
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            let mut below = self.frames.below(current);
+            while let Some(parent) = below {
+                if let Some(group) = self.logical_group_at_mut(parent) {
+                    if recipients.contains(&group.logical_group_id) {
+                        group.record_independent_departure(record)?;
+                    }
+                }
+                below = self.frames.below(parent);
+            }
+            root = self.frames.below(current);
+        }
+        Ok(())
+    }
+
+    /// Link the exact parked parent to the complete child suffix raised by
+    /// its attempt. All intervening frame kinds preserve this relationship.
+    pub(crate) fn link_logical_parent_to_child_suffix(
+        &mut self,
+        group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
+        boundary: ChildStackDepth,
+    ) -> Result<(), String> {
+        let at = self
+            .frames
+            .slot_at_captured_depth(boundary)
+            .ok_or("missing captured child boundary")?;
+        let parent = if self
+            .logical_group_at(at)
+            .is_some_and(|group| group.logical_group_id == group_id)
+        {
+            at
+        } else {
+            self.frames
+                .below(at)
+                .filter(|slot| {
+                    self.logical_group_at(*slot)
+                        .is_some_and(|group| group.logical_group_id == group_id)
+                })
+                .ok_or("captured child boundary has a foreign logical parent")?
+        };
+        let mut child = self.frames.above(parent);
+        let mut records = Vec::new();
+        let mut independent = false;
+        let mut delegated_child_records = Vec::new();
+        while let Some(current) = child {
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get_mut(current) {
+                for drain in drains.drains_mut() {
+                    if !matches!(drain.status, DrainStatus::Ready(_)) {
+                        let recipients = drain
+                            .independent_departure_ancestors
+                            .get_or_insert_with(Vec::new);
+                        if !recipients.contains(&group_id) {
+                            recipients.push(group_id);
+                        }
+                        independent = true;
+                    }
+                }
+            }
+            let ordered = match self.frames.get(current) {
+                Some(ResolutionFrame::PostReplacement(drains)) => drains
+                    .drains()
+                    .map(|drain| {
+                        drain
+                            .independent_departure_ancestors
+                            .as_ref()
+                            .map(|recipients| {
+                                self.order_independent_recipients_below(current, recipients)
+                            })
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get_mut(current) {
+                for (drain, ordered) in drains.drains_mut().zip(ordered) {
+                    if let Some(ordered) = ordered {
+                        drain.independent_departure_ancestors = Some(ordered);
+                    }
+                }
+            }
+            if let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get(current) {
+                if let Some(delegated) = &batch.delegated_primary {
+                    for event in &batch.deferred_events {
+                        if let GameEvent::ZoneChanged { record, .. } = event {
+                            if !delegated.delivery.delivery_events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { record: own, .. } if crate::types::game_state::LogicalZoneChangeGroup::same_departure_core(own, record))) { delegated_child_records.push(record.clone()); }
+                        }
+                    }
+                }
+            }
+            if independent {
+                if let Some(group) = self.logical_group_at(current) {
+                    for occurrence in &group.all_origin_occurrences {
+                        if let GameEvent::ZoneChanged { record, .. } = &occurrence.event {
+                            records.push(record.clone());
+                        }
+                    }
+                }
+            }
+            child = self.frames.above(current);
+        }
+        if independent {
+            records.extend(delegated_child_records);
+        }
+        let group = self
+            .logical_group_at_mut(parent)
+            .ok_or("logical parent disappeared")?;
+        for record in records {
+            group.record_independent_departure(&record)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn replacement_response_recipients(
+        &self,
+        delivery: Option<&crate::types::game_state::PendingZoneChangeDelivery>,
+    ) -> Vec<crate::types::identifiers::LogicalZoneChangeGroupId> {
+        let mut recipients = Vec::new();
+        if let Some(delivery) = delivery {
+            if let Some(owner) = delivery.owner_group {
+                if self
+                    .retained_zone_delivery_for_event(&delivery.expected_event)
+                    .is_some_and(|retained| {
+                        retained.member == delivery.member && retained.owner_group == Some(owner)
+                    })
+                {
+                    recipients.push(owner);
+                }
+            }
+        }
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get(current) {
+                for drain in drains
+                    .drains()
+                    .filter(|drain| !matches!(drain.status, DrainStatus::Ready(_)))
+                {
+                    for id in drain.independent_departure_ancestors.iter().flatten() {
+                        if !recipients.contains(id) {
+                            recipients.push(*id);
+                        }
+                    }
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        recipients
+    }
+
+    pub(crate) fn record_independent_replacement_response(
+        &mut self,
+        recipients: &[crate::types::identifiers::LogicalZoneChangeGroupId],
+        boundary: ChildStackDepth,
+        events: &[GameEvent],
+    ) -> Result<(), String> {
+        let mut bounded = events.to_vec();
+        let mut suffix = self.frames.slot_at_captured_depth(boundary);
+        while let Some(current) = suffix {
+            if let Some(group) = self.logical_group_at(current) {
+                bounded.extend(
+                    group
+                        .all_origin_occurrences
+                        .iter()
+                        .map(|occurrence| occurrence.event.clone()),
+                );
+            }
+            suffix = self.frames.above(current);
+        }
+        for id in recipients {
+            let mut slot = self.frames.top();
+            let mut found = false;
+            while let Some(current) = slot {
+                if let Some(group) = self
+                    .logical_group_at_mut(current)
+                    .filter(|group| group.logical_group_id == *id)
+                {
+                    if found {
+                        return Err(
+                            "replacement response repeats logical recipient authority".into()
+                        );
+                    }
+                    for event in &bounded {
+                        if let GameEvent::ZoneChanged {
+                            object_id,
+                            from,
+                            to,
+                            record,
+                        } = event
+                        {
+                            if record.object_id != *object_id
+                                || record.from_zone != *from
+                                || record.to_zone != *to
+                            {
+                                return Err(
+                                    "replacement response has an incoherent independent departure"
+                                        .into(),
+                                );
+                            }
+                            group.record_independent_departure(record)?;
+                        }
+                    }
+                    found = true;
+                }
+                slot = self.frames.below(current);
+            }
+            if !found {
+                return Err("replacement response lost its captured logical recipient".into());
+            }
+        }
+        let mut child = self.frames.slot_at_captured_depth(boundary);
+        while let Some(current) = child {
+            let ordered = self.order_independent_recipients_below(current, recipients);
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get_mut(current) {
+                for drain in drains.drains_mut() {
+                    let set = drain
+                        .independent_departure_ancestors
+                        .get_or_insert_with(Vec::new);
+                    for id in &ordered {
+                        if !set.contains(id) {
+                            set.push(*id);
+                        }
+                    }
+                }
+            }
+            let ordered = match self.frames.get(current) {
+                Some(ResolutionFrame::PostReplacement(drains)) => drains
+                    .drains()
+                    .map(|drain| {
+                        drain
+                            .independent_departure_ancestors
+                            .as_ref()
+                            .map(|set| self.order_independent_recipients_below(current, set))
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get_mut(current) {
+                for (drain, set) in drains.drains_mut().zip(ordered) {
+                    if let Some(set) = set {
+                        drain.independent_departure_ancestors = Some(set);
+                    }
+                }
+            }
+            child = self.frames.above(current);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn merge_resident_independent_departures(
+        &self,
+        group: &mut crate::types::game_state::LogicalZoneChangeGroup,
+    ) -> Result<(), String> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(resident) = self
+                .logical_group_at(current)
+                .filter(|resident| resident.logical_group_id == group.logical_group_id)
+            {
+                return group.merge_independent_departures(resident);
+            }
+            slot = self.frames.below(current);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_independent_departure_scopes(&self) -> Result<(), String> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get(current) {
+                for drain in drains.drains() {
+                    if let Some(recipients) = &drain.independent_departure_ancestors {
+                        let ordered = self.order_independent_recipients_below(current, recipients);
+                        if !matches!(drain.status, DrainStatus::Ready(_)) {
+                            let mut parent = self.frames.below(current);
+                            while let Some(below) = parent {
+                                let direct = match self.frames.get(below) {
+                                    Some(ResolutionFrame::ChangeZone(frame)) => {
+                                        frame.pending.as_ref().map(|pending| {
+                                            (
+                                                pending.logical_zone_change_group.logical_group_id,
+                                                pending.paused_current.as_ref(),
+                                            )
+                                        })
+                                    }
+                                    Some(ResolutionFrame::BatchDelivery(batch)) => Some((
+                                        batch.logical_zone_change_group.logical_group_id,
+                                        batch.paused_current.as_ref(),
+                                    )),
+                                    _ => None,
+                                };
+                                if let Some((id, paused)) = direct {
+                                    if paused.is_some_and(|paused| {
+                                        Some(paused.member.object_id) == drain.source
+                                    }) && !recipients.contains(&id)
+                                    {
+                                        return Err("post-replacement child omits its exact original recipient".into());
+                                    }
+                                    break;
+                                }
+                                parent = self.frames.below(below);
+                            }
+                        }
+                        if *recipients != ordered
+                            || recipients
+                                .iter()
+                                .enumerate()
+                                .any(|(index, id)| recipients[..index].contains(id))
+                        {
+                            return Err("post-replacement child has duplicate, foreign or reversed independent-departure recipients".into());
+                        }
+                    }
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        Ok(())
+    }
+
+    /// Recover absence only after the actual retained frames are installed.
+    /// Present empty recipient sets remain present and are never reinterpreted.
+    fn normalize_independent_departure_scopes(&mut self) -> Result<(), String> {
+        let mut bottom = self.frames.top();
+        while let Some(below) = bottom.and_then(|slot| self.frames.below(slot)) {
+            bottom = Some(below);
+        }
+        let mut slot = bottom;
+        while let Some(current) = slot {
+            let seeds = match self.frames.get(current) {
+                Some(ResolutionFrame::PostReplacement(drains)) => drains
+                    .drains()
+                    .map(|drain| {
+                        if drain.independent_departure_ancestors.is_some()
+                            || matches!(drain.status, DrainStatus::Ready(_))
+                        {
+                            return None;
+                        }
+                        let mut recipients = Vec::new();
+                        let mut parent = self.frames.below(current);
+                        let mut direct_owner_seen = false;
+                        while let Some(below) = parent {
+                            match self.frames.get(below) {
+                                Some(ResolutionFrame::PostReplacement(enclosing)) => {
+                                    for ancestor in enclosing.drains().filter(|ancestor| {
+                                        !matches!(ancestor.status, DrainStatus::Ready(_))
+                                    }) {
+                                        recipients.extend(
+                                            ancestor
+                                                .independent_departure_ancestors
+                                                .iter()
+                                                .flatten()
+                                                .copied(),
+                                        );
+                                    }
+                                }
+                                Some(ResolutionFrame::ChangeZone(frame)) if !direct_owner_seen => {
+                                    direct_owner_seen = true;
+                                    if let Some(pending) =
+                                        frame.pending.as_ref().filter(|pending| {
+                                            pending.paused_current.as_ref().is_some_and(
+                                                |delivery| {
+                                                    drain.source.is_none()
+                                                        || Some(delivery.member.object_id)
+                                                            == drain.source
+                                                },
+                                            )
+                                        })
+                                    {
+                                        recipients.push(
+                                            pending.logical_zone_change_group.logical_group_id,
+                                        );
+                                    }
+                                }
+                                Some(ResolutionFrame::BatchDelivery(batch))
+                                    if !direct_owner_seen
+                                        && batch.paused_current.as_ref().is_some_and(
+                                            |delivery| {
+                                                drain.source.is_none()
+                                                    || Some(delivery.member.object_id)
+                                                        == drain.source
+                                            },
+                                        ) =>
+                                {
+                                    direct_owner_seen = true;
+                                    recipients
+                                        .push(batch.logical_zone_change_group.logical_group_id);
+                                    if let Some(owner) = batch
+                                        .delegated_primary
+                                        .as_ref()
+                                        .and_then(|delegated| delegated.delivery.owner_group)
+                                    {
+                                        recipients.push(owner);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            parent = self.frames.below(below);
+                        }
+                        Some(self.order_independent_recipients_below(current, &recipients))
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            };
+            if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get_mut(current) {
+                for (drain, recovered) in drains.drains_mut().zip(seeds) {
+                    if let Some(recovered) = recovered {
+                        drain.independent_departure_ancestors = Some(recovered);
+                    }
+                }
+            }
+            slot = self.frames.above(current);
+        }
+        self.validate_independent_departure_scopes()
+    }
+
+    pub(crate) fn validate_delegated_zone_deliveries(&self) -> Result<(), String> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get(current) {
+                if let Some(delegated) = &batch.delegated_primary {
+                    batch.logical_zone_change_group.validate_complete()?;
+                    if !batch
+                        .logical_zone_change_group
+                        .prospective_battlefield_members
+                        .is_empty()
+                        || batch
+                            .logical_zone_change_group
+                            .instruction_deliveries
+                            .as_ref()
+                            .is_none_or(|deliveries| !deliveries.is_empty())
+                        || delegated.components.is_empty()
+                        || delegated
+                            .components
+                            .iter()
+                            .enumerate()
+                            .any(|(index, binding)| {
+                                binding.expected_zone != crate::types::zones::Zone::Battlefield
+                                    || delegated.components[..index].iter().any(|prior| {
+                                        prior.reference.object_id == binding.reference.object_id
+                                    })
+                            })
+                        || !delegated
+                            .components
+                            .iter()
+                            .any(|binding| binding.reference == delegated.delivery.member)
+                        || delegated.tail.as_ref().is_none_or(|tail| {
+                            tail.object_id != delegated.delivery.member.object_id
+                                || tail.from != crate::types::zones::Zone::Battlefield
+                        })
+                    {
+                        return Err("delegated zone delivery has incoherent component/original/tail authority".into());
+                    }
+                    if delegated.components.len() != batch.attempted.len()
+                        || delegated.components.iter().any(|binding| !batch.attempted.contains(&binding.reference.object_id))
+                        || !batch.requests.iter().map(|request| request.object_id).eq(batch.remaining.iter().copied())
+                        || batch.logical_zone_change_group.all_origin_occurrences.iter().any(|occurrence| !matches!(&occurrence.event,
+                            GameEvent::ZoneChanged { from: None, record, .. }
+                                if record.object_id != delegated.delivery.member.object_id
+                                    && delegated.components.iter().any(|binding| record.trigger_source_context().is_some_and(|context| context.identity == *binding)))) {
+                        return Err("delegated zone delivery has an incoherent component partition or auxiliary origin".into());
+                    }
+                    for request in &batch.requests {
+                        if !matches!(request.cause, crate::types::game_state::PendingBatchZoneChangeCause::MergedComponentRouting)
+                            || !delegated.components.iter().any(|binding| {
+                            request.expected_origin
+                                == Some((binding.reference, binding.expected_zone))
+                                && request.object_id == binding.reference.object_id
+                        }) {
+                            return Err(
+                                "delegated zone delivery has a foreign component request".into()
+                            );
+                        }
+                    }
+                    if let Some(paused) = &batch.paused_current {
+                        if !delegated
+                            .components
+                            .iter()
+                            .any(|binding| binding.reference == paused.member)
+                            || batch.remaining.contains(&paused.member.object_id)
+                        {
+                            return Err("delegated zone delivery has a foreign or duplicated paused component".into());
+                        }
+                    }
+                    if delegated.delivery.delivery_events.len() > 1
+                        || delegated.delivery.delivery_events.iter().any(|event| !matches!(event,
+                            GameEvent::ZoneChanged { object_id, from: Some(crate::types::zones::Zone::Battlefield), to, record }
+                                if *object_id == delegated.delivery.member.object_id && record.object_id == *object_id && record.to_zone == *to
+                                    && record.from_zone == Some(crate::types::zones::Zone::Battlefield)
+                                    && record.trigger_source_context().is_some_and(|context| context.identity.reference == delegated.delivery.member)))
+                        || (delegated.delivery.terminal_completion == Some(crate::types::game_state::ZoneMoveCompletion::Moved)) != (delegated.delivery.delivery_events.len() == 1)
+                    { return Err("delegated original has an incoherent certified primary receipt".into()); }
+                    if let Some(owner) = delegated.delivery.owner_group {
+                        let mut parent = self.frames.below(current);
+                        let mut found = false;
+                        while let Some(below) = parent {
+                            if let Some(group) = self
+                                .logical_group_at(below)
+                                .filter(|group| group.logical_group_id == owner)
+                            {
+                                if found {
+                                    return Err(
+                                        "delegated original has duplicate logical owners".into()
+                                    );
+                                }
+                                let outer = match self.frames.get(below) {
+                                    Some(ResolutionFrame::ChangeZone(frame)) => frame
+                                        .pending
+                                        .as_ref()
+                                        .and_then(|pending| pending.paused_current.as_ref()),
+                                    Some(ResolutionFrame::BatchDelivery(batch)) => {
+                                        batch.paused_current.as_ref()
+                                    }
+                                    _ => None,
+                                }
+                                .ok_or("delegated original lost its outer paused boundary")?;
+                                if !outer.captures(
+                                    delegated.delivery.member,
+                                    &delegated.delivery.expected_event,
+                                ) || outer.owner_group != Some(owner)
+                                    || outer.delivery_events != delegated.delivery.delivery_events
+                                    || outer.terminal_completion
+                                        != delegated.delivery.terminal_completion
+                                    || group
+                                        .instruction_binding(outer.member.object_id)
+                                        .is_none_or(|binding| binding.reference != outer.member)
+                                {
+                                    return Err(
+                                        "delegated original names a foreign owner or receipt"
+                                            .into(),
+                                    );
+                                }
+                                found = true;
+                            }
+                            parent = self.frames.below(below);
+                        }
+                        if !found {
+                            return Err("delegated original has no retained logical owner".into());
+                        }
+                    }
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn insert_batch_parent_at_child_boundary(
+        &mut self,
+        pending: PendingBatchDeliveries,
+        boundary: ChildStackDepth,
+    ) -> Result<(), ResolutionStackError> {
+        if self.capture_child_boundary() == boundary {
+            self.push_batch_delivery(pending);
+            Ok(())
+        } else {
+            self.insert_parent_at_child_boundary(
+                ResolutionFrame::BatchDelivery(Box::new(pending)),
+                boundary,
+            )
+        }
+    }
+
+    pub(crate) fn replace_batch_parent_at_child_boundary(
+        &mut self,
+        pending: PendingBatchDeliveries,
+        boundary: ChildStackDepth,
+    ) -> Result<(), ResolutionStackError> {
+        if self.capture_child_boundary() == boundary {
+            return self.replace_active_batch_delivery(pending);
+        }
+        let child = self.frames.slot_at_captured_depth(boundary).ok_or(
+            ResolutionStackError::InvalidChildBoundary {
+                child_stack_start: boundary,
+                stack_len: self.frames.len(),
+            },
+        )?;
+        let parent =
+            self.frames
+                .below(child)
+                .ok_or(ResolutionStackError::InvalidChildBoundary {
+                    child_stack_start: boundary,
+                    stack_len: self.frames.len(),
+                })?;
+        if !matches!(self.frames.get(parent), Some(ResolutionFrame::BatchDelivery(batch)) if batch.logical_zone_change_group.logical_group_id == pending.logical_zone_change_group.logical_group_id)
+        {
+            return Err(ResolutionStackError::InvalidPayload {
+                frame: FrameKind::BatchDelivery,
+                message: "reparked batch has a foreign captured owner".into(),
+            });
+        }
+        self.frames
+            .replace(parent, ResolutionFrame::BatchDelivery(Box::new(pending)));
+        Ok(())
+    }
+
+    /// Deliver a delegated receipt only from its resident physical component
+    /// owner to the exact outer original boundary below that owner.
+    pub(crate) fn forward_delegated_primary_receipt(
+        &mut self,
+        receipt: &crate::types::game_state::PendingZoneChangeDelivery,
+    ) -> Result<(), String> {
+        let Some(owner) = receipt.owner_group else {
+            return Ok(());
+        };
+        let mut slot = self.frames.top();
+        let mut component_root = None;
+        while let Some(current) = slot {
+            if matches!(self.frames.get(current), Some(ResolutionFrame::BatchDelivery(batch))
+                if batch.delegated_primary.as_ref().is_some_and(|delegated| delegated.delivery.owner_group == Some(owner)
+                    && delegated.delivery.captures(receipt.member, &receipt.expected_event)))
+            {
+                component_root = Some(current);
+                break;
+            }
+            slot = self.frames.below(current);
+        }
+        // The initial synchronous component loop has not parked yet. Its
+        // caller receives the same receipt directly, rather than a handoff.
+        let Some(root) = component_root else {
+            return Ok(());
+        };
+        let mut slot = self.frames.below(root);
+        while let Some(current) = slot {
+            let paused = match self.frames.get_mut(current) {
+                Some(ResolutionFrame::ChangeZone(frame)) => frame
+                    .pending
+                    .as_mut()
+                    .filter(|pending| pending.logical_zone_change_group.logical_group_id == owner)
+                    .and_then(|pending| pending.paused_current.as_mut()),
+                Some(ResolutionFrame::BatchDelivery(batch))
+                    if batch.logical_zone_change_group.logical_group_id == owner =>
+                {
+                    batch.paused_current.as_mut()
+                }
+                _ => None,
+            };
+            if let Some(paused) = paused {
+                if !paused.captures(receipt.member, &receipt.expected_event)
+                    || paused.owner_group != Some(owner)
+                {
+                    return Err("delegated receipt has a foreign outer original boundary".into());
+                }
+                if paused.terminal_completion.is_some_and(|existing| receipt.terminal_completion.is_some_and(|completion| existing != completion))
+                    || (!paused.delivery_events.is_empty() && !receipt.delivery_events.is_empty() && !paused.delivery_events.iter().zip(&receipt.delivery_events).all(|(left, right)| matches!((left, right), (GameEvent::ZoneChanged { record: left, .. }, GameEvent::ZoneChanged { record: right, .. }) if crate::types::game_state::LogicalZoneChangeGroup::same_departure_core(left, right)))) {
+                    return Err("delegated receipt conflicts with the outer original completion".into());
+                }
+                paused.capture_physical_delivery(&receipt.delivery_events, false);
+                if let Some(completion) = receipt.terminal_completion {
+                    paused.record_terminal_completion(completion)?;
+                }
+                return Ok(());
+            }
+            slot = self.frames.below(current);
+        }
+        Err("delegated receipt lost its retained outer original owner".into())
+    }
+
+    pub(crate) fn store_primary_delivery_receipt(
+        &mut self,
+        receipt: &crate::types::game_state::PendingZoneChangeDelivery,
+    ) -> Result<bool, String> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            let (paused, component) = match self.frames.get_mut(current) {
+                Some(ResolutionFrame::ChangeZone(frame)) => (
+                    frame
+                        .pending
+                        .as_mut()
+                        .and_then(|pending| pending.paused_current.as_mut()),
+                    false,
+                ),
+                Some(ResolutionFrame::BatchDelivery(batch)) => {
+                    let component = batch.delegated_primary.as_ref().is_some_and(|delegated| {
+                        delegated
+                            .components
+                            .iter()
+                            .any(|binding| binding.reference == receipt.member)
+                    });
+                    (batch.paused_current.as_mut(), component)
+                }
+                _ => (None, false),
+            };
+            if let Some(paused) = paused.filter(|paused| {
+                paused.owner_group == receipt.owner_group
+                    && paused.captures(receipt.member, &receipt.expected_event)
+            }) {
+                if let Some(completion) = receipt.terminal_completion {
+                    paused.record_terminal_completion(completion)?;
+                }
+                paused.capture_physical_delivery(&receipt.delivery_events, component);
+                return Ok(true);
+            }
+            slot = self.frames.below(current);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn retained_batch_for_group_mut(
+        &mut self,
+        id: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if matches!(self.frames.get(current), Some(ResolutionFrame::BatchDelivery(batch)) if batch.logical_zone_change_group.logical_group_id == id)
+            {
+                return match self.frames.get_mut(current) {
+                    Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+                    _ => None,
+                };
+            }
+            slot = self.frames.below(current);
+        }
+        None
+    }
+
+    fn normalize_legacy_delegated_deliveries(&mut self) -> Result<(), String> {
+        use crate::types::game_state::{
+            PendingBatchZoneChangeCause, PendingDelegatedZoneChangeDelivery,
+            ZoneDeliveryExileTracking, ZoneDeliveryTailContext, ZoneMoveCompletion,
+        };
+        use crate::types::zones::Zone;
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            let old = match self.frames.get(current) {
+                Some(ResolutionFrame::BatchDelivery(batch))
+                    if batch.delegated_primary.is_none()
+                        && batch.requests.iter().any(|request| {
+                            matches!(
+                                request.cause,
+                                PendingBatchZoneChangeCause::MergedComponentRouting
+                            )
+                        }) =>
+                {
+                    Some((**batch).clone())
+                }
+                _ => None,
+            };
+            if let Some(mut batch) = old {
+                if batch.requests.is_empty()
+                    || batch.requests.iter().any(|request| {
+                        !matches!(
+                            request.cause,
+                            PendingBatchZoneChangeCause::MergedComponentRouting
+                        ) || !request.replacement_applied.is_empty()
+                    })
+                {
+                    return Err("legacy merged delivery lacks original delivery-tail/replacement lifetime authority".into());
+                }
+                let mut parent = self.frames.below(current);
+                let mut original = None;
+                while let Some(below) = parent {
+                    if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get(below) {
+                        if let Some(pending) = frame.pending.as_ref().filter(|pending| {
+                            pending.paused_current.as_ref().is_some_and(|paused| {
+                                batch.requests.iter().any(|request| {
+                                    request.expected_origin.is_some_and(|(pin, zone)| {
+                                        pin == paused.member && zone == Zone::Battlefield
+                                    })
+                                }) || batch
+                                    .logical_zone_change_group
+                                    .instruction_binding(paused.member.object_id)
+                                    .is_some_and(|binding| binding.reference == paused.member)
+                            })
+                        }) {
+                            original = Some((below, pending.clone()));
+                            break;
+                        }
+                    }
+                    parent = self.frames.below(below);
+                }
+                let (outer_slot, pending) =
+                    original.ok_or("legacy merged delivery lacks exact original logical owner")?;
+                let mut delivery = pending
+                    .paused_current
+                    .clone()
+                    .ok_or("legacy merged delivery lacks original receipt")?;
+                delivery
+                    .owner_group
+                    .get_or_insert(pending.logical_zone_change_group.logical_group_id);
+                let mut components = batch
+                    .logical_zone_change_group
+                    .instruction_deliveries
+                    .as_ref()
+                    .map(|deliveries| {
+                        deliveries
+                            .iter()
+                            .map(|delivery| delivery.binding)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let original_binding = crate::types::identifiers::ObjectIdentityBinding::new(
+                    delivery.member,
+                    Zone::Battlefield,
+                );
+                if !components.contains(&original_binding) {
+                    components.push(original_binding);
+                }
+                for occurrence in &batch.logical_zone_change_group.all_origin_occurrences {
+                    if let GameEvent::ZoneChanged {
+                        from: None, record, ..
+                    } = &occurrence.event
+                    {
+                        if let Some(context) = record.trigger_source_context() {
+                            if !components.contains(&context.identity) {
+                                components.push(context.identity);
+                            }
+                        }
+                    }
+                }
+                for request in &batch.requests {
+                    let (pin, zone) = request
+                        .expected_origin
+                        .ok_or("legacy merged component lacks exact original pin")?;
+                    let binding = crate::types::identifiers::ObjectIdentityBinding::new(pin, zone);
+                    if !components.contains(&binding) {
+                        components.push(binding);
+                    }
+                }
+                if let Some(paused) = &batch.paused_current {
+                    let ProposedEvent::ZoneChange { from, .. } = paused.expected_event else {
+                        return Err("legacy merged component lacks zone proposal".into());
+                    };
+                    let binding =
+                        crate::types::identifiers::ObjectIdentityBinding::new(paused.member, from);
+                    if !components.contains(&binding) {
+                        components.push(binding);
+                    }
+                }
+                if !components
+                    .iter()
+                    .any(|binding| binding.reference == delivery.member)
+                {
+                    return Err(
+                        "legacy merged delivery cannot distinguish selected survivor".into(),
+                    );
+                }
+                let own = batch
+                    .logical_zone_change_group
+                    .instruction_deliveries
+                    .as_ref()
+                    .and_then(|deliveries| {
+                        deliveries
+                            .iter()
+                            .find(|candidate| candidate.binding.reference == delivery.member)
+                    });
+                let records = batch
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter()
+                    .filter_map(|occurrence| match &occurrence.event {
+                        GameEvent::ZoneChanged { record, .. }
+                            if record.trigger_source_context().is_some_and(|context| {
+                                context.identity.reference == delivery.member
+                            }) =>
+                        {
+                            Some(occurrence.event.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if !records.is_empty() {
+                    if records.len() != 1
+                        || own.is_none_or(|own| own.completion != Some(ZoneMoveCompletion::Moved))
+                    {
+                        return Err("legacy merged delivery cannot distinguish primary survivor from independent child/collection authority".into());
+                    }
+                    delivery.capture_physical_delivery(&records, false);
+                } else if own.is_some_and(|own| own.completion == Some(ZoneMoveCompletion::Moved)) {
+                    return Err("legacy merged survivor Moved lacks exact original receipt".into());
+                }
+                let ProposedEvent::ZoneChange {
+                    object_id,
+                    from,
+                    to,
+                    cause,
+                    ..
+                } = &delivery.expected_event
+                else {
+                    return Err("legacy merged original lacks zone proposal".into());
+                };
+                let tail = ZoneDeliveryTailContext {
+                    object_id: *object_id,
+                    from: *from,
+                    to: *to,
+                    cause: *cause,
+                    source_id: Some(pending.source_id),
+                    duration: pending.duration.clone(),
+                    exile_controller: Some(pending.controller),
+                    exile_tracking: if pending.track_exiled_by_source {
+                        ZoneDeliveryExileTracking::TrackBySource
+                    } else {
+                        ZoneDeliveryExileTracking::None
+                    },
+                    drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                    library_placement: pending.library_placement.clone(),
+                };
+                let survivor = delivery.member;
+                batch
+                    .logical_zone_change_group
+                    .prospective_battlefield_members
+                    .clear();
+                batch.logical_zone_change_group.terminal_outcomes.clear();
+                batch
+                    .logical_zone_change_group
+                    .post_event_member_contexts
+                    .clear();
+                batch.logical_zone_change_group.instruction_deliveries = Some(Vec::new());
+                batch
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .retain(|occurrence| {
+                        matches!(&occurrence.event, GameEvent::ZoneChanged { from: None, .. })
+                    });
+                for (ordinal, occurrence) in batch
+                    .logical_zone_change_group
+                    .all_origin_occurrences
+                    .iter_mut()
+                    .enumerate()
+                {
+                    occurrence.ordinal = ordinal;
+                }
+                batch.delegated_primary = Some(PendingDelegatedZoneChangeDelivery {
+                    delivery: delivery.clone(),
+                    components,
+                    tail: Some(tail),
+                });
+                if let Some(ResolutionFrame::ChangeZone(frame)) = self.frames.get_mut(outer_slot) {
+                    let parent = frame.pending.as_mut().expect("exact original parent");
+                    parent.paused_current = Some(delivery.clone());
+                    // The retained old component owner already admitted this
+                    // exact event-subject segment. Transfer ownership without recollection.
+                    parent
+                        .logical_zone_change_group
+                        .append_delivery_events(&delivery.delivery_events)?;
+                }
+                if let Some(paused) = batch
+                    .paused_current
+                    .as_mut()
+                    .filter(|paused| paused.member == survivor)
+                {
+                    paused.owner_group = delivery.owner_group;
+                }
+                self.frames
+                    .replace(current, ResolutionFrame::BatchDelivery(Box::new(batch)));
+            }
+            slot = self.frames.below(current);
+        }
+        Ok(())
+    }
+
+    fn normalize_legacy_independent_departures(&mut self) -> Result<(), String> {
+        let mut parent = self.frames.top();
+        while let Some(current) = parent {
+            let legacy = self
+                .logical_group_at(current)
+                .filter(|group| group.instruction_deliveries.is_none())
+                .map(|group| group.logical_group_id);
+            if let Some(id) = legacy {
+                let mut certified = Vec::new();
+                let mut child = self.frames.above(current);
+                let mut independent = false;
+                while let Some(above) = child {
+                    if let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get(above) {
+                        independent |= drains.drains().any(|drain| {
+                            !matches!(drain.status, DrainStatus::Ready(_))
+                                && drain
+                                    .independent_departure_ancestors
+                                    .as_ref()
+                                    .is_some_and(|ancestors| ancestors.contains(&id))
+                        });
+                    }
+                    if independent {
+                        if let Some(group) = self.logical_group_at(above) {
+                            for occurrence in &group.all_origin_occurrences {
+                                if let GameEvent::ZoneChanged { record, .. } = &occurrence.event {
+                                    if group.instruction_deliveries.as_ref().is_some_and(|deliveries| deliveries.iter().any(|delivery| delivery.completion == Some(crate::types::game_state::ZoneMoveCompletion::Moved) && record.trigger_source_context().is_some_and(|context| context.identity == delivery.binding))) {
+                                        certified.push(record.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    child = self.frames.above(above);
+                }
+                self.logical_group_at_mut(current)
+                    .expect("retained legacy group")
+                    .recover_certified_independent_departures(&certified)?;
+            }
+            parent = self.frames.below(current);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn retained_zone_delivery_for_event(
+        &self,
+        event: &ProposedEvent,
+    ) -> Option<&crate::types::game_state::PendingZoneChangeDelivery> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            let delivery = match self.frames.get(current) {
+                Some(ResolutionFrame::ChangeZone(frame)) => frame
+                    .pending
+                    .as_ref()
+                    .and_then(|pending| pending.paused_current.as_ref()),
+                Some(ResolutionFrame::BatchDelivery(batch)) => batch.paused_current.as_ref(),
+                _ => None,
+            };
+            if let Some(delivery) = delivery.filter(|delivery| delivery.expected_event == *event) {
+                return Some(delivery);
+            }
+            slot = self.frames.below(current);
+        }
+        None
+    }
+
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
     }
@@ -4074,6 +5236,12 @@ impl ResolutionStack {
 
     /// Validate stack-local structural and prompt coherence invariants.
     pub fn validate(&self, waiting_for: &WaitingFor) -> Result<(), ResolutionStackError> {
+        self.validate_independent_departure_scopes()
+            .and_then(|_| self.validate_delegated_zone_deliveries())
+            .map_err(|message| ResolutionStackError::InvalidPayload {
+                frame: FrameKind::PostReplacement,
+                message,
+            })?;
         if let WaitingFor::CopyTargetChoice {
             player,
             source_id,
@@ -6078,7 +7246,10 @@ impl ResolutionStateWire {
                             .to_string(),
                     );
                 }
-                let state = GameStateDecode::materialize_prepared(state_value)?;
+                let mut state = GameStateDecode::materialize_prepared(state_value)?;
+                state.resolution_stack = Box::new(frames);
+                normalize_logical_zone_instruction_owners(&mut state)?;
+                frames = *state.resolution_stack.clone();
                 frames
                     .validate(&state.waiting_for)
                     .map_err(|error| error.to_string())?;
@@ -6117,6 +7288,15 @@ impl ResolutionStateWire {
 pub(crate) fn normalize_logical_zone_instruction_owners(
     state: &mut GameState,
 ) -> Result<(), String> {
+    state
+        .resolution_stack
+        .normalize_legacy_delegated_deliveries()?;
+    state
+        .resolution_stack
+        .normalize_independent_departure_scopes()?;
+    state
+        .resolution_stack
+        .normalize_legacy_independent_departures()?;
     let selections = state
         .resolution_stack
         .iter()
@@ -6139,10 +7319,21 @@ pub(crate) fn normalize_logical_zone_instruction_owners(
         match frame {
             ResolutionFrame::ChangeZone(frame) => {
                 if let Some(pending) = frame.pending.as_mut() {
+                    if let Some(paused) = pending.paused_current.as_mut() {
+                        paused
+                            .owner_group
+                            .get_or_insert(pending.logical_zone_change_group.logical_group_id);
+                    }
                     let selected = selections
                         .iter()
                         .find(|(id, _)| *id == pending.logical_zone_change_group.logical_group_id);
-                    if pending.pending_return_result_producer.is_some() || selected.is_some() {
+                    if pending.pending_return_result_producer.is_some()
+                        || selected.is_some()
+                        || !pending
+                            .logical_zone_change_group
+                            .prospective_battlefield_members
+                            .is_empty()
+                    {
                         let tail = pending
                             .remaining
                             .iter()
@@ -6161,15 +7352,28 @@ pub(crate) fn normalize_logical_zone_instruction_owners(
                 }
             }
             ResolutionFrame::BatchDelivery(batch) => {
+                if let Some(paused) = batch.paused_current.as_mut() {
+                    if batch
+                        .delegated_primary
+                        .as_ref()
+                        .is_none_or(|delegated| delegated.delivery.member != paused.member)
+                    {
+                        paused
+                            .owner_group
+                            .get_or_insert(batch.logical_zone_change_group.logical_group_id);
+                    } else if let Some(delegated) = &batch.delegated_primary {
+                        paused.owner_group = delegated.delivery.owner_group;
+                    }
+                }
                 let selected = selections
                     .iter()
                     .find(|(id, _)| *id == batch.logical_zone_change_group.logical_group_id);
-                if matches!(
+                if batch.delegated_primary.is_none() && (matches!(
                     batch.completion,
                     Some(
                         crate::types::game_state::BatchCompletion::RecordInstructionZoneResult { .. }
                     )
-                ) || selected.is_some()
+                ) || selected.is_some() || !batch.logical_zone_change_group.prospective_battlefield_members.is_empty())
                 {
                     let tail = batch
                         .remaining
@@ -6204,6 +7408,9 @@ pub(crate) fn normalize_logical_zone_instruction_owners(
             _ => {}
         }
     }
+    state
+        .resolution_stack
+        .validate_delegated_zone_deliveries()?;
     Ok(())
 }
 
@@ -6887,6 +8094,7 @@ impl LegacyReplacementTailsWire {
             if let Some(continuation) = continuation {
                 self.post_replacement_drains.install(
                     PostReplacementDrain {
+                        independent_departure_ancestors: None,
                         token_creation_parent: None,
                         status: DrainStatus::Ready(continuation),
                         source: self.post_replacement_source,
@@ -7616,6 +8824,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
+            delegated_primary: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -7763,6 +8972,370 @@ mod tests {
             }),
             devour_eligible_snapshot: None,
         }))
+    }
+
+    fn independent_scope_fixture() -> (
+        GameState,
+        ObjectId,
+        crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) {
+        let mut state = GameState::new_two_player(1561);
+        let member = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1561),
+            PlayerId(0),
+            "original scope member".into(),
+            Zone::Battlefield,
+        );
+        let group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[member]);
+        let id = group.logical_group_id;
+        let pin = group.instruction_binding(member).unwrap().reference;
+        let ResolutionFrame::ChangeZone(mut frame) = change_zone_frame(1561) else {
+            unreachable!();
+        };
+        let pending = frame.pending.as_mut().unwrap();
+        pending.logical_zone_change_group = group;
+        pending.origin = Some(Zone::Battlefield);
+        pending.destination = Zone::Exile;
+        let mut delivery = crate::types::game_state::PendingZoneChangeDelivery::new(
+            pin,
+            ProposedEvent::zone_change(member, Zone::Battlefield, Zone::Exile, Some(member)),
+        );
+        delivery.owner_group = Some(id);
+        pending.paused_current = Some(delivery);
+        state.resolution_stack.push_change_zone(*frame);
+        let mut drains = PostReplacementDrainStack::default();
+        let mut drain = PostReplacementDrain::ready(PostReplacementContinuation::Resolved(
+            Box::new(resolved_draw(member.0)),
+        ));
+        drain.source = Some(member);
+        drains.install(drain, ResidentDrainPolicy::Replace);
+        state.resolution_stack.push_post_replacement(drains);
+        let seed = state
+            .resolution_stack
+            .independent_departure_dispatch_seed(Some(member));
+        assert_eq!(seed, vec![id]);
+        let (_, dispatch) = state
+            .resolution_stack
+            .begin_active_post_replacement_dispatch_with_recipients(seed)
+            .unwrap();
+        assert!(state
+            .resolution_stack
+            .pause_post_replacement_dispatch(dispatch));
+        (state, member, id)
+    }
+
+    #[test]
+    fn independent_departure_scope_survives_ordinary_continuation_and_restore() {
+        let (mut state, member, id) = independent_scope_fixture();
+        state.resolution_stack.push_inner(continuation_frame(1562));
+        let before = state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::ChangeZone(frame) => frame
+                    .pending
+                    .as_ref()
+                    .map(|pending| pending.logical_zone_change_group.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Hand, &mut events);
+        let parent = state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(parent.logical_zone_change_group.logical_group_id, id);
+        assert!(matches!(parent.logical_zone_change_group.terminal_outcomes[0], crate::types::game_state::LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }));
+        assert!(parent
+            .logical_zone_change_group
+            .all_origin_occurrences
+            .is_empty());
+        assert!(parent
+            .paused_current
+            .as_ref()
+            .unwrap()
+            .delivery_events
+            .is_empty());
+        assert_eq!(
+            parent.paused_current.as_ref().unwrap().terminal_completion,
+            None
+        );
+        let mut local = before;
+        state
+            .resolution_stack
+            .merge_resident_independent_departures(&mut local)
+            .unwrap();
+        assert_eq!(
+            local.terminal_outcomes, parent.logical_zone_change_group.terminal_outcomes,
+            "stale local clone imports only the resident retirement"
+        );
+        let raw = serde_json::to_value(&state).unwrap();
+        let restored: GameState = serde_json::from_value(raw).unwrap();
+        assert_eq!(restored.resolution_stack, state.resolution_stack);
+        let current = ResolutionStateWire::from_game_state(state.clone())
+            .to_value()
+            .unwrap();
+        let restored = serde_json::from_value::<ResolutionStateWire>(current)
+            .unwrap()
+            .into_game_state();
+        assert_eq!(restored.resolution_stack, state.resolution_stack);
+        crate::types::game_state::validate_retained_zone_result_owners(&restored).unwrap();
+    }
+
+    #[test]
+    fn independent_departure_v1_missing_scope_recovers_before_first_departure() {
+        let (mut state, member, id) = independent_scope_fixture();
+        for frame in state.resolution_stack.frames.iter_mut() {
+            if let ResolutionFrame::PostReplacement(drains) = frame {
+                drains
+                    .resident_mut()
+                    .unwrap()
+                    .independent_departure_ancestors = None;
+            }
+        }
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        let object = legacy.as_object_mut().unwrap();
+        object.remove("resolution_stack");
+        object.insert("resolution_state_version".into(), Value::from(1));
+        for frame in state.resolution_stack.iter() {
+            match frame {
+                ResolutionFrame::ChangeZone(frame) => {
+                    legacy["pending_change_zone_iteration"] =
+                        serde_json::to_value(frame.pending.as_ref().unwrap()).unwrap();
+                }
+                ResolutionFrame::PostReplacement(drains) => {
+                    legacy["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+                    legacy["post_replacement_drains"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("id");
+                }
+                _ => panic!("fixture contains exact legacy parent and drain"),
+            }
+        }
+        let mut loaded = serde_json::from_value::<ResolutionStateWire>(legacy)
+            .unwrap()
+            .into_game_state();
+        assert_eq!(
+            loaded
+                .resolution_stack
+                .active_post_replacement_or_paired_parent()
+                .unwrap()
+                .resident()
+                .unwrap()
+                .independent_departure_ancestors,
+            Some(vec![id])
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut loaded, member, Zone::Hand, &mut events);
+        let retained = loaded
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        assert!(matches!(retained.logical_zone_change_group.terminal_outcomes[0], crate::types::game_state::LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }));
+        let wire = ResolutionStateWire::from_game_state(loaded.clone())
+            .to_value()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_value::<ResolutionStateWire>(wire)
+                .unwrap()
+                .into_game_state()
+                .resolution_stack,
+            loaded.resolution_stack,
+            "new terminal and recovered scope round-trip together"
+        );
+    }
+
+    #[test]
+    fn independent_departure_scope_rejects_foreign_duplicate_and_reversed_recipients() {
+        let (state, _, id) = independent_scope_fixture();
+        for recipients in [
+            vec![id, id],
+            vec![crate::types::identifiers::LogicalZoneChangeGroupId(9999)],
+        ] {
+            let mut invalid = state.clone();
+            let drains = invalid
+                .resolution_stack
+                .active_post_replacement_or_paired_parent_mut()
+                .unwrap();
+            drains
+                .resident_mut()
+                .unwrap()
+                .independent_departure_ancestors = Some(recipients);
+            let before = invalid.clone();
+            assert!(
+                crate::types::game_state::validate_retained_zone_result_owners(&invalid).is_err()
+            );
+            assert_eq!(invalid, before);
+        }
+        let mut nested = state.clone();
+        let inner_group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut nested, &[]);
+        let inner_id = inner_group.logical_group_id;
+        let ResolutionFrame::ChangeZone(mut inner) = change_zone_frame(1563) else {
+            unreachable!();
+        };
+        inner.pending.as_mut().unwrap().logical_zone_change_group = inner_group;
+        nested.resolution_stack.push_change_zone(*inner);
+        nested
+            .resolution_stack
+            .push_inner(paused_post_replacement_frame());
+        nested
+            .resolution_stack
+            .active_post_replacement_or_paired_parent_mut()
+            .unwrap()
+            .resident_mut()
+            .unwrap()
+            .independent_departure_ancestors = Some(vec![inner_id, id]);
+        nested
+            .resolution_stack
+            .validate_independent_departure_scopes()
+            .unwrap();
+        nested
+            .resolution_stack
+            .active_post_replacement_or_paired_parent_mut()
+            .unwrap()
+            .resident_mut()
+            .unwrap()
+            .independent_departure_ancestors = Some(vec![id, inner_id]);
+        let before = nested.clone();
+        assert!(nested
+            .resolution_stack
+            .validate_independent_departure_scopes()
+            .is_err());
+        assert_eq!(
+            nested, before,
+            "reversed resident ancestors cannot mutate authority"
+        );
+        let mut empty = state;
+        empty
+            .resolution_stack
+            .active_post_replacement_or_paired_parent_mut()
+            .unwrap()
+            .resident_mut()
+            .unwrap()
+            .independent_departure_ancestors = Some(Vec::new());
+        assert!(normalize_logical_zone_instruction_owners(&mut empty).is_err());
+        assert_eq!(
+            empty
+                .resolution_stack
+                .active_post_replacement_or_paired_parent()
+                .unwrap()
+                .resident()
+                .unwrap()
+                .independent_departure_ancestors,
+            Some(Vec::new()),
+            "present empty authority never takes absence recovery"
+        );
+    }
+
+    #[test]
+    fn delegated_primary_handoff_is_exact_idempotent_and_conflict_preserves_owner() {
+        use crate::types::game_state::{
+            PendingDelegatedZoneChangeDelivery, ZoneDeliveryExileTracking, ZoneDeliveryTailContext,
+            ZoneMoveCompletion,
+        };
+        use crate::types::identifiers::{CardId, ObjectIdentityBinding, ObjectIncarnationRef};
+        let mut state = GameState::new_two_player(1566);
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(1566),
+            PlayerId(0),
+            "delegated original".into(),
+            Zone::Battlefield,
+        );
+        let pin = ObjectIncarnationRef::from_object(&state.objects[&object]);
+        let group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[object]);
+        let owner = group.logical_group_id;
+        let event = ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Hand, Some(object));
+        let mut original = crate::types::game_state::PendingZoneChangeDelivery::new(pin, event);
+        original.owner_group = Some(owner);
+        let ResolutionFrame::ChangeZone(mut parent) = change_zone_frame(1566) else {
+            unreachable!();
+        };
+        parent.pending.as_mut().unwrap().logical_zone_change_group = group;
+        parent.pending.as_mut().unwrap().paused_current = Some(original);
+        parent.pending.as_mut().unwrap().destination = Zone::Hand;
+        parent.pending.as_mut().unwrap().origin = Some(Zone::Battlefield);
+        state.resolution_stack.push_change_zone(*parent);
+        let mut events = Vec::new();
+        let delivered = crate::game::zone_pipeline::move_object_with_terminal_for_group(
+            &mut state,
+            crate::game::zone_pipeline::ZoneMoveRequest::effect(object, Zone::Hand, object),
+            Some(owner),
+            &mut events,
+        );
+        let receipt = delivered.delivery.unwrap();
+        assert_eq!(receipt.terminal_completion, Some(ZoneMoveCompletion::Moved));
+        let auxiliary = crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+        let ResolutionFrame::BatchDelivery(mut batch) = batch_delivery_frame(1566) else {
+            unreachable!();
+        };
+        batch.logical_zone_change_group = auxiliary;
+        batch.attempted = vec![object];
+        batch.delegated_primary = Some(PendingDelegatedZoneChangeDelivery {
+            delivery: receipt.clone(),
+            components: vec![ObjectIdentityBinding::new(pin, Zone::Battlefield)],
+            tail: Some(ZoneDeliveryTailContext {
+                object_id: object,
+                from: Zone::Battlefield,
+                to: Zone::Hand,
+                cause: Some(object),
+                source_id: Some(object),
+                duration: None,
+                exile_controller: None,
+                exile_tracking: ZoneDeliveryExileTracking::None,
+                drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
+                library_placement: None,
+            }),
+        });
+        state.resolution_stack.push_batch_delivery(*batch);
+        state
+            .resolution_stack
+            .forward_delegated_primary_receipt(&receipt)
+            .unwrap();
+        let once = state.clone();
+        state
+            .resolution_stack
+            .forward_delegated_primary_receipt(&receipt)
+            .unwrap();
+        assert_eq!(
+            state, once,
+            "same receipt forwarding does not deliver or collect twice"
+        );
+        crate::types::game_state::validate_retained_zone_result_owners(&state).unwrap();
+        let mut conflict = receipt.clone();
+        let GameEvent::ZoneChanged { record, .. } = &mut conflict.delivery_events[0] else {
+            unreachable!();
+        };
+        record.turn_zone_change_index += 1;
+        assert!(state
+            .resolution_stack
+            .forward_delegated_primary_receipt(&conflict)
+            .is_err());
+        assert_eq!(
+            state, once,
+            "conflicting receipt cannot mutate the exact original owner"
+        );
+        let mut foreign = receipt;
+        foreign.owner_group = Some(crate::types::identifiers::LogicalZoneChangeGroupId(9999));
+        assert!(!state
+            .resolution_stack
+            .store_primary_delivery_receipt(&foreign)
+            .unwrap());
+        assert_eq!(state, once);
     }
 
     fn paused_post_replacement_frame() -> ResolutionFrame {
@@ -9551,6 +11124,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         let pending = PendingBatchDeliveries {
+            delegated_primary: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),

@@ -14540,6 +14540,11 @@ fn collect_local_result_declarations(
                 destination,
                 ..
             } => Some((origin.unwrap_or(Zone::Battlefield), *destination)),
+            // CR 608.2c: BounceAll selects battlefield permanents and its
+            // resolver uses Hand only when no explicit destination is given.
+            Effect::BounceAll { destination, .. } => {
+                Some((Zone::Battlefield, destination.unwrap_or(Zone::Hand)))
+            }
             _ => None,
         };
         if declarations.insert(id, zones).is_some() {
@@ -53177,6 +53182,9 @@ mod targeted_departure_declaration_tests {
                 destination,
                 ..
             } => (*origin, *destination),
+            Effect::BounceAll { destination, .. } => {
+                (Zone::Battlefield, destination.unwrap_or(Zone::Hand))
+            }
             _ => unreachable!("positive has an explicit zone pair"),
         };
         assert_eq!(
@@ -53193,6 +53201,79 @@ mod targeted_departure_declaration_tests {
                 target: None,
             }
         );
+    }
+
+    #[test]
+    fn bounce_all_fixed_battlefield_default_and_explicit_destination_are_admitted() {
+        for destination in [
+            None,
+            Some(Zone::Hand),
+            Some(Zone::Exile),
+            Some(Zone::Library),
+        ] {
+            let to = destination.unwrap_or(Zone::Hand);
+            let mut root = program(Some(Zone::Battlefield), to, true);
+            root.effect = Box::new(Effect::BounceAll {
+                target: TargetFilter::Any,
+                destination,
+                count: None,
+            });
+            assert_admitted(&root);
+        }
+    }
+
+    #[test]
+    fn bounce_all_departure_mismatch_foreign_premature_duplicate_remain_strict() {
+        let mut valid = program(Some(Zone::Battlefield), Zone::Hand, true);
+        valid.effect = Box::new(Effect::BounceAll {
+            target: TargetFilter::Any,
+            destination: None,
+            count: None,
+        });
+        assert_admitted(&valid);
+        let mut cases = Vec::new();
+        for (result, from, to) in [
+            (17, Zone::Graveyard, Zone::Hand),
+            (17, Zone::Battlefield, Zone::Exile),
+            (18, Zone::Battlefield, Zone::Hand),
+        ] {
+            let mut invalid = valid.clone();
+            invalid.sub_ability.as_mut().unwrap().effect = Box::new(Effect::Draw {
+                count: max_mana_value(result, from, to),
+                target: TargetFilter::Controller,
+            });
+            cases.push(invalid);
+        }
+        let mut early = valid.sub_ability.as_deref().unwrap().clone();
+        early.sub_ability = Some(Box::new(valid.clone()));
+        cases.push(early);
+        let mut duplicate = valid.clone();
+        duplicate
+            .sub_ability
+            .as_mut()
+            .unwrap()
+            .declares_return_result = Some(ReturnResultId(17));
+        cases.push(duplicate);
+        let mut targeted_unknown = valid.clone();
+        targeted_unknown.effect =
+            Box::new(serde_json::from_value(serde_json::json!({ "type": "Bounce" })).unwrap());
+        cases.push(targeted_unknown);
+        for invalid in cases {
+            assert!(
+                validate_instruction_result_definition(&invalid).is_err(),
+                "invalid producer/reader relationship must fail before resolution"
+            );
+            let resolved = crate::game::ability_utils::build_resolved_from_def(
+                &invalid,
+                ObjectId(91),
+                PlayerId(0),
+            );
+            assert!(classify_instruction_result_invocation(
+                &resolved,
+                InstructionResultEntry::Independent
+            )
+            .is_err());
+        }
     }
 
     #[test]

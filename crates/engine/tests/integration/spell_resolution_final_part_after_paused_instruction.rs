@@ -3731,6 +3731,7 @@ fn markerless_rest(rest: TerminalRest, core_type: CoreType, zone: Zone) -> (Game
     if matches!(rest, TerminalRest::OwnerlessSweep) {
         drains.install(
             PostReplacementDrain {
+                independent_departure_ancestors: Some(Vec::new()),
                 token_creation_parent: None,
                 status: DrainStatus::Dispatching,
                 source: None,

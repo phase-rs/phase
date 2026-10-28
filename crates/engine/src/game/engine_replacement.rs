@@ -406,7 +406,20 @@ fn handle_replacement_choice_inner(
         effects::normalize_warp_zone_delivery_tail(state, delivery);
     }
     let parked_aggregate_opportunity = super::replacement::pending_damage_has_opportunity(state);
+    let independent_recipients = state
+        .resolution_stack
+        .replacement_response_recipients(parked_zone_change_delivery.as_ref());
+    let independent_child_boundary = state.resolution_stack.capture_child_boundary();
+    let independent_event_start = events.len();
     let mut result = super::replacement::continue_replacement(state, index, events);
+    state
+        .resolution_stack
+        .record_independent_replacement_response(
+            &independent_recipients,
+            independent_child_boundary,
+            &events[independent_event_start..],
+        )
+        .map_err(EngineError::InvalidAction)?;
     // CR 400.7: a replacement child may have moved the pending original away
     // and back. Already-delivered entry/counter tails retain their completion.
     if matches!(
@@ -492,8 +505,8 @@ fn handle_replacement_choice_inner(
                     else {
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
-                    let delivery_start = events.len();
-                    match crate::game::zone_pipeline::deliver(
+
+                    match crate::game::zone_pipeline::deliver_with_primary_delivery(
                         state,
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
@@ -512,6 +525,7 @@ fn handle_replacement_choice_inner(
                             library_placement: parked_library_placement.clone(),
                         },
                         events,
+                        parked_zone_change_delivery.as_mut(),
                     ) {
                         crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
                         // CR 614.1c / CR 614.12a: the delivery tail parked a
@@ -522,7 +536,11 @@ fn handle_replacement_choice_inner(
                         // the parked prompt; the epilogue must not run yet.
                         crate::game::zone_pipeline::ZoneDeliveryResult::NeedsChoice(_) => {
                             if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                                let delivered = &events[delivery_start..];
+                                state
+                                    .resolution_stack
+                                    .store_primary_delivery_receipt(paused)
+                                    .map_err(EngineError::InvalidAction)?;
+                                let delivered = &paused.delivery_events;
                                 if crate::game::zone_pipeline::zone_move_completion_from_delivery(
                                     paused.member,
                                     delivered,
@@ -550,7 +568,11 @@ fn handle_replacement_choice_inner(
                         }
                     }
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
-                        let delivered = &events[delivery_start..];
+                        state
+                            .resolution_stack
+                            .store_primary_delivery_receipt(paused)
+                            .map_err(EngineError::InvalidAction)?;
+                        let delivered = &paused.delivery_events;
                         let completion = paused.terminal_completion.unwrap_or_else(|| {
                             crate::game::zone_pipeline::zone_move_completion_from_delivery(
                                 paused.member,
@@ -567,7 +589,6 @@ fn handle_replacement_choice_inner(
                         completed
                             .record_terminal_completion(completion)
                             .expect("retained parent completion remains authoritative");
-                        completed.append_delivery_events(delivered);
                         effects::settle_replaced_forwarded_zone_delivery(
                             state,
                             paused,
@@ -4175,7 +4196,12 @@ pub(crate) fn apply_pending_post_replacement_effect(
         resolved
     });
 
-    let (continuation, dispatch) = state.begin_post_replacement_dispatch()?;
+    let recipients = state
+        .resolution_stack
+        .independent_departure_dispatch_seed(source);
+    let (continuation, dispatch) = state
+        .resolution_stack
+        .begin_active_post_replacement_dispatch_with_recipients(recipients)?;
     // CR 603.3b + CR 608.2c: this dispatch is now live on this thread's call
     // stack. Constructed AFTER the mint so the `?` early-return path never
     // enters it, and dropped by RAII at every exit — the

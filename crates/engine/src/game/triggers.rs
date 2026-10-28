@@ -4289,6 +4289,44 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     Ok(())
 }
 
+/// Consume one attempt's certified primary receipt and independently retire
+/// matching originals from its bounded child work, without recollecting it.
+pub(crate) fn consume_zone_move_attempt(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    primary: Option<&crate::types::game_state::PendingZoneChangeDelivery>,
+    attempt: &[GameEvent],
+) -> Result<(), String> {
+    state
+        .resolution_stack
+        .merge_resident_independent_departures(group)?;
+    for event in attempt {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+        } = event
+        {
+            if record.object_id != *object_id || record.from_zone != *from || record.to_zone != *to
+            {
+                return Err("independent departure event disagrees with its record".into());
+            }
+            if !primary.is_some_and(|primary| primary.delivery_events.iter().any(|event| matches!(event,
+                GameEvent::ZoneChanged { record: own, .. } if LogicalZoneChangeGroup::same_departure_core(own, record)))) {
+                group.record_independent_departure(record)?;
+            }
+        }
+    }
+    if let Some(primary) = primary {
+        if primary.owner_group != Some(group.logical_group_id) {
+            return Err("primary receipt names a foreign logical owner".into());
+        }
+        append_and_collect_logical_zone_trigger_segment(state, group, &primary.delivery_events)?;
+    }
+    Ok(())
+}
+
 /// Complete the one logical zone-change owner after its final delivery slice.
 ///
 /// CR 603.10 observes ordinary triggers only after the final layer flush, while
@@ -4467,6 +4505,7 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         if matches!(
             group.terminal_outcomes[member_index],
             LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft
+                | LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }
         ) {
             continue;
         }
@@ -4527,6 +4566,20 @@ fn collect_latched_batched_zone_triggers(
     let (immediately_after, _) = group.immediately_after_latches()?;
 
     for latched in immediately_before.iter().chain(immediately_after) {
+        if group
+            .prospective_battlefield_members
+            .iter()
+            .zip(&group.terminal_outcomes)
+            .any(|(member, outcome)| {
+                member.identity == latched.definition_ref.source
+                    && matches!(
+                        outcome,
+                        LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }
+                    )
+            })
+        {
+            continue;
+        }
         let Some(matcher) = trigger_matcher(latched.definition.mode.clone()) else {
             continue;
         };

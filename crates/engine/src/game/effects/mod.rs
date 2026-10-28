@@ -1142,6 +1142,7 @@ pub(crate) fn settle_forwarded_zone_result(
             ),
             LogicalZoneChangeTerminalOutcome::Prevented
             | LogicalZoneChangeTerminalOutcome::Remained
+            | LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture { .. }
             | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft => ForwardedResultContext {
                 targets: Vec::new(),
                 object_incarnations: Vec::new(),
@@ -3898,7 +3899,7 @@ fn drain_pending_change_zone_iteration_in_occurrence(
         // CR 603.10a: scope this drain pass's battlefield-exit events so the
         // members moved in this resume join the logical co-departed group and
         // their observer triggers are collected with earlier pause segments.
-        let events_before_drain = events.len();
+
         // CR 603.6a + CR 614.12: each member applies the entry modifications
         // resolved before the event's first member moved; never recompute
         // against the partly-moved board.
@@ -3935,31 +3936,27 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                 enter_attached_to,
             };
             let before_zone = state.objects.get(obj_id).map(|object| object.zone);
-            let anticipated_pause = state.objects.get(obj_id).map(|object| {
-                let mut expected_event = crate::types::proposed_event::ProposedEvent::zone_change(
-                    *obj_id,
-                    object.zone,
-                    ctx.destination,
-                    Some(ctx.source_id),
-                );
-                if let crate::types::proposed_event::ProposedEvent::ZoneChange {
-                    face_down_in_exile: conceal,
-                    ..
-                } = &mut expected_event
-                {
-                    *conceal = ctx.face_down_in_exile;
-                }
-                crate::types::game_state::PendingZoneChangeDelivery::new(
-                    crate::types::identifiers::ObjectIncarnationRef::from_object(object),
-                    expected_event,
-                )
-            });
             let delivery_start = events.len();
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-            match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
-                state, &ctx, member, events,
-            ) {
-                crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+            let terminal = crate::game::effects::change_zone::process_one_zone_move_for_group(
+                state,
+                &ctx,
+                member,
+                Some(logical_zone_change_group.logical_group_id),
+                events,
+            );
+            let anticipated_pause = terminal.delivery;
+            crate::game::triggers::consume_zone_move_attempt(
+                state,
+                &mut logical_zone_change_group,
+                anticipated_pause.as_ref(),
+                &events[delivery_start..],
+            )
+            .expect(
+                "zone move consumes only its certified primary receipt and independent witnesses",
+            );
+            match terminal.outcome {
+                crate::game::zone_pipeline::ZoneMoveTerminalOutcome::Completed(completion) => {
                     logical_zone_change_group
                         .record_delivery_completion(*obj_id, completion)
                         .expect("resumed ChangeZone member records its exact terminal outcome");
@@ -3974,7 +3971,7 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                         }
                     }
                 }
-                crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
                     if let Some(count) = moved_count.as_mut() {
                         if before_zone != Some(ctx.destination)
                             && state
@@ -3985,25 +3982,19 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                             *count += 1;
                         }
                     }
-                    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                        .iter()
-                        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-                        .cloned()
-                        .collect();
                     crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                         state,
                         &mut logical_zone_change_group,
-                        &trigger_events,
+                        &[],
                     )
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
-                    state.replace_active_change_zone_iteration(
+                    state.replace_active_change_zone_iteration_after_child(
                         crate::types::game_state::PendingChangeZoneIteration {
                             return_result_occurrence,
                             return_result_process,
                             logical_zone_change_group,
                             pending_return_result_producer,
                             paused_current: anticipated_pause.map(|mut boundary| {
-                                boundary.append_delivery_events(&events[delivery_start..]);
                                 boundary.mark_counted();
                                 boundary
                             }),
@@ -4025,10 +4016,11 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                             enter_attached_to: ctx.enter_attached_to,
                             effect_kind,
                         },
+                        stack_depth_before_zone_move,
                     );
                     return;
                 }
-                crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
+                crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsChoice(player) => {
                     let entry_target_choice = matches!(
                         state.waiting_for,
                         WaitingFor::EntryAttackTargetChoice { .. }
@@ -4042,22 +4034,12 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                             .expect("post-entry target pause follows completed primary delivery");
                     }
                     let paused_current = (!entry_target_choice).then(|| {
-                        crate::game::zone_pipeline::retain_zone_change_pause(
-                            state,
-                            anticipated_pause,
-                            &events[delivery_start..],
-                        )
-                        .expect("replacement pause must retain its exact boundary")
+                        anticipated_pause.expect("replacement pause must retain its exact boundary")
                     });
-                    let trigger_events: Vec<GameEvent> = events[events_before_drain..]
-                        .iter()
-                        .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
-                        .cloned()
-                        .collect();
                     crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                         state,
                         &mut logical_zone_change_group,
-                        &trigger_events,
+                        &[],
                     )
                     .expect("re-paused ChangeZone retains its explicit delivery segment");
                     state.replace_active_change_zone_iteration_after_child(
@@ -4099,7 +4081,7 @@ fn drain_pending_change_zone_iteration_in_occurrence(
         crate::game::triggers::complete_logical_zone_trigger_collection(
             state,
             &mut logical_zone_change_group,
-            &mut events[events_before_drain..],
+            &mut [],
         )
         .expect("completed resumed ChangeZone owns every terminal member outcome");
         if let Some((occurrence_id, result_id)) = pending_return_result_producer {
@@ -64042,6 +64024,7 @@ mod entry_observation_settlement_tests {
                 .latch_immediately_before(Vec::new(), Vec::new())
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
+                delegated_primary: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),

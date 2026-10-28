@@ -1281,6 +1281,10 @@ pub fn resolve(
                 let _ = state
                     .take_active_change_zone_frame()
                     .expect("completed ChangeZone owns the active frame");
+                crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                    &logical_zone_change_group,
+                    events,
+                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -1358,6 +1362,10 @@ pub fn resolve(
                 let _ = state
                     .take_active_change_zone_frame()
                     .expect("completed ChangeZone owns the active frame");
+                crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                    &logical_zone_change_group,
+                    events,
+                );
             }
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -1480,7 +1488,6 @@ pub fn resolve(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
     super::bind_warp_forwarded_zone_group(state, ability, &logical_zone_change_group);
-    let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
         // CR 400.7: a replacement child cannot substitute a same-ID successor.
@@ -1528,17 +1535,25 @@ pub fn resolve(
                     .get(obj_id)
                     .is_some_and(|object| object.zone == dest_zone)
         };
-        let anticipated_pause = anticipated_zone_change_delivery(
-            state,
-            *obj_id,
-            ctx.destination,
-            ctx.source_id,
-            ctx.face_down_in_exile,
-        );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match process_one_zone_move_with_terminal(state, &ctx, member, events) {
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+        let terminal = process_one_zone_move_for_group(
+            state,
+            &ctx,
+            member,
+            Some(logical_zone_change_group.logical_group_id),
+            events,
+        );
+        let anticipated_pause = terminal.delivery;
+        crate::game::triggers::consume_zone_move_attempt(
+            state,
+            &mut logical_zone_change_group,
+            anticipated_pause.as_ref(),
+            &events[delivery_start..],
+        )
+        .expect("zone move consumes only its certified primary receipt and independent witnesses");
+        match terminal.outcome {
+            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(*obj_id, completion)
                     .expect("logical ChangeZone member records its exact terminal outcome");
@@ -1546,24 +1561,23 @@ pub fn resolve(
                     moved_count += 1;
                 }
             }
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
                 if moved_to_dest(state) {
                     moved_count += 1;
                 }
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
-                    &events[logical_group_event_start..],
+                    &[],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
-                state.push_change_zone_iteration(
+                state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         return_result_occurrence: state.active_return_result_occurrence,
                         return_result_process: ability.return_result_process,
                         pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
-                            boundary.append_delivery_events(&events[delivery_start..]);
                             boundary.mark_counted();
                             boundary
                         }),
@@ -1589,10 +1603,24 @@ pub fn resolve(
                         enter_attached_to: ctx.enter_attached_to,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
+                    stack_depth_before_zone_move,
                 );
                 return Ok(None);
             }
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
+            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsChoice(player) => {
+                let entry_target_choice = matches!(
+                    state.waiting_for,
+                    crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
+                );
+                if entry_target_choice {
+                    logical_zone_change_group
+                        .record_delivery_completion(
+                            *obj_id,
+                            crate::types::game_state::ZoneMoveCompletion::Moved,
+                        )
+                        .expect("entry target choice follows a certified primary delivery");
+                }
+
                 // CR 614.12b + CR 614.1c + CR 614.13: stash the unprocessed targets
                 // so `drain_pending_change_zone_iteration` resumes the loop after
                 // the player resolves this replacement. Without the stash, every
@@ -1601,7 +1629,7 @@ pub fn resolve(
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
-                    &events[logical_group_event_start..],
+                    &[],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
@@ -1610,14 +1638,14 @@ pub fn resolve(
                         return_result_process: ability.return_result_process,
                         pending_return_result_producer,
                         logical_zone_change_group,
-                        paused_current: Some(
-                            crate::game::zone_pipeline::retain_zone_change_pause(
-                                state,
-                                anticipated_pause,
-                                &events[delivery_start..],
+                        paused_current: if entry_target_choice {
+                            None
+                        } else {
+                            Some(
+                                anticipated_pause
+                                    .expect("zone-change pause must retain its exact boundary"),
                             )
-                            .expect("zone-change pause must retain its exact boundary"),
-                        ),
+                        },
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -1631,7 +1659,7 @@ pub fn resolve(
                         // CR 608.2c: carry the running count so the drain stamps
                         // `last_effect_count` with the full targeted-move total
                         // when the resumed iteration completes.
-                        moved_count: Some(moved_count),
+                        moved_count: Some(moved_count + i32::from(entry_target_choice)),
                         // CR 708.2a + CR 708.3: preserve the face-down profile so
                         // the resumed members of a paused face-down return still
                         // enter face down.
@@ -1661,6 +1689,10 @@ pub fn resolve(
         let _ = state
             .take_active_change_zone_frame()
             .expect("completed ChangeZone owns the active frame");
+        crate::game::triggers::sync_logical_zone_change_departure_stamps(
+            &logical_zone_change_group,
+            events,
+        );
     }
 
     // CR 608.2c: record how many objects this targeted move relocated so a
@@ -1673,9 +1705,13 @@ pub fn resolve(
     crate::game::triggers::complete_logical_zone_trigger_collection(
         state,
         &mut logical_zone_change_group,
-        &mut events[logical_group_event_start..],
+        &mut [],
     )
     .expect("completed ChangeZone owns every terminal member outcome");
+    crate::game::triggers::sync_logical_zone_change_departure_stamps(
+        &logical_zone_change_group,
+        events,
+    );
     super::settle_forwarded_zone_result(state, &logical_zone_change_group);
 
     if let Some((occurrence, result)) = pending_return_result_producer {
@@ -2066,6 +2102,16 @@ pub(crate) fn process_one_zone_move_with_terminal(
     member: &ChangeZoneMemberEntry,
     events: &mut Vec<GameEvent>,
 ) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
+    process_one_zone_move_for_group(state, ctx, member, None, events)
+}
+
+pub(crate) fn process_one_zone_move_for_group(
+    state: &mut GameState,
+    ctx: &ChangeZoneIterationCtx,
+    member: &ChangeZoneMemberEntry,
+    owner_group: Option<crate::types::identifiers::LogicalZoneChangeGroupId>,
+    events: &mut Vec<GameEvent>,
+) -> crate::game::zone_pipeline::ZoneMoveTerminalResult {
     let obj_id = member.object_id;
     // CR 400.7 + CR 111.7: An object that has already left the game (a token
     // that ceased to exist via CR 704.5d, or any other object removed from
@@ -2077,16 +2123,12 @@ pub(crate) fn process_one_zone_move_with_terminal(
     // is the common path here: the token dies in combat before the delayed
     // trigger fires.
     if !state.objects.contains_key(&obj_id) {
-        return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
-            crate::types::game_state::ZoneMoveCompletion::Remained,
-        );
+        return crate::game::zone_pipeline::ZoneMoveTerminalResult::remained();
     }
 
     // CR 114.5: Emblems cannot be moved between zones.
     if state.objects.get(&obj_id).is_some_and(|o| o.is_emblem) {
-        return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
-            crate::types::game_state::ZoneMoveCompletion::Remained,
-        );
+        return crate::game::zone_pipeline::ZoneMoveTerminalResult::remained();
     }
 
     let from_zone = state
@@ -2099,9 +2141,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
     // no longer in that zone, the zone change is impossible — skip silently.
     if let Some(expected_origin) = ctx.origin {
         if from_zone != expected_origin {
-            return crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
-                crate::types::game_state::ZoneMoveCompletion::Remained,
-            );
+            return crate::game::zone_pipeline::ZoneMoveTerminalResult::remained();
         }
     }
 
@@ -2115,7 +2155,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
     // normal face-up entry for every non-face-down move.
     // CR 614.12: entry modifications were resolved before the event
     // (`resolve_change_zone_member_entries`).
-    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
+    let result = crate::game::zone_pipeline::execute_zone_move_with_terminal_for_group(
         state,
         obj_id,
         from_zone,
@@ -2135,6 +2175,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
         Some(ctx.controller),
         // CR 608.2c: the controller follows the instruction, so it performs the move.
         Some(ctx.controller),
+        owner_group,
         events,
     );
 
@@ -3164,7 +3205,6 @@ pub fn resolve_all(
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
-    let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
         if !logical_zone_change_group.instruction_member_is_current(state, obj_id) {
@@ -3190,16 +3230,9 @@ pub fn resolve_all(
         // control" effects.
         // CR 122.1 + CR 122.1h: each object enters with the resolved counters
         // (e.g. a finality counter on Shilgengar's mass return).
-        let anticipated_pause = anticipated_zone_change_delivery(
-            state,
-            obj_id,
-            dest_zone,
-            ability.source_id,
-            ability.context.face_down_in_exile,
-        );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
+        let terminal = crate::game::zone_pipeline::execute_zone_move_with_terminal_for_group(
             state,
             obj_id,
             per_object_origin,
@@ -3219,9 +3252,19 @@ pub fn resolve_all(
             Some(ability.controller),
             // CR 608.2c: the controller follows the instruction, so it performs the move.
             Some(ability.controller),
+            Some(logical_zone_change_group.logical_group_id),
             events,
-        ) {
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+        );
+        let anticipated_pause = terminal.delivery;
+        crate::game::triggers::consume_zone_move_attempt(
+            state,
+            &mut logical_zone_change_group,
+            anticipated_pause.as_ref(),
+            &events[delivery_start..],
+        )
+        .expect("zone move consumes only its certified primary receipt and independent witnesses");
+        match terminal.outcome {
+            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::Completed(completion) => {
                 logical_zone_change_group
                     .record_delivery_completion(obj_id, completion)
                     .expect("logical ChangeZoneAll member records its exact terminal outcome");
@@ -3239,7 +3282,7 @@ pub fn resolve_all(
                     state.exile_links.retain(|link| link.exiled_id != obj_id);
                 }
             }
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
+            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsChoice(player) => {
                 let entry_target_choice = matches!(
                     state.waiting_for,
                     crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
@@ -3268,7 +3311,7 @@ pub fn resolve_all(
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
-                    &events[logical_group_event_start..],
+                    &[],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
                 state.push_change_zone_iteration_after_child(
@@ -3278,12 +3321,8 @@ pub fn resolve_all(
                         pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
-                            crate::game::zone_pipeline::retain_zone_change_pause(
-                                state,
-                                anticipated_pause,
-                                &events[delivery_start..],
-                            )
-                            .expect("replacement pause must retain its exact boundary")
+                            anticipated_pause
+                                .expect("replacement pause must retain its exact boundary")
                         }),
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
@@ -3321,7 +3360,7 @@ pub fn resolve_all(
                 crate::game::replacement::park_waiting_for(state, player);
                 return Ok(());
             }
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
                 // CR 303.4f + CR 614.13a: returning an Aura to the battlefield
                 // surfaces a host-choice prompt (the `ReturnAsAuraTarget`
                 // WaitingFor is already installed by `execute_zone_move`). Stash
@@ -3338,17 +3377,16 @@ pub fn resolve_all(
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
-                    &events[logical_group_event_start..],
+                    &[],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.push_change_zone_iteration(
+                state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         return_result_occurrence: state.active_return_result_occurrence,
                         return_result_process: ability.return_result_process,
                         pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: anticipated_pause.map(|mut boundary| {
-                            boundary.append_delivery_events(&events[delivery_start..]);
                             boundary.mark_counted();
                             boundary
                         }),
@@ -3386,6 +3424,7 @@ pub fn resolve_all(
                         enter_attached_to: None,
                         effect_kind: EffectKind::from(&ability.effect),
                     },
+                    stack_depth_before_zone_move,
                 );
                 return Ok(());
             }
@@ -3402,6 +3441,10 @@ pub fn resolve_all(
         let _ = state
             .take_active_change_zone_frame()
             .expect("completed ChangeZone owns the active frame");
+        crate::game::triggers::sync_logical_zone_change_departure_stamps(
+            &logical_zone_change_group,
+            events,
+        );
     }
 
     // CR 608.2c: "that many" in a later instruction refers back to the prior
@@ -3414,9 +3457,13 @@ pub fn resolve_all(
     crate::game::triggers::complete_logical_zone_trigger_collection(
         state,
         &mut logical_zone_change_group,
-        &mut events[logical_group_event_start..],
+        &mut [],
     )
     .expect("completed ChangeZoneAll owns every terminal member outcome");
+    crate::game::triggers::sync_logical_zone_change_departure_stamps(
+        &logical_zone_change_group,
+        events,
+    );
 
     if let Some((occurrence, result)) = pending_return_result_producer {
         super::publish_return_result(

@@ -7293,7 +7293,6 @@ fn handle_resolution_choice_in_occurrence(
                         &entry_spec,
                         &chosen_ids,
                     );
-                    let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
                         let card_id = &member.object_id;
                         // CR 400.7: a replacement child cannot substitute a same-ID successor.
@@ -7338,19 +7337,21 @@ fn handle_resolution_choice_in_occurrence(
                             library_placement: None,
                             enter_attached_to: None,
                         };
-                        let anticipated_pause =
-                            effects::change_zone::anticipated_zone_change_delivery(
-                                state,
-                                *card_id,
-                                ctx.destination,
-                                ctx.source_id,
-                                ctx.face_down_in_exile,
-                            );
                         let delivery_start = events.len();
-                        match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
-                        ) {
-                            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                        let stack_depth_before_zone_move =
+                            state.resolution_stack.capture_child_boundary();
+                        let terminal = effects::change_zone::process_one_zone_move_for_group(
+                            state,
+                            &ctx,
+                            member,
+                            Some(logical_zone_change_group.logical_group_id),
+                            events,
+                        );
+                        let anticipated_pause = terminal.delivery;
+                        crate::game::triggers::consume_zone_move_attempt(state, &mut logical_zone_change_group, anticipated_pause.as_ref(), &events[delivery_start..])
+                            .expect("zone move consumes only its certified primary receipt and independent witnesses");
+                        match terminal.outcome {
+                            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::Completed(completion) => {
                                 logical_zone_change_group
                                     .record_delivery_completion(*card_id, completion)
                                     .expect("EffectZoneChoice member records its exact terminal outcome");
@@ -7363,7 +7364,7 @@ fn handle_resolution_choice_in_occurrence(
                                     );
                                 }
                             }
-                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
                                 // CR 608.2c + CR 303.4f: Publish the
                                 // selection before pausing for Aura host choice —
                                 // this early return skips the terminal publish
@@ -7379,18 +7380,16 @@ fn handle_resolution_choice_in_occurrence(
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
-                                    &events[logical_group_event_start..],
+                                    &[],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         return_result_occurrence: state.active_return_result_occurrence,
                                         return_result_process,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
-                                            boundary
-                                                .append_delivery_events(&events[delivery_start..]);
                                             boundary.mark_counted();
                                             boundary
                                         }),
@@ -7425,13 +7424,20 @@ fn handle_resolution_choice_in_occurrence(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 return Ok(action_result_outcome(
                                     events,
                                     state.waiting_for.clone(),
                                 ));
                             }
-                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(choice_player) => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsChoice(choice_player) => {
+                                let entry_target_choice = matches!(state.waiting_for, WaitingFor::EntryAttackTargetChoice { .. });
+                                if entry_target_choice {
+                                    logical_zone_change_group.record_delivery_completion(*card_id, crate::types::game_state::ZoneMoveCompletion::Moved)
+                                        .expect("entry target choice follows a certified primary delivery");
+                                }
+
                                 // CR 614.12b + CR 614.1c + CR 614.13: stash the
                                 // unprocessed cards so the drain in
                                 // `effects/mod.rs::drain_pending_change_zone_iteration`
@@ -7451,19 +7457,16 @@ fn handle_resolution_choice_in_occurrence(
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
-                                    &events[logical_group_event_start..],
+                                    &[],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         return_result_occurrence: state.active_return_result_occurrence,
                                         return_result_process,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
-                                        paused_current: Some(
-                                            crate::game::zone_pipeline::retain_zone_change_pause(state, anticipated_pause, &events[delivery_start..])
-                                                .expect("zone-change pause must retain its exact boundary"),
-                                        ),
+                                        paused_current: if entry_target_choice { None } else { Some(anticipated_pause.expect("zone-change pause must retain its exact boundary")) },
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -7495,6 +7498,7 @@ fn handle_resolution_choice_in_occurrence(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
@@ -7511,9 +7515,13 @@ fn handle_resolution_choice_in_occurrence(
                     crate::game::triggers::complete_logical_zone_trigger_collection(
                         state,
                         &mut logical_zone_change_group,
-                        &mut events[logical_group_event_start..],
+                        &mut [],
                     )
                     .expect("completed EffectZoneChoice owns every terminal member outcome");
+                    crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                        &logical_zone_change_group,
+                        events,
+                    );
                     if let Some((occurrence_id, result_id)) = pending_return_result_producer {
                         effects::publish_return_result(
                             state,
@@ -7853,7 +7861,6 @@ fn handle_resolution_choice_in_occurrence(
                             state,
                             &chosen_ids,
                         );
-                    let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
                         let card_id = &member.object_id;
                         // CR 400.7: a replacement child cannot substitute a same-ID successor.
@@ -7867,19 +7874,21 @@ fn handle_resolution_choice_in_occurrence(
                                 .expect("stale selected primary completes without a move");
                             continue;
                         }
-                        let anticipated_pause =
-                            effects::change_zone::anticipated_zone_change_delivery(
-                                state,
-                                *card_id,
-                                ctx.destination,
-                                ctx.source_id,
-                                ctx.face_down_in_exile,
-                            );
                         let delivery_start = events.len();
-                        match effects::change_zone::process_one_zone_move_with_terminal(
-                            state, &ctx, member, events,
-                        ) {
-                            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
+                        let stack_depth_before_zone_move =
+                            state.resolution_stack.capture_child_boundary();
+                        let terminal = effects::change_zone::process_one_zone_move_for_group(
+                            state,
+                            &ctx,
+                            member,
+                            Some(logical_zone_change_group.logical_group_id),
+                            events,
+                        );
+                        let anticipated_pause = terminal.delivery;
+                        crate::game::triggers::consume_zone_move_attempt(state, &mut logical_zone_change_group, anticipated_pause.as_ref(), &events[delivery_start..])
+                            .expect("zone move consumes only its certified primary receipt and independent witnesses");
+                        match terminal.outcome {
+                            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::Completed(completion) => {
                                 logical_zone_change_group
                                     .record_delivery_completion(*card_id, completion)
                                     .expect("cost-payment zone move records its exact terminal outcome");
@@ -7890,22 +7899,20 @@ fn handle_resolution_choice_in_occurrence(
                                     );
                                 }
                             }
-                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsAuraAttachmentChoice => {
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
-                                    &events[logical_group_event_start..],
+                                    &[],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         return_result_occurrence: state.active_return_result_occurrence,
                                         return_result_process: None,
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
                                         paused_current: anticipated_pause.map(|mut boundary| {
-                                            boundary
-                                                .append_delivery_events(&events[delivery_start..]);
                                             boundary.mark_counted();
                                             boundary
                                         }),
@@ -7925,6 +7932,7 @@ fn handle_resolution_choice_in_occurrence(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
@@ -7935,23 +7943,26 @@ fn handle_resolution_choice_in_occurrence(
                                     state.waiting_for.clone(),
                                 ));
                             }
-                            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(choice_player) => {
+                            crate::game::zone_pipeline::ZoneMoveTerminalOutcome::NeedsChoice(choice_player) => {
+                                let entry_target_choice = matches!(state.waiting_for, WaitingFor::EntryAttackTargetChoice { .. });
+                                if entry_target_choice {
+                                    logical_zone_change_group.record_delivery_completion(*card_id, crate::types::game_state::ZoneMoveCompletion::Moved)
+                                        .expect("entry target choice follows a certified primary delivery");
+                                }
+
                                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                                     state,
                                     &mut logical_zone_change_group,
-                                    &events[logical_group_event_start..],
+                                    &[],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         return_result_occurrence: state.active_return_result_occurrence,
                                         return_result_process: None,
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
-                                        paused_current: Some(
-                                            crate::game::zone_pipeline::retain_zone_change_pause(state, anticipated_pause, &events[delivery_start..])
-                                                .expect("zone-change pause must retain its exact boundary"),
-                                        ),
+                                        paused_current: if entry_target_choice { None } else { Some(anticipated_pause.expect("zone-change pause must retain its exact boundary")) },
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -7968,6 +7979,7 @@ fn handle_resolution_choice_in_occurrence(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
@@ -7984,9 +7996,13 @@ fn handle_resolution_choice_in_occurrence(
                     crate::game::triggers::complete_logical_zone_trigger_collection(
                         state,
                         &mut logical_zone_change_group,
-                        &mut events[logical_group_event_start..],
+                        &mut [],
                     )
                     .expect("completed cost-payment zone move owns every terminal member outcome");
+                    crate::game::triggers::sync_logical_zone_change_departure_stamps(
+                        &logical_zone_change_group,
+                        events,
+                    );
                     let events_after_move = events.len();
                     // CR 614.12a: this `EffectZoneChoice` was the interactive payment of an
                     // optional `MayCost` replacement's accept (e.g. Mimeoplasm's
