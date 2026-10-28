@@ -1118,6 +1118,7 @@ mod tests {
                 ObjectIncarnationRef::of(ObjectId(900), 4),
                 Zone::Battlefield,
             )),
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(1))),
         };
         for actor in crate::types::ability::instruction_actor_test_refs() {

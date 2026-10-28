@@ -1657,6 +1657,11 @@ mod tests {
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(runtime),
         );
+        state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            .unwrap()
+            .event_amount = Some(prevented);
         let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
             &mut state,
             None,

@@ -89,7 +89,7 @@ fn synthetic_declared_and_carried_owner_library_subjects_keep_their_counter_acto
             node = current.sub_ability.as_deref();
         }
         assert_eq!(actors.len(), 2);
-        assert_ne!(actors[0], ControllerRef::You.into());
+        assert_ne!(actors[0], ControllerRef::You.into(), "{text}");
         assert_eq!(actors[1], ControllerRef::You.into());
         let cast = runner.cast(spell);
         let outcome = if owner_subject {
@@ -681,7 +681,7 @@ fn synthetic_explicit_controller_subject_owns_its_counter_choice() {
         .to_vec();
     assert!(
         matches!(&runner.state().waiting_for,
-        WaitingFor::EffectZoneChoice { player: P1, cards, .. }
+        WaitingFor::ChooseFromZoneChoice { player: P1, cards, .. }
         if cards.contains(&anchor) && cards.contains(&recipient) && !cards.contains(&decoy)),
         "possessive controller's counter choice: {:?}",
         runner.state().waiting_for

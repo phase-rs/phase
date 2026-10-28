@@ -390,6 +390,13 @@ fn handle_opponent_may_choice_inner(
             // `controller` remains the controller of the resolving ability.
             ability.set_scoped_player_recursive(promptee);
             ability.context.accepting_player = Some(promptee);
+            // CR 118.12 + CR 608.2d: the player accepting this cost offer
+            // pays it; the printed controller still owns independent riders.
+            if let Effect::PayCost { payer, .. } = &mut ability.effect {
+                if matches!(payer, TargetFilter::Controller) {
+                    *payer = TargetFilter::SpecificPlayer { id: promptee };
+                }
+            }
 
             // CR 608.2d: a player cannot accept an exact resolution-time
             // selection they cannot make. This query deliberately recognizes
@@ -3032,6 +3039,54 @@ mod tests {
         .expect("terminal decline resolves the parked frame");
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.active_optional_effect_frame().is_none());
+    }
+
+    #[test]
+    fn opponent_may_cost_acceptance_preserves_payer_and_printed_rider_controller() {
+        for payer in [
+            TargetFilter::Controller,
+            TargetFilter::SpecificPlayer { id: PlayerId(2) },
+        ] {
+            let paid_by = if matches!(payer, TargetFilter::Controller) {
+                PlayerId(1)
+            } else {
+                PlayerId(2)
+            };
+            let mut state = opponent_may_state(
+                Effect::PayCost {
+                    cost: AbilityCost::PayLife {
+                        amount: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                    },
+                    scale: None,
+                    payer,
+                },
+                vec![PlayerId(1)],
+            );
+            let mut rider = ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+            rider.condition = Some(AbilityCondition::effect_performed());
+            state
+                .active_optional_effect_frame_mut()
+                .unwrap()
+                .ability
+                .sub_ability = Some(Box::new(rider));
+            crate::game::engine::apply(
+                &mut state,
+                PlayerId(0),
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .unwrap();
+            let result = crate::game::engine::apply(
+                &mut state,
+                PlayerId(1),
+                GameAction::DecideOptionalEffect { accept: true },
+            )
+            .unwrap();
+            assert_eq!(state.players[0].life, 23);
+            assert_eq!(state.players[paid_by.0 as usize].life, 18);
+            assert!(result.events.iter().any(|event| matches!(event, GameEvent::LifeChanged { player_id, .. } if *player_id == paid_by)));
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.active_optional_effect_frame().is_none());
+        }
     }
 
     #[test]

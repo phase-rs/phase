@@ -81,11 +81,9 @@ pub struct QuantityContext {
     /// to zero rather than treating the static source as the grammatical subject.
     pub spell: Option<ObjectId>,
     /// CR 121.2a + CR 614.1a: The amount carried by the proposed event a
-    /// replacement condition is being evaluated against — the draw count a
-    /// count-form antecedent ("would draw two or more cards") compares. Set
-    /// only by the replacement pipeline's condition context; `None` in every
-    /// other context, where `EventContextAmount` keeps its trigger/effect
-    /// cascade.
+    /// replacement condition is being evaluated against, or the applied event
+    /// owned by a post-replacement continuation. An owned missing quantity is
+    /// zero; only an unowned context uses the trigger/effect cascade.
     pub event_amount: Option<i32>,
     /// CR 201.5a: the granter stamped on the definition this quantity is read for,
     /// when no resolving ability is in scope to carry it.
@@ -3833,7 +3831,13 @@ fn ability_quantity_context(ability: &ResolvedAbility) -> QuantityContext {
         recipient: None,
         scoped_player: ability.scoped_player,
         damage_source: None,
-        event_amount: None,
+        // CR 615.5: a captured replacement amount is independent of nested
+        // instructions; owned missing data cannot borrow their effect counts.
+        event_amount: ability
+            .context
+            .replacement_event
+            .as_ref()
+            .map(|event| event.amount.unwrap_or(0)),
         spell: None,
         granting_object: None,
     }
@@ -20455,6 +20459,32 @@ mod tests {
             qty: QuantityRef::EventContextAmount,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
+    }
+
+    /// CR 615.5: an owning replacement keeps its amount across a nested event;
+    /// an explicitly missing amount cannot acquire that nested event's count.
+    #[test]
+    fn owned_replacement_amount_does_not_borrow_nested_counts() {
+        let mut state = GameState::new_two_player(42);
+        state.last_effect_count = Some(99);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 99);
+        for amount in [Some(3), Some(0), None] {
+            ability.context.replacement_event =
+                Some(crate::types::ability::ReplacementEventContext {
+                    amount,
+                    ..Default::default()
+                });
+            let restored: ResolvedAbility =
+                serde_json::from_slice(&serde_json::to_vec(&ability).unwrap()).unwrap();
+            assert_eq!(
+                resolve_quantity_with_targets(&state, &expr, &restored),
+                amount.unwrap_or(0)
+            );
+        }
     }
 
     /// CR 603.7a + CR 608.2h: `determined_event_context_amount` tells an amount

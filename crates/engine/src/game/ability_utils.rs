@@ -16860,6 +16860,7 @@ mod tests {
         parent.context.replacement_event = Some(ReplacementEventContext {
             source_id: None,
             source_identity: None,
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(1))),
         });
         for actor in crate::types::ability::instruction_actor_test_refs() {
@@ -16869,6 +16870,7 @@ mod tests {
                 Some(ReplacementEventContext {
                     source_id: None,
                     source_identity: None,
+                    amount: None,
                     event_target: Some(TargetRef::Player(PlayerId(2))),
                 }),
             ] {
@@ -16927,11 +16929,13 @@ mod tests {
         let parent_event = crate::types::ability::ReplacementEventContext {
             source_id: Some(ObjectId(80)),
             source_identity: None,
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(0))),
         };
         let selected_event = crate::types::ability::ReplacementEventContext {
             source_id: Some(ObjectId(81)),
             source_identity: None,
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(1))),
         };
         for actor in crate::types::ability::instruction_actor_test_refs() {

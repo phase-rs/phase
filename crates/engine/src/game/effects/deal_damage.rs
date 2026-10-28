@@ -1522,6 +1522,10 @@ pub fn resolve(
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
                     stash_remaining_damage_chain(state, ability, &ctx, remaining);
+                    // CR 608.2c: this batch owns the already-parked later instructions.
+                    if ability.sub_ability.is_some() {
+                        mark_pending_continuation_parent(state, EffectKind::DealDamage);
+                    }
                     return Ok(());
                 }
             }
@@ -1537,6 +1541,10 @@ pub fn resolve(
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
                     stash_remaining_damage_chain(state, ability, &ctx, remaining);
+                    // CR 608.2c: this batch owns the already-parked later instructions.
+                    if ability.sub_ability.is_some() {
+                        mark_pending_continuation_parent(state, EffectKind::DealDamage);
+                    }
                     return Ok(());
                 }
             }

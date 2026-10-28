@@ -14462,6 +14462,7 @@ mod tests {
             let event = ReplacementEventContext {
                 source_id: Some(source),
                 source_identity: Some(pin),
+                amount: None,
                 event_target: Some(TargetRef::Player(PlayerId(1))),
             };
             let mut ability = ResolvedAbility::new(Effect::NoOp, vec![], source, PlayerId(0));

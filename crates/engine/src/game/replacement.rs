@@ -928,6 +928,7 @@ fn stash_post_replacement_continuation(
     event_source: Option<ObjectId>,
     event_source_identity: Option<crate::types::identifiers::ObjectIdentityBinding>,
     event_target: Option<TargetRef>,
+    event_amount: Option<i32>,
 ) {
     state.install_post_replacement_drain(
         PostReplacementDrain {
@@ -937,6 +938,7 @@ fn stash_post_replacement_continuation(
             event_source,
             event_source_identity,
             event_target,
+            event_amount,
             // CR 109.5: "you" in the continuation is the REPLACING ability's
             // controller. Carried beside `source` rather than derived from it,
             // because `source` is the affected object on every zone-change
@@ -952,6 +954,25 @@ fn stash_post_replacement_continuation(
         },
         ResidentDrainPolicy::KeepResident,
     );
+}
+
+/// CR 614.1a + CR 615.5: the scalar belonging to the event being replaced.
+/// Damage prevention refines this to the amount actually prevented after its
+/// applier runs; no other event borrows a prior instruction's scalar.
+fn replacement_event_amount(event: &ProposedEvent) -> Option<i32> {
+    match event {
+        ProposedEvent::Damage { amount, .. }
+        | ProposedEvent::LifeGain { amount, .. }
+        | ProposedEvent::LifeLoss { amount, .. } => Some(u32_to_i32_saturating(*amount)),
+        ProposedEvent::Draw { count, .. }
+        | ProposedEvent::Mill { count, .. }
+        | ProposedEvent::AddCounter { count, .. }
+        | ProposedEvent::RemoveCounter { count, .. }
+        | ProposedEvent::CreateToken { count, .. }
+        | ProposedEvent::Proliferate { count, .. }
+        | ProposedEvent::Connive { count, .. } => Some(u32_to_i32_saturating(*count)),
+        _ => None,
+    }
 }
 
 fn ability_tree_creates_tokens(def: &AbilityDefinition) -> bool {
@@ -10230,7 +10251,42 @@ fn apply_single_replacement(
 
     if let Some(handler) = registry.get(&event_key) {
         let event_type = event_key.to_string();
-        match (handler.applier)(proposed, rid, state, events) {
+        let proposed_amount = replacement_event_amount(&proposed);
+        let replaced_damage = matches!(proposed, ProposedEvent::Damage { .. });
+        let optional_post =
+            repl_def_ref.is_some_and(|definition| replacement_mode_is_optional(&definition.mode));
+        let application_event_start = events.len();
+        let application = (handler.applier)(proposed, rid, state, events);
+        // CR 615.5: a partial prevention's rider names the prevented amount,
+        // not the original damage or a nested child's later effect count.
+        let applied_amount = replaced_damage
+            .then(|| {
+                events[application_event_start..]
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        GameEvent::DamagePrevented { amount, .. } => {
+                            Some(u32_to_i32_saturating(*amount))
+                        }
+                        _ => None,
+                    })
+            })
+            .flatten()
+            .or(proposed_amount);
+        if optional_post {
+            if let Some(drain) = state
+                .active_post_replacement_drains_mut()
+                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+                .filter(|drain| {
+                    drain.source == Some(rid.source)
+                        && drain.applied == replacement_applied
+                        && matches!(drain.status, DrainStatus::Ready(_))
+                })
+            {
+                drain.event_amount = applied_amount;
+            }
+        }
+        match application {
             ApplyResult::Modified(mut new_event) => {
                 if modifiers.etb_tap_state != EtbTapState::Unspecified {
                     if let Some(enter_tapped) = new_event.battlefield_entry_tap_state_mut() {
@@ -10402,6 +10458,7 @@ fn apply_single_replacement(
                         // `proposed_event_target` match above), so no existing
                         // continuation's event-target slot changes.
                         proposed_event_target.clone(),
+                        applied_amount,
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -10442,6 +10499,7 @@ fn apply_single_replacement(
                         proposed_damage_source,
                         proposed_damage_source_identity,
                         proposed_event_target.clone(),
+                        applied_amount,
                     );
                 }
                 events.push(GameEvent::ReplacementApplied {
@@ -12599,6 +12657,7 @@ fn continue_replacement_impl(
                         applied: proposed.applied_set().clone(),
                         event_source: None,
                         event_source_identity: None,
+                        event_amount: replacement_event_amount(&proposed),
                         event_target: None,
                         // CR 109.5: same split as the mandatory stash — the
                         // zone-change drain rebinds `source` to the entering /
@@ -17547,6 +17606,7 @@ mod tests {
                     applied: HashSet::new(),
                     event_source: None,
                     event_source_identity: None,
+                    event_amount: None,
                     event_target: Some(TargetRef::Player(PlayerId(0))),
                     controller: Some(PlayerId(0)),
                 },
@@ -20093,6 +20153,49 @@ mod tests {
         assert_eq!(
             observed, 2,
             "a prevented-amount continuation must observe the per-event amount"
+        );
+
+        let rider = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+        );
+        let repl = damage_repl(DamageModification::PreventionMinus {
+            value: PreventionFormula::fixed(2),
+        })
+        .execute(rider);
+        let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
+        assert!(matches!(
+            replace_event(&mut state, damage_event(5), &mut Vec::new()),
+            ReplacementResult::Execute(ProposedEvent::Damage { amount: 3, .. })
+        ));
+        let drain = state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .unwrap();
+        assert_eq!(drain.event_amount, Some(2));
+        let restored: PostReplacementDrain =
+            serde_json::from_slice(&serde_json::to_vec(drain).unwrap()).unwrap();
+        assert_eq!(&restored, drain);
+        state.last_effect_count = Some(999);
+        let mut resolved = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(10), PlayerId(0));
+        resolved.context.replacement_event =
+            Some(crate::game::targeting::resident_replacement_event(&state));
+        let restored: ResolvedAbility =
+            serde_json::from_slice(&serde_json::to_vec(&resolved).unwrap()).unwrap();
+        assert_eq!(
+            crate::game::quantity::resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                &restored
+            ),
+            2
         );
     }
 

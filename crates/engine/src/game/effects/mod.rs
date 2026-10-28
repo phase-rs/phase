@@ -7486,8 +7486,18 @@ fn detach_after_player_scope_local_chain(
     // CROSS-PLAYER aggregate instead (Windfall's "then draws that many cards" →
     // `PreviousEffectAmount`, the greatest discarded table-wide) is NOT a
     // referent consumer, so it still runs as its own post-all-iterations loop.
-    let referent_in_scope =
-        referent_introduced || effect_introduces_per_iteration_referent(&node.effect);
+    // CR 608.2c: a declared object left in place by this instruction is
+    // also this iteration's referent (such as the second counter in a list).
+    let declared_object_in_scope = gate_declares_target_it_leaves_in_place(node)
+        && node
+            .targets
+            .iter()
+            .filter(|target| matches!(target, TargetRef::Object(_)))
+            .count()
+            == 1;
+    let referent_in_scope = referent_introduced
+        || effect_introduces_per_iteration_referent(&node.effect)
+        || declared_object_in_scope;
     let next_is_co_scoped_anaphoric_consumer = (next.player_scope.as_ref() == Some(scope)
         || (next.player_scope.is_none() && next.sub_link == SubAbilityLink::ContinuationStep))
         && referent_in_scope
@@ -19152,6 +19162,24 @@ fn resolve_chain_body(
             && waits_for_resolution_choice(&state.waiting_for)
             && state.active_ability_continuation().is_some()
             && state.active_ability_continuation() != pending_continuation_before.as_ref()
+        {
+            return Ok(());
+        }
+
+        // CR 608.2c: a paused damage batch already owns its complete tail.
+        // A prior, unchanged damage continuation is unrelated to this call.
+        if matches!(
+            ability.effect,
+            Effect::DealDamage { .. }
+                | Effect::DamageAll { .. }
+                | Effect::DamageEachPlayer { .. }
+                | Effect::EachDealsDamageEqualToPower { .. }
+                | Effect::EachSourceDealsDamage { .. }
+        ) && waits_for_resolution_choice(&state.waiting_for)
+            && state.active_ability_continuation().is_some_and(|pending| {
+                pending.parent_kind == Some(EffectKind::from(&ability.effect))
+                    && Some(pending) != pending_continuation_before.as_ref()
+            })
         {
             return Ok(());
         }
@@ -32328,6 +32356,7 @@ mod tests {
             source_id: Some(source),
             source_identity: Some(source_pin),
             event_target: Some(TargetRef::Player(P1)),
+            amount: None,
         };
         for actor in crate::types::ability::instruction_actor_test_refs() {
             let mut producer = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
@@ -40686,6 +40715,66 @@ mod tests {
                     "{selection:?}, {link:?}"
                 );
                 assert_eq!(after_scope.is_none(), retained);
+            }
+        }
+    }
+
+    #[test]
+    fn player_scope_declared_in_place_target_keeps_its_intrinsic_counter_body() {
+        for targets in [
+            vec![],
+            vec![TargetRef::Object(ObjectId(42))],
+            vec![
+                TargetRef::Object(ObjectId(42)),
+                TargetRef::Object(ObjectId(43)),
+            ],
+        ] {
+            let mut head = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                targets.clone(),
+                ObjectId(1),
+                P0,
+            );
+            let mut body = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Keyword(
+                        crate::types::keywords::KeywordKind::Lifelink,
+                    ),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::ParentTarget,
+                },
+                vec![],
+                ObjectId(1),
+                P0,
+            );
+            body.instruction_actor = Some(ControllerRef::You.into());
+            let mut later = ResolvedAbility::new(
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+                vec![],
+                ObjectId(1),
+                P0,
+            );
+            later.instruction_actor = Some(ControllerRef::ScopedPlayer.into());
+            body.sub_ability = Some(Box::new(later));
+            head.sub_ability = Some(Box::new(body));
+            let (scoped, tail) = split_player_scope_chain(&head, &PlayerFilter::All);
+            assert_eq!(scoped.sub_ability.is_some(), targets.len() == 1);
+            assert_eq!(tail.is_none(), targets.len() == 1);
+            if targets.len() == 1 {
+                let intrinsic = scoped.sub_ability.unwrap();
+                assert_eq!(intrinsic.instruction_actor, Some(ControllerRef::You.into()));
+                assert_eq!(
+                    intrinsic.sub_ability.unwrap().instruction_actor,
+                    Some(ControllerRef::ScopedPlayer.into())
+                );
             }
         }
     }

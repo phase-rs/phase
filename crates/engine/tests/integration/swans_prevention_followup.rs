@@ -117,6 +117,7 @@ fn swans_followup_draws_for_damage_sources_controller() {
                 ObjectIncarnationRef::from_object(&state.objects[&damage_source]),
                 Zone::Battlefield,
             )),
+            event_amount: Some(1),
             event_target: None,
             // CR 109.5: this fixture drives the event-context read directly and
             // installs no replacing object, so "you" falls back to the affected
@@ -799,6 +800,7 @@ fn actual_selected_instead_keeps_its_own_event_with_an_independent_actor_after_s
                     Zone::Battlefield,
                 )
             }),
+            amount: None,
             event_target: Some(TargetRef::Player(p3)),
         };
         let mut sub = ResolvedAbility::new(
@@ -988,7 +990,8 @@ fn replacement_subject_actors_are_separate_from_replacer_owner_and_independent_y
         } else {
             runner.cast(source).target_player(p2).resolve()
         };
-        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == host)).count(), 1);
+        assert_eq!(outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { actor: actual, object_id, counter_type: CounterType::Plus1Plus1, count: 1 } if *actual == actor && *object_id == host)).count(), 1,
+            "replacement family {family}: {:?}", outcome.events().iter().filter(|event| matches!(event, GameEvent::CounterAdded { .. })).collect::<Vec<_>>());
         assert_eq!(
             outcome.state().objects[&host]
                 .counters
@@ -1715,6 +1718,7 @@ fn owned_missing_damage_recipients_skip_nonempty_decoys_after_nested_saved_dispa
                         source_id: (!matches!(filter, TargetFilter::PostReplacementDamageSource))
                             .then_some(outer),
                         source_identity: None,
+                        amount: None,
                         event_target: matches!(
                             filter,
                             TargetFilter::PostReplacementSourceController
@@ -1958,6 +1962,7 @@ fn zurs_real_payer_population_and_hydration_keep_the_outer_drawer_after_a_saved_
                 future.context.replacement_event = Some(ReplacementEventContext {
                     source_id: None,
                     source_identity: None,
+                    amount: None,
                     event_target: (target_case == 2).then_some(TargetRef::Object(decoy)),
                 });
             }
@@ -2236,6 +2241,7 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                     future.context.replacement_event = Some(ReplacementEventContext {
                         source_id: None,
                         source_identity: None,
+                        amount: None,
                         event_target: Some(TargetRef::Player(P0)),
                     });
                 }
@@ -2323,6 +2329,11 @@ fn comeuppance_source_kind_keeps_the_outer_event_across_an_opposite_kind_saved_d
                 let outcome = runner.activate(outer, 0).target_player(P0).resolve();
                 assert!(
                     matches!(outcome.final_waiting_for(), WaitingFor::ReplacementChoice { player, .. } if *player == p3)
+                );
+                assert_eq!(
+                    runner.state().players[0].life,
+                    20,
+                    "the independent tail cannot run before its nested damage choice"
                 );
                 let pending = runner.state().pending_replacement.as_ref().unwrap();
                 assert!(
@@ -2735,6 +2746,7 @@ fn template_and_fresh_resolved_source_followups_keep_the_outer_event_after_neste
             assert_eq!(owned.source_id, Some(source));
             assert_eq!(owned.source_identity, Some(original));
             assert_eq!(owned.event_target, Some(TargetRef::Object(swans)));
+            assert_eq!(owned.amount, Some(1));
             let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
                 .unwrap();
             let restored = serde_json::from_str::<PersistedGameState>(&saved)

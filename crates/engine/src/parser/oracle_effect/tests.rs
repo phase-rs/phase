@@ -59,6 +59,13 @@ fn instruction_actor_declared_library_subject_survives_conjugated_counter() {
             AbilityKind::Spell,
         );
         assert_attachment_chain_has_no_unimplemented(&definition);
+        assert!(
+            matches!(
+                definition.effect.as_ref(),
+                Effect::Shuffle { target } if is_declared_player_filter(target)
+            ),
+            "{subject}: the library action must declare the printed player target"
+        );
         let counters: Vec<_> =
             std::iter::successors(Some(&definition), |node| node.sub_ability.as_deref())
                 .filter(|node| matches!(node.effect.as_ref(), Effect::PutCounter { .. }))

@@ -7656,6 +7656,7 @@ mod tests {
                         ObjectIncarnationRef::of(ObjectId(2), 7),
                         Zone::Battlefield,
                     )),
+                    amount: None,
                     event_target: Some(TargetRef::Player(PlayerId(1))),
                 },
                 ReplacementEventContext {
@@ -7664,6 +7665,7 @@ mod tests {
                         ObjectIncarnationRef::of(ObjectId(2), 3),
                         Zone::Stack,
                     )),
+                    amount: None,
                     event_target: Some(TargetRef::Object(ObjectId(3))),
                 },
             ] {

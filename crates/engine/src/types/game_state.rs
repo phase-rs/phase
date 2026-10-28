@@ -24554,6 +24554,11 @@ pub struct PostReplacementDrain {
     /// `TargetFilter::PostReplacementDamageTarget`.
     pub event_target: Option<crate::types::ability::TargetRef>,
 
+    /// CR 615.5: quantity captured when this replacement applied, including
+    /// the amount actually prevented by a partial prevention effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_amount: Option<i32>,
+
     /// CR 109.5: the player "you" names inside this continuation — the
     /// controller of the object whose ability is doing the replacing.
     ///
@@ -24733,6 +24738,7 @@ impl PostReplacementDrain {
             event_source: None,
             event_source_identity: None,
             event_target: None,
+            event_amount: None,
             controller: None,
         }
     }

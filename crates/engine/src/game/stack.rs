@@ -6596,16 +6596,19 @@ mod tests {
                 ReplacementEventContext {
                     source_id: None,
                     source_identity: None,
+                    amount: None,
                     event_target: None,
                 },
                 ReplacementEventContext {
                     source_id: Some(ObjectId(3)),
                     source_identity: Some(pin(3, 2, Zone::Battlefield)),
+                    amount: None,
                     event_target: Some(TargetRef::Player(PlayerId(1))),
                 },
                 ReplacementEventContext {
                     source_id: Some(ObjectId(3)),
                     source_identity: Some(pin(3, 3, Zone::Stack)),
+                    amount: None,
                     event_target: Some(TargetRef::Object(ObjectId(4))),
                 },
             ] {

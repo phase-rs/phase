@@ -29863,7 +29863,12 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
             *target = subject_filter;
         }
         Effect::Shuffle { ref mut target }
-            if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
+            if *target == TargetFilter::Any
+                || *target == TargetFilter::Controller
+                // CR 115.1a + CR 608.2c: "their library" names the
+                // explicitly targeted subject, not an earlier object.
+                || (*target == TargetFilter::ParentTarget
+                    && subject.target.as_ref().is_some_and(is_declared_player_filter)) =>
         {
             *target = subject_filter;
         }

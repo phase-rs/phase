@@ -6520,6 +6520,10 @@ pub struct ReplacementEventContext {
     pub source_identity: Option<ObjectIdentityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_target: Option<TargetRef>,
+    /// CR 615.5: the amount established by this applied replacement, before
+    /// any nested instruction can publish a different effect count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount: Option<i32>,
 }
 
 impl Serialize for ReplacementEventContext {
@@ -38476,6 +38480,7 @@ mod tests {
                 ObjectIncarnationRef::of(ObjectId(92), 3),
                 Zone::Battlefield,
             )),
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(1))),
         };
         for actor in instruction_actor_test_refs() {
@@ -38520,6 +38525,7 @@ mod tests {
                 ObjectIncarnationRef::of(ObjectId(92), 4),
                 Zone::Stack,
             )),
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(2))),
         };
         for actor in instruction_actor_test_refs() {
@@ -38591,6 +38597,7 @@ mod tests {
         let event = ReplacementEventContext {
             source_id: Some(ObjectId(91)),
             source_identity: Some(pin),
+            amount: None,
             event_target: Some(TargetRef::Player(PlayerId(1))),
         };
         assert_eq!(
@@ -38647,11 +38654,13 @@ mod tests {
         let outer = ReplacementEventContext {
             source_id: Some(ObjectId(11)),
             source_identity: None,
+            amount: Some(3),
             event_target: Some(TargetRef::Player(PlayerId(1))),
         };
         let nested = ReplacementEventContext {
             source_id: Some(ObjectId(22)),
             source_identity: None,
+            amount: Some(9),
             event_target: Some(TargetRef::Player(PlayerId(2))),
         };
         let mut root = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));

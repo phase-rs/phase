@@ -2178,6 +2178,10 @@ pub(crate) fn resident_replacement_event(state: &GameState) -> ReplacementEventC
     ReplacementEventContext {
         source_id: state.post_replacement_event_source(),
         source_identity: state.post_replacement_event_source_identity(),
+        amount: state
+            .active_post_replacement_drains()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
+            .and_then(|drain| drain.event_amount),
         event_target: state.post_replacement_event_target().cloned(),
     }
 }
@@ -4733,6 +4737,7 @@ mod tests {
                     ObjectIncarnationRef::from_object(&state.objects[&c0]),
                     Zone::Battlefield,
                 )),
+                event_amount: None,
                 event_target: None,
                 controller: None,
             },
@@ -4793,6 +4798,7 @@ mod tests {
                 status: DrainStatus::Dispatching,
                 source: None,
                 applied: HashSet::new(),
+                event_amount: None,
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
                 event_source_identity: None,

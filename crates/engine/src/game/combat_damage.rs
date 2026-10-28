@@ -2003,11 +2003,12 @@ fn fire_combat_prevention_riders(
         state.install_ready_continuation(
             crate::types::ability::PostReplacementContinuation::Resolved(runtime),
         );
-        if let Some(source) = event_source {
-            if let Some(drain) = state
-                .active_post_replacement_drains_mut()
-                .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
-            {
+        if let Some(drain) = state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        {
+            drain.event_amount = Some(total_prevented);
+            if let Some(source) = event_source {
                 drain.event_source = Some(source);
                 drain.event_source_identity = source_identities.get(&source).copied();
             }
