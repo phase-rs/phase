@@ -3431,6 +3431,18 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             {
                 resume_resolution_frames(state, events);
             }
+            // CR 608.2c: the completed replacement child can also expose
+            // the interrupted zone instruction itself. Its remaining members
+            // must finish before priority or the instruction's reader.
+            if retired_paused_dispatch
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::ChangeZone(_) | ResolutionFrame::BatchDelivery(_))
+                )
+            {
+                resume_resolution_frames(state, events);
+            }
         }
     }
 

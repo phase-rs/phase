@@ -5989,7 +5989,13 @@ fn departure_later_branch_retirement(batch: bool, movement: u8, deep: bool, rest
         player, candidates, ..
     } = &runner.state().waiting_for
     else {
-        panic!("the normal selected C must still reach its real replacement");
+        panic!(
+            "the normal selected C must still reach its real replacement: \
+             batch={batch}, movement={movement}, deep={deep}, restore={restore}, \
+             waiting_for={:?}, frames={:?}",
+            runner.state().waiting_for,
+            runner.state().resolution_stack,
+        );
     };
     assert_eq!(*player, P1);
     assert_eq!(candidates.len(), 2);
@@ -6195,6 +6201,7 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
     for (component, side) in [(first, MergeSide::Top), (last, MergeSide::Bottom)] {
         runner
             .cast(component)
+            .alternative_cast(engine::types::actions::AlternativeCastDecision::Alternative)
             .casting_variant(engine::types::game_state::CastingVariant::Mutate)
             .target_objects(&[survivor])
             .commit();
