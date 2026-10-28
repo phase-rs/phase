@@ -3179,7 +3179,11 @@ pub(crate) fn source_choice_expected_faces() -> Vec<CardFace> {
         };
         let oracle = source["text"].as_str().unwrap();
         let activation_line = if pilgrim {
-            oracle.lines().nth(1).unwrap()
+            if name == "Pilgrim of Justice" {
+                "{W}, Sacrifice ~: The next time a red source of your choice would deal damage this turn, prevent that damage."
+            } else {
+                "{W}, Sacrifice ~: The next time a black source of your choice would deal damage this turn, prevent that damage."
+            }
         } else {
             oracle.lines().next().unwrap()
         };
@@ -3296,6 +3300,9 @@ pub(crate) fn source_choice_expected_faces() -> Vec<CardFace> {
         }
         faces.push(face);
     }
+    // Independent fixture identities determine the normal oracle-id/face/key
+    // scan order; these twelve single faces all have distinct oracle ids.
+    faces.sort_by(|left, right| left.scryfall_oracle_id.cmp(&right.scryfall_oracle_id));
     faces
 }
 

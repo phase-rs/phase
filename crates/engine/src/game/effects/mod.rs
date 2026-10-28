@@ -6195,7 +6195,6 @@ pub(crate) fn apply_parent_chain_context(
     if !child_attach_target_bindings.is_empty() {
         child.context.attach_target_bindings = child_attach_target_bindings;
     }
-    child.refresh_coin_target_inputs();
     // Only explicitly marked remaining members inherit this operation.
     child.context.damage_opportunity = child_damage_opportunity
         .and_then(|owned| parent.context.damage_opportunity.clone().or(Some(owned)));
@@ -6296,6 +6295,7 @@ pub(crate) fn apply_parent_chain_context(
     if let Some(snapshot) = effect_context_object {
         child.set_effect_context_object_recursive(snapshot.clone());
     }
+    child.refresh_coin_target_inputs();
 }
 
 /// CR 608.2d: whether `ability`'s already-chosen targets should propagate into
@@ -9295,6 +9295,14 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
                 ParentTargetHandling::NotAudited
             },
         ),
+        Effect::Draw { count, target } => (
+            matches!(count, QuantityExpr::Fixed { .. }).then(|| vec![target]),
+            if target.is_context_ref() {
+                ParentTargetHandling::NamesNoObject
+            } else {
+                ParentTargetHandling::NotAudited
+            },
+        ),
         Effect::CreateEmblem { statics, triggers } => (
             // CR 608.2c: an emblem's triggered ability can refer to anything when
             // it later triggers, so only a trigger-free emblem is audited.
@@ -9352,7 +9360,6 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
         | Effect::ApplyPostReplacementDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
         | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
         | Effect::PairWith { .. }
         | Effect::Destroy { .. }
         | Effect::Regenerate { .. }
@@ -26650,6 +26657,22 @@ fn resolve_chain_body(
         {
             return Ok(progress);
         }
+        // CR 608.2c + CR 609.7a: these three source-choice producers park
+        // their complete owning head and tail with the captured candidates.
+        // The generic pending path must not prepend that same tail again.
+        if continuation_installed_by_this_effect
+            && ability.effect.is_fresh_damage_source_producer()
+            && matches!(state.waiting_for, WaitingFor::DamageSourceChoice { .. })
+            && state.active_ability_continuation().is_some_and(|pending| {
+                !pending.damage_source_candidates.is_empty()
+                    && pending.chain.source_id == ability.source_id
+                    && pending.chain.controller == ability.controller
+                    && pending.chain.effect == ability.effect
+                    && pending.chain.sub_ability == ability.sub_ability
+            })
+        {
+            return Ok(progress);
+        }
         // CR 616.1 + CR 701.44a: An explore doubler ("…then it explores again")
         // paused this explore, and its applier already installed the doubled
         // second explore on `pending_continuation`. This node's own `sub_ability`
@@ -30184,7 +30207,23 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .sub_ability = Some(Box::new(draw));
-            runner.advance_to_end_step();
+            for _ in 0..160 {
+                if runner.state().phase == crate::types::phase::Phase::End {
+                    break;
+                }
+                let action = match runner.state().waiting_for {
+                    WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
+                    WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    },
+                    _ => GameAction::PassPriority,
+                };
+                runner.act(action).unwrap();
+            }
+            assert_eq!(runner.state().phase, crate::types::phase::Phase::End);
             runner.advance_until_stack_empty();
             assert!(matches!(
                 runner.state().waiting_for,
@@ -30365,7 +30404,23 @@ mod tests {
                 .as_mut()
                 .unwrap()
                 .sub_ability = Some(Box::new(draw));
-            runner.advance_to_end_step();
+            for _ in 0..160 {
+                if runner.state().phase == crate::types::phase::Phase::End {
+                    break;
+                }
+                let action = match runner.state().waiting_for {
+                    WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    },
+                    WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    },
+                    _ => GameAction::PassPriority,
+                };
+                runner.act(action).unwrap();
+            }
+            assert_eq!(runner.state().phase, crate::types::phase::Phase::End);
             runner.advance_until_stack_empty();
             let original = runner
                 .state()
@@ -30492,7 +30547,14 @@ mod tests {
                 }]
             )
             .is_empty());
-            state.resolving_stack_entry = state.stack.pop_back();
+            let popped = crate::game::stack::pop_top_stack_entry(&mut state)
+                .expect("the normal delayed producer placed its stack entry");
+            crate::game::stack::begin_resolving_stack_entry(
+                &mut state,
+                popped.entry,
+                popped.trigger_firing,
+            )
+            .expect("the normal delayed firing transfers with its resolving carrier");
             assert!(
                 state.resolving_stack_entry.is_some(),
                 "the normal delayed producer supplies the resolving source carrier"
@@ -34824,8 +34886,16 @@ mod tests {
 
         // Unaudited shapes are refused even when every filter they show is a
         // declared target (the deny-list mutation admits these).
+        assert!(survives(DOUBLE_TARGET, DRAW));
+        assert!(!survives(
+            DOUBLE_TARGET,
+            r#"{"type":"Draw","count":{"type":"Ref","qty":{"type":"EventContextAmount"}},"target":{"type":"Controller"}}"#,
+        ));
+        assert!(!survives(
+            DOUBLE_TARGET,
+            r#"{"type":"Draw","count":{"type":"Fixed","value":1},"target":{"type":"LastCreated"}}"#,
+        ));
         for unaudited in [
-            DRAW,
             r#"{"type":"DiscardCard","count":1,"target":{"type":"ParentTarget"}}"#,
             r#"{"type":"GrantCastingPermission","permission":{"type":"PlayFromExile","duration":"UntilEndOfTurn","granted_to":0},"target":{"type":"TrackedSet","id":0}}"#,
             r#"{"type":"Pump","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":0},"target":{"type":"ParentTarget"}}"#,
@@ -61598,6 +61668,53 @@ mod tests {
         let library = runner.state().players[0].library.len();
         runner.advance_until_stack_empty();
         assert_eq!(runner.state().players[0].library.len(), library);
+    }
+
+    /// CR 608.2c: the surviving independent draw still owns its replacement
+    /// pause and completes once after the declined placement's gate is gone.
+    #[test]
+    fn independent_fixed_draw_after_declined_placement_survives_replacement_pause() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        scenario
+            .add_creature(P0, "Synthetic optional draw observer", 1, 1)
+            .with_replacement_definition(
+                ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Draw)
+                    .draw_scope(DrawReplacementScope::IndividualDraw)
+                    .mode(crate::types::ability::ReplacementMode::Optional { decline: None }),
+            );
+        let source = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic declined placement paused draw", true,
+            "You may gain 1 life. You may put a creature card from your hand onto the battlefield. If you do, gain 5 life. Draw a card.").id();
+        scenario.with_library_top(P0, &["Independent paused draw", "Reserve"]);
+        let mut runner = scenario.build();
+        runner.cast(source).commit().stop_at_optional().resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert_eq!(runner.state().players[0].life, 21);
+        assert_eq!(runner.state().players[0].library.len(), 2);
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().players[0].library.len(), 1);
+        assert_eq!(runner.state().players[0].life, 21);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().stack.is_empty());
     }
 
     /// CR 608.2c + CR 608.2d: the existing instruction-entry and decline

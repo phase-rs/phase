@@ -3141,6 +3141,11 @@ pub(super) fn handle_copy_target_choice(
         });
     }
 
+    // CR 608.2d + CR 614.12a: the accepted copy answer consumes this prompt;
+    // entry work below may install a genuine new choice of its own.
+    state.waiting_for = WaitingFor::Priority {
+        player: state.active_player,
+    };
     let mut ability = copy_effect_for_source(state, source_id)
         .map(|effect_def| {
             build_resolved_from_def_with_targets(
@@ -6304,6 +6309,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let replacement_source = ObjectId(state.next_object_id);
         state.next_object_id += 1;
+        state.resolution_stack.push_copy_token(
+            crate::types::game_state::PendingCopyTokenResolution::legacy(
+                Default::default(),
+                EffectKind::CopyTokenOf,
+                replacement_source,
+            ),
+        );
         let mut jinnie = GameObject::new(
             replacement_source,
             CardId(1001),
@@ -6348,6 +6360,8 @@ mod tests {
                     },
                 )),
         );
+        jinnie.base_replacement_definitions =
+            std::sync::Arc::new(jinnie.replacement_definitions.iter_all().cloned().collect());
         state.objects.insert(replacement_source, jinnie);
         state.battlefield.push_back(replacement_source);
 
@@ -6401,6 +6415,7 @@ mod tests {
             "accepting the replacement must park on the branch choice, got {:?}",
             state.waiting_for
         );
+        state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
 
         apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
             .expect("choose dog branch");
@@ -6451,6 +6466,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let replacement_source = ObjectId(state.next_object_id);
         state.next_object_id += 1;
+        state.resolution_stack.push_copy_token(
+            crate::types::game_state::PendingCopyTokenResolution::legacy(
+                Default::default(),
+                EffectKind::CopyTokenOf,
+                replacement_source,
+            ),
+        );
         let mut jinnie = GameObject::new(
             replacement_source,
             CardId(1002),
@@ -6512,6 +6534,8 @@ mod tests {
                     },
                 )),
         );
+        jinnie.base_replacement_definitions =
+            std::sync::Arc::new(jinnie.replacement_definitions.iter_all().cloned().collect());
         state.objects.insert(replacement_source, jinnie);
         state.battlefield.push_back(replacement_source);
 
@@ -6573,6 +6597,7 @@ mod tests {
             "nested branch must park on the inner token choice, got {:?}",
             state.waiting_for
         );
+        state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
 
         apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
             .expect("choose dog-then-cat branch");
@@ -6611,6 +6636,94 @@ mod tests {
         );
     }
 
+    /// CR 614.5: a current creation starts fresh despite a stale global seed,
+    /// then carries its own stamped substitution through a public saved choice.
+    #[test]
+    fn current_public_token_creation_ignores_stale_legacy_seed_and_substitutes_once() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{PlayerFilter, PtValue};
+        let token = |name: &str| Effect::Token {
+            name: name.into(),
+            power: PtValue::Fixed(2),
+            toughness: PtValue::Fixed(2),
+            types: vec!["Creature".into(), name.into()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: false,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let replacer = scenario
+            .add_creature(P0, "Synthetic token substitute", 3, 3)
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                    .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChooseOneOf {
+                            chooser: PlayerFilter::Controller,
+                            branches: vec![
+                                AbilityDefinition::new(AbilityKind::Spell, token("Cat")),
+                                AbilityDefinition::new(AbilityKind::Spell, token("Dog")),
+                            ],
+                            kind: ChooseOneOfKind::Ordinary,
+                        },
+                    )),
+            )
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic current token creator", true)
+            .with_ability(token("Original"))
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().post_replacement_token_choice_applied =
+            Some(std::collections::HashSet::from([
+                AppliedReplacementKey::object(replacer, 0),
+            ]));
+        runner.cast(spell).resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { player: P0, .. }
+        ));
+        assert!(runner.state().resolution_stack.iter().any(|frame| matches!(frame,
+            crate::types::resolution::ResolutionFrame::CopyToken(pending) if pending.creation_id.is_some())));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { player: P0, .. }
+        ));
+        let loaded = serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap();
+        runner = crate::game::scenario::GameRunner::from_state(loaded);
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+        runner.advance_until_stack_empty();
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token)
+            .collect();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "Dog");
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner
+            .state()
+            .post_replacement_token_choice_applied
+            .is_none());
+    }
+
     /// CR 614.6 + CR 111.1 + issue #4886 (review #6): a token created by the
     /// `sub_ability` tail chained AFTER the whole `ChooseOneOf` — not by one of
     /// its own branches — must still be recognized as part of the token-choice
@@ -6631,6 +6744,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let replacement_source = ObjectId(state.next_object_id);
         state.next_object_id += 1;
+        state.resolution_stack.push_copy_token(
+            crate::types::game_state::PendingCopyTokenResolution::legacy(
+                Default::default(),
+                EffectKind::CopyTokenOf,
+                replacement_source,
+            ),
+        );
         let mut jinnie = GameObject::new(
             replacement_source,
             CardId(1003),
@@ -6692,6 +6812,8 @@ mod tests {
                 .description("Jinnie Fay".to_string())
                 .execute(choose_then_token),
         );
+        jinnie.base_replacement_definitions =
+            std::sync::Arc::new(jinnie.replacement_definitions.iter_all().cloned().collect());
         state.objects.insert(replacement_source, jinnie);
         state.battlefield.push_back(replacement_source);
 
@@ -6926,6 +7048,13 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let jinnie_source = ObjectId(state.next_object_id);
         state.next_object_id += 1;
+        state.resolution_stack.push_copy_token(
+            crate::types::game_state::PendingCopyTokenResolution::legacy(
+                Default::default(),
+                EffectKind::CopyTokenOf,
+                jinnie_source,
+            ),
+        );
         let mut jinnie = GameObject::new(
             jinnie_source,
             CardId(1020),
@@ -6993,6 +7122,8 @@ mod tests {
                     },
                 )),
         );
+        jinnie.base_replacement_definitions =
+            std::sync::Arc::new(jinnie.replacement_definitions.iter_all().cloned().collect());
         state.objects.insert(jinnie_source, jinnie);
         state.battlefield.push_back(jinnie_source);
 
@@ -7057,6 +7188,7 @@ mod tests {
             "branch 0 must park on the inner non-token choice before the token sub-ability, got {:?}",
             state.waiting_for
         );
+        state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
 
         // Resolve the inner non-token choice. The Dog sub-ability is stashed
         // into pending_continuation and drains after this returns. Pre-fix,
@@ -8955,6 +9087,70 @@ mod tests {
             state.battlefield.contains(&copy_ench),
             "the attached copy must survive the unattached-Aura SBA"
         );
+    }
+
+    /// CR 614.12a + CR 616.1: consuming the copy answer preserves a newly
+    /// raised counter replacement, then resumes the copied Aura's entry tail.
+    #[test]
+    fn ordinary_copy_answer_preserves_new_counter_replacement_then_attaches() {
+        let (mut state, copy_ench, aura, hosts) = drive_copy_enchantment_of_aura(1);
+        let entry_counters = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: crate::types::counter::CounterType::Time,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            ));
+        let donor = state.objects.get_mut(&aura).unwrap();
+        donor.replacement_definitions.push(entry_counters.clone());
+        std::sync::Arc::make_mut(&mut donor.base_replacement_definitions).push(entry_counters);
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
+                .quantity_modification(crate::types::ability::QuantityModification::DOUBLE),
+        );
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(aura)),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        assert_eq!(
+            state.objects[&copy_ench]
+                .counters
+                .get(&crate::types::counter::CounterType::Time),
+            None
+        );
+        assert!(state.resolution_stack.iter().any(|frame| matches!(
+            frame,
+            crate::types::resolution::ResolutionFrame::CounterAdditions(_)
+        )));
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        assert_eq!(
+            state.objects[&copy_ench]
+                .counters
+                .get(&crate::types::counter::CounterType::Time),
+            Some(&2)
+        );
+        assert_eq!(
+            state.objects[&copy_ench].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(hosts[0]))
+        );
+        assert!(state.deferred_entry_events.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.resolution_stack.is_empty());
     }
 
     /// CR 303.4g + CR 704.5m: With NO legal host on the battlefield, the copied

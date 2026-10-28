@@ -3636,11 +3636,15 @@ mod tests {
         let mut ctx = ParseContext::default();
         let mut suffix = SearchSuffixConstraints::default();
         // Invented suffix that won't hit any existing filter-suffix pattern.
-        parse_search_filter_suffixes(
+        let result = parse_search_filter_suffixes(
             " with unrecognized flibbertigibbet suffix",
             &mut suffix,
             &mut ctx,
             None,
+        );
+        assert_eq!(
+            result,
+            Err("with unrecognized flibbertigibbet suffix".into())
         );
         assert!(
             ctx.diagnostics

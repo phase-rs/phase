@@ -832,7 +832,10 @@ pub(crate) fn validate_pending_coin_flip(
             .resolving_stack_entry
             .as_ref()
             .and_then(|entry| entry.ability())
-            .is_some_and(|owner| matches_owner(owner, pending));
+            .is_some_and(|owner| {
+                matches_owner(owner, pending)
+                    || matches_direct_die_branch_owner(state, owner, pending)
+            });
         if !retained_owner {
             return Err(EffectError::InvalidParam(
                 "parked coin target custody has no coherent original owner".into(),
@@ -863,6 +866,113 @@ pub(crate) fn validate_pending_coin_flip(
         pending.return_result_occurrence,
     )
     .map(|_| ())
+}
+
+fn matches_direct_die_branch_owner(
+    state: &GameState,
+    installed: &ResolvedAbility,
+    pending: &PendingCoinFlip,
+) -> bool {
+    use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
+    use std::ops::ControlFlow;
+
+    let Some(parent) = state.resolution_stack.direct_coin_die_parent(pending) else {
+        return false;
+    };
+    // A modified result cannot be reconstructed from the natural die after its
+    // branch has run. Only the retained unmodified direct-row writer is admitted.
+    if parent.modifier.is_some()
+        || parent.source_id != pending.source_id
+        || parent.controller != pending.controller
+        || parent.expected_return_result_process != pending.expected_return_result_process
+        || parent.targets != pending.targets
+        || parent.chain_root_targets != pending.chain_root_targets
+    {
+        return false;
+    }
+    let Some(index) = parent.next_index.checked_sub(1) else {
+        return false;
+    };
+    let Some(natural) = parent.results.get(index).copied() else {
+        return false;
+    };
+    if parent.forced_ignored.contains(&index) {
+        return false;
+    }
+    let Some(selected) = parent
+        .results_table
+        .iter()
+        .find(|row| natural >= row.min && natural <= row.max)
+    else {
+        return false;
+    };
+    fn installed_roll_matches(
+        node: &ResolvedAbility,
+        parent: &crate::types::resolution::PendingDieRoll,
+    ) -> bool {
+        (node.source_id == parent.source_id
+            && node.controller == parent.controller
+            && node.targets == parent.targets
+            && node.context.chain_root_targets == parent.chain_root_targets
+            && node.return_result_process == parent.expected_return_result_process
+            && matches!(&node.effect, Effect::RollDie { sides, modifier, results, .. }
+                if *sides == parent.sides && modifier == &parent.modifier && results == &parent.results_table))
+            || node
+                .sub_ability
+                .as_deref()
+                .is_some_and(|child| installed_roll_matches(child, parent))
+            || node
+                .else_ability
+                .as_deref()
+                .is_some_and(|child| installed_roll_matches(child, parent))
+    }
+    if !installed_roll_matches(installed, parent) {
+        return false;
+    }
+    let effect = Effect::RollDie {
+        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        sides: parent.sides,
+        modifier: parent.modifier.clone(),
+        results: parent.results_table.clone(),
+    };
+    let mut coherent = false;
+    let _ = direct_nodes::visit_effect_scoped(
+        &effect,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |node| {
+            let DefinitionNode::Ability(definition) = node else {
+                return ControlFlow::Continue(());
+            };
+            if definition != selected.effect.as_ref()
+                || !matches!(definition.effect.as_ref(), Effect::FlipCoins { .. })
+            {
+                return ControlFlow::Continue(());
+            }
+            let mut expected =
+                crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                    definition,
+                    parent.source_id,
+                    parent.controller,
+                    parent.targets.clone(),
+                    parent.chain_root_targets.clone(),
+                );
+            expected.bind_return_result_process(parent.expected_return_result_process);
+            crate::game::ability_utils::inherit_result_branch_source_identity(state, &mut expected);
+            coherent = matches!(&expected.effect, Effect::FlipCoins { win_effect, lose_effect, .. }
+            if win_effect == &pending.win_effect && lose_effect == &pending.lose_effect)
+                && crate::game::ability_utils::validate_retained_coin_target_custody(
+                    &expected,
+                    &pending.branch_context,
+                )
+                .is_ok();
+            if coherent {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    );
+    coherent
 }
 
 pub fn resume_after_keep(

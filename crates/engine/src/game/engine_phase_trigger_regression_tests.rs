@@ -1044,7 +1044,7 @@ fn issue_4663_go_shintai_hidden_cruelty_optional_pay_target_list_uses_where_x() 
         player: PlayerId(0),
     };
 
-    put_hidden_cruelty_go_shintai(&mut state);
+    let shrine = put_hidden_cruelty_go_shintai(&mut state);
     let second_shrine = put_pt_creature(&mut state, 46631, PlayerId(0), "Second Shrine", 1, 1);
     let second_shrine_obj = state.objects.get_mut(&second_shrine).unwrap();
     second_shrine_obj
@@ -1069,52 +1069,124 @@ fn issue_4663_go_shintai_hidden_cruelty_optional_pay_target_list_uses_where_x() 
         Vec::new(),
     ));
 
-    let mut events = Vec::new();
-    crate::game::turns::auto_advance(&mut state, &mut events);
-
-    for _ in 0..20 {
-        match state.waiting_for.clone() {
-            WaitingFor::Priority { player } => {
-                if state.stack.is_empty() {
-                    break;
-                }
-                apply(&mut state, player, GameAction::PassPriority).unwrap();
+    let initial = state;
+    for (accept, legal_target) in [(true, true), (false, true), (true, false)] {
+        let mut state = initial.clone();
+        if !legal_target {
+            for id in [shrine, second_shrine, low_toughness] {
+                let object = state.objects.get_mut(&id).unwrap();
+                object.toughness = Some(3);
+                object.base_toughness = Some(3);
             }
-            WaitingFor::OptionalEffectChoice { player, .. } => {
-                apply(
-                    &mut state,
-                    player,
-                    GameAction::DecideOptionalEffect { accept: true },
-                )
-                .unwrap();
-            }
-            WaitingFor::TriggerTargetSelection { target_slots, .. }
-            | WaitingFor::TargetSelection { target_slots, .. } => {
-                assert_eq!(target_slots.len(), 1);
-                assert!(
-                    target_slots[0]
-                        .legal_targets
-                        .contains(&TargetRef::Object(low_toughness)),
-                    "two Shrines should allow toughness-2 target: {:?}",
-                    target_slots[0].legal_targets
-                );
-                assert!(
-                    !target_slots[0]
-                        .legal_targets
-                        .contains(&TargetRef::Object(high_toughness)),
-                    "two Shrines should exclude toughness-3 target: {:?}",
-                    target_slots[0].legal_targets
-                );
-                return;
-            }
-            other => panic!("unexpected state while driving Hidden Cruelty trigger: {other:?}"),
         }
-    }
+        let mut events = Vec::new();
+        crate::game::turns::auto_advance(&mut state, &mut events);
+        let mut original_entry = None;
+        let mut reflexive_entry = None;
+        let mut saw_payment = false;
+        for _ in 0..40 {
+            match state.waiting_for.clone() {
+                WaitingFor::Priority { player } => {
+                    if state.stack.is_empty() {
+                        break;
+                    }
+                    if original_entry.is_none() {
+                        original_entry = state.stack.last().map(|entry| entry.id);
+                    }
+                    apply(&mut state, player, GameAction::PassPriority).unwrap();
+                }
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    assert_eq!(player, PlayerId(0));
+                    assert!(!saw_payment, "one printed optional payment");
+                    saw_payment = true;
+                    assert_eq!(state.players[0].mana_pool.total(), 1);
+                    assert_eq!(state.objects[&low_toughness].zone, Zone::Battlefield);
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::DecideOptionalEffect { accept },
+                    )
+                    .unwrap();
+                }
+                WaitingFor::TriggerTargetSelection {
+                    player,
+                    target_slots,
+                    ..
+                } => {
+                    assert!(accept && legal_target);
+                    assert!(saw_payment);
+                    assert_eq!(player, PlayerId(0));
+                    assert_eq!(
+                        state.players[0].mana_pool.total(),
+                        0,
+                        "the printed 1 is paid before the reflexive trigger"
+                    );
+                    // CR 603.12: payment creates a distinct stack entry whose
+                    // destruction remains pending until its own targets and resolution.
+                    let entry = state
+                        .pending_trigger_entry
+                        .expect("separate reflexive trigger entry");
+                    assert_ne!(Some(entry), original_entry);
+                    assert!(state.stack.iter().any(|stack| stack.id == entry));
+                    assert_eq!(state.objects[&low_toughness].zone, Zone::Battlefield);
+                    assert!(reflexive_entry.replace(entry).is_none());
+                    assert_eq!(target_slots.len(), 1);
+                    assert!(
+                        target_slots[0]
+                            .legal_targets
+                            .contains(&TargetRef::Object(low_toughness)),
+                        "two Shrines should allow toughness-2 target: {:?}",
+                        target_slots[0].legal_targets
+                    );
+                    assert!(
+                        !target_slots[0]
+                            .legal_targets
+                            .contains(&TargetRef::Object(high_toughness)),
+                        "two Shrines should exclude toughness-3 target: {:?}",
+                        target_slots[0].legal_targets
+                    );
+                    apply(
+                        &mut state,
+                        player,
+                        GameAction::SelectTargets {
+                            targets: vec![TargetRef::Object(low_toughness)],
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        state.objects[&low_toughness].zone,
+                        Zone::Battlefield,
+                        "choosing targets does not itself resolve the separate trigger"
+                    );
+                }
+                other => panic!("unexpected state while driving Hidden Cruelty trigger: {other:?}"),
+            }
+        }
 
-    panic!(
-        "never reached Hidden Cruelty reflexive target selection; final state = {:?}",
-        state.waiting_for
-    );
+        assert!(saw_payment);
+        assert!(
+            original_entry.is_some(),
+            "the original end-step trigger used the stack"
+        );
+        assert_eq!(reflexive_entry.is_some(), accept && legal_target);
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            if accept { 0 } else { 1 }
+        );
+        assert_eq!(
+            state.objects[&low_toughness].zone,
+            if accept && legal_target {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(state.objects[&high_toughness].zone, Zone::Battlefield);
+        assert!(state.stack.is_empty());
+        assert!(state.resolution_stack.is_empty());
+        assert!(state.pending_trigger.is_none());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
 }
 
 /// Issue #1243 — decline path. The trigger still goes on the stack and the

@@ -6904,7 +6904,11 @@ fn replacement_valid_card_matches(
     }
     if repl_def.event == ReplacementEvent::ChangeZone
         || (repl_def.event == ReplacementEvent::Moved
-            && repl_def.destination_zone == Some(Zone::Battlefield))
+            && (repl_def.destination_zone == Some(Zone::Battlefield)
+                || (repl_def.destination_zone.is_none()
+                    && *filter == TargetFilter::SelfRef
+                    && matches!(event, ProposedEvent::TokenEntry { entry_ref, .. }
+                        if *entry_ref == source_id && state.liminal_entries.contains_key(entry_ref)))))
     {
         return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
     }
@@ -15128,18 +15132,12 @@ mod tests {
                 index: 2
             }]
         );
-        let settled = apply_single_replacement(
-            &mut state,
-            ordinary.clone(),
-            ReplacementId {
-                source: ObjectId(0),
-                index: 2,
-            },
-            ReplacementBranch::Execute,
-            replacement_registry(),
-            &mut Vec::new(),
-        )
-        .unwrap();
+        assert_eq!(
+            replace_event(&mut state, ordinary.clone(), &mut Vec::new()),
+            ReplacementResult::NeedsChoice(PlayerId(0)),
+            "the real pipeline applies the creation-class doubler before ordering the two entry-class candidates"
+        );
+        let settled = state.pending_replacement.take().unwrap().proposed;
         assert!(matches!(
             &settled,
             ProposedEvent::CreateToken { count: 2, .. }
@@ -16664,80 +16662,129 @@ mod tests {
 
     #[test]
     fn token_entry_matches_liminal_self_moved_replacement_only() {
-        let mut state = test_state_with_object(
-            ObjectId(10),
-            Zone::Battlefield,
-            vec![make_repl(ReplacementEvent::Moved).valid_card(TargetFilter::Any)],
-        );
-        let entry_ref = ObjectId(20);
-        let mut liminal = GameObject::new(
-            entry_ref,
-            CardId(0),
-            PlayerId(0),
-            "Liminal Copy".to_string(),
-            Zone::Battlefield,
-        );
-        liminal
-            .replacement_definitions
-            .push(tap_self_moved_replacement());
-        state.liminal_entries.insert(
-            entry_ref,
-            LiminalEntry {
-                creation_frame: None,
-                instructions: None,
-                object: crate::types::game_state::LiminalEntrant::Token(
-                    crate::types::game_state::TokenProjection::materialize(liminal),
-                ),
-                name: "Liminal Copy".to_string(),
-                source_id: ObjectId(999),
-                controller: PlayerId(0),
-                enters_attacking: false,
-                attach_to: None,
-                sacrifice_at: None,
-                remaining_count: 0,
-                created_ids: Vec::new(),
-                copy_resume: None,
-                spec_resume: None,
-                enter_tapped: EtbTapState::Unspecified,
-                enter_with_counters: Vec::new(),
-                kind: crate::types::game_state::LiminalEntryKind::Token,
-                replacement_applied: HashSet::new(),
-            },
-        );
-        assert!(!state.objects.contains_key(&entry_ref));
-        assert!(!state.battlefield.iter().any(|id| *id == entry_ref));
-
-        let mut events = Vec::new();
-        let result = replace_event(
-            &mut state,
-            ProposedEvent::TokenEntry {
+        for destination in [None, Some(Zone::Battlefield), Some(Zone::Graveyard)] {
+            let mut state = test_state_with_object(
+                ObjectId(10),
+                Zone::Battlefield,
+                vec![make_repl(ReplacementEvent::Moved).valid_card(TargetFilter::Any)],
+            );
+            let entry_ref = ObjectId(20);
+            let mut liminal = GameObject::new(
                 entry_ref,
-                enter_tapped: EtbTapState::Unspecified,
-                enter_with_counters: Vec::new(),
-                enter_with_choices: None,
-                applied: HashSet::new(),
-            },
-            &mut events,
-        );
+                CardId(0),
+                PlayerId(0),
+                "Liminal Copy".to_string(),
+                Zone::Battlefield,
+            );
+            let mut own = tap_self_moved_replacement();
+            own.destination_zone = destination;
+            liminal.replacement_definitions.push(own);
+            state.liminal_entries.insert(
+                entry_ref,
+                LiminalEntry {
+                    creation_frame: None,
+                    instructions: None,
+                    object: crate::types::game_state::LiminalEntrant::Token(
+                        crate::types::game_state::TokenProjection::materialize(liminal),
+                    ),
+                    name: "Liminal Copy".to_string(),
+                    source_id: ObjectId(999),
+                    controller: PlayerId(0),
+                    enters_attacking: false,
+                    attach_to: None,
+                    sacrifice_at: None,
+                    remaining_count: 0,
+                    created_ids: Vec::new(),
+                    copy_resume: None,
+                    spec_resume: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    kind: crate::types::game_state::LiminalEntryKind::Token,
+                    replacement_applied: HashSet::new(),
+                },
+            );
+            assert!(!state.objects.contains_key(&entry_ref));
+            assert!(!state.battlefield.iter().any(|id| *id == entry_ref));
 
-        let ReplacementResult::Execute(event @ ProposedEvent::TokenEntry { enter_tapped, .. }) =
-            result
-        else {
-            panic!("expected TokenEntry execute, got {result:?}");
-        };
-        assert_eq!(enter_tapped, EtbTapState::Tapped);
-        assert!(
-            event
-                .applied_set()
-                .contains(&AppliedReplacementKey::object(entry_ref, 0)),
-            "liminal object's own SelfRef Moved replacement should apply"
-        );
-        assert!(
-            !event
-                .applied_set()
-                .contains(&AppliedReplacementKey::object(ObjectId(10), 0)),
-            "unscoped generic external Moved/Any must not see TokenEntry"
-        );
+            let mut events = Vec::new();
+            let result = replace_event(
+                &mut state,
+                ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enter_with_counters: Vec::new(),
+                    enter_with_choices: None,
+                    applied: HashSet::new(),
+                },
+                &mut events,
+            );
+
+            let ReplacementResult::Execute(event @ ProposedEvent::TokenEntry { enter_tapped, .. }) =
+                result
+            else {
+                panic!("expected TokenEntry execute, got {result:?}");
+            };
+            assert_eq!(
+                enter_tapped,
+                if destination == Some(Zone::Graveyard) {
+                    EtbTapState::Unspecified
+                } else {
+                    EtbTapState::Tapped
+                }
+            );
+            assert_eq!(
+                event
+                    .applied_set()
+                    .contains(&AppliedReplacementKey::object(entry_ref, 0)),
+                destination != Some(Zone::Graveyard),
+                "liminal object's own SelfRef Moved replacement should apply"
+            );
+            assert!(
+                !event
+                    .applied_set()
+                    .contains(&AppliedReplacementKey::object(ObjectId(10), 0)),
+                "unscoped generic external Moved/Any must not see TokenEntry"
+            );
+        }
+    }
+
+    /// CR 614.12: a copied token's own projected self-entry replacement
+    /// applies before the public creation commits it to the battlefield.
+    #[test]
+    fn public_copy_token_applies_its_own_unannotated_self_entry_replacement() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let donor = scenario
+            .add_creature(P0, "Synthetic copied self-entry bearer", 2, 2)
+            .with_replacement_definition(tap_self_moved_replacement())
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic public copy token",
+                true,
+                "Create a token that's a copy of target creature you control.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(donor).resolve();
+        let tokens: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token)
+            .collect();
+        assert_eq!(tokens.len(), 1);
+        assert!(tokens[0].tapped);
+        assert_eq!(tokens[0].zone, Zone::Battlefield);
+        assert!(!runner.state().objects[&donor].tapped);
+        assert!(runner.state().liminal_entries.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 
     #[test]
@@ -25809,8 +25856,17 @@ mod tests {
             Zone::Battlefield,
         );
         jinnie.replacement_definitions = vec![jinnie_replacement].into();
+        jinnie.base_replacement_definitions =
+            std::sync::Arc::new(jinnie.replacement_definitions.iter_all().cloned().collect());
         state.objects.insert(source, jinnie);
         state.battlefield.push_back(source);
+        state.resolution_stack.push_copy_token(
+            crate::types::game_state::PendingCopyTokenResolution::legacy(
+                Default::default(),
+                crate::types::ability::EffectKind::CopyTokenOf,
+                source,
+            ),
+        );
 
         let proposed = ProposedEvent::CreateToken {
             creation_frame: None,
@@ -25876,6 +25932,149 @@ mod tests {
         assert_eq!(tokens[0].name, "Cat");
         assert_eq!(tokens[0].power, Some(2));
         assert_eq!(tokens[0].toughness, Some(2));
+    }
+
+    /// CR 614.5: an authentic saved legacy substitution retains its full
+    /// applied authority even when its selected source is no longer available.
+    #[test]
+    fn legacy_token_substitution_missing_source_zero_and_other_replacement_complete() {
+        for missing_source in [false, true] {
+            let source = ObjectId(10);
+            let token = |name: &str| {
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Token {
+                        name: name.into(),
+                        power: PtValue::Fixed(2),
+                        toughness: PtValue::Fixed(2),
+                        types: vec!["Creature".into(), name.into()],
+                        colors: vec![],
+                        keywords: vec![],
+                        tapped: false,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        owner: TargetFilter::Controller,
+                        attach_to: None,
+                        enters_attacking: false,
+                        supertypes: vec![],
+                        static_abilities: vec![],
+                        enter_with_counters: vec![],
+                    },
+                )
+            };
+            let selected = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                .mode(ReplacementMode::Optional { decline: None })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![token("Cat"), token("Dog")],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                ));
+            let mut state = test_state_with_object(source, Zone::Battlefield, vec![selected]);
+            let object = state.objects.get_mut(&source).unwrap();
+            object.base_replacement_definitions =
+                std::sync::Arc::new(object.replacement_definitions.iter_all().cloned().collect());
+            state.resolution_stack.push_copy_token(
+                crate::types::game_state::PendingCopyTokenResolution::legacy(
+                    Default::default(),
+                    crate::types::ability::EffectKind::CopyTokenOf,
+                    source,
+                ),
+            );
+            let proposed = ProposedEvent::CreateToken {
+                creation_frame: None,
+                instructions: None,
+                owner: PlayerId(0),
+                spec: Box::new(test_token_spec(PlayerId(0), CoreType::Artifact)),
+                copy: None,
+                enter_tapped: EtbTapState::Unspecified,
+                count: 1,
+                appended: vec![],
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+            assert_eq!(
+                replace_event(&mut state, proposed, &mut events),
+                ReplacementResult::NeedsChoice(PlayerId(0))
+            );
+            let ReplacementResult::Execute(primary) =
+                continue_replacement(&mut state, 0, &mut events)
+            else {
+                panic!("selected legacy substitution must suppress the original event")
+            };
+            apply_create_token_after_replacement(&mut state, primary, &mut events);
+            if missing_source {
+                state.objects.remove(&source);
+                state.battlefield.retain(|id| *id != source);
+            }
+            assert!(matches!(
+                crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                    &mut state,
+                    None,
+                    None,
+                    Some(ReplacementEvent::CreateToken),
+                    &mut events,
+                ),
+                Some(WaitingFor::ChooseOneOfBranch { .. })
+            ));
+            let pending = state
+                .resolution_stack
+                .active_choose_one_of()
+                .expect("real branch owner");
+            assert_eq!(
+                pending.source_id,
+                if missing_source { ObjectId(0) } else { source }
+            );
+            let applied = pending.replacement_applied.clone();
+            assert!(state.has_legacy_token_substitution_authority(pending.source_id, &applied));
+            assert!(!state.has_legacy_token_substitution_authority(
+                if missing_source {
+                    ObjectId(999)
+                } else {
+                    ObjectId(0)
+                },
+                &applied
+            ));
+            if !missing_source {
+                let mut departed = state.clone();
+                departed.objects.remove(&source);
+                assert!(
+                    departed.has_legacy_token_substitution_authority(source, &applied),
+                    "a branch's already-bound nonzero source survives its later disappearance"
+                );
+            }
+            let mut foreign = applied.clone();
+            foreign.insert(AppliedReplacementKey::object(ObjectId(999), 4));
+            assert!(!state.has_legacy_token_substitution_authority(pending.source_id, &foreign));
+            assert!(
+                !state.has_legacy_token_substitution_authority(pending.source_id, &HashSet::new())
+            );
+            state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+            state.pending_damage_replacements.push(
+                ReplacementDefinition::new(ReplacementEvent::CreateToken)
+                    .quantity_modification(QuantityModification::DOUBLE),
+            );
+            crate::game::engine::apply_as_current(
+                &mut state,
+                GameAction::ChooseBranch { index: 1 },
+            )
+            .unwrap();
+            let tokens: Vec<_> = state
+                .objects
+                .values()
+                .filter(|object| object.is_token)
+                .collect();
+            assert_eq!(
+                tokens.len(),
+                2,
+                "a different replacement still doubles the selected substitute"
+            );
+            assert!(tokens.iter().all(|object| object.name == "Dog"));
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.resolution_stack.is_empty());
+            assert!(state.post_replacement_token_choice_applied.is_none());
+        }
     }
 
     /// CR 616.1: `Effect::Token` execute on a Draw event fully substitutes the
@@ -28667,13 +28866,13 @@ mod tests {
     /// the recorder is hooked at. R13 pins the INVARIANT, never a call-site
     /// count (U1 itself moves one caller of `find_applicable_replacements` from
     /// `effects/token.rs` into this file): **every production path that goes on
-    /// to apply a replacement routes through `fn pipeline_loop`, where the one
+    /// to apply a replacement routes through `fn pipeline_loop_in_opportunity`, where the one
     /// hook sits.**
     ///
     /// Two conjuncts, because either alone is passable for the wrong reason:
     ///
     /// 1. STRUCTURAL — exactly one hook call site in the pipeline, and its
-    ///    enclosing top-level `fn` is `pipeline_loop`. The one other site is
+    ///    enclosing top-level `fn` is `pipeline_loop_in_opportunity`. The one other site is
     ///    `push_appended_token_batch`: a batch a replacement adds to a
     ///    CreateToken event (CR 614.1a) is part of that event and never enters
     ///    the pipeline on its own, so it is recorded where it is built. The
@@ -28688,14 +28887,14 @@ mod tests {
     ///    **bypasses `replace_event` entirely**, so a hook on the wrapper is blind
     ///    to every combat-damage event while still passing conjunct 1's spirit.
     ///
-    /// REVERT-PROBE (RUN, not argued): move the hook from `pipeline_loop` into
+    /// REVERT-PROBE (historical): move the hook from the pipeline body into
     /// `replace_event` ⇒ the batch arm records nothing ⇒ this test FAILS.
     #[test]
     fn every_applying_path_reaches_the_recorder_because_the_hook_is_in_pipeline_loop() {
         // Assembled, never written whole: a literal needle would appear in this
         // file and be counted by the very scan that looks for it.
         let hook_needle = format!("{}{}", "record_proposed_", "event(&");
-        let fn_header = format!("\n{}{} ", "fn ", "pipeline_loop(");
+        let fn_header = format!("\n{}{} ", "fn ", "pipeline_loop_in_opportunity(");
         let src = std::fs::read_to_string(format!(
             "{}/src/game/replacement.rs",
             env!("CARGO_MANIFEST_DIR")
@@ -28722,7 +28921,7 @@ mod tests {
             other_sites
                 .iter()
                 .all(|&site| src[enclosing_of(site)..].starts_with(&appended_batch_header)),
-            "outside `pipeline_loop`, only the appended-token-batch builder records"
+            "outside `pipeline_loop_in_opportunity`, only the appended-token-batch builder records"
         );
         assert_eq!(
             (pipeline_sites.len(), other_sites.len()),
@@ -28734,7 +28933,7 @@ mod tests {
         let enclosing = enclosing_of(pipeline_sites[0]);
         assert!(
             src[enclosing..].starts_with(fn_header.trim_end()),
-            "the hook must sit in `pipeline_loop` — the pipeline BODY every entry \
+            "the hook must sit in `pipeline_loop_in_opportunity` — the pipeline BODY every entry \
              runs — not in the `replace_event` wrapper that \
              `replace_combat_damage_batch` bypasses"
         );

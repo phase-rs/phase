@@ -3791,6 +3791,21 @@ impl ResolutionStack {
         }
     }
 
+    pub(crate) fn direct_coin_die_parent(&self, coin: &PendingCoinFlip) -> Option<&PendingDieRoll> {
+        let top = self.frames.top()?;
+        let parent = match self.frames.get(top)? {
+            ResolutionFrame::CoinFlip(resident) if resident == coin => self.frames.below(top)?,
+            // The public answer checks the resident pair before taking the coin;
+            // resume_after_keep repeats custody validation after that exact take.
+            ResolutionFrame::DieRoll(_) => top,
+            _ => return None,
+        };
+        match self.frames.get(parent)? {
+            ResolutionFrame::DieRoll(parent) => Some(parent),
+            _ => None,
+        }
+    }
+
     /// CR 706.6: Consumes exactly the active die-roll owner once the roller has
     /// chosen which roll(s) to ignore.
     pub fn take_active_die_roll(&mut self) -> Result<Option<PendingDieRoll>, ResolutionStackError> {
@@ -4430,6 +4445,42 @@ impl ResolutionStack {
             Some(ResolutionFrame::PostReplacement(_))
         )
         .then_some(below)
+    }
+
+    // Preserve absent source versus absent authority; the GameState consumer
+    // applies the existing dispatcher's exact missing-source conversion.
+    pub(crate) fn legacy_token_substitution_source(
+        &self,
+        applied: &HashSet<crate::types::proposed_event::AppliedReplacementKey>,
+    ) -> Option<Option<ObjectId>> {
+        let parent = self.active_post_replacement_parent_slot()?;
+        if self.frames.above(parent).is_some_and(|child| {
+            matches!(self.frames.get(child), Some(ResolutionFrame::CopyToken(_)))
+        }) {
+            return None;
+        }
+        let Some(ResolutionFrame::PostReplacement(drains)) = self.frames.get(parent) else {
+            return None;
+        };
+        let drain = drains.resident()?;
+        if !matches!(drain.status, DrainStatus::Dispatching | DrainStatus::Paused)
+            || drain.token_creation_parent.is_some()
+            || applied.is_empty()
+            || drain.applied != *applied
+        {
+            return None;
+        }
+        let exterior = self.frames.below(parent)?;
+        matches!(self.frames.get(exterior), Some(ResolutionFrame::CopyToken(owner))
+            if owner.creation_id.is_none()
+                && owner.work.is_empty()
+                && owner.pending.is_none()
+                && owner.replacement_queue_tail.is_none()
+                && owner.result_parent.is_none()
+                && owner.created_incarnations.is_empty()
+                && owner.creator.is_none()
+                && owner.continuation.is_none())
+        .then_some(drain.source)
     }
 
     /// CR 614.12a + CR 616.1g: take the active frame's resident continuation and
@@ -7184,6 +7235,9 @@ impl ResolutionStateWire {
                     }
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
+                legacy
+                    .resolution_stack
+                    .recover_post_replacement_frame_id_allocator();
                 normalize_logical_zone_instruction_owners(&mut legacy)?;
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
@@ -9356,6 +9410,79 @@ mod tests {
             Some(DrainStatus::Paused)
         ));
         ResolutionFrame::PostReplacement(drains)
+    }
+
+    #[test]
+    fn legacy_token_substitution_requires_exact_resident_exterior_and_full_applied_set() {
+        use crate::types::proposed_event::AppliedReplacementKey;
+        let source = ObjectId(83);
+        let applied = HashSet::from([
+            AppliedReplacementKey::Object { source, index: 0 },
+            AppliedReplacementKey::Floating { index: 7 },
+        ]);
+        let mut frames = ResolutionStack::default();
+        let mut drain = PostReplacementDrain::ready(PostReplacementContinuation::Resolved(
+            Box::new(resolved_draw(83)),
+        ));
+        drain.source = Some(source);
+        drain.applied = applied.clone();
+        let mut drains = PostReplacementDrainStack::default();
+        drains.install(drain, ResidentDrainPolicy::Replace);
+        frames.push_copy_token(PendingCopyTokenResolution::legacy(
+            Default::default(),
+            EffectKind::CopyTokenOf,
+            source,
+        ));
+        frames.push_post_replacement(drains);
+        assert!(
+            frames.legacy_token_substitution_source(&applied).is_none(),
+            "Ready is not a selected running branch"
+        );
+        let (_, dispatch) = frames.begin_active_post_replacement_dispatch().unwrap();
+        assert!(frames.legacy_token_substitution_source(&applied).is_some());
+        assert!(frames
+            .legacy_token_substitution_source(&HashSet::new())
+            .is_none());
+        assert!(frames
+            .legacy_token_substitution_source(&HashSet::from([AppliedReplacementKey::Object {
+                source,
+                index: 0
+            }]))
+            .is_none());
+        assert!(frames.pause_post_replacement_dispatch(dispatch));
+        frames.push_inner(continuation_frame(83));
+        assert!(
+            frames.legacy_token_substitution_source(&applied).is_some(),
+            "one actual selected child keeps the resident scope"
+        );
+        frames.push_inner(continuation_frame(84));
+        assert!(
+            frames.legacy_token_substitution_source(&applied).is_none(),
+            "a buried ancestor grants no authority"
+        );
+        let _ = frames.frames.pop();
+        let _ = frames.frames.pop();
+        let mut current_child =
+            PendingCopyTokenResolution::legacy(Default::default(), EffectKind::CopyTokenOf, source);
+        current_child.creation_id = Some(crate::types::identifiers::TokenCreationFrameId(1));
+        frames.push_copy_token(current_child);
+        assert!(
+            frames.legacy_token_substitution_source(&applied).is_none(),
+            "an independent creation never borrows the old replacement set"
+        );
+        let _ = frames.frames.pop();
+        let mut no_owner = ResolutionStack::default();
+        no_owner.push_post_replacement(frames.take_active_post_replacement().unwrap().unwrap());
+        assert!(no_owner
+            .legacy_token_substitution_source(&applied)
+            .is_none());
+        let mut current_owner =
+            PendingCopyTokenResolution::legacy(Default::default(), EffectKind::CopyTokenOf, source);
+        current_owner.creation_id = Some(crate::types::identifiers::TokenCreationFrameId(2));
+        let _ = frames.frames.pop();
+        frames.push_copy_token(current_owner);
+        frames.push_post_replacement(no_owner.take_active_post_replacement().unwrap().unwrap());
+        assert!(frames.legacy_token_substitution_source(&applied).is_none());
     }
 
     fn active_multi_draw_frame() -> ResolutionFrame {

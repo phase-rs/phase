@@ -298,13 +298,11 @@ fn parse_exile_search_result_clause(lower: &str) -> Option<bool> {
 }
 
 fn parse_search_result_referent(input: &str) -> OracleResult<'_, &str> {
-    alt((
-        tag("that card "),
-        tag("it "),
-        tag("them "),
-        tag("those cards "),
-    ))
-    .parse(input)
+    recognize((parse_search_result_referent_name, tag(" "))).parse(input)
+}
+
+fn parse_search_result_referent_name(input: &str) -> OracleResult<'_, &str> {
+    alt((tag("that card"), tag("it"), tag("them"), tag("those cards"))).parse(input)
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -321,6 +319,29 @@ fn parse_search_result_put_onto_battlefield_restatement(
     let (input, _) = tag("onto the battlefield").parse(input)?;
     let (input, _) = opt(tag(" tapped")).parse(input)?;
     Ok((input, ()))
+}
+
+/// CR 608.2c: A Seek instruction owns its explicit found-card destination.
+/// Reuse the typed partition destination grammar and require callers
+/// to certify the clause boundary; unrelated Put instructions remain siblings.
+fn parse_seek_put_destination(input: &str) -> OracleResult<'_, (Zone, bool)> {
+    let (input, _) = tag("put ").parse(input)?;
+    let (input, _) = parse_search_result_referent_name(input)?;
+    alt((
+        map(
+            (tag(" onto the battlefield"), opt(tag(" tapped"))),
+            |(_, tapped)| (Zone::Battlefield, tapped.is_some()),
+        ),
+        map(
+            preceded(
+                tag(" on top of "),
+                preceded(parse_partition_owner_possessive, tag("library")),
+            ),
+            |_| (Zone::Library, false),
+        ),
+        map(parse_choice_partition_destination, |zone| (zone, false)),
+    ))
+    .parse(input)
 }
 
 /// CR 701.23a + CR 701.18a: Bare "put it onto the battlefield" restatement
@@ -1680,6 +1701,14 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // so the follow-up absorber's library-only arm misses them.
                         let search_put_destination = has_search_prefix
                             && is_search_result_put_onto_battlefield_restatement(remainder_trimmed);
+                        let seek_put_destination =
+                            nom_primitives::scan_contains(&before_lower, "seek ")
+                                && terminated(
+                                    parse_seek_put_destination,
+                                    peek(alt((eof, tag("."), tag(", then ")))),
+                                )
+                                .parse(&*remainder_trimmed.to_lowercase())
+                                .is_ok();
                         // CR 707.9: ", except <body> and <body> [and …]" — inside
                         // a copy-effect except clause, " and " is an internal
                         // delimiter between recognised body shapes (SetName, P/T,
@@ -1908,6 +1937,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || prevent_then_put_continuation
                         || search_with_that_name
                         || search_put_destination
+                        || seek_put_destination
                         || inside_except_clause
                         || choice_partition_remainder
                         || compound_subject_each
@@ -12023,6 +12053,40 @@ mod tests {
             "search your library and/or graveyard for a creature card with mana value less than or equal to the number of creatures sacrificed this way and put it onto the battlefield",
         );
         assert_eq!(chunks.len(), 1, "unexpected split: {chunks:?}");
+    }
+
+    #[test]
+    fn bare_and_keeps_only_complete_seek_destinations_with_their_producer() {
+        for destination in [
+            "into your graveyard",
+            "into your hand",
+            "onto the battlefield",
+            "onto the battlefield tapped",
+        ] {
+            let source =
+                format!("seek two creature cards and put them {destination}. You gain 7 life.");
+            assert_eq!(
+                clause_texts(&source),
+                vec![
+                    format!("seek two creature cards and put them {destination}"),
+                    "You gain 7 life".into(),
+                ]
+            );
+        }
+        for source in [
+            "seek two creature cards and put them into your graveyard unexplained",
+            "draw two cards and put them into your graveyard",
+        ] {
+            assert_eq!(
+                clause_texts(source).len(),
+                2,
+                "no unrelated or incomplete destination ownership: {source}"
+            );
+        }
+        assert_eq!(
+            clause_texts("seek two creature cards"),
+            vec!["seek two creature cards"]
+        );
     }
 
     #[test]

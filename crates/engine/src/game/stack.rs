@@ -6670,16 +6670,18 @@ mod tests {
             "CR 608.2h: the controller it had as it left the stack"
         );
 
-        // Re-exile: a later departure recorded under the same storage id (the
-        // CR 800.4a exile of an already-exiled card) overwrites `lki_cache`, but
-        // a same-zone move keeps the incarnation, so the pinned stack snapshot
-        // still answers (CR 400.7).
+        // CR 400.7: a same-zone no-op keeps the incarnation and its first LKI.
         let exile_incarnation = state.objects[&spell].incarnation;
         zones::move_to_zone(&mut state, spell, Zone::Exile, &mut events);
         assert_eq!(
             state.objects[&spell].incarnation, exile_incarnation,
             "reach guard: an Exile→Exile move keeps the incarnation"
         );
+        assert_eq!(state.lki_cache[&spell].controller, PlayerId(2));
+        // A real later departure overwrites the bare-id cache while the
+        // original resolving stack incarnation keeps its own snapshot.
+        zones::move_to_zone(&mut state, spell, Zone::Hand, &mut events);
+        zones::move_to_zone(&mut state, spell, Zone::Exile, &mut events);
         assert_ne!(
             state.lki_cache[&spell].controller,
             PlayerId(2),
@@ -12341,22 +12343,22 @@ mod tests {
             add_lands(&mut state, 3);
             let src = add_scute_source(&mut state);
 
-            // CounterAdded observer: "Whenever one or more +1/+1 counters are put
-            // on a creature you control, put a +1/+1 counter on each creature
-            // you control." Registers under TriggerEventKey::CounterAdded ONLY —
+            // Finite synthetic CounterAdded observer: each +1/+1 entry fans
+            // out time counters. Time counters cannot retrigger this observer.
+            // Registers under TriggerEventKey::CounterAdded ONLY —
             // NOT under any ETB/TokenCreated key.
             let observer_id = create_object(
                 &mut state,
                 CardId(903),
                 PlayerId(0),
-                "Counter Doubler".to_string(),
+                "Finite counter fanout".to_string(),
                 Zone::Battlefield,
             );
             {
                 let obj = state.objects.get_mut(&observer_id).unwrap();
                 obj.card_types.core_types.push(CoreType::Enchantment);
                 let put_all = Effect::PutCounterAll {
-                    counter_type: CounterType::Plus1Plus1,
+                    counter_type: CounterType::Time,
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Typed(TypedFilter {
                         type_filters: vec![TypeFilter::Creature],
@@ -12364,6 +12366,10 @@ mod tests {
                     }),
                 };
                 let trig = TriggerDefinition::new(TriggerMode::CounterAdded)
+                    .counter_filter(crate::types::ability::CounterTriggerFilter {
+                        counter_type: CounterType::Plus1Plus1,
+                        threshold: None,
+                    })
                     .valid_card(TargetFilter::Typed(TypedFilter {
                         type_filters: vec![TypeFilter::Creature],
                         ..Default::default()
@@ -12408,26 +12414,30 @@ mod tests {
                 "entering-counter board must resolve sequentially, got {steps:?}"
             );
 
-            // Each token entered with 1 counter; the CounterAdded observer then
-            // fans out per token. token1 observes the most subsequent counter
-            // events ⇒ descending distribution per CR 603.3.
+            // Each of the five entries emits one matching +1/+1 occurrence.
+            // Each resulting observer resolves before the next token entry,
+            // so the first token receives five time counters and the last one.
+            for id in token_ids(&state) {
+                assert_eq!(
+                    state.objects[&id].counters.get(&CounterType::Plus1Plus1),
+                    Some(&1)
+                );
+            }
             let mut totals: Vec<u32> = token_ids(&state)
                 .iter()
                 .map(|id| {
                     state.objects[id]
                         .counters
-                        .get(&CounterType::Plus1Plus1)
+                        .get(&CounterType::Time)
                         .copied()
                         .unwrap_or(0)
                 })
                 .collect();
             assert_eq!(totals.len(), 5);
             totals.sort_unstable();
-            // Distinct strictly-descending per-token totals (not uniform).
-            assert!(
-                totals.windows(2).all(|w| w[0] < w[1]),
-                "expected strict descending distribution, got {totals:?}"
-            );
+            assert_eq!(totals, vec![1, 2, 3, 4, 5]);
+            assert!(state.resolution_stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         }
 
         // §9.5 — Layer A/B predicate-shape refusals.
@@ -13392,8 +13402,39 @@ mod tests {
                         1,
                     );
                 }
-                let steps = resolve_to_empty_batched(&mut state);
-                assert_eq!(steps, if variant == 0 { vec![3] } else { vec![1, 1, 1] });
+                let mut sequential = state.clone();
+                crate::game::perf_counters::reset();
+                let (steps, mut events) = resolve_to_empty_batched_with_events(&mut state);
+                assert_eq!(
+                    crate::game::perf_counters::stack_bulk_snapshot().bulk_entries,
+                    if variant == 0 { 3 } else { 0 },
+                    "only the vanilla copy run may use the bulk executor"
+                );
+                assert_eq!(steps.iter().sum::<u32>(), 3);
+                let mut sequential_events =
+                    resolve_to_empty_sequential_with_events(&mut sequential);
+                // The batch fixture explicitly arms a committed session. End
+                // that session through its production teardown and settle both
+                // terminal checkpoints before comparing their complete states.
+                for (finished, emitted) in [
+                    (&mut state, &mut events),
+                    (&mut sequential, &mut sequential_events),
+                ] {
+                    crate::game::engine::take_and_restore_stack_resolution_session(finished);
+                    let waiting = WaitingFor::Priority {
+                        player: finished.active_player,
+                    };
+                    let settled = crate::game::engine_priority::run_post_action_pipeline_from(
+                        finished, emitted, 0, &waiting, false, false,
+                    )
+                    .unwrap();
+                    assert!(matches!(settled, WaitingFor::Priority { .. }));
+                }
+                assert_eq!(events, sequential_events);
+                assert_eq!(
+                    serde_json::to_value(&state).unwrap(),
+                    serde_json::to_value(&sequential).unwrap()
+                );
                 assert_eq!(token_ids(&state).len(), 3);
                 for id in token_ids(&state) {
                     let token = &state.objects[&id];

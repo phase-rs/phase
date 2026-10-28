@@ -577,7 +577,13 @@ fn begin_token_creation_with_host(
                     instructions,
                     enter_tapped,
                     count,
-                    applied: if ability.context.token_creation_parent.is_some() {
+                    // CR 614.5: only the current parent or the exact admitted
+                    // legacy substitution carries the already-applied set.
+                    applied: if ability.context.token_creation_parent.is_some()
+                        || state.has_legacy_token_substitution_authority(
+                            ability.source_id,
+                            &ability.replacement_applied,
+                        ) {
                         ability.replacement_applied.clone()
                     } else {
                         HashSet::new()

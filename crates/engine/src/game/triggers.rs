@@ -50850,17 +50850,17 @@ pub mod tests {
                     .any(|entry| entry.definition.batched),
                 "{carrier:?} positive reach guard: the recipient must hold the live Layer-6 grant before departure"
             );
-            state
+            let pause =
+                ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .description("Park the departing-grant logical owner".to_string());
+            let subject = state
                 .objects
                 .get_mut(&pausing_subject)
-                .expect("pausing subject exists")
-                .replacement_definitions
-                .push(
-                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Moved)
-                        .valid_card(TargetFilter::SelfRef)
-                        .mode(ReplacementMode::Optional { decline: None })
-                        .description("Park the departing-grant logical owner".to_string()),
-                );
+                .expect("pausing subject exists");
+            subject.replacement_definitions.push(pause.clone());
+            std::sync::Arc::make_mut(&mut subject.base_replacement_definitions).push(pause);
 
             let mut events = Vec::new();
             resolve_ltb_production_carrier(&mut state, carrier, ObjectId(91_500), &mut events);

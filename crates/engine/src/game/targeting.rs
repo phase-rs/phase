@@ -2061,6 +2061,15 @@ pub(crate) fn resolved_object_ids_for_filter_with_context(
     ctx: &super::filter::FilterContext<'_>,
 ) -> Vec<ObjectId> {
     match filter {
+        // CR 400.7j + CR 608.2k: the paid source's exact public arrival
+        // remains the referent, including when it arrived in exile.
+        TargetFilter::CostPaidObject {
+            reference: crate::types::ability::CostPaidObjectRef::Source,
+        } => ability
+            .cost_paid_source_binding(state)
+            .into_iter()
+            .map(|reference| reference.object_id)
+            .collect(),
         // CR 400.7: self-reference resolves only to the exact source or its own
         // immediate recorded event successor; a blinked-and-returned source
         // (higher incarnation) finds nothing.
@@ -4119,6 +4128,95 @@ pub(crate) fn resolve_tracked_set_sentinel(
 
 #[cfg(test)]
 mod tests {
+
+    /// CR 400.7j + CR 608.2k: an activated ability follows its paid source
+    /// into exile, but cannot follow a later independent move of that card.
+    #[test]
+    fn paid_source_public_exile_activation_places_counters_only_on_its_arrival() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, CardTypeSetSource,
+            CostPaidObjectRef, Effect, ObjectProperty, PropertyAggregate, QuantityExpr,
+            QuantityRef,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::WaitingFor;
+        for moved_again in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let source_filter = TargetFilter::CostPaidObject {
+                reference: CostPaidObjectRef::Source,
+            };
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Synthetic paid-source counter fixture", "")
+                .with_mana_cost(crate::types::mana::ManaCost::generic(3))
+                .with_ability_definition(
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::PutCounter {
+                            counter_type: CounterType::Time,
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::PropertyAggregate(
+                                    PropertyAggregate::new(
+                                        AggregateFunction::Sum,
+                                        ObjectProperty::ManaValue,
+                                        CardTypeSetSource::Objects {
+                                            filter: source_filter.clone(),
+                                        },
+                                    )
+                                    .unwrap(),
+                                ),
+                            },
+                            target: source_filter,
+                        },
+                    )
+                    .cost(AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(TargetFilter::SelfRef),
+                    }),
+                )
+                .id();
+            let decoy = scenario
+                .add_creature(P0, "Unrelated selected object", 9, 9)
+                .id();
+            let mut runner = scenario.build();
+            runner
+                .act(crate::types::actions::GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+            assert_eq!(runner.state().stack.len(), 1);
+            if moved_again {
+                crate::game::zones::move_to_zone(
+                    runner.state_mut(),
+                    source,
+                    Zone::Hand,
+                    &mut Vec::new(),
+                );
+            }
+            runner.advance_until_stack_empty();
+            assert_eq!(
+                runner.state().objects[&source]
+                    .counters
+                    .get(&CounterType::Time)
+                    .copied()
+                    .unwrap_or(0),
+                if moved_again { 0 } else { 3 }
+            );
+            assert!(!runner.state().objects[&decoy]
+                .counters
+                .contains_key(&CounterType::Time));
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().resolution_stack.is_empty());
+        }
+    }
 
     /// CR 109.4 + CR 110.2a: the player a zone-change event names is the
     /// controller the move installed, not the one the card had when it left.

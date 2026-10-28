@@ -4102,6 +4102,361 @@ fn complete_continuous_entity_activation_preserves_both_base_axes_and_types() {
 }
 
 #[test]
+fn complete_continuous_zur_paid_animation_uses_each_recipient_mana_value() {
+    use engine::types::card_type::CoreType;
+    use engine::types::game_state::CastPaymentMode;
+    const ZUR: &str = "Flying\nEnchantment creatures you control have deathtouch, lifelink, and hexproof.\n{1}{W}: Target non-Aura enchantment you control becomes a creature in addition to its other types and has base power and base toughness each equal to its mana value.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let zur = scenario
+        .add_creature_from_oracle(P0, "Zur, Eternal Schemer", 1, 4, ZUR)
+        .from_oracle_text_with_keywords(&["Flying", "Lifelink"], ZUR)
+        .id();
+    let first = scenario
+        .add_enchantment_from_oracle(P0, "Three mana enchantment", "")
+        .with_mana_cost(complete_publication_cost("{2}{G}"))
+        .id();
+    let second = scenario
+        .add_enchantment_from_oracle(P0, "Five mana enchantment", "")
+        .with_mana_cost(complete_publication_cost("{4}{U}"))
+        .id();
+    let foreign = scenario
+        .add_enchantment_from_oracle(P1, "Foreign enchantment", "")
+        .with_mana_cost(complete_publication_cost("{6}{R}"))
+        .id();
+    let aura = scenario
+        .add_enchantment_from_oracle(P0, "Aura control", "Enchant creature")
+        .with_subtypes(vec!["Aura"])
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        complete_publication_pool(2, &[ManaType::White, ManaType::White]),
+    );
+    let mut runner = scenario.build();
+    let previous_host = engine::game::effects::attach::attach_to(runner.state_mut(), aura, zur);
+    assert_eq!(previous_host, None);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(zur))
+    );
+    for (recipient, value, remaining) in [(first, 3, 2), (second, 5, 0)] {
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: zur,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "actual activation targets: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 1);
+        let legal = &target_slots[0].legal_targets;
+        assert!(legal.contains(&TargetRef::Object(first)));
+        assert!(legal.contains(&TargetRef::Object(second)));
+        assert!(!legal.contains(&TargetRef::Object(foreign)));
+        assert!(!legal.contains(&TargetRef::Object(aura)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(recipient)),
+            })
+            .unwrap();
+        runner.advance_until_stack_empty();
+        assert_eq!(
+            runner.state().players[0].mana_pool.total(),
+            remaining,
+            "the printed 1W is paid for each activation"
+        );
+        // CR 205.1b + CR 613.4b: retain Enchantment and set each recipient's own base P/T.
+        assert_eq!(effective_pt(&mut runner, recipient), (value, value));
+        let object = &runner.state().objects[&recipient];
+        assert!(object
+            .card_types
+            .core_types
+            .contains(&CoreType::Enchantment));
+        assert!(object.card_types.core_types.contains(&CoreType::Creature));
+        for keyword in [Keyword::Deathtouch, Keyword::Lifelink, Keyword::Hexproof] {
+            assert!(
+                engine::game::keywords::has_keyword(object, &keyword),
+                "printed static grant: {keyword:?}"
+            );
+        }
+        assert_continuous_complete(runner.state());
+    }
+    assert_eq!(effective_pt(&mut runner, first), (3, 3));
+    for id in [foreign, aura] {
+        assert!(!runner.state().objects[&id]
+            .card_types
+            .core_types
+            .contains(&CoreType::Creature));
+    }
+}
+
+#[test]
+fn complete_continuous_possessed_thresholds_grant_and_pay_the_printed_color_destruction() {
+    use engine::types::game_state::CastPaymentMode;
+    for (name, oracle, hints, color, cost, intrinsic) in [
+        ("Possessed Aven", "Flying\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target blue creature.\"", &["Flying", "Threshold"][..], ManaColor::Blue, "{2}{U}{U}", Keyword::Flying),
+        ("Possessed Barbarian", "First strike\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target red creature.\"", &["First strike", "Threshold"][..], ManaColor::Red, "{2}{R}{R}", Keyword::FirstStrike),
+        ("Possessed Centaur", "Trample\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target green creature.\"", &["Threshold", "Trample"][..], ManaColor::Green, "{2}{G}{G}", Keyword::Trample),
+        ("Possessed Nomad", "Vigilance\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target white creature.\"", &["Threshold", "Vigilance"][..], ManaColor::White, "{2}{W}{W}", Keyword::Vigilance),
+    ] {
+        for graveyard_count in [6, 7] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario.add_creature_from_oracle(P0, name, 3, 3, oracle)
+                .from_oracle_text_with_keywords(hints, oracle).with_mana_cost(complete_publication_cost(cost)).with_color(vec![color]).id();
+            for _ in 0..graveyard_count { scenario.add_creature_to_graveyard(P0, "Historical graveyard card", 1, 1); }
+            let victim = scenario.add_creature(P1, "Matching printed color", 2, 2).with_color(vec![color]).id();
+            let wrong = scenario.add_creature(P1, "Wrong printed color", 2, 2).with_color(vec![ManaColor::Black]).id();
+            scenario.with_mana_pool(P0, complete_publication_pool(2, &[ManaType::Black]));
+            let mut runner = scenario.build();
+            assert_eq!(effective_pt(&mut runner, source), if graveyard_count == 7 { (4, 4) } else { (3, 3) });
+            assert!(engine::game::keywords::has_keyword(&runner.state().objects[&source], &intrinsic));
+            assert_eq!(runner.state().objects[&source].color, if graveyard_count == 7 { vec![ManaColor::Black] } else { vec![color] });
+            if graveyard_count == 6 {
+                assert!(runner.state().objects[&source].abilities.is_empty());
+                assert!(runner.act(GameAction::ActivateAbility { source_id: source, ability_index: 0, payment_mode: CastPaymentMode::Auto }).is_err());
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Battlefield);
+                assert_eq!(runner.state().players[0].mana_pool.total(), 3);
+            } else {
+                runner.act(GameAction::ActivateAbility { source_id: source, ability_index: 0, payment_mode: CastPaymentMode::Auto }).unwrap();
+                let WaitingFor::TargetSelection { player, target_slots, .. } = &runner.state().waiting_for else { panic!("real granted destruction targets"); };
+                assert_eq!(*player, P0);
+                assert_eq!(target_slots.len(), 1);
+                assert!(target_slots[0].legal_targets.contains(&TargetRef::Object(victim)));
+                assert!(!target_slots[0].legal_targets.contains(&TargetRef::Object(wrong)));
+                runner.act(GameAction::ChooseTarget { target: Some(TargetRef::Object(victim)) }).unwrap();
+                runner.advance_until_stack_empty();
+                assert!(runner.state().objects[&source].tapped, "the granted tap cost is paid");
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0, "the granted 2B is paid");
+                assert_eq!(runner.state().objects[&victim].zone, Zone::Graveyard);
+            }
+            assert_eq!(runner.state().objects[&wrong].zone, Zone::Battlefield);
+            assert_continuous_complete(runner.state());
+        }
+    }
+}
+
+#[test]
+fn complete_continuous_skrull_creature_count_grants_types_and_keeps_public_mana() {
+    use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt};
+    const ORACLE: &str = "As long as there are two or more creature cards in your graveyard, this creature gets +2/+2 and is all creature types.\n{T}: Add one mana of any color.";
+    for count in [1, 2] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(P0, "Undercover Skrull", 1, 1, ORACLE)
+            .with_subtypes(vec!["Skrull", "Shapeshifter", "Villain"])
+            .id();
+        for _ in 0..count {
+            scenario.add_creature_to_graveyard(P0, "Own creature card", 1, 1);
+        }
+        scenario.add_land_to_graveyard(P0, "Noncreature graveyard control");
+        for _ in 0..3 {
+            scenario.add_creature_to_graveyard(P1, "Foreign creature card", 1, 1);
+        }
+        let mut runner = scenario.build();
+        assert_eq!(
+            effective_pt(&mut runner, source),
+            if count == 2 { (3, 3) } else { (1, 1) }
+        );
+        assert_eq!(
+            engine::game::keywords::has_keyword(
+                &runner.state().objects[&source],
+                &Keyword::Changeling
+            ),
+            count == 2
+        );
+        assert_eq!(
+            runner.state().objects[&source]
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Demon"),
+            count == 2
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("printed any-color mana choice");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(options.len(), 5);
+        assert!(options.contains(&ManaType::Green));
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Green),
+                count: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().players[0]
+                .mana_pool
+                .count_color(ManaType::Green),
+            1
+        );
+        assert!(runner.state().objects[&source].tapped);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_wayward_threshold_grants_a_real_upkeep_sacrifice() {
+    const ORACLE: &str = "Flying, vigilance\nThreshold — As long as there are seven or more cards in your graveyard, this creature gets +3/+3, is black, has trample, and has \"At the beginning of your upkeep, sacrifice a creature.\"";
+    for count in [6, 7] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Untap);
+        let angel = scenario
+            .add_creature_from_oracle(P0, "Wayward Angel", 4, 4, ORACLE)
+            .from_oracle_text_with_keywords(&["Flying", "Threshold", "Vigilance"], ORACLE)
+            .with_color(vec![ManaColor::White])
+            .id();
+        let retained = scenario.add_creature(P0, "Retained creature", 1, 1).id();
+        let sacrificed = scenario.add_creature(P0, "Selected creature", 1, 1).id();
+        for _ in 0..count {
+            scenario.add_creature_to_graveyard(P0, "Historical graveyard card", 1, 1);
+        }
+        let mut runner = scenario.build();
+        assert_eq!(
+            effective_pt(&mut runner, angel),
+            if count == 7 { (7, 7) } else { (4, 4) }
+        );
+        assert_eq!(
+            runner.state().objects[&angel].color,
+            if count == 7 {
+                vec![ManaColor::Black]
+            } else {
+                vec![ManaColor::White]
+            }
+        );
+        for keyword in [Keyword::Flying, Keyword::Vigilance] {
+            assert!(engine::game::keywords::has_keyword(
+                &runner.state().objects[&angel],
+                &keyword
+            ));
+        }
+        assert_eq!(
+            engine::game::keywords::has_keyword(&runner.state().objects[&angel], &Keyword::Trample),
+            count == 7
+        );
+        runner.advance_to_upkeep();
+        assert_eq!(runner.state().phase, Phase::Upkeep);
+        if count == 7 {
+            assert!(
+                !runner.state().stack.is_empty(),
+                "the granted trigger comes from the real upkeep event"
+            );
+            runner.advance_until_stack_empty();
+            let WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "granted upkeep sacrifice choice: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(*count, 1);
+            assert!(cards.contains(&sacrificed));
+            assert!(cards.contains(&retained));
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![sacrificed],
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+        }
+        assert_eq!(
+            runner.state().objects[&sacrificed].zone,
+            if count == 7 {
+                Zone::Graveyard
+            } else {
+                Zone::Battlefield
+            }
+        );
+        assert_eq!(runner.state().objects[&retained].zone, Zone::Battlefield);
+        assert_continuous_complete(runner.state());
+    }
+}
+
+#[test]
+fn complete_continuous_wrath_of_oko_paid_cast_replaces_creature_types_colors_and_abilities() {
+    use engine::types::card_type::CoreType;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Wrath of Oko", false,
+        "All creatures lose all abilities and become green Elk creatures with base power and toughness 3/3. (This effect lasts indefinitely. Just like Oko. Unfortunately.)")
+        .with_mana_cost(complete_publication_cost("{2}{U}{U}")).id();
+    let own = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Artifact creature control",
+            5,
+            6,
+            "Flying, indestructible",
+        )
+        .as_artifact_creature()
+        .with_subtypes(vec!["Bird"])
+        .with_color(vec![ManaColor::White])
+        .id();
+    let foreign = scenario
+        .add_creature_from_oracle(P1, "Foreign creature", 7, 8, "Haste")
+        .with_subtypes(vec!["Giant"])
+        .with_color(vec![ManaColor::Red])
+        .id();
+    let untouched = scenario
+        .add_enchantment_from_oracle(P0, "Noncreature control", "")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        complete_publication_pool(2, &[ManaType::Blue, ManaType::Blue]),
+    );
+    let mut runner = scenario.build();
+    runner.cast(spell).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    for id in [own, foreign] {
+        // CR 205.1a + CR 613.1d + CR 613.1e + CR 613.1f: complete replacement, not merely a P/T overwrite.
+        assert_eq!(effective_pt(&mut runner, id), (3, 3));
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(object.card_types.subtypes, vec!["Elk".to_string()]);
+        assert_eq!(object.color, vec![ManaColor::Green]);
+        for keyword in [Keyword::Flying, Keyword::Indestructible, Keyword::Haste] {
+            assert!(!engine::game::keywords::has_keyword(object, &keyword));
+        }
+    }
+    assert_eq!(
+        runner.state().objects[&untouched].card_types.core_types,
+        vec![CoreType::Enchantment]
+    );
+    assert_continuous_complete(runner.state());
+}
+
+#[test]
 fn complete_continuous_qualified_counts_use_actual_population_and_source_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

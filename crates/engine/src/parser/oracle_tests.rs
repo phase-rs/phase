@@ -521,7 +521,7 @@ mod contextual_hand_publication {
         if life {
             consumer.sub_ability = Some(Box::new(sibling(ability(Effect::LoseLife {
                 amount: QuantityExpr::Fixed { value: 2 },
-                target: None,
+                target: Some(TargetFilter::Controller),
             }))));
         }
         let mut head = ability(Effect::RevealHand {
@@ -1211,9 +1211,10 @@ mod nested_operand_publication {
             );
             let raw = card.text.as_deref().unwrap();
             assert_eq!(doc.source_text, raw);
-            assert_eq!(doc.items.len(), 2);
-            for (line, item) in doc.items.iter().enumerate() {
-                assert_eq!(item.id, OracleItemId(line as u32));
+            let physical_lines: &[usize] = if index == 0 { &[0, 1] } else { &[1] };
+            assert_eq!(doc.items.len(), physical_lines.len());
+            for (ordinal, (&line, item)) in physical_lines.iter().zip(&doc.items).enumerate() {
+                assert_eq!(item.id, OracleItemId(ordinal as u32));
                 let span = item.source.span();
                 assert_eq!(
                     (
@@ -1224,9 +1225,19 @@ mod nested_operand_publication {
                     ),
                     (line, line, 0, SpanPrecision::Exact)
                 );
-                let fragment = raw.lines().nth(line).unwrap();
+                let normalized = complete_publication_expected_normalized(&expected.name, raw);
+                let fragment = normalized.lines().nth(line).unwrap();
                 assert_eq!(item.source.fragment(), Some(fragment));
-                assert_eq!(&raw[span.start_byte..span.end_byte], fragment);
+                let start: usize = normalized
+                    .lines()
+                    .take(line)
+                    .map(|line| line.len() + 1)
+                    .sum();
+                assert_eq!(
+                    (span.start_byte, span.end_byte),
+                    (start, start + fragment.len())
+                );
+                assert_eq!(&normalized[span.start_byte..span.end_byte], fragment);
                 assert!(
                     item_ability(item).is_none()
                         && item_static(item).is_none()
@@ -1304,7 +1315,14 @@ mod nested_operand_publication {
             assert_eq!(lowered.triggers, expected.triggers);
             assert_eq!(lowered.statics, expected.static_abilities);
             assert_eq!(lowered.replacements, expected.replacements);
-            assert_eq!(lowered.extracted_keywords, expected.keywords);
+            assert_eq!(
+                lowered.extracted_keywords,
+                if index == 0 {
+                    vec![Keyword::Warp(ManaCost::generic(4))]
+                } else {
+                    vec![]
+                }
+            );
             assert_eq!(lowered.modal, None);
             assert_eq!(lowered.additional_cost, None);
             assert_eq!(lowered.solve_condition, None);
@@ -1666,19 +1684,11 @@ mod relative_population_publication {
                 (1, 0, 1, "static"),
                 (2, 0, 2, "replacement"),
             ],
-            vec![
-                (0, 0, 0, "keyword"),
-                (1, 0, 1, "static"),
-                (2, 0, 2, "trigger"),
-            ],
+            vec![(1, 0, 0, "static"), (2, 0, 1, "trigger")],
             vec![(0, 0, 0, "spell")],
             vec![(0, 0, 0, "static")],
             vec![(0, 0, 0, "spell")],
-            vec![
-                (0, 0, 0, "keyword"),
-                (1, 0, 1, "replacement"),
-                (2, 0, 2, "trigger"),
-            ],
+            vec![(1, 0, 0, "replacement"), (2, 0, 1, "trigger")],
         ];
         let mut exports = serde_json::Map::new();
         for (index, (card, expected)) in cases.iter().enumerate() {
@@ -1733,9 +1743,19 @@ mod relative_population_publication {
                 );
                 assert_eq!(item_kind(item), kind);
                 assert!(span.is_exact());
-                let fragment = source.lines().nth(line).unwrap();
+                let normalized = complete_publication_expected_normalized(&expected.name, source);
+                let fragment = normalized.lines().nth(line).unwrap();
                 assert_eq!(item.source.fragment(), Some(fragment));
-                assert_eq!(&source[span.start_byte..span.end_byte], fragment);
+                let start: usize = normalized
+                    .lines()
+                    .take(line)
+                    .map(|line| line.len() + 1)
+                    .sum();
+                assert_eq!(
+                    (span.start_byte, span.end_byte),
+                    (start, start + fragment.len())
+                );
+                assert_eq!(&normalized[span.start_byte..span.end_byte], fragment);
             }
             if index == 6 {
                 let OracleNodeIr::Spell(spell) = &doc.items[0].node else {
@@ -1757,7 +1777,14 @@ mod relative_population_publication {
             assert_eq!(parsed.statics, expected.static_abilities);
             assert_eq!(parsed.triggers, expected.triggers);
             assert_eq!(parsed.replacements, expected.replacements);
-            assert_eq!(parsed.extracted_keywords, expected.keywords);
+            let extracted = match index {
+                1 => expected.keywords.clone(),
+                2 => vec![Keyword::Enchant(TargetFilter::Typed(
+                    TypedFilter::creature(),
+                ))],
+                _ => vec![],
+            };
+            assert_eq!(parsed.extracted_keywords, extracted);
             assert_eq!(parsed.modal, expected.modal);
             assert_eq!(parsed.additional_cost, None);
             assert_eq!(parsed.solve_condition, None);
@@ -2325,6 +2352,7 @@ mod retained_spell_publication {
                 &atomic.subtypes,
             );
             assert_eq!(doc.source_text, input.oracle_text);
+            let normalized = complete_publication_expected_normalized(name, &input.oracle_text);
             let mut ids = std::collections::HashSet::new();
             let mut previous = (0, 0);
             let mut ordinals = std::collections::BTreeMap::new();
@@ -2339,11 +2367,11 @@ mod retained_spell_publication {
                 *ordinal += 1;
                 assert_eq!(
                     item.source.fragment(),
-                    Some(&input.oracle_text[span.start_byte..span.end_byte])
+                    Some(&normalized[span.start_byte..span.end_byte])
                 );
                 assert_eq!(
                     span.first_line,
-                    input.oracle_text[..span.start_byte]
+                    normalized[..span.start_byte]
                         .bytes()
                         .filter(|byte| *byte == b'\n')
                         .count()
@@ -2898,15 +2926,19 @@ mod retained_spell_publication {
             let complete = format!("{source}\nFlying");
             let mut doc = parse_oracle_ir(&complete, "Synthetic spell refusal", &["Flying".into()], &["Creature".into()], &[]);
             assert_eq!(doc.source_text, complete);
-            let refused = doc.items.iter().find(|item| item.source.fragment() == Some(source)).expect("whole refused atomic source");
+            let normalized = match source {
+                "As long as you've cast two or more mysterious spells this turn, this creature has double strike." => "As long as you've cast two or more mysterious spells this turn, ~ has double strike.",
+                _ => source,
+            };
+            let refused = doc.items.iter().find(|item| item.source.fragment() == Some(normalized)).expect("whole refused atomic source");
             assert!(matches!(refused.node, crate::parser::oracle_ir::doc::OracleNodeIr::Unsupported { .. } | crate::parser::oracle_ir::doc::OracleNodeIr::Spell(_)), "the refused operation retains its own item identity");
-            let span = refused.source.span(); assert!(span.is_exact()); assert_eq!((span.start_byte, span.end_byte, span.first_line, span.last_line, span.ordinal_within_span), (0, source.len(), 0, 0, 0));
+            let span = refused.source.span(); assert!(span.is_exact()); assert_eq!((span.start_byte, span.end_byte, span.first_line, span.last_line, span.ordinal_within_span), (0, normalized.len(), 0, 0, 0));
             let flying = doc.items.iter().find(|item| item.source.fragment() == Some("Flying")).unwrap();
-            assert_eq!(flying.source.span().start_byte, source.len() + 1);
+            assert_eq!(flying.source.span().start_byte, normalized.len() + 1);
             let parsed = lower_oracle_ir(&mut doc);
             assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
             let unsupported = parsed.abilities.iter().find(|ability| super::has_unimplemented(ability)).expect("whole refused operation");
-            assert_eq!(unsupported.description.as_deref(), Some(source));
+            assert_eq!(unsupported.description.as_deref(), Some(normalized));
         }
     }
 }
@@ -43400,6 +43432,296 @@ fn u14_inherited_removal_companion_documents() {
 // SHAPE: select the printed owning ability, then compare every modification,
 // affected filter, condition and duration. Runtime counterparts are in the
 // existing flowstone_surge_mixed_anthem integration module.
+// Independent literal source buffers and MTGJSON keyword authorities for the
+// complete printed fixtures. These never inspect a parser result or invoke the
+// production normalizer; the original Oracle remains separately asserted.
+fn complete_publication_expected_normalized<'a>(name: &str, raw: &'a str) -> &'a str {
+    match name {
+        "Alpine Moon" => "As ~ enters, choose a nonbasic land card name.\nLands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"",
+        "Anticausal Vestige" => "When ~ leaves the battlefield, draw a card, then you may put a permanent card with mana value less than or equal to the number of lands you control from your hand onto the battlefield tapped.\nWarp {4} (You may cast this card from your hand for its warp cost. Exile ~ at the beginning of the next end step, then you may cast it from exile on a later turn.)",
+        "Aurelia, Exemplar of Justice" => "Flying\nMentor (Whenever ~ attacks, put a +1/+1 counter on target attacking creature with lesser power.)\nAt the beginning of combat on your turn, choose up to one target creature you control. Until end of turn, that creature gets +2/+0, gains trample if it's red, and gains vigilance if it's white.",
+        "Azula, Ruthless Firebender" => "Firebending 1 (Whenever ~ attacks, add {R}. This mana lasts until end of combat.)\nWhenever ~ attacks, you may discard a card. Then you get an experience counter for each player who discarded a card this turn.\n{2}{B}: Until end of turn, ~ gets +1/+1 for each experience counter you have and gains menace.",
+        "Battlefield Thaumaturge" => "Each instant and sorcery spell you cast costs {1} less to cast for each creature it targets.\nHeroic — Whenever you cast a spell that targets ~, ~ gains hexproof until end of turn.",
+        "Battlegate Mimic" => "Whenever you cast a spell that's both red and white, ~ has base power and toughness 4/2 until end of turn and gains first strike until end of turn.",
+        "Blaster Hulk" => "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever ~ attacks, you get {E}{E}, then you may pay eight {E}. When you do, ~ deals 8 damage divided as you choose among up to eight targets.",
+        "Blood Sun" => "When ~ enters, draw a card.\nAll lands lose all abilities except mana abilities.",
+        "Buzzing Whack-a-Doodle" => "As ~ enters, you and an opponent each secretly choose Whack or Doodle. Then those choices are revealed. If the choices match, ~ has that ability. Otherwise, it has Buzz.\n• Whack — {T}: Target player loses 2 life.\n• Doodle — {T}: You gain 3 life.\n• Buzz — {2}, {T}: Draw a card.",
+        "Calamity's Wake" => "Exile all graveyards. Players can't cast noncreature spells this turn. Exile ~.",
+        "Collision Course" => "Choose one —\n• ~ deals X damage to target creature, where X is the number of permanents you control that are creatures and/or Vehicles.\n• Destroy target artifact.",
+        "Conspicuous Snoop" => "Play with the top card of your library revealed.\nYou may cast Goblin spells from the top of your library.\nAs long as the top card of your library is a Goblin card, ~ has all activated abilities of that card.",
+        "Council of Reeds" => "The \"legend rule\" doesn't apply to creatures you control.\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a token that's a copy of ~.",
+        "Dark Matter Manipulator" => "When ~ enters, mill three cards.\n~ gets +2/+0 for every seven cards in your graveyard.",
+        "Demon of Fate's Design" => "Flying, trample\nOnce during each of your turns, you may cast an enchantment spell by paying life equal to its mana value rather than paying its mana cost.\n{2}{B}, Sacrifice another enchantment: ~ gets +X/+0 until end of turn, where X is the sacrificed enchantment's mana value.",
+        "Dragonblood Twins" => "Double team\nFlurry — Whenever you cast your second spell each turn, until end of turn, ~ has base power and toughness 4/4 and gains flying.",
+        "Dream Devourer" => "Each nonland card in your hand without foretell has foretell. Its foretell cost is equal to its mana cost reduced by {2}. (During your turn, you may pay {2} and exile it from your hand face down. Cast it on a later turn for its foretell cost.)\nWhenever you foretell a card, ~ gets +2/+0 until end of turn.",
+        "Eidolon of Astral Winds" => "Vigilance\nConstellation — Whenever ~ or another enchantment you control enters, choose target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains flying.",
+        "Eshki Dragonclaw" => "Vigilance, trample, ward {1}\nAt the beginning of combat on your turn, if you've cast both a creature spell and a noncreature spell this turn, draw a card and put two +1/+1 counters on ~.",
+        "Flayer of Loyalties" => "When you cast this spell, gain control of target creature until end of turn. Untap that creature. Until end of turn, it has base power and toughness 10/10 and gains trample, annihilator 2, and haste.\nAnnihilator 2 (Whenever ~ attacks, defending player sacrifices two permanents of their choice.)\nTrample",
+        "Frantic Firebolt" => "~ deals X damage to target creature, where X is 2 plus the number of cards in your graveyard that are instant cards, sorcery cards, and/or have an Adventure.",
+        "Gigantiform" => "Kicker {4}\nEnchant creature\nEnchanted creature has base power and toughness 8/8 and has trample.\nWhen ~ enters, if it was kicked, you may search your library for a card named Gigantiform, put it onto the battlefield, then shuffle.",
+        "Glamer Gifter" => "Flash\nFlying\nWhen ~ enters, choose up to one other target creature. Until end of turn, that creature has base power and toughness 4/4 and gains all creature types.",
+        "Greensleeves" => "[+2]: Create a Giant Badger token. (It's a {1}{G}{G} 2/2 Badger creature with \"Whenever ~ blocks, it gets +2/+2 until end of turn.\")\n[−3]: Mill three cards. Put all permanent cards from among them into your hand.\n[−8]: Until end of turn, creatures you control have base power and toughness 8/8 and gain trample.\n~ can be your commander.",
+        "Human Torch" => "At the beginning of combat on your turn, if you've cast a noncreature spell this turn, ~ gains flying, double strike, and haste until end of turn.\nWhenever ~ attacks, you may pay {R}{G}{W}{U}. If you do, until end of turn, whenever he deals combat damage to an opponent, he deals that much damage to each other opponent.",
+        "Ichneumon Druid" => "Whenever an opponent casts an instant spell other than the first instant spell that player casts each turn, ~ deals 4 damage to that player.",
+        "Impending Flux" => "Paradox — ~ deals X damage to each opponent and each creature they control, where X is 1 plus the number of spells you've cast from anywhere other than your hand this turn.\nForetell {1}{R}{R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)",
+        "Katilda's Rising Dawn" => "Enchant creature\nEnchanted creature has flying, lifelink, and protection from Vampires, and it gets +X/+X, where X is the number of permanents you control that are Spirits and/or enchantments.\nIf ~ would be put into a graveyard from anywhere, exile it instead.",
+        "Katilda, Dawnhart Martyr" => "Flying, lifelink, protection from Vampires\n~'s power and toughness are each equal to the number of permanents you control that are Spirits and/or enchantments.\nDisturb {3}{W}{W} (You may cast this card from your graveyard transformed for its disturb cost.)",
+        "Korvold, Gleeful Glutton" => "This spell costs {1} less to cast for each card type among permanents you've sacrificed this turn.\nFlying, trample, haste\nWhenever ~ deals combat damage to a player, put X +1/+1 counters on ~ and draw X cards, where X is the number of permanent types among cards in your graveyard.",
+        "Lockjaw, Slobbering Teleporter" => "Vigilance\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, put a +1/+1 counter on ~. When you do, ~ and up to one other target creature you control can't be blocked this turn.",
+        "Lumbering Megasloth" => "This spell costs {1} less to cast for each counter among players and permanents.\nTrample\n~ enters tapped.",
+        "Lyse Hext" => "Prowess (Whenever you cast a noncreature spell, ~ gets +1/+1 until end of turn.)\nNoncreature spells you cast cost {1} less to cast.\nAs long as you've cast two or more noncreature spells this turn, ~ has double strike.",
+        "Mace of the Valiant" => "Equipped creature gets +1/+1 for each charge counter on ~ and has vigilance. (Attacking doesn't cause it to tap.)\nWhenever a creature you control enters, put a charge counter on ~.\nEquip {3}",
+        "Marina Vendrell's Grimoire" => "When ~ enters, if you cast it, draw five cards.\nYou have no maximum hand size and don't lose the game for having 0 or less life.\nWhenever you gain life, draw that many cards.\nWhenever you lose life, discard that many cards. Then if you have no cards in hand, you lose the game.",
+        "Mine, Mine, Mine!" => "When ~ enters, each player puts their library into their hand.\nPlayers have no maximum hand size and don't lose the game for drawing from an empty library.\nEach player can't cast more than one spell each turn.\nWhen ~ leaves the battlefield, each player shuffles their hand and graveyard into their library.",
+        "Mystic Doom Sandwich" => "{TK}{TK} — Lifelink\n{TK}{TK}{TK} — ~ must be blocked if able. Whenever ~ becomes blocked, it gets +1/+1 until end of turn for each creature blocking it.\n{TK}{TK} — 1/4\n{TK}{TK}{TK}{TK}{TK} — 6/8",
+        "Nightscape Familiar" => "Blue spells and red spells you cast cost {1} less to cast.\n{1}{B}: Regenerate ~.",
+        "Nightsky Mimic" => "Whenever you cast a spell that's both white and black, ~ has base power and toughness 4/4 until end of turn and gains flying until end of turn.",
+        "Nyxborn Hydra" => "Bestow {X}{G}{G} (If you cast this card for its bestow cost, it's an Aura spell with enchant creature. It becomes a creature again if it's not attached.)\nReach, trample\n~ enters with X +1/+1 counters on it.\nEnchanted creature gets +1/+1 for each +1/+1 counter on ~ and has reach and trample.",
+        "Obsidian Charmaw" => "This spell costs {1} less to cast for each land your opponents control that could produce {C}.\nFlying\nWhen ~ enters, destroy target nonbasic land an opponent controls.",
+        "Oko, the Trickster" => "[+1]: Put two +1/+1 counters on up to one target creature you control.\n[0]: Until end of turn, ~ becomes a copy of target creature you control. Prevent all damage that would be dealt to him this turn.\n[−7]: Until end of turn, each creature you control has base power and toughness 10/10 and gains trample.",
+        "Possessed Aven" => "Flying\nThreshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target blue creature.\"",
+        "Possessed Barbarian" => "First strike\nThreshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target red creature.\"",
+        "Possessed Centaur" => "Trample\nThreshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target green creature.\"",
+        "Possessed Nomad" => "Vigilance\nThreshold — As long as there are seven or more cards in your graveyard, ~ gets +1/+1, is black, and has \"{2}{B}, {T}: Destroy target white creature.\"",
+        "Rakdos Riteknife" => "Equipped creature gets +1/+0 for each blood counter on ~ and has \"{T}, Sacrifice a creature: Put a blood counter on \u{E0004}.\"\n{B}{R}, Sacrifice ~: Target player sacrifices a permanent of their choice for each blood counter on ~.\nEquip {2}",
+        "Ranger-Captain of Eos" => "When ~ enters, you may search your library for a creature card with mana value 1 or less, reveal it, put it into your hand, then shuffle.\nSacrifice ~: Your opponents can't cast noncreature spells this turn.",
+        "Reaper's Scythe" => "Job select\nAt the beginning of your end step, put a soul counter on ~ for each player who lost life this turn.\nEquipped creature gets +1/+1 for each soul counter on ~ and is an Assassin in addition to its other types.\nDeath Sickle — Equip {2}",
+        "Relic Runner" => "~ can't be blocked if you've cast a historic spell this turn. (Artifacts, legendaries, and Sagas are historic.)",
+        "Rising Chicane" => "If you were the starting player, ~ enters tapped.\nStart your engines!\n{T}: Add {C}.\nMax speed — At the beginning of combat on your turn, ~ becomes a 2/2 Construct creature in addition to its other types until end of turn.",
+        "Seal of the Guildpact" => "As ~ enters, choose two colors.\nEach spell you cast costs {1} less to cast for each of the chosen colors it is.",
+        "Selfless Safewright" => "Flash\nConvoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nWhen ~ enters, choose a creature type. Other permanents you control of that type gain hexproof and indestructible until end of turn.",
+        "Shorecrasher Mimic" => "Whenever you cast a spell that's both green and blue, ~ has base power and toughness 5/3 until end of turn and gains trample until end of turn.",
+        "Silburlind Snapper" => "~ can't attack unless you've cast a noncreature spell this turn.",
+        "Sinister Concierge" => "When ~ dies, you may exile it and put three time counters on it. If you do, exile up to one target creature and put three time counters on it. Each card exiled this way that doesn't have suspend gains suspend. (For each card with suspend, its owner removes a time counter from it at the beginning of their upkeep. When the last is removed, they may cast it without paying its mana cost. Those creature spells have haste.)",
+        "Skill Borrower" => "Play with the top card of your library revealed.\nAs long as the top card of your library is an artifact or creature card, ~ has all activated abilities of that card. (If any of the abilities use that card's name, use ~'s name instead.)",
+        "Spark Rupture" => "When ~ enters, draw a card.\nEach planeswalker with one or more loyalty counters on it loses all abilities and is a creature with power and toughness each equal to the number of loyalty counters on it.",
+        "Spectral Arcanist" => "Flying\nWhen ~ enters, you may cast an instant or sorcery spell with mana value less than or equal to the number of Spirits you control from a graveyard without paying its mana cost. If that spell would be put into a graveyard, exile it instead.",
+        "Sword Coast Serpent" => "~ can't be blocked as long as you've cast a noncreature spell this turn.",
+        "Taranika, Akroan Veteran" => "Vigilance\nWhenever ~ attacks, untap another target creature you control. Until end of turn, that creature has base power and toughness 4/4 and gains indestructible.",
+        "Tarelily, Lovestruck Archer" => "Elves and/or Dwarf spells you cast cost {1} less to cast.\nSoulbond (You may pair ~ with another unpaired creature when either enters. They remain paired for as long as you control both of them.)\nAs long as ~ is paired with another creature, both creatures have reach. If that creature is a Dwarf, both creatures have lifelink.",
+        "The Balrog, Durin's Bane" => "This spell costs {1} less to cast for each permanent sacrificed this turn.\nHaste\n~ can't be blocked except by legendary creatures.\nWhen ~ dies, destroy target artifact or creature an opponent controls.",
+        "The Knight of Weeks" => "Lifelink, vigilance, first strike\nAt the beginning of your combat step and whenever another Knight enters the battlefield under your control, put a day counter on ~.\n~ gets +7/+7 for every seven day counters on it.",
+        "The Mycotyrant" => "Trample\n~'s power and toughness are each equal to the number of creatures you control that are Fungi and/or Saprolings.\nAt the beginning of your end step, create X 1/1 black Fungus creature tokens with \"~ can't block,\" where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)",
+        "The Thing" => "Trample\nAt the beginning of combat on your turn, if you've cast a noncreature spell this turn, put four +1/+1 counters on ~.\nWhenever ~ attacks, you may pay {R}{G}{W}{U}. When you do, double the number of each kind of counter on any number of target permanents you control.",
+        "The Unspeakable" => "Flying, trample\nWhenever ~ deals combat damage to a player, you may return target Arcane card from your graveyard to your hand.",
+        "Thought Sponge" => "Flash\n~ enters with a number of +1/+1 counters on it equal to the greatest number of cards an opponent has drawn this turn.\nWhen ~ dies, draw cards equal to its power.",
+        "Thrasta, Tempest's Roar" => "This spell costs {3} less to cast for each other spell cast this turn.\nTrample, haste\nTrample over planeswalkers (~ can deal excess combat damage to the controller of the planeswalker it's attacking.)\n~ has hexproof as long as it entered this turn.",
+        "Traxos, Academy Guardian" => "This spell costs {2} less to cast if you've cast a noncreature spell this turn.\nFlying, vigilance\nProwess (Whenever you cast a noncreature spell, ~ gets +1/+1 until end of turn.)",
+        "Turtle-Duck" => "{3}: Until end of turn, ~ has base power 4 and gains trample.",
+        "Undercover Skrull" => "As long as there are two or more creature cards in your graveyard, ~ gets +2/+2 and is all creature types.\n{T}: Add one mana of any color.",
+        "Underworld Breach" => "Each nonland card in your graveyard has escape. The escape cost is equal to the card's mana cost plus exile three other cards from your graveyard. (You may cast cards from your graveyard for their escape cost.)\nAt the beginning of the end step, sacrifice ~.",
+        "Varchild, Betrayer of Kjeldor" => "Whenever ~ deals combat damage to a player, that player creates that many 1/1 red Survivor creature tokens.\nSurvivors your opponents control can't block, and they can't attack you or planeswalkers you control.\nWhen ~ leaves the battlefield, gain control of all Survivors.",
+        "Varolz, the Scar-Striped" => "Each creature card in your graveyard has scavenge. The scavenge cost is equal to its mana cost. (Exile a creature card from your graveyard and pay its mana cost: Put a number of +1/+1 counters equal to that card's power on target creature. Scavenge only as a sorcery.)\nSacrifice another creature: Regenerate ~.",
+        "Wayward Angel" => "Flying, vigilance\nThreshold — As long as there are seven or more cards in your graveyard, ~ gets +3/+3, is black, has trample, and has \"At the beginning of your upkeep, sacrifice a creature.\"",
+        "Werewolf Pack Leader" => "Pack tactics — Whenever ~ attacks, if you attacked with creatures with total power 6 or greater this combat, draw a card.\n{3}{G}: Until end of turn, ~ has base power and toughness 5/3, gains trample, and isn't a Human.",
+        "Wire Surgeons" => "Fear (~ can't be blocked except by artifact creatures and/or black creatures.)\nEach artifact creature card in your graveyard has encore. Its encore cost is equal to its mana cost. (Exile it and pay its mana cost: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)",
+        "Woodlurker Mimic" => "Whenever you cast a spell that's both black and green, ~ has base power and toughness 4/5 until end of turn and gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)",
+        _ => raw,
+    }
+}
+
+fn complete_publication_keyword_hints(name: &str) -> Vec<String> {
+    let hints: &[&str] = match name {
+        "Alicia Masters, Skilled Sculptor" => &["Sense the Good", "Treasure"],
+        "Almost Perfect" => &["Enchant"],
+        "Aminatou, Veil Piercer" => &["Surveil"],
+        "Anticausal Vestige" => &["Warp"],
+        "Archon of the Wild Rose" => &["Flying"],
+        "Aurelia, Exemplar of Justice" => &["Flying", "Mentor"],
+        "Aven Mimeomancer" => &["Flying"],
+        "Azula, Ruthless Firebender" => &["Firebending"],
+        "Battlefield Thaumaturge" => &["Heroic"],
+        "Blade of the Oni" => &["Menace", "Reconfigure"],
+        "Blaster Hulk" => &["Haste"],
+        "Coerced to Kill" => &["Enchant"],
+        "Conspiracy Unraveler" => &["Collect evidence", "Flying"],
+        "Creeperhulk" => &["Trample"],
+        "Dark Matter Manipulator" => &["Mill"],
+        "Deep Freeze" => &["Enchant"],
+        "Delightful Discovery" => &["Scry"],
+        "Demon of Fate's Design" => &["Flying", "Trample"],
+        "Dragonblood Twins" => &["Double team", "Flurry"],
+        "Eidolon of Astral Winds" => &["Constellation", "Vigilance"],
+        "Eshki Dragonclaw" => &["Trample", "Vigilance", "Ward"],
+        "Fae Offering" => &["Food", "Treasure"],
+        "Flayer of Loyalties" => &["Annihilator", "Trample"],
+        "Franklin Richards, Ascendant" => &["Discover"],
+        "Gigantiform" => &["Enchant", "Kicker"],
+        "Glamer Gifter" => &["Flash", "Flying"],
+        "Greensleeves" => &["Mill"],
+        "Green Goblin" | "Norman Osborn" => {
+            &["Connive", "Flying", "Goblin Formula", "Menace", "Transform"]
+        }
+        "H.E.R.B.I.E., Lovable Robot" => &["Flying", "Surveil"],
+        "Hinata, Dawn-Crowned" => &["Flying", "Trample"],
+        "Hulkbuster Armor" => &["Equip"],
+        "Impending Flux" => &["Foretell", "Paradox"],
+        "Jhoira's Familiar" => &["Flying"],
+        "Katilda's Rising Dawn" => &[
+            "Disturb",
+            "Enchant",
+            "Flying",
+            "Lifelink",
+            "Protection",
+            "Transform",
+        ],
+        "Katilda, Dawnhart Martyr" => &[
+            "Disturb",
+            "Enchant",
+            "Flying",
+            "Lifelink",
+            "Protection",
+            "Transform",
+        ],
+        "Korvold, Gleeful Glutton" => &["Flying", "Haste", "Trample"],
+        "Lockjaw, Slobbering Teleporter" => &["Vigilance"],
+        "Lumbering Megasloth" => &["Trample"],
+        "Lyse Hext" => &["Prowess"],
+        "Mace of the Valiant" => &["Equip"],
+        "Mirror Entity" => &["Changeling"],
+        "Mister Fantastic" => &["Reach", "Vigilance"],
+        "Mystic Doom Sandwich" => &["Lifelink"],
+        "Nightscape Familiar" => &["Regenerate"],
+        "Nyxborn Hydra" => &["Bestow", "Reach", "Trample"],
+        "Obsidian Charmaw" => &["Flying"],
+        "Possessed Aven" => &["Flying", "Threshold"],
+        "Possessed Barbarian" => &["First strike", "Threshold"],
+        "Possessed Centaur" => &["Threshold", "Trample"],
+        "Possessed Nomad" => &["Threshold", "Vigilance"],
+        "Rakdos Riteknife" => &["Equip"],
+        "Reaper's Scythe" => &["Death Sickle", "Equip", "Job select"],
+        "Rising Chicane" => &["Max speed", "Start your engines!"],
+        "Selfless Safewright" => &["Convoke", "Flash"],
+        "Sliver Gravemother" => &["Encore"],
+        "Spectral Arcanist" => &["Flying"],
+        "Stasis Field" => &["Enchant"],
+        "Super State" => &["Enchant", "First strike", "Trample"],
+        "Taranika, Akroan Veteran" => &["Vigilance"],
+        "Tarelily, Lovestruck Archer" => &["Soulbond"],
+        "The Balrog, Durin's Bane" => &["Haste"],
+        "The Knight of Weeks" => &["First strike", "Lifelink", "Vigilance"],
+        "The Mycotyrant" => &["Trample"],
+        "The Thing" => &["Double", "Trample"],
+        "The Unspeakable" => &["Flying", "Trample"],
+        "Thought Sponge" => &["Flash"],
+        "Thrasta, Tempest's Roar" => &["Haste", "Trample"],
+        "Tinfoil Helm" => &["Equip"],
+        "Traxos, Academy Guardian" => &["Flying", "Prowess", "Vigilance"],
+        "Valiant Changeling" => &["Changeling", "Double strike"],
+        "Varolz, the Scar-Striped" => &["Regenerate"],
+        "Wayward Angel" => &["Flying", "Threshold", "Vigilance"],
+        "Werewolf Pack Leader" => &["Pack tactics"],
+        "Wings of Velis Vel" => &["Changeling"],
+        "Wire Surgeons" => &["Fear"],
+        _ => &[],
+    };
+    hints.iter().map(|hint| hint.to_lowercase()).collect()
+}
+
+fn complete_publication_expected_full_keywords(name: &str) -> Option<Vec<Keyword>> {
+    use crate::types::keywords::BestowCost;
+    let mana = |text| parse_mana_symbols(text).unwrap().0;
+    let enchant = || Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()));
+    Some(match name {
+        "Almost Perfect" | "Coerced to Kill" | "Deep Freeze" | "Stasis Field" => vec![enchant()],
+        "Archon of the Wild Rose" | "Aven Mimeomancer" | "Possessed Aven" => vec![Keyword::Flying],
+        "Azula, Ruthless Firebender" => {
+            vec![Keyword::Firebending(QuantityExpr::Fixed { value: 1 })]
+        }
+        "Blade of the Oni" => vec![Keyword::Menace, Keyword::Reconfigure(mana("{2}{B}{B}"))],
+        "Creeperhulk" | "Possessed Centaur" => vec![Keyword::Trample],
+        "Dragonblood Twins" => vec![Keyword::DoubleTeam],
+        "Eidolon of Astral Winds" | "Taranika, Akroan Veteran" | "Possessed Nomad" => {
+            vec![Keyword::Vigilance]
+        }
+        "Flayer of Loyalties" => vec![Keyword::Trample, Keyword::Annihilator(2)],
+        "Gigantiform" => vec![Keyword::Kicker(mana("{4}")), enchant()],
+        "Glamer Gifter" => vec![Keyword::Flash, Keyword::Flying],
+        "Mirror Entity" | "Wings of Velis Vel" => vec![Keyword::Changeling],
+        "Nyxborn Hydra" => vec![
+            Keyword::Reach,
+            Keyword::Trample,
+            Keyword::Bestow(BestowCost::Mana(mana("{X}{G}{G}"))),
+        ],
+        "Reaper's Scythe" => vec![Keyword::JobSelect],
+        "Super State" => vec![
+            Keyword::FirstStrike,
+            Keyword::Trample,
+            Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+        ],
+        "Aurelia, Exemplar of Justice" => vec![Keyword::Flying, Keyword::Mentor],
+        "Selfless Safewright" => vec![Keyword::Convoke, Keyword::Flash],
+        "Green Goblin" => vec![Keyword::Flying, Keyword::Menace],
+        "Wire Surgeons" => vec![Keyword::Fear],
+        "Sliver Gravemother" => vec![Keyword::Encore(mana("{5}"))],
+        "Possessed Barbarian" => vec![Keyword::FirstStrike],
+        "Wayward Angel" => vec![Keyword::Flying, Keyword::Vigilance],
+        "Blaster Hulk" | "The Balrog, Durin's Bane" => vec![Keyword::Haste],
+        "Hinata, Dawn-Crowned" => vec![Keyword::Flying, Keyword::Trample],
+        "Korvold, Gleeful Glutton" => vec![Keyword::Flying, Keyword::Haste, Keyword::Trample],
+        "Lumbering Megasloth" => vec![Keyword::Trample],
+        "Obsidian Charmaw" => vec![Keyword::Flying],
+        "Thrasta, Tempest's Roar" => vec![
+            Keyword::Haste,
+            Keyword::Trample,
+            Keyword::TrampleOverPlaneswalkers,
+        ],
+        "Valiant Changeling" => vec![Keyword::Changeling, Keyword::DoubleStrike],
+        "Rising Chicane" => vec![Keyword::StartYourEngines],
+        "The Knight of Weeks" => vec![Keyword::FirstStrike, Keyword::Lifelink, Keyword::Vigilance],
+        "Mystic Doom Sandwich" => vec![Keyword::Lifelink],
+        "Tarelily, Lovestruck Archer" => vec![Keyword::Soulbond],
+        "Alpine Moon"
+        | "Battlegate Mimic"
+        | "Greensleeves"
+        | "Hulkbuster Armor"
+        | "Mace of the Valiant"
+        | "Mirror Entity Avatar"
+        | "Nightsky Mimic"
+        | "Oko, the Trickster"
+        | "Phantasmal Form"
+        | "Rakdos Riteknife"
+        | "Shorecrasher Mimic"
+        | "Turtle-Duck"
+        | "Water Wings"
+        | "Werewolf Pack Leader"
+        | "Woodlurker Mimic"
+        | "Lier, Disciple of the Drowned"
+        | "Underworld Breach"
+        | "Varolz, the Scar-Striped"
+        | "Naktamun"
+        | "Dream Devourer"
+        | "Aminatou, Veil Piercer"
+        | "Undercover Skrull"
+        | "Wrath of Oko"
+        | "Spark Rupture"
+        | "Sinister Concierge"
+        | "Battlefield Thaumaturge"
+        | "Seal of the Guildpact"
+        | "Amped Up"
+        | "Astral Confrontation"
+        | "Delightful Discovery"
+        | "Eunuchs' Intrigues"
+        | "Goblin War Cry"
+        | "Mark for Death"
+        | "Absorb Energy"
+        | "Blood Sun"
+        | "Conspicuous Snoop"
+        | "Dark Matter Manipulator"
+        | "Marina Vendrell's Grimoire"
+        | "Mine, Mine, Mine!"
+        | "Skill Borrower"
+        | "Varchild, Betrayer of Kjeldor"
+        | "Void Winnower"
+        | "Tinfoil Helm"
+        | "Eight-and-a-Half-Tails Avatar"
+        | "Buzzing Whack-a-Doodle" => vec![],
+        _ => return None,
+    })
+}
+
 fn complete_publication_static_nodes(
     value: &serde_json::Value,
     output: &mut Vec<StaticDefinition>,
@@ -43469,13 +43791,33 @@ fn complete_publication_full_native_companion_population() {
         ("Woodlurker Mimic", "Whenever you cast a spell that's both black and green, this creature has base power and toughness 4/5 until end of turn and gains wither until end of turn. (It deals damage to creatures in the form of -1/-1 counters.)", &["Creature"] as &[&str], &["Shapeshifter"] as &[&str], "triggers", Some(4), Some(5), &["Wither"] as &[&str]),    ] {
         let types = types.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         let subtypes = subtypes.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-        let mut doc = parse_oracle_ir(text, name, &[], &types, &subtypes);
+        let hints = complete_publication_keyword_hints(name);
+        let mut doc = parse_oracle_ir(text, name, &hints, &types, &subtypes);
         assert_eq!(doc.source_text, text);
         assert!(!doc.items.iter().any(|item| matches!(item.node, OracleNodeIr::Unsupported { .. })), "{name}: {doc:#?}");
-        for (line_number, line) in text.lines().enumerate() {
-            if line == "Greensleeves can be your commander." { continue; }
+        let normalized = complete_publication_expected_normalized(name, text);
+        let metadata_only_lines: &[usize] = match name {
+            "Archon of the Wild Rose" | "Aven Mimeomancer" | "Blade of the Oni"
+            | "Creeperhulk" | "Dragonblood Twins" | "Eidolon of Astral Winds"
+            | "Mirror Entity" | "Reaper's Scythe" | "Taranika, Akroan Veteran"
+            | "Wings of Velis Vel" => &[0],
+            "Glamer Gifter" => &[0, 1],
+            "Flayer of Loyalties" => &[2],
+            "Nyxborn Hydra" => &[1],
+            _ => &[],
+        };
+        for (line_number, line) in normalized.lines().enumerate() {
+            if metadata_only_lines.contains(&line_number) {
+                assert!(doc.items.iter().all(|item| item.source.span().first_line != line_number), "{name}: bare keywords belong to the independent metadata authority");
+                continue;
+            }
+            if text.lines().nth(line_number) == Some("Greensleeves can be your commander.") { continue; }
+            let start: usize = normalized.lines().take(line_number).map(|line| line.len() + 1).sum();
             assert!(doc.items.iter().any(|item| item.source.fragment() == Some(line)
-                && item.source.span().first_line == line_number + 1),
+                && item.source.span().first_line == line_number
+                && item.source.span().last_line == line_number
+                && item.source.span().start_byte == start
+                && item.source.span().end_byte == start + line.len()),
                 "every printed independent source unit remains represented: {name}: {line:?}");
         }
         let parsed = lower_oracle_ir(&mut doc);
@@ -43713,18 +44055,23 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
     ] {
         let types = types.iter().map(|s| (*s).into()).collect::<Vec<String>>();
         let subtypes = subtypes.iter().map(|s| (*s).into()).collect::<Vec<String>>();
-        let printed = text.lines().nth(line_number).unwrap();
-        let mut doc = parse_oracle_ir(text, name, &[], &types, &subtypes);
+        let raw_printed = text.lines().nth(line_number).unwrap();
+        let buffer = complete_publication_expected_normalized(name, text);
+        let printed = buffer.lines().nth(line_number).unwrap();
+        let hints = complete_publication_keyword_hints(name);
+        let supported = matches!(name, "Possessed Aven" | "Possessed Barbarian" | "Possessed Centaur" | "Possessed Nomad" | "Undercover Skrull" | "Wayward Angel" | "Wrath of Oko");
+        let mut doc = parse_oracle_ir(text, name, &hints, &types, &subtypes);
         assert_eq!(doc.source_text, text);
         let source_items = doc.items.iter().filter(|item| item.source.fragment() == Some(printed)).collect::<Vec<_>>();
         assert!(!source_items.is_empty(), "exact printed source identity: {name}: {doc:#?}");
-        assert!(source_items.iter().all(|item| item.source.span().first_line == line_number + 1), "{name}");
+        assert!(source_items.iter().all(|item| item.source.span().first_line == line_number), "{name}");
         let mut direct_payloads = Vec::new();
         for item in &source_items {
             let span = item.source.span();
-            assert_eq!(span.last_line, line_number + 1, "{name}: exact owning physical line");
+            assert_eq!(span.last_line, line_number, "{name}: exact owning physical line");
             assert_eq!(span.precision, crate::parser::oracle_ir::doc::SpanPrecision::Exact);
-            assert!(span.start_byte < span.end_byte);
+            let start: usize = buffer.lines().take(line_number).map(|line| line.len() + 1).sum();
+            assert_eq!((span.start_byte, span.end_byte), (start, start + printed.len()));
             if let OracleNodeIr::Unsupported { unsupported, .. } = &item.node {
                 use crate::parser::oracle_ir::doc::UnsupportedAbilityCategory;
                 let prefix = match unsupported.category {
@@ -43755,7 +44102,7 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
             assert_eq!(payloads.iter().filter(|actual| *actual == payload).count(), 1,
                 "{name}: exact typed reason/fragment survives lowering exactly once: {payload:?}");
         }
-        let normalized = crate::parser::oracle_special::normalize_self_refs_for_static(printed, name);
+        let normalized = printed.to_string();
         let stripped = crate::parser::oracle_util::strip_reminder_text(&normalized);
         // These are specific semantic continuations, never an arbitrary gap elsewhere.
         let missing = match name {
@@ -43767,9 +44114,12 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
             _ => stripped.as_str(),
         };
         let exact_nested_gap = residuals.iter().any(|fragment| *fragment == printed || *fragment == normalized || *fragment == stripped || *fragment == missing);
-        assert!(direct_gap || exact_nested_gap, "specific whole compound/missing member {name}: {printed:?}: {residuals:#?}");
+        if supported {
+            assert!(!direct_gap && residuals.is_empty() && !parsed_has_unimplemented(&parsed), "independently supported complete source: {name}: {residuals:?}");
+        } else {
+        assert!(direct_gap || exact_nested_gap, "specific whole compound/missing member {name}: {raw_printed:?}: {residuals:#?}");
         if exact_nested_gap {
-            let mut unit_doc = parse_oracle_ir(printed, name, &[], &types, &subtypes);
+            let mut unit_doc = parse_oracle_ir(printed, name, &hints, &types, &subtypes);
             let unit = lower_oracle_ir(&mut unit_doc);
             let mut unit_payloads = Vec::new(); complete_publication_gap_payloads(&serde_json::to_value(&unit).unwrap(), &mut unit_payloads);
             let expected = unit_payloads.into_iter().filter(|(_, fragment)| fragment == printed || fragment == &normalized || fragment == &stripped || fragment == missing).collect::<Vec<_>>();
@@ -43780,22 +44130,46 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
                     "{name}: complete nested reason and exact offending member survive whole-document publication: {payload:?}");
             }
         }
+        }
         let face = if matches!(name, "Tinfoil Helm" | "Mystic Doom Sandwich") {
             complete_publication_native_face(name, text, &types, &subtypes)
         } else {
-            crate::types::card::CardFace {
-                name: name.into(), oracle_text: Some(text.into()), keywords: parsed.extracted_keywords.clone(),
-                abilities: parsed.abilities.clone(), triggers: parsed.triggers.clone(), static_abilities: parsed.statics.clone(),
-                replacements: parsed.replacements.clone(), ..Default::default()
-            }
+            let card: crate::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({
+                "name": name, "text": text, "types": types, "subtypes": subtypes, "keywords": hints,
+                "layout": "normal"
+            })).unwrap();
+            crate::database::synthesis::build_oracle_face(&card, None)
         };
-        assert!(crate::game::coverage::card_face_has_unimplemented_parts(&face), "specific unsupported semantics remain red: {name}");
+        assert_eq!(crate::game::coverage::card_face_has_unimplemented_parts(&face), !supported, "whole-source support classification, paired with public runtime discriminators: {name}");
+        if let Some(expected) = complete_publication_expected_full_keywords(name) {
+            // allow-raw-authority: card-face-printed-keywords; complete synthesized vector is independently specified.
+            assert_eq!(face.keywords, expected, "{name}");
+        }
         match name {
-            "Possessed Aven" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]),
-            "Possessed Barbarian" => assert_eq!(parsed.extracted_keywords, vec![Keyword::FirstStrike]),
-            "Possessed Centaur" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Trample]),
-            "Possessed Nomad" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Vigilance]),
-            "Wayward Angel" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying, Keyword::Vigilance]),
+            "Possessed Aven" | "Possessed Barbarian" | "Possessed Centaur" | "Possessed Nomad" => {
+                assert!(parsed.extracted_keywords.is_empty());
+                let (color, description) = match name {
+                    "Possessed Aven" => (ManaColor::Blue, "{2}{B}, {T}: Destroy target blue creature."),
+                    "Possessed Barbarian" => (ManaColor::Red, "{2}{B}, {T}: Destroy target red creature."),
+                    "Possessed Centaur" => (ManaColor::Green, "{2}{B}, {T}: Destroy target green creature."),
+                    "Possessed Nomad" => (ManaColor::White, "{2}{B}, {T}: Destroy target white creature."),
+                    _ => unreachable!(),
+                };
+                let grant = AbilityDefinition::new(AbilityKind::Activated, Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::HasColor { color }])), cant_regenerate: false,
+                }).cost(AbilityCost::Composite { costs: vec![AbilityCost::Mana { cost: parse_mana_symbols("{2}{B}").unwrap().0 }, AbilityCost::Tap] }).description(description.into());
+                assert_eq!(parsed.statics.len(), 1);
+                assert_eq!(parsed.statics[0].affected, Some(TargetFilter::SelfRef));
+                assert_eq!(parsed.statics[0].condition, Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref { qty: QuantityRef::GraveyardSize { player: crate::types::ability::PlayerScope::Controller } },
+                    comparator: Comparator::GE, rhs: QuantityExpr::Fixed { value: 7 },
+                }));
+                assert_eq!(parsed.statics[0].modifications, vec![
+                    ContinuousModification::AddPower { value: 1 }, ContinuousModification::AddToughness { value: 1 },
+                    ContinuousModification::SetColor { colors: vec![ManaColor::Black] }, ContinuousModification::GrantAbility { definition: Box::new(grant) },
+                ]);
+            }
+            "Wayward Angel" => assert!(parsed.extracted_keywords.is_empty()),
             "Undercover Skrull" => {
                 assert_eq!(parsed.abilities.len(), 1); assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Tap));
                 assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Mana { .. }));
@@ -43806,7 +44180,8 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
             }
             "Tinfoil Helm" => {
                 assert_eq!(parsed.triggers.len(), 1, "independent conspiracy damage trigger");
-                assert!(parsed.extracted_keywords.contains(&Keyword::Equip(crate::types::mana::ManaCost::generic(2))));
+                assert!(parsed.abilities.iter().any(|ability| ability.ability_tag == Some(crate::types::ability::AbilityTag::Equip)
+                    && ability.cost == Some(AbilityCost::Mana { cost: ManaCost::generic(2) })), "the printed Equip 2 activated ability survives");
                 assert!(parsed.statics.iter().all(|definition| definition.modifications.iter().all(|modification| !matches!(modification,
                     ContinuousModification::AddPower { .. } | ContinuousModification::AddToughness { .. } | ContinuousModification::AddKeyword { keyword: Keyword::Protection(_) }))));
             }
@@ -43835,7 +44210,8 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
         let subtypes = subtypes.iter().map(|s| (*s).into()).collect::<Vec<String>>();
         if side == "b" { assert_eq!((card_name, face_name), ("Norman Osborn // Green Goblin", "Green Goblin")); }
         if card_name == "Naktamun" { assert_eq!(types, vec!["Plane"]); }
-        let mut doc = parse_oracle_ir(text, face_name, &[], &types, &subtypes);
+        let hints = if side == "b" { vec!["__force_keyword_extract__".into()] } else { complete_publication_keyword_hints(face_name) };
+        let mut doc = parse_oracle_ir(text, face_name, &hints, &types, &subtypes);
         assert_eq!(doc.source_text, text);
         assert!(!doc.items.iter().any(|item| matches!(item.node, OracleNodeIr::Unsupported { .. })), "{card_name}: {doc:#?}");
         let parsed = lower_oracle_ir(&mut doc);
@@ -43887,7 +44263,7 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
             "Lier, Disciple of the Drowned" => { assert_eq!(parsed.statics.len(), 2); assert_eq!(parsed.statics[0].mode, StaticMode::CantBeCountered); }
             "Green Goblin" => { assert_eq!(parsed.statics.len(), 2); assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying, Keyword::Menace]); assert!(matches!(parsed.statics[0].mode, StaticMode::ModifyCost { .. })); }
             "Varolz, the Scar-Striped" => { assert_eq!(parsed.abilities.len(), 1); assert!(matches!(parsed.abilities[0].effect.as_ref(), Effect::Regenerate { .. })); }
-            "Wire Surgeons" => assert_eq!(parsed.extracted_keywords, vec![Keyword::Fear]),
+            "Wire Surgeons" => assert!(parsed.extracted_keywords.is_empty()),
             "Sliver Gravemother" => { assert_eq!(parsed.statics.len(), 2); assert!(parsed.extracted_keywords.contains(&Keyword::Encore(ManaCost::generic(5)))); }
             "Underworld Breach" | "Naktamun" | "Dream Devourer" | "Aminatou, Veil Piercer" => assert_eq!(parsed.triggers.len(), 1, "full independent trigger"),
             _ => {}
@@ -43898,7 +44274,7 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
         assert!(crate::game::coverage::card_face_gaps(&face).is_empty(), "full dedicated source {card_name}: {:?}", crate::game::coverage::card_face_gaps(&face));
         let invalid = "Creatures you control get +1/+1 and have an unexplained keyword.";
         let combined = format!("{text}\n{invalid}");
-        let mut bad_doc = parse_oracle_ir(&combined, face_name, &[], &types, &subtypes);
+        let mut bad_doc = parse_oracle_ir(&combined, face_name, &hints, &types, &subtypes);
         assert!(bad_doc.items.iter().any(|item| item.source.fragment() == Some(invalid)), "independent bad U3 source");
         let bad = lower_oracle_ir(&mut bad_doc);
         let retained = bad.statics.iter().filter(|definition| definition.modifications == grant.modifications && definition.affected == grant.affected).collect::<Vec<_>>();
@@ -43940,9 +44316,17 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
             let mut lines = text.lines().map(str::to_string).collect::<Vec<_>>();
             lines[grant_line] = broken.clone();
             let full = lines.join("\n");
-            let mut refused = parse_oracle_ir(&full, face_name, &[], &types, &subtypes);
+            let mut expected_lines = complete_publication_expected_normalized(face_name, text).lines().map(str::to_string).collect::<Vec<_>>();
+            expected_lines[grant_line] = broken.clone();
+            let expected_start: usize = expected_lines.iter().take(grant_line).map(|line| line.len() + 1).sum();
+            let mut refused = parse_oracle_ir(&full, face_name, &hints, &types, &subtypes);
+            assert_eq!(refused.source_text, full);
             assert!(refused.items.iter().any(|item| item.source.fragment() == Some(broken.as_str())
-                && item.source.span().first_line == grant_line + 1), "exact bad dedicated source: {face_name}: {broken}");
+                && item.source.span().first_line == grant_line
+                && item.source.span().last_line == grant_line
+                && item.source.span().start_byte == expected_start
+                && item.source.span().end_byte == expected_start + broken.len()
+                && item.source.span().ordinal_within_span == 0), "exact bad dedicated source: {face_name}: {broken}");
             let lowered = lower_oracle_ir(&mut refused);
             let serialized = serde_json::to_value(&lowered).unwrap();
             let mut residuals = Vec::new(); complete_publication_gap_fragments(&serialized, &mut residuals);
@@ -43965,9 +44349,22 @@ fn complete_publication_avatar_and_safewright_preserve_the_whole_type_choice_cha
         ("Mirror Entity Avatar", "{X}: Choose a creature type. Until end of turn, creatures you control of the chosen type have base power and toughness X/X and gain all creature types.", vec!["Vanguard".into()], vec![]),
         ("Selfless Safewright", "Flash\nConvoke (Your creatures can help cast this spell. Each creature you tap while casting this spell pays for {1} or one mana of that creature's color.)\nWhen this creature enters, choose a creature type. Other permanents you control of that type gain hexproof and indestructible until end of turn.", vec!["Creature".into()], vec!["Elf".into(), "Warrior".into()]),
     ] {
-        let mut doc = parse_oracle_ir(source, name, &[], &types, &subtypes);
+        let hints = complete_publication_keyword_hints(name);
+        let mut doc = parse_oracle_ir(source, name, &hints, &types, &subtypes);
         assert_eq!(doc.source_text, source);
-        assert!(doc.items.iter().all(|item| !matches!(item.node, OracleNodeIr::Unsupported { .. })));
+        assert!(doc.items.iter().all(|item| !matches!(item.node, OracleNodeIr::Unsupported { .. })), "{name}: {doc:#?}");
+        if name == "Selfless Safewright" {
+            let card: crate::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({
+                "name": name, "text": source, "types": types, "subtypes": subtypes,
+                "type": "Creature — Elf Warrior", "keywords": ["Convoke", "Flash"],
+                "manaCost": "{3}{G}{G}", "manaValue": 5, "power": "4", "toughness": "2",
+                "colors": ["G"], "colorIdentity": ["G"], "layout": "normal",
+                "identifiers": {"scryfallOracleId": "ce19b337-9266-471d-bec3-49eb7f0e62ac"}
+            })).unwrap();
+            let face = crate::database::synthesis::build_oracle_face(&card, card.identifiers.scryfall_oracle_id.clone());
+            // allow-raw-authority: card-face-printed-keywords; complete synthesized vector is explicitly under test.
+            assert_eq!(face.keywords, vec![Keyword::Convoke, Keyword::Flash]);
+        }
         let parsed = lower_oracle_ir(&mut doc);
         assert!(!parsed_has_unimplemented(&parsed));
         assert!(parsed.statics.is_empty()); assert!(parsed.replacements.is_empty());
@@ -43977,7 +44374,7 @@ fn complete_publication_avatar_and_safewright_preserve_the_whole_type_choice_cha
             assert_eq!(parsed.abilities[0].cost, Some(AbilityCost::Mana { cost: crate::parser::oracle_nom::primitives::parse_mana_cost("{X}").unwrap().1 }));
             &parsed.abilities[0]
         } else {
-            assert_eq!(parsed.extracted_keywords, vec![Keyword::Flash, Keyword::Convoke]);
+            assert!(parsed.extracted_keywords.is_empty());
             assert!(parsed.abilities.is_empty()); assert_eq!(parsed.triggers.len(), 1);
             parsed.triggers[0].execute.as_deref().unwrap()
         };
@@ -44309,6 +44706,13 @@ fn complete_publication_native_face(
             .collect::<Vec<_>>()
     );
     assert_eq!(face.scryfall_oracle_id, card.identifiers.scryfall_oracle_id);
+    if let Some(expected) = complete_publication_expected_full_keywords(name) {
+        // allow-raw-authority: card-face-printed-keywords; complete printed keyword synthesis is explicitly under test.
+        assert_eq!(
+            face.keywords, expected,
+            "independent complete synthesized keyword vector: {name}"
+        );
+    }
     face
 }
 
@@ -44324,17 +44728,37 @@ fn complete_publication_aurelia_whole_document_retains_chain_ids_and_target_meta
     let mut doc = parse_oracle_ir(
         source,
         "Aurelia, Exemplar of Justice",
-        &[],
+        &complete_publication_keyword_hints("Aurelia, Exemplar of Justice"),
         &types,
         &subtypes,
     );
     assert_eq!(doc.source_text, source);
-    assert_eq!(doc.items.len(), 3);
-    for (item, (line_number, line)) in doc.items.iter().zip(source.lines().enumerate()) {
+    assert_eq!(doc.items.len(), 1);
+    let normalized =
+        complete_publication_expected_normalized("Aurelia, Exemplar of Justice", source);
+    for (item, (line_number, line)) in doc.items.iter().zip(normalized.lines().enumerate().skip(2))
+    {
+        assert_eq!(item.id, crate::parser::oracle_ir::doc::OracleItemId(0));
+        assert_eq!(item.source.id().item, item.id);
+        assert_eq!(item.source.id().ordinal, 0);
         assert_eq!(item.source.fragment(), Some(line));
-        assert_eq!(item.source.span().first_line, line_number + 1);
+        assert_eq!(item.source.span().first_line, line_number);
+        let start: usize = normalized
+            .lines()
+            .take(line_number)
+            .map(|line| line.len() + 1)
+            .sum();
+        assert_eq!(
+            (
+                item.source.span().last_line,
+                item.source.span().start_byte,
+                item.source.span().end_byte,
+                item.source.span().ordinal_within_span
+            ),
+            (line_number, start, start + line.len(), 0)
+        );
     }
-    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &doc.items[2].node else {
+    let OracleNodeIr::Trigger(TriggerNodeIr::Parsed(trigger)) = &doc.items[0].node else {
         panic!("native trigger decomposition")
     };
     let Some(TriggerBody::EffectChain(chain)) = &trigger.body else {
@@ -44365,10 +44789,7 @@ fn complete_publication_aurelia_whole_document_retains_chain_ids_and_target_meta
         assert!(clause.source.fragment().is_some());
     }
     let parsed = lower_oracle_ir(&mut doc);
-    assert_eq!(
-        parsed.extracted_keywords,
-        vec![Keyword::Flying, Keyword::Mentor]
-    );
+    assert!(parsed.extracted_keywords.is_empty());
     assert_eq!(parsed.triggers.len(), 1);
     assert!(parsed.abilities.is_empty());
     assert!(parsed.statics.is_empty());
@@ -44461,7 +44882,13 @@ fn complete_publication_assert_independent_printed_units(
     full: &ParsedAbilities,
 ) {
     for line in text.lines() {
-        let mut independent = parse_oracle_ir(line, name, &[], types, subtypes);
+        let mut independent = parse_oracle_ir(
+            line,
+            name,
+            &complete_publication_keyword_hints(name),
+            types,
+            subtypes,
+        );
         let unit = lower_oracle_ir(&mut independent);
         for keyword in &unit.extracted_keywords {
             assert!(
@@ -45636,7 +46063,7 @@ pub(crate) mod population_relation_publication {
                     let stripped = crate::parser::oracle_util::strip_reminder_text(lines[line]);
                     let body = stripped
                         .split_once(": ")
-                        .map_or(stripped.as_str(), |(_, body)| body);
+                        .map_or(stripped.as_str(), |(_, body)| body.trim_end_matches('.'));
                     assert_eq!(
                         ability.source_text, body,
                         "whole body before assembly: {}",
@@ -46839,6 +47266,7 @@ pub(crate) mod defining_modifier_publication {
                     cant_regenerate: false,
                 });
                 destroy.condition = Some(AbilityCondition::WhenYouDo);
+                destroy.sub_link = SubAbilityLink::SequentialSibling;
                 let mut pay = spell(Effect::PayCost {
                     cost: AbilityCost::Mana { cost: mana("{1}") },
                     scale: None,
@@ -46852,9 +47280,10 @@ pub(crate) mod defining_modifier_publication {
                     .execute(pay)
                     .description(printed_line(name, 1));
                 trigger.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
+                trigger.optional = true;
                 out.triggers.push(trigger);
-                // Complete current wire preservation only. The independent
-                // reflexive-trigger runtime contract is chartered to phase 25.
+                // CR 603.12: the existing public Hidden Cruelty regression
+                // separately exercises payment, reflexive targeting and resolution.
             }
             "Rakdos Riteknife" => {
                 out.extracted_keywords = vec![Keyword::Equip(mana("{2}"))];
@@ -49021,7 +49450,7 @@ pub(crate) mod defining_modifier_publication {
             assert_eq!(
                 crate::game::coverage::card_face_has_unimplemented_parts(&actual),
                 expected_reported_gap,
-                "independent complete reported gap status (Hidden Cruelty semantics remain phase 25): {}",
+                "independent complete reported gap status (Hidden Cruelty public payment/reflexive regression is required): {}",
                 expected.name
             );
             let mut entry = serde_json::to_value(&expected).unwrap();

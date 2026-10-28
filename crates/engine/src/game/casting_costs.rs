@@ -591,6 +591,24 @@ fn propagate_shared_cast_context(ability: &mut ResolvedAbility, shared: &SpellCo
     }
 }
 
+// Finalization owns these announcement snapshots. Node-local choices, source
+// provenance, attachment context and target occurrences retain their own owners.
+fn propagate_final_cast_inputs(ability: &mut ResolvedAbility, shared: &SpellContext) {
+    ability.context.cast_from_zone = shared.cast_from_zone;
+    ability.context.cast_controller = shared.cast_controller;
+    ability.context.cast_active_player = shared.cast_active_player;
+    ability.context.cast_phase = shared.cast_phase;
+    ability.context.chain_root_targets = shared.chain_root_targets.clone();
+    ability.context.controller_controlled_as_cast = shared.controller_controlled_as_cast.clone();
+    ability.refresh_coin_target_inputs();
+    if let Some(sub) = ability.sub_ability.as_mut() {
+        propagate_final_cast_inputs(sub, shared);
+    }
+    if let Some(otherwise) = ability.else_ability.as_mut() {
+        propagate_final_cast_inputs(otherwise, shared);
+    }
+}
+
 /// CR 118.6a + CR 601.2b + CR 601.2h: apply a spell's alternative cost
 /// without asking, because the printed cost it would replace doesn't exist.
 /// Records it as an accepted alternative would be (its once-per-turn grant is
@@ -13203,6 +13221,8 @@ fn finalize_cast_with_phyrexian_choices_inner(
         .cloned()
         .collect();
     stamp_controller_controlled_as_cast(state, &mut ability, player, object_id);
+    let final_cast_inputs = ability.context.clone();
+    propagate_final_cast_inputs(&mut ability, &final_cast_inputs);
 
     // CR 107.3m: Stash the paid X value directly on the permanent so replacement
     // effects ("enters with X counters") and ETB triggered abilities that

@@ -3705,6 +3705,7 @@ fn handle_resolution_choice_in_occurrence(
                             "LoopCollapse pay-amount for {player:?} has no pending materialization stash"
                         )));
                     };
+                    set_priority(state, player);
                     // CR 732.2a pause-safety: process the ONLY pause-prone axis (`Tokens` — its
                     // per-cycle fodder mint can raise an ETB replacement `NeedsChoice`, unlike
                     // the deterministic Counters/Life axes) LAST. A mixed loop
@@ -15791,24 +15792,6 @@ mod random_result_resolution_context_tests {
             match_count: Some(17),
             die_result: Some(79),
         };
-        let mut carrier = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
-        carrier.set_trigger_source_recursive(provenance);
-        state.resolving_stack_entry = Some(StackEntry {
-            id: ObjectId(900),
-            source_id: source,
-            controller: P0,
-            kind: StackEntryKind::TriggeredAbility {
-                source_id: source,
-                ability: Box::new(carrier),
-                condition: None,
-                trigger_event: owned.event.clone(),
-                description: None,
-                source_name: String::new(),
-                subject_match_count: None,
-                die_result: None,
-                provenance: None,
-            },
-        });
         state.resolving_trigger_firing = Some(crate::types::identifiers::TriggerFiring::Ordinary);
         install(&mut state, &owned);
         let sentinel = ResolvedAbility::new(
@@ -15878,7 +15861,28 @@ mod random_result_resolution_context_tests {
                 .unwrap();
             state.rng = GameRng::seed_from_u64(seed);
         }
-        let ability = ResolvedAbility::new(effect, vec![], source, P0);
+        let mut ability = crate::game::ability_utils::build_resolved_from_def(
+            &AbilityDefinition::new(AbilityKind::Spell, effect),
+            source,
+            P0,
+        );
+        ability.set_trigger_source_recursive(provenance);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability.clone()),
+                condition: None,
+                trigger_event: owned.event.clone(),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
         match boundary {
             Boundary::Coin => {
                 effects::flip_coin::resolve(&mut state, &ability, &mut vec![]).unwrap()
@@ -16147,6 +16151,86 @@ mod random_result_resolution_context_tests {
                 );
                 assert!(state.resolution_stack.is_empty());
                 state.resolution_stack.validate(&state.waiting_for).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn nested_coin_public_answer_requires_its_direct_installed_die_owner() {
+        let child = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+                win_effect: Some(Box::new(gain(2))),
+                lose_effect: Some(Box::new(gain(2))),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let (state, _, _, _) =
+            fixture_with_child(Boundary::DieDrain, move_successor(), Some(child));
+        let before_life = state.players[0].life;
+        for fault in 0..6 {
+            let mut candidate = state.clone();
+            let coin = candidate.take_active_coin_flip_frame().unwrap().unwrap();
+            let mut die = candidate.take_active_die_roll_frame().unwrap().unwrap();
+            match fault {
+                0 => {}
+                1 => die.source_id = ObjectId(999),
+                2 => die
+                    .chain_root_targets
+                    .push(TargetRef::Object(ObjectId(999))),
+                3 => die.results_table[0].effect = Box::new(gain(99)),
+                4 => die.next_index = 0,
+                5 => {}
+                _ => unreachable!(),
+            }
+            candidate.push_die_roll_frame(die);
+            if fault == 5 {
+                let continuation = PendingContinuation::new(
+                    Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        coin.source_id,
+                        P0,
+                    )),
+                    &candidate,
+                );
+                candidate.park_ability_continuation(continuation);
+            }
+            candidate.push_coin_flip_frame(coin);
+            let custody = effects::flip_coin::validate_pending_coin_flip(
+                &candidate,
+                candidate.active_coin_flip_frame().unwrap(),
+            );
+            if fault == 0 {
+                custody.unwrap();
+            } else {
+                assert!(custody
+                    .unwrap_err()
+                    .to_string()
+                    .contains("parked coin target custody"));
+            }
+            let before = candidate.clone();
+            let answer = crate::game::engine::apply(
+                &mut candidate,
+                P0,
+                GameAction::SelectCoinFlips {
+                    keep_indices: vec![0],
+                },
+            );
+            if fault == 0 {
+                answer.unwrap();
+                assert_eq!(candidate.players[0].life, before_life + 1002);
+                assert!(matches!(candidate.waiting_for, WaitingFor::Priority { .. }));
+                assert!(candidate.resolution_stack.is_empty());
+            } else {
+                assert!(answer.is_err());
+                assert_eq!(
+                    candidate, before,
+                    "foreign or missing direct owner refuses before mutation"
+                );
             }
         }
     }

@@ -561,7 +561,12 @@ pub fn resolve(
             })
     });
     let (snapshot_targets, target_pins) = if let Some(result) = &creation_result {
-        (result.targets.clone(), result.object_incarnations.clone())
+        let pins = if condition_expects_referent_move {
+            Vec::new()
+        } else {
+            result.object_incarnations.clone()
+        };
+        (result.targets.clone(), pins)
     } else if let Some(anaphor) = root_event_subject_anaphor {
         // CR 608.2k: An event-subject anaphor always reads the event context —
         // `TriggeringSource` the event's subject (the dying creature of a
@@ -686,7 +691,9 @@ pub fn resolve(
     // to only the final win's token at end-step. Must run while the effect still
     // reads `LastCreated` and before `targets` is consumed downstream.
     if let Some(result) = &creation_result {
-        freeze_created_result(&mut delayed_ability, result);
+        // CR 400.7e + CR 603.7c: a referent's own zone-change condition
+        // supplies its new object; retain the saved population without birth pins.
+        freeze_created_result_with_pins(&mut delayed_ability, result, &target_pins);
     }
 
     // CR 603.7a + CR 608.2c: the payload fires as its own root, where the creating chain's
@@ -1107,6 +1114,14 @@ pub(crate) fn freeze_created_result(
     ability: &mut ResolvedAbility,
     result: &crate::types::ability::ForwardedResultContext,
 ) {
+    freeze_created_result_with_pins(ability, result, &result.object_incarnations);
+}
+
+fn freeze_created_result_with_pins(
+    ability: &mut ResolvedAbility,
+    result: &crate::types::ability::ForwardedResultContext,
+    target_pins: &[crate::types::identifiers::ObjectIncarnationRef],
+) {
     // CR 603.7c + CR 400.7 + CR 701.21a: a frozen concrete subject keeps the
     // original installing player's normal sacrifice authority and birth pins.
     let filter = match result.targets.as_slice() {
@@ -1130,27 +1145,27 @@ pub(crate) fn freeze_created_result(
                     .expect("creation count fits engine quantity"),
             };
             ability.set_unpinned_targets(result.targets.clone());
-            ability.target_incarnations = result.object_incarnations.clone();
+            ability.target_incarnations = target_pins.to_vec();
         }
         Effect::CopyTokenOf { target, .. } if matches!(target, TargetFilter::LastCreated) => {
             // The copy-source axis is a context reference, so the shared
             // stack-target accessor intentionally surfaces the owner instead.
             *target = filter;
             ability.set_unpinned_targets(result.targets.clone());
-            ability.target_incarnations = result.object_incarnations.clone();
+            ability.target_incarnations = target_pins.to_vec();
         }
         effect => {
             if let Some(target @ TargetFilter::LastCreated) = effect.target_filter_mut() {
                 *target = filter;
                 ability.set_unpinned_targets(result.targets.clone());
-                ability.target_incarnations = result.object_incarnations.clone();
+                ability.target_incarnations = target_pins.to_vec();
             }
         }
     }
     // An else body runs instead of this effect, so it has not seen this
     // effect's publication. Each alternative performs its own ordered walk.
     if let Some(next) = ability.else_ability.as_mut() {
-        freeze_created_result(next, result);
+        freeze_created_result_with_pins(next, result, target_pins);
     }
     // The shared own-resolution classifier includes inline branch publishers
     // and excludes separately registered abilities. Reads by the publisher
@@ -1158,7 +1173,7 @@ pub(crate) fn freeze_created_result(
     // output becomes visible to the continuation.
     if !ability.effect.publishes_created_referent() {
         if let Some(next) = ability.sub_ability.as_mut() {
-            freeze_created_result(next, result);
+            freeze_created_result_with_pins(next, result, target_pins);
         }
     }
 }
@@ -5952,6 +5967,76 @@ mod tests {
         assert!(stored.target_incarnations.is_empty());
     }
 
+    /// CR 400.7e + CR 603.7c: the event supplies the saved referent's new
+    /// graveyard object, independently of a later global created population.
+    #[test]
+    fn event_delayed_created_population_returns_its_actual_departed_referent_publicly() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let saved = scenario
+            .add_creature(P0, "Synthetic saved created card", 2, 2)
+            .id();
+        let foreign = scenario
+            .add_creature(P0, "Foreign later created card", 3, 3)
+            .id();
+        let inner = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            serde_json::from_value(serde_json::json!({
+                "type":"ChangeZone", "origin":"Graveyard", "destination":"Hand",
+                "target":{"type":"LastCreated"}
+            }))
+            .unwrap(),
+        );
+        let mut installing = AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::TargetOnly {
+                target: TargetFilter::SpecificObject { id: saved },
+            },
+        );
+        installing.sub_ability = Some(Box::new(AbilityDefinition::new(
+            crate::types::ability::AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenDies {
+                    filter: TargetFilter::ParentTarget,
+                },
+                effect: Box::new(inner),
+                uses_tracked_set: false,
+            },
+        )));
+        let install = scenario
+            .add_spell_to_hand(P0, "Synthetic event-delayed saved population", true)
+            .with_ability_definition(installing)
+            .id();
+        let destroy = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic destroy saved card",
+                true,
+                "Destroy target creature.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().last_created_token_ids = vec![saved];
+        runner.cast(install).target_object(saved).resolve();
+        assert_eq!(runner.state().delayed_triggers.len(), 1);
+        assert!(runner.state().delayed_triggers[0]
+            .ability
+            .target_incarnations
+            .is_empty());
+        runner.state_mut().last_created_token_ids = vec![foreign];
+        runner.cast(destroy).target_object(saved).resolve();
+        runner.advance_until_stack_empty();
+        assert_eq!(runner.state().objects[&saved].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&foreign].zone, Zone::Battlefield);
+        assert!(runner.state().delayed_triggers.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ));
+    }
+
     /// CR 603.7c + CR 608.2c (issue #5972): plural "those tokens" delayed exile
     /// binds the tracked set with origin `Battlefield`. A token that already
     /// left the battlefield is skipped; the remaining member is exiled.
@@ -6820,10 +6905,23 @@ mod tests {
                 if !runner.state().stack.is_empty() {
                     break;
                 }
-                runner
-                    .act(crate::types::actions::GameAction::PassPriority)
-                    .unwrap();
+                let action = match runner.state().waiting_for {
+                    crate::types::game_state::WaitingFor::DeclareAttackers { .. } => {
+                        crate::types::actions::GameAction::DeclareAttackers {
+                            attacks: vec![],
+                            bands: vec![],
+                        }
+                    }
+                    crate::types::game_state::WaitingFor::DeclareBlockers { .. } => {
+                        crate::types::actions::GameAction::DeclareBlockers {
+                            assignments: vec![],
+                        }
+                    }
+                    _ => crate::types::actions::GameAction::PassPriority,
+                };
+                runner.act(action).unwrap();
             }
+            assert_eq!(runner.state().phase, Phase::End);
             assert!(!runner.state().stack.is_empty());
             runner.advance_until_stack_empty();
             for id in tokens {
@@ -6862,9 +6960,21 @@ mod tests {
             if runner.state().stack.len() == 2 {
                 break;
             }
-            runner
-                .act(crate::types::actions::GameAction::PassPriority)
-                .unwrap();
+            let action = match runner.state().waiting_for {
+                crate::types::game_state::WaitingFor::DeclareAttackers { .. } => {
+                    crate::types::actions::GameAction::DeclareAttackers {
+                        attacks: vec![],
+                        bands: vec![],
+                    }
+                }
+                crate::types::game_state::WaitingFor::DeclareBlockers { .. } => {
+                    crate::types::actions::GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    }
+                }
+                _ => crate::types::actions::GameAction::PassPriority,
+            };
+            runner.act(action).unwrap();
         }
         assert_eq!(runner.state().phase, Phase::End);
         assert_eq!(runner.state().stack.len(), 2);

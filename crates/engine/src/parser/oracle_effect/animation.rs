@@ -48,6 +48,14 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
         rest = rest[..end].trim_end().trim_end_matches('.').trim_end();
     }
 
+    // CR 205.1b: A retention marker can precede the base-P/T conjunct.
+    // Bind that complete conjunct before removing the descriptor's marker.
+    if let Some((descriptor, value)) = split_animation_dynamic_pt_clause(rest) {
+        spec.dynamic_power = Some(value.clone());
+        spec.dynamic_toughness = Some(value);
+        rest = descriptor;
+    }
+
     // The additive suffix scopes the whole descriptor, including a trailing
     // base-P/T clause or keyword list. Remove it before those complete owners
     // run; callers retain its type/color policy from the original descriptor.
@@ -1410,31 +1418,23 @@ mod test_den_bugbear {
         )
         .expect("Frodo-style animation phrase should parse");
 
-        let mods = animation_modifications(&spec);
-        assert!(
-            mods.contains(&crate::types::ability::ContinuousModification::SetPower { value: 2 })
-        );
-        assert!(mods
-            .contains(&crate::types::ability::ContinuousModification::SetToughness { value: 3 }));
-        assert!(
-            mods.contains(&crate::types::ability::ContinuousModification::AddType {
-                core_type: crate::types::card_type::CoreType::Creature,
-            })
-        );
-        assert!(
-            mods.contains(&crate::types::ability::ContinuousModification::AddSubtype {
-                subtype: "Halfling".to_string(),
-            })
-        );
-        assert!(
-            mods.contains(&crate::types::ability::ContinuousModification::AddSubtype {
-                subtype: "Scout".to_string(),
-            })
-        );
-        assert!(
-            mods.contains(&crate::types::ability::ContinuousModification::AddKeyword {
-                keyword: Keyword::Lifelink,
-            })
+        use crate::types::ability::ContinuousModification as CM;
+        // CR 205.3d: Naming creature subtypes does not add the Creature card type.
+        assert_eq!(
+            animation_modifications(&spec),
+            vec![
+                CM::SetPower { value: 2 },
+                CM::SetToughness { value: 3 },
+                CM::AddKeyword {
+                    keyword: Keyword::Lifelink
+                },
+                CM::AddSubtype {
+                    subtype: "Halfling".into()
+                },
+                CM::AddSubtype {
+                    subtype: "Scout".into()
+                },
+            ]
         );
     }
 
@@ -1502,6 +1502,13 @@ mod test_den_bugbear {
         assert!(mods.contains(
             &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
         ));
+        for tail in [" and draws a card", " unexplained", ", unknown"] {
+            let text = format!("a creature in addition to its other types and has base power and base toughness each equal to its mana value{tail}");
+            assert!(
+                parse_animation_spec(&text, &mut ParseContext::default()).is_none(),
+                "{text}"
+            );
+        }
     }
 
     /// Regression: supertypes (CR 205.4) must be captured without halting the
@@ -1715,10 +1722,15 @@ mod test_den_bugbear {
             }]
         );
 
-        // Without the tail, loose mode must NOT fire — "demon" alone would
-        // have been a capitalized subtype in the original CR 205.3 grammar,
-        // but lacking the structural signal we must reject lowercase input.
-        assert!(parse_becomes_type_modifications("demon").is_empty());
+        // CR 205.3m: The canonical subtype vocabulary is case-insensitive.
+        assert_eq!(
+            parse_becomes_type_modifications("demon"),
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Demon".into()
+            }]
+        );
+        assert!(parse_becomes_type_modifications("flibbertigibbet").is_empty());
+        assert!(parse_becomes_type_modifications("demon with unexplained powers").is_empty());
 
         // parse_animation_type_parts exercises the same fallback.
         assert_eq!(

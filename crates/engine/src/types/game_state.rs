@@ -5227,6 +5227,14 @@ impl PendingZoneChangeDelivery {
     /// CR 400.7: the physical transfer alone certifies the original receipt.
     /// Absorbed merge components are admitted only by the explicit component route.
     pub(crate) fn capture_physical_delivery(&mut self, events: &[GameEvent], component: bool) {
+        // A completed no-move request can be followed by an independent child
+        // moving that same original. Its event cannot replace the parent's receipt.
+        if matches!(
+            self.terminal_completion,
+            Some(ZoneMoveCompletion::Remained | ZoneMoveCompletion::Prevented)
+        ) {
+            return;
+        }
         let expected_from = match &self.expected_event {
             ProposedEvent::ZoneChange { from, .. } => *from,
             _ => return,
@@ -34735,6 +34743,27 @@ impl GameState {
             .active_post_replacement_or_paired_parent()
     }
 
+    pub(crate) fn has_legacy_token_substitution_authority(
+        &self,
+        source_id: ObjectId,
+        applied: &HashSet<AppliedReplacementKey>,
+    ) -> bool {
+        self.resolution_stack
+            .legacy_token_substitution_source(applied)
+            .is_some_and(|selected| {
+                // Keep the source already bound by dispatch even if a preceding
+                // selected instruction removed it. Only the unequal zero-source
+                // case needs the dispatcher's missing-object conversion.
+                if selected == Some(source_id) {
+                    return true;
+                }
+                let effective = selected
+                    .filter(|id| self.entering_or_live_object(*id).is_some())
+                    .unwrap_or(ObjectId(0));
+                effective == source_id
+            })
+    }
+
     /// Mutably accesses the active general drain or its exact immediate child
     /// parent.
     pub fn active_post_replacement_drains_mut(&mut self) -> Option<&mut PostReplacementDrainStack> {
@@ -43912,7 +43941,7 @@ mod tests {
 
     fn park_warp_delivery_fixture(state: &mut GameState, paused: PendingZoneChangeDelivery) {
         let object = paused.member.object_id;
-        let group = state.allocate_logical_zone_change_group(&[object]);
+        let group = crate::game::triggers::allocate_logical_zone_change_group(state, &[object]);
         state.push_change_zone_iteration(PendingChangeZoneIteration {
             return_result_occurrence: None,
             return_result_process: None,
@@ -44030,7 +44059,11 @@ mod tests {
                 .pending_zone_change_delivery_from_replacement()
                 .unwrap();
             assert_eq!(captured.terminal_completion, Some(completion));
-            assert_eq!(captured.delivery_events, child_events);
+            assert!(
+                captured.delivery_events.is_empty(),
+                "independent child events are not a primary receipt"
+            );
+            assert!(child_events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == paused.member.object_id)));
             assert!(
                 state.capture_paused_zone_change_delivery(
                     paused.member,
@@ -61152,7 +61185,7 @@ mod damage_source_canonical_admission_tests {
             else {
                 panic!("the announced Sorcerer ability still waits below Gambit");
             };
-            assert!(ability.target_incarnations.contains(&old));
+            assert_eq!(ability.target_pin_at(0), Some(old));
             assert!(runner
                 .state()
                 .zone_changes_this_turn
@@ -61581,6 +61614,54 @@ mod damage_source_canonical_admission_tests {
         );
         // The same real pause with sufficient owned evidence remains usable.
         // This is a current save, not an invented historical scalar writer.
+        let installed = runner
+            .state()
+            .resolving_stack_entry
+            .as_ref()
+            .unwrap()
+            .ability()
+            .unwrap();
+        let flip = installed.sub_ability.as_deref().unwrap();
+        assert!(matches!(flip.effect, Effect::FlipCoins { .. }));
+        assert_eq!(flip.context.cast_from_zone, Some(Zone::Hand));
+        assert_eq!(
+            flip.context.cast_controller,
+            installed.context.cast_controller
+        );
+        assert_eq!(
+            flip.context.cast_active_player,
+            installed.context.cast_active_player
+        );
+        assert_eq!(flip.context.cast_phase, installed.context.cast_phase);
+        let mut malformed = runner.state().clone();
+        malformed
+            .active_coin_flip_frame_mut()
+            .unwrap()
+            .branch_context
+            .coin_branch_target_abilities[0]
+            .1
+            .context
+            .cast_from_zone = None;
+        let before = malformed.clone();
+        let error = crate::game::engine::apply(
+            &mut malformed,
+            P0,
+            GameAction::SelectCoinFlips {
+                keep_indices: vec![0],
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("parked coin target custody"));
+        assert_eq!(
+            malformed, before,
+            "changed announcement input cannot be reconstructed from the live source"
+        );
+        let raw: GameState =
+            serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap();
+        assert_eq!(
+            raw.active_coin_flip_frame(),
+            runner.state().active_coin_flip_frame()
+        );
         let current =
             serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
                 .unwrap();
@@ -61593,19 +61674,23 @@ mod damage_source_canonical_admission_tests {
             })
             .unwrap();
         runner.advance_until_stack_empty();
-        assert!(runner
-            .state()
-            .pending_damage_replacements
-            .iter()
-            .chain(
-                runner.state().objects[&source]
-                    .replacement_definitions
-                    .iter_all()
-            )
-            .any(|definition| definition
-                .selected_damage_source
-                .as_ref()
-                .is_some_and(|capture| capture.identity.reference == expected)));
+        assert_eq!(
+            runner
+                .state()
+                .pending_damage_replacements
+                .iter()
+                .chain(
+                    runner.state().objects[&source]
+                        .replacement_definitions
+                        .iter_all()
+                )
+                .filter(|definition| definition
+                    .selected_damage_source
+                    .as_ref()
+                    .is_some_and(|capture| capture.identity.reference == expected))
+                .count(),
+            1
+        );
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
@@ -61770,8 +61855,24 @@ mod damage_source_canonical_admission_tests {
     #[test]
     fn current_capture_predicate_mismatch_is_incoherence_not_legacy_ambiguity() {
         let (state, _) = completed_materializer(true);
+        assert_eq!(
+            state.pending_damage_replacements[0]
+                .selected_damage_source
+                .as_ref()
+                .unwrap()
+                .identity
+                .reference
+                .incarnation,
+            0
+        );
+        let zero_birth: GameState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(
+            zero_birth.pending_damage_replacements,
+            state.pending_damage_replacements
+        );
         for wire_owner in [false, true] {
-            for zero_birth in [false, true] {
+            for legacy_birth in [false, true] {
                 let mut wire = if wire_owner {
                     serde_json::to_value(
                         crate::types::resolution::ResolutionStateWire::from_game_state(
@@ -61782,9 +61883,10 @@ mod damage_source_canonical_admission_tests {
                 } else {
                     serde_json::to_value(&state).unwrap()
                 };
-                if zero_birth {
+                if legacy_birth {
                     wire["pending_damage_replacements"][0]["selected_damage_source"]["identity"]
-                        ["reference"]["incarnation"] = serde_json::json!(0);
+                        ["reference"]["incarnation"] =
+                        serde_json::json!(crate::types::identifiers::LEGACY_INCARNATION);
                 } else {
                     wire["pending_damage_replacements"][0]["damage_source_filter"] =
                         serde_json::json!({"type":"SpecificObject", "id":999});
