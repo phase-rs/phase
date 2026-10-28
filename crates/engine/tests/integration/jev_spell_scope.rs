@@ -1759,6 +1759,12 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
         .with_subtypes(vec!["Swamp"])
         .as_artifact_land()
         .id();
+    // CR 603.3d + CR 601.2c: two legal targets exercise the player's choice
+    // rather than the engine's sole-legal-target auto-selection.
+    let unselected_swamp = scenario
+        .add_land_from_oracle(P0, "Unselected Swamp", "{T}: Add {B}.")
+        .with_subtypes(vec!["Swamp"])
+        .id();
     let other = scenario
         .add_land_from_oracle(P0, "Non-Swamp decoy", "{T}: Add {G}.")
         .with_subtypes(vec!["Forest"])
@@ -1785,6 +1791,12 @@ fn swamp_kitten_animation_and_counter_keep_the_same_declared_swamp() {
     }
     assert_eq!(object.counters.get(&CounterType::Plus1Plus1), Some(&1));
     assert!(object.keywords.contains(&Keyword::Menace));
+    let unselected = &runner.state().objects[&unselected_swamp];
+    assert!(!unselected
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert!(unselected.counters.is_empty());
     assert!(runner.state().objects[&kitten].counters.is_empty());
     assert!(!runner.state().objects[&other]
         .card_types
