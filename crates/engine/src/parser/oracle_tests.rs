@@ -5655,13 +5655,13 @@ fn chosen_creature_type_spell_cast_trigger_filters_are_retargeted() {
             .unwrap_or_else(|| panic!("{name} SpellCast trigger must retain its spell filter"));
 
         assert!(
-            crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+            crate::types::ability::filter_contains_filter_prop(valid_card, &|prop| {
                 matches!(prop, FilterProp::IsChosenCreatureType)
             }),
             "{name} trigger must match the persisted chosen creature type: {trigger:#?}"
         );
         assert!(
-            !crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+            !crate::types::ability::filter_contains_filter_prop(valid_card, &|prop| {
                 matches!(prop, FilterProp::IsChosenCardType)
             }),
             "{name} trigger must not retain a card-type discriminator: {trigger:#?}"
@@ -32887,6 +32887,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: vec![],
@@ -33125,6 +33126,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],
@@ -33243,6 +33245,8 @@ fn guard_walk_reaches_every_continuous_modification_carrier() {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

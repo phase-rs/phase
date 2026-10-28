@@ -32,6 +32,7 @@ use super::{
     casting, casting_costs, engine_priority, mana_abilities, payment_transaction, public_state,
     zone_pipeline,
 };
+use crate::types::proposed_event::TokenAttackRequest;
 
 /// CR 608.2c: does the parked zone-choice continuation `chain` treat
 /// the objects NOT picked as "the rest" for its next instruction (a
@@ -3689,6 +3690,7 @@ pub(super) fn handle_resolution_choice(
                                         additional_modifications: vec![],
                                         tapped: true,
                                         enters_attacking: false,
+                                        attack_request: TokenAttackRequest::Unspecified,
                                         sacrifice_at: None,
                                         source_id: ObjectId(0),
                                         controller: player,

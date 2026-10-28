@@ -14,8 +14,8 @@ use crate::game::printed_cards::{
 };
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, FilterProp, PermanentEntryMode, ResolvedAbility,
-    TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectError, EntryAttackDestination, FilterProp, PermanentEntryMode,
+    ResolvedAbility, TargetFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -253,6 +253,7 @@ pub(crate) fn finish_meld_entry(
             source_id: context.source_id,
             controller: context.controller,
             enters_attacking: attack_target.is_some(),
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,

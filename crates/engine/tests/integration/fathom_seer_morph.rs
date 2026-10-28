@@ -2002,7 +2002,7 @@ fn turn_face_up_reveal_and_discard_redacts_private_choices_for_opponent_and_spec
     let ripper = scenario
         .add_creature_to_hand(P0, "Ruthless Ripper", 1, 1)
         .from_oracle_text(
-            "Deathtouch\nMorph—Reveal a black card in your hand.\nWhen this creature is turned face up, target player loses 2 life if you cast it this turn.",
+            "Deathtouch\nMorph—Reveal a black card in your hand.\nWhen this creature is turned face up, target player loses 2 life.",
         )
         .id();
 
@@ -3764,5 +3764,102 @@ fn turn_face_up_sacrifice_cost_co_departing_observer_survives_replacement_pause(
         co_departure_trigger_count(&mut runner, chainsaw),
         1,
         "Chainsaw must trigger once for the single simultaneous death event"
+    );
+}
+
+// CR 702.37e: Turning a permanent face up only requires paying its morph cost;
+// nothing excludes the face-down permanent itself from paying it. Under Ashaya,
+// Soul of the Wild + Prismatic Omen the face-down Skirk Volcanist is itself a
+// Mountain, so "Sacrifice two Mountains" (no "another") may sacrifice it. The
+// permanent leaves during payment, so the action settles without a flip.
+#[test]
+fn skirk_volcanist_may_sacrifice_itself_for_its_morph_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(
+        P0,
+        "Ashaya, Soul of the Wild",
+        0,
+        0,
+        "Ashaya, Soul of the Wild's power and toughness are each equal to the number of lands you control.\nNontoken creatures you control are Forest lands in addition to their other types.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P0,
+        "Prismatic Omen",
+        "Lands you control are every basic land type in addition to their other types.",
+    );
+    let goblin = scenario.add_creature(P0, "Goblin", 1, 1).id();
+    let volcanist = scenario
+        .add_creature_to_hand(P0, "Skirk Volcanist", 3, 1)
+        .from_oracle_text("Morph—Sacrifice two Mountains.")
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| {
+                ManaUnit::new(
+                    engine::types::mana::ManaType::Colorless,
+                    volcanist,
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    cast_face_down(&mut runner, volcanist);
+
+    runner
+        .act(GameAction::TurnFaceUp {
+            object_id: volcanist,
+            x: 0,
+        })
+        .expect("turn face up must be offered");
+    match &runner.state().waiting_for {
+        WaitingFor::PayCost {
+            kind: PayCostKind::Sacrifice,
+            choices,
+            count: 2,
+            ..
+        } => {
+            assert!(
+                choices.contains(&volcanist),
+                "the face-down Mountain must be able to pay its own morph cost"
+            );
+            assert!(choices.contains(&goblin));
+        }
+        other => panic!("expected PayCost(Sacrifice) for two Mountains, got {other:?}"),
+    }
+
+    let outcome = runner
+        .act(GameAction::SelectCards {
+            cards: vec![volcanist, goblin],
+        })
+        .expect("sacrificing the face-down permanent itself is a legal payment");
+    assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&volcanist].zone, Zone::Graveyard);
+    assert!(
+        outcome.events.iter().any(|e| matches!(
+            e,
+            engine::types::events::GameEvent::PermanentSacrificed { object_id, .. }
+                if *object_id == volcanist
+        )),
+        "the face-down permanent must be sacrificed as part of the payment"
+    );
+    assert!(
+        !outcome
+            .events
+            .iter()
+            .any(|e| matches!(e, engine::types::events::GameEvent::TurnedFaceUp { .. })),
+        "a permanent that left during payment is not turned face up"
+    );
+    assert!(runner.state().pending_cost_move_resume.is_none());
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
     );
 }

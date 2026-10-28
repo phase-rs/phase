@@ -1313,6 +1313,78 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filter_state_for_scope(state, Some(viewer))
 }
 
+/// How a seated viewer's projection treats hands the viewer cannot privately see.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HandDisclosure {
+    /// CR 400.2: hands are hidden zones; only their owner (or a player with
+    /// private access to them) sees the cards' faces.
+    #[default]
+    Rules,
+    /// Debug "show hands" (the local "Show AI Hand" toggle): every hand's
+    /// identities are disclosed to a viewer holding debug identity access.
+    /// Falls back to [`Self::Rules`] for any other viewer, so asking for it
+    /// never widens an ordinary projection.
+    DebugRevealAll,
+}
+
+/// Debug identity access: the explicit per-seat grant that lets a viewer see
+/// hidden-zone card identities. This is debug god-mode, not a rule — both
+/// `debug_mode` and an explicit `debug_permitted` membership are required, so
+/// an unrestricted (empty) permission set does not grant it. Local games grant
+/// it to the local seat and sandbox games to every seat; a non-sandbox
+/// multiplayer game grants it to no one.
+pub(crate) fn viewer_has_debug_identity_access(state: &GameState, viewer: PlayerId) -> bool {
+    state.debug_mode && state.debug_permitted.contains(&viewer)
+}
+
+/// [`filter_state_for_viewer`] with an explicit [`HandDisclosure`] choice.
+pub fn filter_state_for_viewer_with_hand_disclosure(
+    state: &GameState,
+    viewer: PlayerId,
+    disclosure: HandDisclosure,
+) -> GameState {
+    let mut filtered = filter_state_for_viewer(state, viewer);
+    match disclosure {
+        HandDisclosure::Rules => {}
+        HandDisclosure::DebugRevealAll => {
+            if viewer_has_debug_identity_access(state, viewer) {
+                disclose_hidden_hand_identities(state, &mut filtered);
+            }
+        }
+    }
+    filtered
+}
+
+/// Restore the canonical identity of every projected hand card the viewer
+/// projection hid. Only cards the canonical state also holds in a hand are
+/// restored, so a staged shadow that moved a card out of hand keeps its
+/// projected (redacted) form.
+fn disclose_hidden_hand_identities(state: &GameState, filtered: &mut GameState) {
+    let hidden_hand_ids: Vec<ObjectId> = filtered
+        .players
+        .iter()
+        .flat_map(|player| player.hand.iter().copied())
+        .filter(|id| {
+            filtered
+                .objects
+                .get(id)
+                .is_some_and(|object| !object.display_visible_to_viewer)
+        })
+        .collect();
+    for id in hidden_hand_ids {
+        let Some(canonical) = state
+            .objects
+            .get(&id)
+            .filter(|object| object.zone == Zone::Hand)
+        else {
+            continue;
+        };
+        let mut disclosed = canonical.clone();
+        disclosed.display_visible_to_viewer = true;
+        filtered.objects.insert(id, disclosed);
+    }
+}
+
 /// Returns a public projection for a wire with no authenticated seat. An
 /// unseated observer has no private-zone or team access, including in
 /// OneVsMany/Archenemy topologies.
@@ -4087,14 +4159,26 @@ fn redact_mana_ability_resume_payment(
         ManaAbilityResume::ManaAbilityManaPayment {
             pending_mana_ability,
         } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
+        // CR 400.2 + CR 702.143a: a foretell card in hand is in a hidden zone,
+        // and its effective foretell cast cost is not public information. Zero
+        // it for viewers who cannot see the card; the {2} payment cost is public.
+        ManaAbilityResume::Foretell {
+            object_id, cost, ..
+        } if hidden_ids.contains(object_id) => {
+            *cost = crate::types::mana::ManaCost::generic(0);
+        }
         // Keep this complete rather than using a catch-all: a new resume must decide
         // whether it retains an ability. None of these holds one.
         ManaAbilityResume::Priority
         | ManaAbilityResume::CompanionToHand { .. }
+        | ManaAbilityResume::PlanarDieRoll { .. }
         | ManaAbilityResume::TurnFaceUp { .. }
         | ManaAbilityResume::EndContinuousEffect { .. }
+        | ManaAbilityResume::RoomUnlock { .. }
+        | ManaAbilityResume::Foretell { .. }
         | ManaAbilityResume::ManaPayment { .. }
         | ManaAbilityResume::ManaSourceSelection { .. }
+        | ManaAbilityResume::CombatTaxPayment { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
         | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
     }
@@ -7836,6 +7920,7 @@ mod tests {
                 source_id: ObjectId(1),
                 controller: PlayerId(0),
                 enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
                 attach_to: None,
                 sacrifice_at: None,
                 remaining_count: 0,
@@ -9350,6 +9435,91 @@ mod tests {
             Some("Hidden Card"),
             "a stale debug permission must not reveal a library"
         );
+    }
+
+    /// Builds a two-player game with one hand card and one library card for the
+    /// opponent (PlayerId(1)), returning `(state, hand_card, library_card)`.
+    fn opponent_hand_and_library_state() -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let hand_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Hand Card".to_string(),
+            Zone::Hand,
+        );
+        let library_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Library Card".to_string(),
+            Zone::Library,
+        );
+        (state, hand_card, library_card)
+    }
+
+    /// The "show hands" disclosure restores opponent hand identities for a
+    /// viewer with debug identity access, and only hands: libraries stay hidden.
+    #[test]
+    fn debug_hand_disclosure_reveals_opponent_hand_only() {
+        // Debug grants as the WASM bridge seeds them (`initialize_debug_permissions`):
+        // a sandbox game grants every seat; a local non-sandbox game grants only
+        // the local seat.
+        let grants: [&[PlayerId]; 2] = [&[PlayerId(0), PlayerId(1)], &[PlayerId(0)]];
+        for grant in grants {
+            let (mut state, hand_card, library_card) = opponent_hand_and_library_state();
+            state.debug_mode = true;
+            state.debug_permitted.extend(grant.iter().copied());
+
+            let filtered = filter_state_for_viewer_with_hand_disclosure(
+                &state,
+                PlayerId(0),
+                HandDisclosure::DebugRevealAll,
+            );
+
+            let revealed = &filtered.objects[&hand_card];
+            assert_eq!(revealed.name, "Opponent Hand Card", "grant={grant:?}");
+            assert!(revealed.display_visible_to_viewer);
+            assert!(filtered.players[1].hand.contains(&hand_card));
+            assert_eq!(filtered.objects[&library_card].name, HIDDEN_CARD_NAME);
+            assert!(!filtered.objects[&library_card].display_visible_to_viewer);
+        }
+    }
+
+    /// Without explicit debug identity access, or without asking for it, the
+    /// disclosure is the ordinary CR 400.2 projection: the hand stays hidden.
+    #[test]
+    fn debug_hand_disclosure_requires_request_and_debug_identity_access() {
+        // (debug_mode, viewer explicitly permitted, disclosure requested)
+        let cases = [
+            (true, true, HandDisclosure::Rules),
+            // A non-sandbox multiplayer game: debug mode with an unrestricted
+            // (empty) permission set is not an explicit identity grant.
+            (true, false, HandDisclosure::DebugRevealAll),
+            (false, true, HandDisclosure::DebugRevealAll),
+        ];
+        for (debug_mode, permitted, disclosure) in cases {
+            let (mut state, hand_card, _) = opponent_hand_and_library_state();
+            state.debug_mode = debug_mode;
+            if permitted {
+                state.debug_permitted.insert(PlayerId(0));
+            }
+
+            let filtered =
+                filter_state_for_viewer_with_hand_disclosure(&state, PlayerId(0), disclosure);
+
+            assert_eq!(
+                filtered.objects[&hand_card].name, HIDDEN_CARD_NAME,
+                "debug_mode={debug_mode} permitted={permitted} disclosure={disclosure:?}"
+            );
+            assert!(!filtered.objects[&hand_card].display_visible_to_viewer);
+            assert_eq!(
+                serde_json::to_value(&filtered).expect("projection serializes"),
+                serde_json::to_value(filter_state_for_viewer(&state, PlayerId(0)))
+                    .expect("projection serializes"),
+                "an unauthorized or unrequested disclosure is the rules projection"
+            );
+        }
     }
 
     #[test]

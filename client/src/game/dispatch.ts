@@ -21,6 +21,7 @@ import { useAppNotificationStore } from "../stores/appToastStore";
 import {
   captureTrustedCheckpoint,
   isAuthorityRemote,
+  nextGameSessionGeneration,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -136,7 +137,7 @@ function sharedRemoteSettlement(waiters: RemoteWaiter[]): Pick<PendingRemoteUpda
 
 type PendingWork = PendingLocalAction | PendingRemoteUpdate;
 
-type BoundGameSession = {
+export type BoundGameSession = {
   adapter: EngineAdapter;
   generation: number;
 };
@@ -237,7 +238,7 @@ function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
 }
 
-function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
+export function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
   if (!session) return true;
   const game = useGameStore.getState();
   return (
@@ -1245,6 +1246,12 @@ export async function restoreGameState(
     : [];
   useGameStore.getState().commitEngineSnapshot(snapshot, {
     extraState: {
+      // A restore that keeps this game's checkpoints rewinds the same game; any
+      // other restore (an import) replaces it, so it starts a new game session
+      // and session-bound work (e.g. the Show AI Hand request) re-binds to it.
+      ...(options.preserveCheckpoints
+        ? {}
+        : { gameSessionGeneration: nextGameSessionGeneration() }),
       events: [],
       eventHistory: [],
       logHistory: [],

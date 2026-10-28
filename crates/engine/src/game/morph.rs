@@ -5,7 +5,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingCostMoveResume, TurnFaceUpMoveKind, WaitingFor};
-use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -85,6 +85,8 @@ pub(crate) fn turn_face_up_offer(
                 Some(object_id),
                 &cost,
                 crate::types::mana::SpecialAction::TurnFaceUp,
+                // Live payment carries `ManaAbilityResume::TurnFaceUp`.
+                super::casting::PausedManaPayment::Resumable,
             )
             .then_some(())?;
             Some(if super::casting_costs::cost_has_x(&cost) {
@@ -425,8 +427,9 @@ pub(crate) fn is_blocked_by_cant_be_turned_face_up(state: &GameState, object_id:
 ///
 /// Kept separate from the commit half so the paid `GameAction::TurnFaceUp`
 /// special-action handler can charge the returned cost through
-/// `pay_special_action_mana_cost` before `turn_face_up` flips the permanent,
-/// while the free direct callers (grant path, tests) reuse the same guards.
+/// `pay_special_action_mana_cost_with_resume` before `turn_face_up` flips the
+/// permanent, while the free direct callers (grant path, tests) reuse the same
+/// guards.
 use crate::types::ability::TurnUpCostSource;
 
 pub(crate) fn turn_face_up_prepare(
@@ -558,10 +561,9 @@ pub(crate) fn turn_face_up_prepare(
 /// A paused payment is a real outcome, not an error:
 /// `pay_special_action_mana_cost_with_resume` returns `Paused` when an
 /// auto-tapped mana source's own cost surfaces a replacement choice
-/// (CR 605.3b + CR 616.1). The permanent stays face down and the prompt is
-/// returned; [`resume_turn_face_up_payment`] finishes the action once the choice
-/// is answered. The compatibility wrapper `pay_special_action_mana_cost` turns
-/// that state into an error, which is why this action may not use it.
+/// (CR 605.3b + CR 616.1) or a pre-spend echo choice. The permanent stays face
+/// down and the prompt is returned; [`resume_turn_face_up_payment`] finishes the
+/// action once the choice is answered.
 pub(crate) fn handle_turn_face_up(
     state: &mut GameState,
     player: PlayerId,
@@ -691,6 +693,154 @@ pub(crate) fn finish_or_continue_turn_face_up(
     }
 }
 
+/// CR 702.37e + CR 118.1: Pay one object of a turn-face-up cost move (return to
+/// hand, discard, or sacrifice). Single authority for both the initial selection
+/// and the post-replacement-choice resume loop. Returns the player who must make
+/// a replacement choice when the move pauses, `None` when it completed.
+fn pay_turn_face_up_cost_object(
+    state: &mut GameState,
+    player: PlayerId,
+    source: ObjectIncarnationRef,
+    move_kind: TurnFaceUpMoveKind,
+    id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<PlayerId>, EngineError> {
+    match move_kind {
+        TurnFaceUpMoveKind::ReturnToHand => {
+            match crate::game::zone_pipeline::move_object(
+                state,
+                crate::game::zone_pipeline::ZoneMoveRequest::cost(id, Zone::Hand, source.object_id),
+                events,
+            ) {
+                crate::game::zone_pipeline::ZoneMoveResult::Done => Ok(None),
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
+                    Ok(Some(choice_player))
+                }
+                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
+                    unreachable!("a cost move to Hand cannot require Aura attachment")
+                }
+            }
+        }
+        TurnFaceUpMoveKind::Discard => {
+            match super::effects::discard::discard_as_cost_with_source(
+                state,
+                id,
+                player,
+                Some(source.object_id),
+                events,
+            ) {
+                super::effects::discard::DiscardOutcome::Complete => Ok(None),
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
+                    Ok(Some(choice_player))
+                }
+            }
+        }
+        // CR 701.21a: Sacrifice is attributed to the sacrificing player, not a source
+        // object; `sacrifice_permanent` takes no source, matching every other
+        // sacrifice-as-cost payment path (`costs.rs`, `casting_costs.rs`).
+        TurnFaceUpMoveKind::Sacrifice => {
+            match super::sacrifice::sacrifice_permanent(state, id, player, events)? {
+                super::sacrifice::SacrificeOutcome::Complete => Ok(None),
+                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
+                    Ok(Some(choice_player))
+                }
+            }
+        }
+    }
+}
+
+/// CR 702.37e + CR 118.1 + CR 118.3: Handle player selection of cards/permanents
+/// to pay a turn-face-up non-mana cost (return to hand, discard, sacrifice, reveal).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_turn_face_up_cost_selection(
+    state: &mut GameState,
+    player: PlayerId,
+    kind: &crate::types::game_state::PayCostKind,
+    choices: &[ObjectId],
+    count: usize,
+    chosen: &[ObjectId],
+    source: ObjectIncarnationRef,
+    cost_source: TurnUpCostSource,
+    remaining_cost: Option<Box<AbilityCost>>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must choose exactly {} permanent(s)/card(s)",
+            count
+        )));
+    }
+    // CR 118.1 + CR 118.3 + CR 702.37e: Multi-object cost payment requires distinct IDs
+    let mut seen = std::collections::HashSet::new();
+    for &id in chosen.iter() {
+        if !seen.insert(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected cards/permanents must be distinct".into(),
+            ));
+        }
+        if !choices.contains(&id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card or permanent is not eligible".to_string(),
+            ));
+        }
+    }
+    let move_kind = match kind {
+        crate::types::game_state::PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
+        crate::types::game_state::PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
+        crate::types::game_state::PayCostKind::Sacrifice => TurnFaceUpMoveKind::Sacrifice,
+        crate::types::game_state::PayCostKind::Reveal => {
+            let revealed_names = chosen
+                .iter()
+                .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect();
+            events.push(GameEvent::CardsRevealed {
+                player,
+                card_ids: chosen.to_vec(),
+                card_names: revealed_names,
+            });
+            return finish_or_continue_turn_face_up(
+                state,
+                player,
+                source,
+                cost_source,
+                remaining_cost,
+                events,
+            );
+        }
+        crate::types::game_state::PayCostKind::ExileFromZone { .. }
+        | crate::types::game_state::PayCostKind::ExilePermanent { .. }
+        | crate::types::game_state::PayCostKind::UnattachFrom { .. }
+        | crate::types::game_state::PayCostKind::ExileMaterials { .. }
+        | crate::types::game_state::PayCostKind::ExileAggregate { .. }
+        | crate::types::game_state::PayCostKind::RemoveCounter { .. }
+        | crate::types::game_state::PayCostKind::TapCreatures { .. }
+        | crate::types::game_state::PayCostKind::Behold { .. }
+        | crate::types::game_state::PayCostKind::ExileFromManaZone { .. } => {
+            return Err(EngineError::InvalidAction(
+                "Cost kind cannot resume a turn-face-up PayCost".into(),
+            ));
+        }
+    };
+    // CR 702.37e + CR 118.3: the selected objects move together as one cost
+    // component through the shared turn-face-up move loop.
+    let cost_event_start = events.len();
+    move_turn_face_up_cost_objects(
+        state,
+        TurnFaceUpCostMoveRequest {
+            player,
+            source,
+            cost_source,
+            move_kind,
+            chosen: chosen.to_vec(),
+            start_at_index: 0,
+            remaining_cost,
+        },
+        CostMoveLedger::default(),
+        cost_event_start,
+        events,
+    )
+}
+
 /// CR 702.37e + CR 614.6 + CR 616.1: Resume paying a turn-face-up cost move
 /// after a replacement choice settles.
 pub(crate) fn resume_turn_face_up_cost_move(
@@ -771,7 +921,7 @@ pub(crate) fn move_turn_face_up_cost_objects(
     } = request;
     for (index, &object_id) in chosen.iter().enumerate().skip(start_at_index) {
         let Some(choice_player) =
-            move_turn_face_up_cost_object(state, move_kind, object_id, player, source, events)?
+            pay_turn_face_up_cost_object(state, player, source, move_kind, object_id, events)?
         else {
             continue;
         };
@@ -811,61 +961,6 @@ pub(crate) fn move_turn_face_up_cost_objects(
 
     ledger.settle(state, None, &chosen, events, cost_event_start);
     finish_or_continue_turn_face_up(state, player, source, cost_source, remaining_cost, events)
-}
-
-/// Move one selected object for a turn-face-up cost. `Some(player)` means the
-/// move paused for that player's replacement choice.
-fn move_turn_face_up_cost_object(
-    state: &mut GameState,
-    move_kind: TurnFaceUpMoveKind,
-    object_id: ObjectId,
-    player: PlayerId,
-    source: ObjectIncarnationRef,
-    events: &mut Vec<GameEvent>,
-) -> Result<Option<PlayerId>, EngineError> {
-    Ok(match move_kind {
-        TurnFaceUpMoveKind::ReturnToHand => {
-            match crate::game::zone_pipeline::move_object(
-                state,
-                crate::game::zone_pipeline::ZoneMoveRequest::cost(
-                    object_id,
-                    Zone::Hand,
-                    source.object_id,
-                ),
-                events,
-            ) {
-                crate::game::zone_pipeline::ZoneMoveResult::Done => None,
-                crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(choice_player) => {
-                    Some(choice_player)
-                }
-                crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
-                    unreachable!("a cost move to Hand cannot require Aura attachment")
-                }
-            }
-        }
-        TurnFaceUpMoveKind::Discard => {
-            match super::effects::discard::discard_as_cost_with_source(
-                state,
-                object_id,
-                player,
-                Some(source.object_id),
-                events,
-            ) {
-                super::effects::discard::DiscardOutcome::Complete => None,
-                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) => {
-                    Some(choice_player)
-                }
-            }
-        }
-        TurnFaceUpMoveKind::Sacrifice => {
-            match super::sacrifice::sacrifice_permanent(state, object_id, player, events)? {
-                super::sacrifice::SacrificeOutcome::Complete => None,
-                super::sacrifice::SacrificeOutcome::NeedsReplacementChoice(choice_player) => {
-                    Some(choice_player)
-                }
-            }
-        }
-    })
 }
 
 /// CR 116.2b + CR 106.6: pay the already-derived turn-face-up cost through
@@ -939,6 +1034,18 @@ pub(crate) fn finish_paid_turn_face_up(
     announced_x: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 400.7: A paused payment saved before turn-face-up carried an incarnation
+    // deserializes with `LEGACY_INCARNATION`, which names no live object. That pause
+    // was keyed by `ObjectId` alone, so bind it to the live object's current
+    // incarnation rather than silently dropping a payment that was already made.
+    let source = if source.incarnation == LEGACY_INCARNATION {
+        state
+            .objects
+            .get(&source.object_id)
+            .map_or(source, ObjectIncarnationRef::from_object)
+    } else {
+        source
+    };
     // CR 702.37e + CR 400.7 + CR 101.3: If the permanent left the battlefield during
     // cost payment (e.g. returned itself to hand via Raven Guild Initiate + Maskwood Nexus),
     // it became a new object and the instruction to turn it face up is ignored.
@@ -1290,6 +1397,34 @@ mod tests {
         assert!(obj.keywords.is_empty());
         assert!(obj.abilities.is_empty());
         assert!(obj.color.is_empty());
+    }
+
+    /// CR 400.7 + CR 702.37e: a paused turn-face-up payment restored from a save that
+    /// predates incarnation tracking must still flip the face-down permanent.
+    #[test]
+    fn legacy_source_incarnation_still_turns_face_up_after_payment() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let id = setup_morph_creature(&mut state, player);
+        let mut events = Vec::new();
+        play_face_down(&mut state, player, id, &mut events).unwrap();
+        assert!(state.objects[&id].face_down);
+
+        let legacy: ObjectIncarnationRef = serde_json::from_value(serde_json::json!(id.0)).unwrap();
+        assert_eq!(legacy.incarnation, LEGACY_INCARNATION);
+
+        finish_paid_turn_face_up(
+            &mut state,
+            player,
+            legacy,
+            TurnUpCostSource::Morph,
+            None,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(!state.objects[&id].face_down);
+        assert_eq!(state.objects[&id].name, "Secret Creature");
     }
 
     #[test]

@@ -1,6 +1,15 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+pub(crate) use crate::types::ability::{
+    effect_owns_resolution_zone_choice, effect_refs_parent_target,
+    effect_requires_parent_target_object, filter_refs_parent_or_event_subject,
+    mass_population_target, mass_population_target_mut, EVENT_SUBJECT_ANAPHORS,
+};
+use crate::types::ability::{
+    effect_parent_ref_slots, effect_target_filter, filter_refs_event_subject,
+};
+
 use crate::game::conditions::{
     eval_has_city_blessing, eval_has_enduring_story, eval_is_initiative, eval_is_monarch,
     eval_source_attached_to_controlled_creature, eval_source_entered_this_turn,
@@ -9,20 +18,23 @@ use crate::game::conditions::{
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityUseTally,
-    AttachmentReferent, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, ChosenAttribute,
-    ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset, ContinuousModification,
-    ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot, CounterKindDomain,
-    DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError, EffectKind,
-    EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient, FilterProp,
-    ForEachCategoryAction, ForwardedResultContext, ManaProduction, MassLibraryShuffleMode,
-    NameStickerSet, ObjectScope, ObjectSelectionCardinality, OpponentMayScope, PlayerFilter,
-    PlayerRelation, PlayerScope, PossessionAxis, PtValue, QuantityExpr, QuantityRef,
-    ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility, RevealUntilDisposition,
-    SacrificeCost, SacrificeRequirement, SharedQuality, SharedQualityRelation, SiblingCondition,
-    StaticDefinition, SubAbilityLink, TapStateChange, TargetChoiceTiming,
-    TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause,
-    TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    condition_depends_on_effect_performed, condition_has_reveal_until_matched_guard,
+    effect_introduces_per_iteration_referent, effect_introduces_per_player_object_referent,
+    effect_parks_reveal_card_choice, filter_refs_parent_target, graveyard_destination_rider,
+    is_graveyard_exile_rider_subability, AbilityCondition, AbilityCost, AbilityDefinition,
+    AbilityKind, AbilityUseTally, CardPlayMode, CardTypeSetSource, CastFromZoneDriver,
+    ChosenAttribute, ChosenTargetSlots, CommanderOwnership, ContinuousEffectOnset,
+    ContinuousModification, ControllerRef, CopyRetargetPermission, CostPaidObjectSnapshot,
+    CounterKindDomain, DetachedRemainder, Duration, EachDamageRecipient, Effect, EffectError,
+    EffectKind, EffectOutcomeSignal, EffectResolutionResult, EffectScope, ExtraPhaseRecipient,
+    FilterProp, ForEachCategoryAction, ForwardedResultContext, ManaProduction,
+    MassLibraryShuffleMode, NameStickerSet, ObjectScope, ObjectSelectionCardinality,
+    OpponentMayScope, PlayerFilter, PlayerRelation, PlayerScope, PossessionAxis, PtValue,
+    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, RepeatContinuation, ResolvedAbility,
+    RevealUntilDisposition, SacrificeCost, SacrificeRequirement, SharedQuality,
+    SharedQualityRelation, SiblingCondition, StaticDefinition, SubAbilityLink, TapStateChange,
+    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetReadOrigin, TargetRef,
+    ThisWayCause, TrackedAnaphorSource, TypedFilter, ZoneChoiceCandidateSource, ZoneChoiceChooser,
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
@@ -410,7 +422,12 @@ pub(crate) fn target_filter_controller_scope(filter: &TargetFilter) -> Option<Co
     }
 }
 
-pub(crate) fn matches_player_scope(
+/// CR 608.2c + CR 102.2: whether `player` is a recipient of a `PlayerFilter`
+/// scope ("each player", "each opponent", ...) for an effect controlled by
+/// `controller` from `source_id`. Single authority for effect-recipient player
+/// scopes; `phase-ai` reads it to price non-targeted damage without
+/// re-deriving the scope rules.
+pub fn matches_player_scope(
     state: &GameState,
     player: PlayerId,
     scope: &PlayerFilter,
@@ -4886,401 +4903,13 @@ fn has_resolution_owned_zone_choice(sub: &ResolvedAbility) -> bool {
     effect_owns_resolution_zone_choice(&sub.effect, sub.target_choice_timing)
 }
 
-/// CR 115.10 + CR 608.2d: a nontargeted zone choice announced while the effect
-/// resolves owns a fresh object choice instead of consuming an object selected
-/// by an earlier instruction. The explicit zone set is the provenance marker:
-/// it covers both scalar `InZone` (Broken Bond) and mixed `InAnyZone`
-/// (Worldsoul's Rage), while context references such as Beseech the Mirror's
-/// exile-linked card remain bound continuations rather than fresh choices.
-pub(crate) fn effect_owns_resolution_zone_choice(
-    effect: &Effect,
-    timing: TargetChoiceTiming,
-) -> bool {
-    let (target, origin) = match effect {
-        Effect::ChangeZone { origin, target, .. } if timing == TargetChoiceTiming::Resolution => {
-            (target, *origin)
-        }
-        Effect::PutAtLibraryPosition { target, .. }
-            if matches!(target.extract_in_zone(), Some(Zone::Hand | Zone::Library)) =>
-        {
-            (target, target.extract_in_zone())
-        }
-        _ => return false,
-    };
-    let selection_zones = origin.map_or_else(|| target.extract_zones(), |zone| vec![zone]);
-    !selection_zones.is_empty()
-        && !target.is_context_ref()
-        && !effect_requires_parent_target_object(effect)
-}
-
-/// CR 608.2c + CR 400.7 + CR 115.10a: what one instruction can single out,
-/// introduce or move — the objects a later instruction's definite anaphor
-/// ("that creature") could name. See [`instruction_object_reach`].
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum InstructionObjectReach<'a> {
-    /// Singles out, introduces and moves no object: the instruction affects only
-    /// players (their life totals, player counters, turns, speed or library
-    /// order) or a number.
-    NoObject,
-    /// Affects only what its one slot names and introduces or moves no other
-    /// object. The slot may be a declared target, a player, an object an earlier
-    /// instruction handed the chain, or a described population; the caller
-    /// decides which of these it is.
-    Slot(&'a TargetFilter),
-    /// May single out, introduce, reveal or move an object outside one slot, or
-    /// its reach is not classified. A later anaphor may name what it touches.
-    Unclassified,
-}
-
-/// CR 608.2c + CR 400.7 + CR 115.10a: the one classification of every `Effect`
-/// variant by the objects it can hand a later instruction's definite anaphor
-/// (see [`InstructionObjectReach`]). An object chosen while an instruction is
-/// applied is affected, not targeted (CR 115.10a), and an object that moves to
-/// another zone becomes a new object (CR 400.7); either can be what a later
-/// "that <noun>" names under the rules of English (CR 608.2c).
-///
-/// `NoObject` and `Slot` are allow-lists whose arms name every field, so a new
-/// field is a compile error until it is classified. Every other variant is
-/// named in the `Unclassified` arm, so a new variant is a compile error too.
-pub(crate) fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
-    match effect {
-        // CR 119.3: only a player gains or loses life. CR 122.1: energy and
-        // player counters are placed on players. CR 701.24a: a shuffle
-        // randomizes a library and singles out no card in it.
-        Effect::GainLife {
-            amount: _,
-            player: _,
-        }
-        | Effect::LoseLife {
-            amount: _,
-            target: _,
-        }
-        | Effect::SetLifeTotal {
-            target: _,
-            amount: _,
-        }
-        | Effect::ExchangeLifeTotals {
-            player_a: _,
-            player_b: _,
-        }
-        | Effect::DamageEachPlayer {
-            amount: _,
-            player_filter: _,
-        }
-        | Effect::GainEnergy { amount: _ }
-        | Effect::GivePlayerCounter {
-            counter_kind: _,
-            count: _,
-            target: _,
-        }
-        | Effect::LoseAllPlayerCounters { target: _ }
-        | Effect::Shuffle { target: _ }
-        | Effect::BecomeMonarch { target: _ }
-        | Effect::ExtraTurn {
-            target: _,
-            count: _,
-        }
-        | Effect::SkipNextTurn {
-            target: _,
-            count: _,
-        }
-        | Effect::StartYourEngines { player_scope: _ }
-        | Effect::ChangeSpeed {
-            player_scope: _,
-            amount: _,
-            direction: _,
-            floor: _,
-        }
-        | Effect::NoteNumber { value: _ }
-        | Effect::NoOp => InstructionObjectReach::NoObject,
-        // Instructions that act on what their one `target` names and on
-        // nothing else. Moving that object (destroy, sacrifice, return, exile)
-        // is acting on it; the caller reads where a `ChangeZone` leaves it.
-        Effect::DealDamage {
-            amount: _,
-            target,
-            damage_source: None,
-            // CR 120.4a: excess damage goes to the damaged permanent's
-            // controller, a player.
-            excess: _,
-        }
-        | Effect::Pump {
-            power: _,
-            toughness: _,
-            target,
-        }
-        | Effect::PutCounter {
-            counter_type: _,
-            count: _,
-            target,
-        }
-        | Effect::RemoveCounter {
-            counter_type: _,
-            count: _,
-            target,
-        }
-        | Effect::SetTapState {
-            target,
-            scope: _,
-            state: _,
-        }
-        | Effect::Destroy {
-            target,
-            cant_regenerate: _,
-        }
-        | Effect::Regenerate { target }
-        | Effect::RemoveAllDamage { target }
-        | Effect::TargetOnly { target }
-        | Effect::GainControl { target }
-        | Effect::ChangeZone {
-            origin: _,
-            destination: _,
-            target,
-            owner_library: _,
-            enter_transformed: _,
-            enters_under: _,
-            enter_tapped: _,
-            enters_attacking: _,
-            up_to: _,
-            enter_with_counters: _,
-            conditional_enter_with_counters: _,
-            face_down_profile: _,
-            enters_modified_if: _,
-        }
-        | Effect::Bounce {
-            target,
-            destination: _,
-            selection: _,
-        }
-        | Effect::Sacrifice {
-            target,
-            count: _,
-            min_count: _,
-        } => InstructionObjectReach::Slot(target),
-        // A damage source other than the instruction's own source is a second
-        // object slot.
-        Effect::DealDamage {
-            damage_source: Some(_),
-            ..
-        }
-        | Effect::ApplyPostReplacementDamage { .. }
-        | Effect::EachDealsDamageEqualToPower { .. }
-        | Effect::EachSourceDealsDamage { .. }
-        | Effect::Draw { .. }
-        | Effect::PairWith { .. }
-        | Effect::Counter { .. }
-        | Effect::CounterAll { .. }
-        | Effect::Token { .. }
-        | Effect::DiscardCard { .. }
-        | Effect::Mill { .. }
-        | Effect::Scry { .. }
-        | Effect::PumpAll { .. }
-        | Effect::DamageAll { .. }
-        | Effect::DestroyAll { .. }
-        | Effect::ChangeZoneAll { .. }
-        | Effect::Dig { .. }
-        | Effect::GainControlAll { .. }
-        | Effect::ControlNextTurn { .. }
-        | Effect::Attach { .. }
-        | Effect::UnattachAll { .. }
-        | Effect::Surveil { .. }
-        | Effect::Fight { .. }
-        | Effect::BounceAll { .. }
-        | Effect::Explore
-        | Effect::ExploreAll { .. }
-        | Effect::Investigate
-        | Effect::Tribute { .. }
-        | Effect::TimeTravel
-        | Effect::Proliferate
-        | Effect::ProliferateTarget { .. }
-        | Effect::Populate
-        | Effect::Clash
-        | Effect::ExileTopCardContest { .. }
-        | Effect::Behold { .. }
-        | Effect::EndTheTurn
-        | Effect::EndCombatPhase
-        | Effect::Vote { .. }
-        | Effect::SeparateIntoPiles { .. }
-        | Effect::SwitchPT { .. }
-        | Effect::CopySpell { .. }
-        | Effect::EpicCopy { .. }
-        | Effect::CastCopyOfCard { .. }
-        | Effect::CopyTokenOf { .. }
-        | Effect::CreateTokenCopyFromPool { .. }
-        | Effect::Myriad
-        | Effect::Encore
-        | Effect::CombineHost { .. }
-        | Effect::ChooseAugmentAndCombineWithHost { .. }
-        | Effect::Meld { .. }
-        | Effect::ExileHaunting { .. }
-        | Effect::HideawayConceal { .. }
-        | Effect::CopyTokenBlockingAttacker { .. }
-        | Effect::BecomeCopy { .. }
-        | Effect::ChoosePermanent { .. }
-        | Effect::GainActivatedAbilitiesOfTarget { .. }
-        | Effect::ChooseCard { .. }
-        | Effect::ChooseCounterKind { .. }
-        | Effect::PutChosenCounter { .. }
-        | Effect::PutCounterAll { .. }
-        | Effect::MultiplyCounter { .. }
-        | Effect::ChooseCounterAdjustment { .. }
-        | Effect::DoublePT { .. }
-        | Effect::DoublePTAll { .. }
-        | Effect::MoveCounters { .. }
-        | Effect::ReproduceEventCounters { .. }
-        | Effect::Animate { .. }
-        | Effect::ReturnAsAura { .. }
-        | Effect::RegisterBending { .. }
-        | Effect::GenericEffect { .. }
-        | Effect::Cleanup { .. }
-        | Effect::Mana { .. }
-        | Effect::Discard { .. }
-        | Effect::Transform { .. }
-        | Effect::FlipPermanent { .. }
-        | Effect::SearchLibrary { .. }
-        | Effect::SearchOutsideGame { .. }
-        | Effect::OpenBoosterPack { .. }
-        | Effect::RevealHand { .. }
-        | Effect::RevealFromHand { .. }
-        | Effect::Reveal { .. }
-        | Effect::RevealChosenNumbers { .. }
-        | Effect::RevealTop { .. }
-        | Effect::ExileTop { .. }
-        | Effect::ExileFaceDownPile { .. }
-        | Effect::Choose { .. }
-        | Effect::OpponentGuess { .. }
-        | Effect::SwapChosenLabels { .. }
-        | Effect::ChooseDamageSource { .. }
-        | Effect::Suspect { .. }
-        | Effect::Unsuspect { .. }
-        | Effect::Connive { .. }
-        | Effect::PhaseOut { .. }
-        | Effect::PhaseIn { .. }
-        | Effect::ForceBlock { .. }
-        | Effect::ForceAttack { .. }
-        | Effect::SolveCase
-        | Effect::BecomePrepared { .. }
-        | Effect::BecomeUnprepared { .. }
-        | Effect::BecomeSaddled { .. }
-        | Effect::SetClassLevel { .. }
-        | Effect::CreateDelayedTrigger { .. }
-        | Effect::AddTargetReplacement { .. }
-        | Effect::AddRestriction { .. }
-        | Effect::ReduceNextSpellCost { .. }
-        | Effect::GrantNextSpellAbility { .. }
-        | Effect::AddPendingETBCounters { .. }
-        | Effect::AddPendingEntersModifications { .. }
-        | Effect::CreateEmblem { .. }
-        | Effect::CreateBoon { .. }
-        | Effect::PayCost { .. }
-        | Effect::CastFromZone { .. }
-        | Effect::FreeCastFromZones { .. }
-        | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
-        | Effect::PreventDamage { .. }
-        | Effect::CreateDamageReplacement { .. }
-        | Effect::CreateDrawReplacement { .. }
-        | Effect::CreatePlaneswalkReplacement { .. }
-        | Effect::LoseTheGame { .. }
-        | Effect::WinTheGame { .. }
-        | Effect::RollDie { .. }
-        | Effect::FlipCoins { .. }
-        | Effect::RingTemptsYou
-        | Effect::VentureIntoDungeon
-        | Effect::VentureInto { .. }
-        | Effect::TakeTheInitiative
-        | Effect::ArrangePlanarDeckTop { .. }
-        | Effect::Planeswalk
-        | Effect::ChaosEnsues
-        | Effect::ReverseTurnOrder
-        | Effect::RedistributeLifeTotals
-        | Effect::OpenAttractions { .. }
-        | Effect::RollToVisitAttractions
-        | Effect::AssembleContraptions { .. }
-        | Effect::AssembleContraptionsFromRollDifference
-        | Effect::CrankContraptions { .. }
-        | Effect::ReassembleContraption { .. }
-        | Effect::AssembleContraptionOnSprocket { .. }
-        | Effect::ReassembleContraptionOnSprocket { .. }
-        | Effect::PutSticker { .. }
-        | Effect::ApplySticker { .. }
-        | Effect::ProcessRadCounters
-        | Effect::GrantCastingPermission { .. }
-        | Effect::ChooseFromZone { .. }
-        | Effect::RememberCard { .. }
-        | Effect::NoteManaSpent
-        | Effect::ForEachCategory { .. }
-        | Effect::ChooseObjectsIntoTrackedSet { .. }
-        | Effect::ChooseAndSacrificeRest { .. }
-        | Effect::EachPlayerCopyChosen { .. }
-        | Effect::Exploit { .. }
-        | Effect::ExileFromTopUntil { .. }
-        | Effect::RevealUntil { .. }
-        | Effect::Discover { .. }
-        | Effect::PhysicalContest { .. }
-        | Effect::Heist { .. }
-        | Effect::HeistExile
-        | Effect::Cascade
-        | Effect::Ripple { .. }
-        | Effect::MiracleCast { .. }
-        | Effect::MadnessCast { .. }
-        | Effect::PutAtLibraryPosition { .. }
-        | Effect::ChooseDrawnThisTurnPayOrTopdeck { .. }
-        | Effect::PutOnTopOrBottom { .. }
-        | Effect::GiftDelivery { .. }
-        | Effect::Goad { .. }
-        | Effect::GoadAll { .. }
-        | Effect::Detain { .. }
-        | Effect::SetRoomDoorLock { .. }
-        | Effect::ExchangeControl { .. }
-        | Effect::ChangeTargets { .. }
-        | Effect::Manifest { .. }
-        | Effect::ManifestDread
-        | Effect::Cloak { .. }
-        | Effect::TurnFaceUp { .. }
-        | Effect::TurnFaceDown { .. }
-        | Effect::GrantExtraLoyaltyActivations { .. }
-        | Effect::SkipNextStep { .. }
-        | Effect::AdditionalPhase { .. }
-        | Effect::ModifyAnnouncedX { .. }
-        | Effect::Double { .. }
-        | Effect::RuntimeHandled { .. }
-        | Effect::Incubate { .. }
-        | Effect::Amass { .. }
-        | Effect::EmpowerJace { .. }
-        | Effect::Monstrosity { .. }
-        | Effect::Specialize
-        | Effect::Renown { .. }
-        | Effect::Bolster { .. }
-        | Effect::Adapt { .. }
-        | Effect::Learn
-        | Effect::Forage
-        | Effect::CompletePlayerAction { .. }
-        | Effect::Harness
-        | Effect::CollectEvidence { .. }
-        | Effect::Endure { .. }
-        | Effect::BlightEffect { .. }
-        | Effect::Seek { .. }
-        | Effect::ExchangeLifeWithStat { .. }
-        | Effect::SetDayNight { .. }
-        | Effect::GiveControl { .. }
-        | Effect::RemoveFromCombat { .. }
-        | Effect::BecomeBlocked { .. }
-        | Effect::Conjure { .. }
-        | Effect::ApplyPerpetual { .. }
-        | Effect::Intensify { .. }
-        | Effect::DraftFromSpellbook { .. }
-        | Effect::ChooseOneOf { .. }
-        | Effect::Unimplemented { .. } => InstructionObjectReach::Unclassified,
-    }
-}
-
 /// Whether a child owns an object-selection slot independent of its parent's
 /// already-bound object. Reflexive continuations retain their context-owned
 /// referent even when their effect is a resolution-time typed zone choice,
 /// unless that choice reads only parent metadata
 /// (`effect_refs_parent_target_metadata`).
 fn sub_has_independent_object_target_slot(sub: &ResolvedAbility) -> bool {
-    (crate::game::triggers::extract_target_filter_from_effect(&sub.effect).is_some()
+    (crate::types::ability::extract_target_filter_from_effect(&sub.effect).is_some()
         && !effect_requires_parent_target_object(&sub.effect)
         && !sub_ability_target_belongs_to_reflexive_context(sub))
         || (sub
@@ -6255,11 +5884,8 @@ pub(crate) fn optional_decline_branch<'a>(
             && !(matches!(
                 &ability.effect,
                 Effect::CastFromZone { .. } | Effect::CastCopyOfCard { .. }
-            ) && (cast_from_zone::graveyard_destination_rider(
-                &sub.effect,
-                sub.condition.as_ref(),
-            )
-            .is_some()
+            ) && (graveyard_destination_rider(&sub.effect, sub.condition.as_ref())
+                .is_some()
                 || cast_from_zone::is_enters_with_counter_rider_subability(sub)
                 || cast_from_zone::is_enters_with_modifications_rider_subability(sub))));
     let mut branch = if !selected {
@@ -7103,7 +6729,7 @@ fn prepare_declined_search_node_with_input<'a>(
         if ability.target_choice_timing == TargetChoiceTiming::Resolution
             && ability.attach_host_target().is_none()
             && attachment.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(target)
+            && crate::types::ability::attach_host_filter_needs_target_slot(target)
             && target.denotes_battlefield_objects());
     if let Effect::GenericEffect {
         target,
@@ -7349,7 +6975,7 @@ fn declined_search_fresh_authority(ability: &ResolvedAbility) -> bool {
                 | Effect::ExileFromTopUntil { .. }
         )
         || effect_writes_last_revealed_ids(&ability.effect)
-        || reveal_hand::effect_parks_reveal_card_choice(&ability.effect)
+        || effect_parks_reveal_card_choice(&ability.effect)
         || ability.effect.publishes_created_referent()
         || (ability.forward_result
             && matches!(
@@ -7505,33 +7131,6 @@ fn without_declined_search_object_dependencies(
         relink_in_printed_order(kept.iter().collect()).map(|root| *root)
     }
     reduce(state, ability, ability)
-}
-
-/// Whether a sub-ability condition references a per-iteration outcome gate —
-/// "was the effect performed" (`IfYouDo` / `IfAPlayerDoes`, CR 118.12
-/// optional-cost branch) or "did the current scope iteration succeed"
-/// (`IfCurrentScopeSucceeded`, CR 101.3 + CR 118.12 mandatory-cost branch),
-/// including a `Not`-wrapped form or a composite `And`/`Or` that contains
-/// one. Such conditions cannot be evaluated while the parent effect is
-/// suspended for a player choice — the answer is not yet known — so the
-/// sub-ability must be deferred as a continuation rather than gated eagerly.
-/// They are also load-bearing for `detach_after_player_scope_local_chain`:
-/// a per-iteration outcome gate has meaning ONLY relative to its surrounding
-/// scoped iteration, so the sub-ability must stay inside the scoped template
-/// rather than detach as an unscoped post-loop tail. A composite like
-/// `Or { [IfYouDo, QuantityCheck] }` (Armored Kincaller) also qualifies:
-/// declining the optional effect leaves `IfYouDo` false, but the sibling
-/// disjunct may still be satisfied, so the sub-ability must be re-evaluated
-/// rather than dropped. Predicate helper, not rule-implementing code.
-fn condition_depends_on_effect_performed(condition: &AbilityCondition) -> bool {
-    match condition {
-        AbilityCondition::EffectOutcome { .. } => true,
-        AbilityCondition::Not { condition } => condition_depends_on_effect_performed(condition),
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_depends_on_effect_performed)
-        }
-        _ => false,
-    }
 }
 
 /// CR 608.2c: Settle a game-state gate that covers several instructions of one
@@ -8111,18 +7710,21 @@ fn audit_later_instruction(effect: &Effect) -> LaterInstructionAudit<'_> {
             owner,
             attach_to,
             enters_attacking: _,
+            attack_destination,
             supertypes: _,
             static_abilities,
             enter_with_counters,
         } => (
             // A token's printed power, toughness and abilities could be defined
             // by what the gated action did ("an X/X token"); only a fixed,
-            // ability-free token is audited.
+            // ability-free token is audited. A named destination is not a
+            // `TargetFilter`, so this list cannot hold it.
             (pt_value_is_fixed(power)
                 && pt_value_is_fixed(toughness)
                 && keywords.is_empty()
                 && static_abilities.is_empty()
-                && enter_with_counters.is_empty())
+                && enter_with_counters.is_empty()
+                && attack_destination.is_controller_chooses())
             .then(|| std::iter::once(owner).chain(attach_to.as_ref()).collect()),
             match attach_to {
                 None => ParentTargetHandling::NamesNoObject,
@@ -8785,7 +8387,7 @@ fn condition_depends_on_last_created(condition: &AbilityCondition) -> bool {
 /// satisfies `leaf`.
 ///
 /// EXHAUSTIVE on `AbilityCondition`, no `_` arm, for the same reason
-/// `filter::filter_contains` is exhaustive on `TargetFilter`. The wildcard this
+/// `types::ability::filter_contains` is exhaustive on `TargetFilter`. The wildcard this
 /// replaced classified EVERY filter-bearing condition as anaphor-free:
 /// `TargetMatchesFilter`, `ControllerControlsMatching`, `SourceMatchesFilter`,
 /// `ZoneChangeObjectMatchesFilter` and `DiscardedCardMatchesFilter` all read as
@@ -12034,33 +11636,6 @@ fn effect_has_iteration_bound_recipient(effect: &Effect) -> bool {
     )
 }
 
-/// CR 608.2c + CR 701.20b: An effect that introduces a single per-player object
-/// referent which a later anaphoric clause ("that card", "it", "its mana value")
-/// in the same iteration binds to. `RevealTop` is the canonical case: it reveals
-/// one card per scoped player, captured into `effect_context_object` and exposed
-/// to later clauses as `Demonstrative`/`Anaphoric`/`ParentTarget`. This referent
-/// is rebuilt fresh each iteration, so a consuming sub-clause MUST run inside the
-/// same iteration as its introducer.
-fn effect_introduces_per_player_object_referent(effect: &Effect) -> bool {
-    matches!(effect, Effect::RevealTop { .. })
-}
-
-/// CR 608.2c + CR 701.20a: a per-iteration reveal choice introduces the chosen
-/// card as that iteration's object referent (chain targets), consumed by a
-/// co-scoped `ParentTarget` clause ("exile a creature card they revealed this
-/// way" — Valki, God of Lies).
-fn effect_introduces_per_player_chosen_card_referent(effect: &Effect) -> bool {
-    reveal_hand::effect_parks_reveal_card_choice(effect)
-}
-
-/// CR 608.2c: single authority for "this clause introduces a per-iteration object
-/// referent" — consumed by the player-scope co-scope split and by the swallow
-/// audit's per-player-iteration evidence.
-pub(crate) fn effect_introduces_per_iteration_referent(effect: &Effect) -> bool {
-    effect_introduces_per_player_object_referent(effect)
-        || effect_introduces_per_player_chosen_card_referent(effect)
-}
-
 /// CR 608.2c: True when an effect (or its quantity/target) reads the parent's
 /// per-player object referent anaphorically — a `Demonstrative`/`Anaphoric`
 /// object scope in a quantity, or a `ParentTarget`/`ParentTargetSlot` target.
@@ -12603,11 +12178,6 @@ fn extract_shares_quality_props(
             .collect(),
         _ => vec![],
     }
-}
-
-/// CR 608.2b: Extract the target filter from an effect for SharesQuality validation.
-fn effect_target_filter(effect: &Effect) -> Option<&TargetFilter> {
-    effect.target_filter()
 }
 
 /// CR 601.2c: Oracle's `target opponents` lowering can use the dedicated
@@ -13782,7 +13352,7 @@ fn node_or_branch_references_tracked_set(
     // target, so its grant still reads the tracked set.
     let declares_optional_single_target = ability.optional_targeting
         && ability.target_choice_timing == TargetChoiceTiming::Stack
-        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+        && crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
     let child_anaphor = if ability.multi_target.is_some() || declares_optional_single_target {
         ParentAnaphor::NamesDeclaredTargets
     } else {
@@ -14895,23 +14465,6 @@ fn reflexive_occurrence_voided_by_parent(
         && parent_verdict == Some(crate::types::ability::ParentTargetMissingReason::RevealUntil)
 }
 
-/// Whether the root condition carries the reveal-until-hit guard, alone or as a
-/// member of the flat root `And` built by `when_you_do_with_guard`.
-pub(crate) fn condition_has_reveal_until_matched_guard(condition: &AbilityCondition) -> bool {
-    let is_guard = |condition: &AbilityCondition| {
-        matches!(
-            condition,
-            AbilityCondition::EffectOutcome {
-                signal: EffectOutcomeSignal::RevealUntilMatched,
-            }
-        )
-    };
-    match condition {
-        AbilityCondition::And { conditions } => conditions.iter().any(is_guard),
-        condition => is_guard(condition),
-    }
-}
-
 #[cfg(test)]
 mod settle_reflexive_zone_change_event_tests {
     use super::settle_reflexive_zone_change_event;
@@ -15996,71 +15549,6 @@ pub(crate) fn publish_battlefield_object_for_pending_continuation(
     }
 }
 
-/// CR 608.2c + CR 109.5: Returns `true` when the effect resolves an acting
-/// subject relative to the parent target — i.e., any effect-target slot
-/// reachable via [`effect_target_filter`] contains
-/// `TargetFilter::ParentTargetController` or `TargetFilter::ParentTarget`.
-/// Used by the `repeat_for: TrackedSetSize` loop to decide whether
-/// per-iteration parent rebinding is required.
-///
-/// CR 109.5: "you/your" on an object refers to its controller; for an iterated
-/// effect that derives the acting subject from the parent target (e.g., "its
-/// controller" on Winds of Abandon's per-creature search), each iteration must
-/// rebind the parent reference to the i-th tracked-set member so the per-iter
-/// subject resolves correctly.
-///
-/// Generic: scans whatever target filter the effect exposes via
-/// `effect_target_filter`, so any future effect family that carries a
-/// parent-target filter (search, draw, life-gain by parent's controller, etc.)
-/// participates without code changes here. `Effect::target_filter()` already
-/// surfaces `SearchLibrary::target_player`, so iterated-search variants are
-/// covered through the same single path.
-pub(crate) fn effect_refs_parent_target(effect: &Effect) -> bool {
-    effect_parent_ref_slot_count(effect) > 0
-}
-
-/// CR 608.2c: how many of the effect's target-filter slots (the ones
-/// [`effect_refs_parent_target`] scans) read its parent's target. The parser's
-/// cross-choice antecedent binder links a reader only when exactly one does.
-pub(crate) fn effect_parent_ref_slot_count(effect: &Effect) -> usize {
-    effect_parent_ref_slots(effect)
-        .iter()
-        .filter(|filter| filter_refs_parent_target(filter))
-        .count()
-}
-
-/// CR 608.2c + CR 608.2h: Whether a later instruction needs the parent object
-/// itself, rather than only its move-time controller/owner metadata. Used when
-/// deciding whether a resolution-time private-zone choice owns a fresh
-/// object-selection slot, and by the parser's cross-choice antecedent binder.
-pub(crate) fn effect_requires_parent_target_object(effect: &Effect) -> bool {
-    effect_parent_ref_slots(effect)
-        .iter()
-        .any(|filter| filter_requires_parent_target_object(filter))
-}
-
-/// CR 608.2c + CR 608.2h: Recursively identify the filter forms that require
-/// the parent's object referent rather than its last-known identity metadata.
-fn filter_requires_parent_target_object(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. } => true,
-        TargetFilter::Typed(typed) => typed.properties.iter().any(|property| {
-            matches!(
-                property,
-                FilterProp::DistinctFrom { reference }
-                    if filter_requires_parent_target_object(reference)
-            )
-        }),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_requires_parent_target_object)
-        }
-        TargetFilter::Not { filter } | TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_requires_parent_target_object(filter)
-        }
-        _ => false,
-    }
-}
-
 /// CR 608.2c + CR 608.2h: Whether a later instruction reads only controller or
 /// owner metadata from the parent object.
 fn effect_refs_parent_target_metadata(effect: &Effect) -> bool {
@@ -16100,128 +15588,6 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
             .any(|t| matches!(t, TargetRef::Object(_)))
 }
 
-/// Every object-target filter slot of an effect that may carry a parent-ref,
-/// INCLUDING slots `target_filter()` hides. Single source of truth for which
-/// slots a member-driven loop inspects for rebinding.
-///
-/// `target_filter()` surfaces exactly one slot, and for some effects it is not
-/// the parent-ref-bearing one:
-///  * `Effect::CopyTokenOf` surfaces the token *owner*, not the copy *source*,
-///    when the source is a context ref (CR 707.2) — Second Harvest's "for each
-///    token you control, create a token that's a copy of that permanent" needs
-///    its `target` (copy source) inspected. The arm fires ONLY when the source
-///    is a context ref (`source_filter: None && target.is_context_ref()`), which
-///    is exactly when `target_filter()` returns `owner` instead of `target`, so
-///    `target` is never double-counted.
-///  * `Effect::Token` surfaces a *targetable* `attach_to` (the single-target
-///    "attached to target creature" host) but hides a *context-ref* `attach_to`
-///    (`ParentTarget`), surfacing `owner` instead. The arm fires ONLY when
-///    `attach_to.is_context_ref()` — exactly when `target_filter()` returns
-///    `owner` rather than `attach_to` — so the filter is never double-counted.
-///    Asinine Antics' "for each opponent creature, create a Cursed Role attached
-///    to that creature" rebinds through this hidden `ParentTarget` slot.
-///  * `Effect::Attach` surfaces `target` but hides `attachment`; the arm fires
-///    only when `attachment.is_context_ref()`, mirroring the guards above (a
-///    non-context-ref `attachment` can never be a parent-ref, so excluding it
-///    cannot change the gate result).
-///  * `Effect::UnattachAll` surfaces `target` but hides `attachment`, exactly as
-///    `Effect::Attach` does; the same context-ref guard applies. A delayed
-///    "when you lose control of this, unattach it" trigger rebinds the per-source
-///    `attachment` through this hidden slot (Stolen Uniform, Ogre Geargrabber);
-///    without the arm the `_ => {}` fallback snapshots nothing and it resolves inert.
-///  * The MASS-POPULATION family (`ChangeZoneAll`, `DestroyAll`, `DamageAll`,
-///    `BounceAll`, `CounterAll`, `GainControlAll`, `PumpAll`, `PutCounterAll`,
-///    `DoublePTAll`) intentionally has no generic `target_filter()` slot: the
-///    filter selects a mass operation rather than a declared target, so
-///    `Effect::target_filter()` answers `None` for every one of them. They still
-///    need inspection here when the filter carries a context anaphor, so a
-///    delayed trigger snapshots and pins that object before the mass scan.
-///
-///    The whole family is listed because the PARSER treats it as one: the
-///    trigger rebind in `parser::oracle_trigger` converts a context filter to
-///    `EventTarget` across exactly these nine effects. Surfacing one of them and
-///    not its siblings is the sibling-cluster smell — an omitted member is not a
-///    compile error, it degrades silently into "this delayed effect does
-///    nothing".
-///
-/// NOTE: the `_ => {}` arm means "no hidden object slot beyond `target_filter()`".
-/// Any FUTURE effect that hides an object slot behind `target_filter()` MUST add
-/// an arm here, or its for-each parent-ref form won't rebind.
-fn effect_parent_ref_slots(effect: &Effect) -> Vec<&TargetFilter> {
-    let mut slots: Vec<&TargetFilter> = effect_target_filter(effect).into_iter().collect();
-    match effect {
-        Effect::CopyTokenOf {
-            target,
-            source_filter: None,
-            ..
-        } if target.is_context_ref() => slots.push(target),
-        Effect::Token {
-            attach_to: Some(f), ..
-        } if f.is_context_ref() => slots.push(f),
-        Effect::Attach { attachment, .. } if attachment.is_context_ref() => slots.push(attachment),
-        Effect::UnattachAll { attachment, .. } if attachment.is_context_ref() => {
-            slots.push(attachment)
-        }
-        _ => {}
-    }
-    // The mass-population family, via the single authority below so this list
-    // and the delayed-trigger rewrite cannot diverge.
-    if let Some(target) = mass_population_target(effect) {
-        if filter_refs_parent_or_event_subject(target) {
-            slots.push(target);
-        }
-    }
-    slots
-}
-
-/// CR 608.2k: The hidden `target` of a MASS-POPULATION effect, if this is one.
-///
-/// The single authority for "is this a mass-population effect, and where does it
-/// keep its population filter". `effect_parent_ref_slots` surfaces that filter
-/// and `delayed_trigger::concretize_mass_population_event_subject` rewrites it;
-/// both route through here so the family cannot be enumerated two ways and
-/// drift apart — which is exactly how one of them ends up handling a variant the
-/// other silently ignores.
-///
-/// The wildcard arm is deliberate: `Effect` has far too many variants to list
-/// exhaustively here, and a mass-population effect is identified by carrying a
-/// population `target` that `Effect::target_filter()` deliberately hides. The
-/// protection against a future variant being missed is therefore this function
-/// being the ONE place to add it — previously the family was enumerated twice,
-/// here and in the delayed-trigger rewrite, which is exactly how one site ends
-/// up handling a variant the other silently ignores.
-pub(crate) fn mass_population_target(effect: &Effect) -> Option<&TargetFilter> {
-    match effect {
-        Effect::ChangeZoneAll { target, .. }
-        | Effect::DestroyAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::GainControlAll { target, .. }
-        | Effect::PumpAll { target, .. }
-        | Effect::PutCounterAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => Some(target),
-        _ => None,
-    }
-}
-
-/// Mutable counterpart of [`mass_population_target`]. Kept adjacent so the two
-/// variant lists are read and edited together.
-pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
-    match effect {
-        Effect::ChangeZoneAll { target, .. }
-        | Effect::DestroyAll { target, .. }
-        | Effect::DamageAll { target, .. }
-        | Effect::BounceAll { target, .. }
-        | Effect::CounterAll { target, .. }
-        | Effect::GainControlAll { target, .. }
-        | Effect::PumpAll { target, .. }
-        | Effect::PutCounterAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => Some(target),
-        _ => None,
-    }
-}
-
 /// CR 608.2c + CR 601.2c: Whether [`resolved_object_filter`] should concretize
 /// this effect's POSITIVE parent-target population legs through
 /// `filter::concretize_mass_population_parent_legs`.
@@ -16245,28 +15611,6 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
 /// card uses `DamageAll`.
 pub(crate) fn mass_population_concretizes_parent_legs(effect: &Effect) -> bool {
     mass_population_target(effect).is_some() && !matches!(effect, Effect::DamageAll { .. })
-}
-
-/// CR 608.2c + CR 608.2k: True when the filter names a parent-target anaphor OR
-/// an event subject, at any depth.
-///
-/// The gate for the mass-population arm above. It is deliberately the UNION of
-/// what that arm's consumers ask for rather than the broader
-/// `TargetFilter::is_context_ref`: every caller of `effect_parent_ref_slots`
-/// re-filters the returned slots through its own predicate, so surfacing a slot
-/// that only one consumer recognizes cannot perturb the others — but surfacing
-/// filters no consumer asks about would be noise.
-///
-/// Previously this arm tested `filter_refs_parent_target` alone, which made a
-/// delayed mass move naming `TriggeringSource`/`EventTarget` invisible to
-/// `effect_refs_event_subject`: it took no creation-time snapshot and, at the
-/// later phase event (which carries no event subject), resolved against nothing.
-/// The `ParentTarget` half of the test is unchanged.
-pub(crate) fn filter_refs_parent_or_event_subject(filter: &TargetFilter) -> bool {
-    filter_refs_parent_target(filter)
-        || EVENT_SUBJECT_ANAPHORS
-            .iter()
-            .any(|anaphor| filter_refs_event_subject(filter, anaphor))
 }
 
 /// True if any object-target slot of the effect references the per-iteration
@@ -16326,120 +15670,6 @@ fn effect_iterates_over_parent_target(effect: &Effect) -> bool {
     // rebind the parent target each iteration even though the parent-ref lives on
     // the search filter, not a `TargetFilter::ParentTarget` slot.
     matches!(effect, Effect::SearchLibrary { filter, .. } if filter_refs_same_name_as_parent_target(filter))
-}
-
-/// Recurse into compound filters so a wrapped `ParentTargetController` is
-/// detected wherever it appears (`Or { filters: [..., ParentTargetController, ...] }`).
-pub(crate) fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
-    match filter {
-        // CR 603.7c + CR 608.2c: a `ParentTargetSlot { index }` delayed effect
-        // must snapshot the parent targets at creation, exactly like the broad
-        // `ParentTarget` anaphor — the index is honored later by
-        // `effect_object_targets` when the snapshot fires.
-        TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. } => true,
-        TargetFilter::Typed(typed) => {
-            matches!(typed.controller, Some(ControllerRef::ParentTargetController))
-                // CR 608.2c + CR 109.1: a `DistinctFrom { reference: ParentTarget }`
-                // property (Jodah's "put the rest ..." exclusion of the declined
-                // hit, Radiance's "each OTHER creature that shares a color with it")
-                // reads the parent's chosen target, so the enclosing effect must
-                // inherit `ability.targets` on a decline for the exclusion to fire.
-                || typed.properties.iter().any(|prop| match prop {
-                    FilterProp::DistinctFrom { reference } => {
-                        filter_refs_parent_target(reference)
-                    }
-                    // CR 701.3a: a mass object set defined by attachment to the
-                    // parent referent ("destroy all Auras attached to that
-                    // creature") names the parent inside the host filter, so
-                    // propagation, delayed-trigger snapshotting and loop
-                    // rebinding must see it.
-                    FilterProp::AttachedTo {
-                        to: AttachmentReferent::Host { filter },
-                    } => filter_refs_parent_target(filter),
-                    _ => false,
-                })
-        }
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_refs_parent_target)
-        }
-        TargetFilter::Not { filter } => filter_refs_parent_target(filter),
-        TargetFilter::TrackedSetFiltered { filter, .. } => filter_refs_parent_target(filter),
-        _ => false,
-    }
-}
-
-/// CR 608.2k: The EVENT-SUBJECT anaphors — the target filters that name an
-/// object carried by the trigger EVENT itself rather than a target a player
-/// chose. There are exactly two, and they are the two halves of the same
-/// grammatical relation on a `DamageDealt`/`ZoneChanged`/… event:
-///
-/// * `TriggeringSource` — the event's SUBJECT (CR 120.1: on an active-voice
-///   damage condition, the damage dealer).
-/// * `EventTarget` — the event's OBJECT slot (CR 120.3: the damage recipient,
-///   the "that creature" of "deals damage to a creature, destroy that
-///   creature").
-///
-/// Listed once, in the order a chain that somehow names both should be read:
-/// `TriggeringSource` first, preserving the behaviour that predates
-/// `EventTarget` joining the set.
-///
-/// Consumers must take the whole slice rather than matching one member. Both
-/// are already members of `targeting::is_pure_event_context_filter`, and the
-/// bug class this constant exists to prevent is precisely a pass that handles
-/// one and silently no-ops on the other (issue #4229, Ohran Viper: the delayed
-/// destroy of "that creature at end of combat" was never snapshotted at
-/// creation because the snapshot pass named only `TriggeringSource`).
-pub(crate) const EVENT_SUBJECT_ANAPHORS: [TargetFilter; 2] =
-    [TargetFilter::TriggeringSource, TargetFilter::EventTarget];
-
-/// True if the filter directly or recursively references `anaphor`, one of
-/// [`EVENT_SUBJECT_ANAPHORS`].
-///
-/// Used by `delayed_trigger::resolve()` to gate the event-context snapshot for
-/// delayed triggers whose inner effect names the trigger event's subject or its
-/// object slot via the "it" / "that creature" anaphor (e.g. "return it to the
-/// battlefield", "destroy that creature at end of combat").
-///
-/// Checks all object-target slots via `effect_parent_ref_slots`, including
-/// hidden slots that `effect_target_filter` does not surface (e.g.,
-/// `Attach.attachment`).
-///
-/// Traverses the same STRUCTURAL references as `filter_refs_parent_target`, not
-/// merely the boolean combinators: a `Typed` filter can bury the anaphor in a
-/// `DistinctFrom { reference }` property ("each OTHER creature that shares a
-/// color with it"), and `TrackedSetFiltered` wraps an inner filter. Missing
-/// either means the chain is not recognized as naming an event subject, no
-/// creation-time snapshot is taken, and the effect silently resolves against an
-/// empty target list at the later phase event — the exact failure this whole
-/// snapshot pass exists to prevent.
-fn filter_refs_event_subject(filter: &TargetFilter, anaphor: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| match prop {
-            FilterProp::DistinctFrom { reference } => filter_refs_event_subject(reference, anaphor),
-            // CR 608.2k + CR 701.3a: a mass object set defined by attachment to
-            // the trigger event's subject or its object slot ("destroy all Auras
-            // attached to that creature") names the event referent inside the
-            // host filter. Missing this arm is the exact Ohran Viper failure the
-            // event-subject set exists to prevent: the phase-delayed payload
-            // would take no creation snapshot and resolve against the later
-            // phase event, affecting nothing.
-            FilterProp::AttachedTo {
-                to: AttachmentReferent::Host { filter },
-            } => filter_refs_event_subject(filter, anaphor),
-            _ => false,
-        }),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
-            .iter()
-            .any(|inner| filter_refs_event_subject(inner, anaphor)),
-        TargetFilter::Not { filter } => filter_refs_event_subject(filter, anaphor),
-        TargetFilter::TrackedSetFiltered { filter, .. } => {
-            filter_refs_event_subject(filter, anaphor)
-        }
-        other => other == anaphor,
-    }
 }
 
 /// True if the filter directly or recursively references
@@ -17097,7 +16327,8 @@ pub(crate) fn resolution_optional_payment_options(
             let intercepted_sacrifice = matches!(cost, AbilityCost::Sacrifice(_));
             crate::game::costs::is_resolution_optional_payment_prompt_branch(cost)
                 && ((!intercepted_sacrifice || ability.repeat_for.is_none())
-                    && (intercepted_sacrifice || crate::game::costs::supported_at_resolution(cost)))
+                    && (intercepted_sacrifice
+                        || crate::types::ability::supported_at_resolution(cost)))
                 && crate::game::costs::can_pay(state, payer, ability.source_id, cost, &scope)
         })
         .map(|(index, cost)| ResolutionOptionalPaymentOption {
@@ -21824,7 +21055,7 @@ fn counter_tail_family_has_runtime_evidence(effect: &Effect) -> bool {
 /// so a tail this drops is reported as a resolver gap. Asked of the link's
 /// fields because the resolver holds a `ResolvedAbility` and coverage an
 /// `AbilityDefinition` (the same convention as
-/// `cast_from_zone::is_graveyard_exile_rider_subability`).
+/// `types::ability::is_graveyard_exile_rider_subability`).
 pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effect) -> bool {
     link == SubAbilityLink::SequentialSibling && counter_tail_family_has_runtime_evidence(effect)
 }
@@ -24783,8 +24014,7 @@ fn resolve_chain_body(
         // last slot itself when no rider is printed.
         let cast_slots = cast_from_zone::cast_slot_group(ability);
         let is_rider = |link: &ResolvedAbility| {
-            cast_from_zone::graveyard_destination_rider(&link.effect, link.condition.as_ref())
-                .is_some()
+            graveyard_destination_rider(&link.effect, link.condition.as_ref()).is_some()
         };
         let tail_parent: Option<&ResolvedAbility> = match cast_slots.last() {
             Some(last) => Some(
@@ -25062,10 +24292,7 @@ fn resolve_chain_body(
         // its condition reads none and grants nothing, while the spell stays
         // on the stack (measured: `delay_leaves_an_uncounterable_spell_alone`).
         if matches!(&ability.effect, Effect::Counter { .. })
-            && cast_from_zone::is_graveyard_exile_rider_subability(
-                &sub.effect,
-                sub.condition.as_ref(),
-            )
+            && is_graveyard_exile_rider_subability(&sub.effect, sub.condition.as_ref())
         {
             // Not pinned by a test: no printed card reaches this state
             // (measured above), and returning here preserves `main`'s
@@ -25365,6 +24592,15 @@ fn resolve_chain_body(
             state.pending_cost_move_resume.as_ref(),
             Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. })
                 if matches!(&pending.resume, ManaAbilityResume::EffectPayCost { .. })
+        ) || matches!(
+            state
+                .pending_triggered_mana_resume
+                .as_deref()
+                .map(|resume| &resume.outer_resume),
+            Some(crate::types::game_state::ManaTriggerFixedPointResume::Root {
+                resume,
+                ..
+            }) if matches!(resume.as_ref(), ManaAbilityResume::EffectPayCost { .. })
         );
         if matches!(ability.effect, Effect::PayCost { .. })
             && typed_effect_pay_cost_root
@@ -26740,7 +25976,7 @@ pub(crate) fn declared_player_slot_is_empty(
 ) -> bool {
     crate::game::targeting::resolves_on_stack(state, ability)
         && !filter.is_context_ref()
-        && crate::game::triggers::extract_target_filter_from_effect(&ability.effect) == Some(filter)
+        && crate::types::ability::extract_target_filter_from_effect(&ability.effect) == Some(filter)
         && crate::game::ability_utils::primary_announced_player(&ability.targets, ability).is_none()
 }
 
@@ -33097,6 +32333,33 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("; "));
     }
 
+    /// A destination a token instruction names is not a `TargetFilter`, so the
+    /// audit's referent list cannot hold it; a fixed token that names one
+    /// is read as possibly depending on the gated action, while the same token
+    /// naming none still lists its referents.
+    #[test]
+    fn a_later_token_that_names_its_defender_is_not_audited_as_independent() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let token = r#"{"type":"Token","name":"Ally","power":{"type":"Fixed","value":1},"toughness":{"type":"Fixed","value":1},"types":["Creature","Ally"],"colors":["White"],"keywords":[],"tapped":false,"count":{"type":"Fixed","value":1},"owner":{"type":"Controller"},"enters_attacking":true,"supertypes":[],"static_abilities":[],"enter_with_counters":[]}"#;
+        let mut effect: Effect = serde_json::from_str(token).expect("effect must parse");
+        assert!(
+            audit_later_instruction(&effect).referents.is_some(),
+            "reach guard: a fixed token naming no defender lists its referents"
+        );
+        let Effect::Token {
+            attack_destination, ..
+        } = &mut effect
+        else {
+            panic!("expected a Token effect");
+        };
+        *attack_destination = TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        };
+        assert!(audit_later_instruction(&effect).referents.is_none());
+    }
+
     /// Phase 7, J-3 (the building block): after a declined gate, each later
     /// instruction is kept or skipped on its own. (i) is a resolution step of the
     /// gate and (iii) names the token only the gated action creates, so both are
@@ -35730,6 +34993,7 @@ mod tests {
             owner: TargetFilter::OriginalController,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -37027,6 +36291,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -37164,6 +36430,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(
@@ -39248,6 +38516,8 @@ mod tests {
                 owner: TargetFilter::ParentTargetController,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -43580,6 +42850,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -44040,6 +43312,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -44251,6 +43525,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -44337,6 +43613,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -44408,6 +43686,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -44490,6 +43770,8 @@ mod tests {
                 owner,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -48632,6 +47914,8 @@ mod tests {
         let make_chain = |child_effect: Effect, link: SubAbilityLink| {
             let mut token = ResolvedAbility::new(
                 Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Fractal".to_string(),
                     power: PtValue::Fixed(0),
                     toughness: PtValue::Fixed(0),
@@ -49184,6 +48468,7 @@ mod tests {
     #[test]
     fn mark_co_scoped_created_referent_consumer_requires_the_matching_producer() {
         let token = || Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -49285,6 +48570,7 @@ mod tests {
             end_cost: None,
         };
         let elemental = || Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Elemental".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -49710,6 +48996,7 @@ mod tests {
             }))
         };
         let token = |static_abilities: Vec<StaticDefinition>| Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -50073,6 +49360,7 @@ mod tests {
             end_cost: None,
         };
         let token = |static_def: StaticDefinition| Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Soldier".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),
@@ -50710,6 +49998,7 @@ mod tests {
             target: TargetFilter::LastCreated,
         };
         let token_attached = Effect::Token {
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Aura".to_string(),
             power: PtValue::Fixed(0),
             toughness: PtValue::Fixed(0),
@@ -51066,6 +50355,8 @@ mod tests {
             (
                 "Token keyword Protection(Filter)",
                 effect_row(Box::new(move |filter| Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".to_string(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),
@@ -51598,7 +50889,9 @@ mod tests {
             "the reveal pass keeps no later instruction in its iteration"
         );
         let tail = tail.expect("the choice pass detaches as the tail");
-        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&tail.effect));
+        assert!(crate::types::ability::effect_parks_reveal_card_choice(
+            &tail.effect
+        ));
         assert_eq!(
             tail.player_scope,
             Some(PlayerFilter::Opponent),
@@ -53303,6 +52596,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -53461,6 +52756,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -54801,6 +54098,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -56557,6 +55856,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -58430,6 +57731,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -62460,6 +61762,8 @@ mod resolution_progress_contract_tests {
             );
             let effect = if token {
                 Effect::Token {
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     name: "Soldier".into(),
                     power: PtValue::Fixed(1),
                     toughness: PtValue::Fixed(1),

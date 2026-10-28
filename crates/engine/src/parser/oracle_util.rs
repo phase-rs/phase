@@ -22,6 +22,8 @@ use nom::multi::many_till;
 use nom::sequence::{preceded, terminated};
 
 use super::oracle_effect::token::parse_complete_token_keyword_list;
+use crate::types::text_grammar::{oracle_subtypes, parse_subtype_entry};
+pub use crate::types::text_grammar::{parse_subtype, OUTLAW_SUBTYPES};
 
 /// A borrowed pair of `(original, lowercase)` slices kept in lockstep.
 ///
@@ -1518,53 +1520,6 @@ pub fn canonicalize_subtype_name(text: &str) -> String {
         .join(" ")
 }
 
-/// Irregular plural → singular mappings for MTG creature subtypes.
-/// Only entries that cannot be resolved by stripping "-s" or "-es".
-const SUBTYPE_PLURALS: &[(&str, &str)] = &[
-    ("elves", "Elf"),
-    ("dwarves", "Dwarf"),
-    ("wolves", "Wolf"),
-    ("werewolves", "Werewolf"),
-    ("halves", "Half"),
-    ("fungi", "Fungus"),
-    ("loci", "Locus"),
-    ("djinn", "Djinn"),
-    ("sphinxes", "Sphinx"),
-    ("foxes", "Fox"),
-    ("octopi", "Octopus"),
-    ("octopuses", "Octopus"),
-    ("mice", "Mouse"),
-    ("oxen", "Ox"),
-    ("pegasi", "Pegasus"),
-    ("pegasuses", "Pegasus"),
-    ("allies", "Ally"),
-    ("armies", "Army"),
-    ("faeries", "Faerie"),
-    ("zombies", "Zombie"),
-    ("sorceries", "Sorcery"),
-    ("ponies", "Pony"),
-    ("harpies", "Harpy"),
-    ("berserkers", "Berserker"),
-];
-
-/// CR 700.12: An outlaw is an object with the Assassin, Mercenary, Pirate,
-/// Rogue, and/or Warlock creature type. Shared by every parser path that
-/// recognizes the "outlaw[s]" head noun.
-pub const OUTLAW_SUBTYPES: [&str; 5] = ["Assassin", "Mercenary", "Pirate", "Rogue", "Warlock"];
-
-/// MTGJSON CardTypes-derived **creature** subtype vocabulary (`oracle-subtypes.json`),
-/// merged at load with canonical noncreature tables from `card_type.rs`.
-static ORACLE_SUBTYPES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
-    let creature: Vec<String> =
-        serde_json::from_str(include_str!("../../data/oracle-subtypes.json"))
-            .expect("oracle-subtypes.json well-formed");
-    crate::database::subtype_vocab::build_parser_subtype_vocabulary(&creature)
-});
-
-fn oracle_subtypes() -> &'static [String] {
-    &ORACLE_SUBTYPES
-}
-
 /// Test whether a lowercased candidate word names an MTG core type.
 /// CR 205.2: Core types are artifact, battle, creature, enchantment, instant,
 /// land, planeswalker, sorcery, tribal. `card`, `permanent`, and `spell` are
@@ -1625,113 +1580,6 @@ pub(crate) fn is_supertype_word(candidate_lower: &str) -> bool {
     )
 }
 
-/// Check if `text` starts with `prefix` using ASCII case-insensitive comparison,
-/// followed by a word boundary (non-alphanumeric or end of string).
-fn starts_with_word_ci(text: &str, prefix: &str) -> bool {
-    if text.len() < prefix.len() {
-        return false;
-    }
-    // prefix is always ASCII (subtypes/planeswalker names), but text may contain
-    // multi-byte UTF-8 (e.g. em dashes). Guard against slicing inside a character.
-    if !text.is_char_boundary(prefix.len()) {
-        return false;
-    }
-    if !text[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        return false;
-    }
-    let after = &text[prefix.len()..];
-    after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric())
-}
-
-/// Try to match a subtype at the start of text (case-insensitive).
-/// Returns `(canonical_name, bytes_consumed)` or `None`.
-/// Handles plural forms (regular and irregular).
-pub fn parse_subtype(text: &str) -> Option<(String, usize)> {
-    // Check irregular plurals first (they take priority over regular matching)
-    for &(plural, singular) in SUBTYPE_PLURALS {
-        if starts_with_word_ci(text, plural) {
-            return Some((singular.to_string(), plural.len()));
-        }
-    }
-
-    for subtype in fixed_noncreature_subtypes() {
-        if let Some(parsed) = parse_subtype_entry(text, subtype) {
-            return Some(parsed);
-        }
-    }
-
-    // Check each subtype (singular and regular plural)
-    for subtype in oracle_subtypes() {
-        if let Some(parsed) = parse_subtype_entry(text, subtype.as_str()) {
-            return Some(parsed);
-        }
-    }
-
-    None
-}
-
-fn parse_subtype_entry(text: &str, subtype: &str) -> Option<(String, usize)> {
-    if starts_with_word_ci(text, subtype) {
-        return Some((subtype.to_string(), subtype.len()));
-    }
-
-    // Try regular plural: subtype + "s" — check subtype prefix + 's' at boundary
-    let plural_len = subtype.len() + 1;
-    if text.len() >= plural_len
-        && text.is_char_boundary(subtype.len())
-        && text[..subtype.len()].eq_ignore_ascii_case(subtype)
-        && text.as_bytes()[subtype.len()] == b's'
-    {
-        let after = &text[plural_len..];
-        if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
-            return Some((subtype.to_string(), plural_len));
-        }
-    }
-
-    // Try regular "-es" plural: subtypes ending in a sibilant (s, x, z, ch, sh)
-    // or in consonant+o pluralize with "-es" rather than "-s" (e.g. "Hero" →
-    // "Heroes", "Sphinx" → "Sphinxes"). Without this, such plurals fall through
-    // to a naive trailing-'s' strip at call sites, corrupting the subtype name
-    // (e.g. "Heroes" → "Heroe"). Irregular forms still take priority via
-    // SUBTYPE_PLURALS above.
-    if takes_es_plural(subtype) {
-        let es_plural_len = subtype.len() + 2;
-        if text.len() >= es_plural_len
-            && text.is_char_boundary(subtype.len())
-            && text[..subtype.len()].eq_ignore_ascii_case(subtype)
-            && text[subtype.len()..es_plural_len].eq_ignore_ascii_case("es")
-        {
-            let after = &text[es_plural_len..];
-            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
-                return Some((subtype.to_string(), es_plural_len));
-            }
-        }
-    }
-
-    // Try regular "-ies" plural: subtypes ending in consonant + "y" pluralize by
-    // replacing "y" with "ies" (e.g. "Mercenary" → "Mercenaries", "Berserker"
-    // is unaffected). Words ending in vowel + "y" take a plain "-s" ("Monkey" →
-    // "Monkeys") and are covered by the "-s" rule above. Matching the plural
-    // surface form requires stripping the trailing "y" from the subtype stem and
-    // matching "ies" at the boundary; only the canonical singular is returned.
-    if takes_ies_plural(subtype) {
-        let stem_len = subtype.len() - 1; // drop trailing "y"
-        let ies_plural_len = stem_len + 3; // stem + "ies"
-        if text.len() >= ies_plural_len
-            && text.is_char_boundary(stem_len)
-            && text[..stem_len].eq_ignore_ascii_case(&subtype[..stem_len])
-            && text[stem_len..ies_plural_len].eq_ignore_ascii_case("ies")
-        {
-            let after = &text[ies_plural_len..];
-            if after.is_empty() || after.starts_with(|c: char| !c.is_alphanumeric()) {
-                return Some((subtype.to_string(), ies_plural_len));
-            }
-        }
-    }
-
-    None
-}
-
 /// CR 205.3m creature-only subtype vocabulary, loaded from the committed
 /// `oracle-subtypes.json` (creature subtypes only — before the noncreature
 /// merge that `ORACLE_SUBTYPES` applies). Sorted longest-first so multi-word
@@ -1756,49 +1604,6 @@ pub fn parse_creature_subtype(text: &str) -> Option<(String, usize)> {
         }
     }
     None
-}
-
-/// Whether an English noun pluralizes by replacing a trailing "-y" with "-ies":
-/// nouns ending in consonant + "y" (e.g. "Mercenary" → "Mercenaries"). Nouns
-/// ending in vowel + "y" take a plain "-s" ("Monkey" → "Monkeys") and are
-/// excluded so the regular "-s" rule handles them.
-fn takes_ies_plural(word: &str) -> bool {
-    let bytes = word.as_bytes();
-    // A one-letter "y" has no preceding consonant, so the "-ies" rule cannot
-    // apply; the `len() < 2` guard also makes the penultimate index safe without
-    // `saturating_sub`/`get`.
-    if bytes.len() < 2 || !matches!(bytes.last(), Some(b'y' | b'Y')) {
-        return false;
-    }
-    !matches!(
-        bytes[bytes.len() - 2].to_ascii_lowercase(),
-        b'a' | b'e' | b'i' | b'o' | b'u'
-    )
-}
-
-/// Whether an English noun forms its plural by appending "-es" rather than
-/// "-s": nouns ending in a sibilant (s, x, z, ch, sh) or in consonant + "o"
-/// (e.g. "Hero" → "Heroes"). Words ending in vowel + "o" take a plain "-s"
-/// ("Radio" → "Radios") and are excluded.
-fn takes_es_plural(word: &str) -> bool {
-    let lower = word.to_ascii_lowercase();
-    if lower.ends_with('s') || lower.ends_with('x') || lower.ends_with('z') {
-        return true;
-    }
-    let bytes = lower.as_bytes();
-    if matches!(
-        bytes.get(bytes.len().saturating_sub(2)..),
-        Some(b"ch" | b"sh")
-    ) {
-        return true;
-    }
-    if matches!(bytes.last(), Some(b'o')) {
-        return !matches!(
-            bytes.get(bytes.len().saturating_sub(2)),
-            Some(b'a' | b'e' | b'i' | b'o' | b'u')
-        );
-    }
-    false
 }
 
 /// Infer the core type for a known subtype name.

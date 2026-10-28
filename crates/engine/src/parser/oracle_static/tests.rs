@@ -926,28 +926,29 @@ fn compound_subject_keyword_static_splits_four_item_oxford_list() {
     assert_eq!(defs[1].mode, StaticMode::Shroud);
 }
 
-// CR 611.3a + CR 604.3 + CR 613.4a: Angry Mob — a two-clause turn-window CDA. "During
+// CR 604.3a + CR 613.4b: conditional equality is an ordinary layer-7b setter.
+// SHAPE: Angry Mob has two complementary live turn-window statics. "During
 // your turn, ~'s power and toughness are each equal to 2 plus the number of
 // Swamps your opponents control. During turns other than yours, ~'s power and
-// toughness are each 2." Splits into two CDA statics: the on-turn clause is a
+// toughness are each 2." Splits into two conditional statics: the on-turn clause is a
 // dynamic P/T (2 + count) gated on DuringYourTurn; the off-turn clause is a
 // constant 2/2 gated on Not{DuringYourTurn}.
 #[test]
-fn static_angry_mob_two_clause_turn_window_cda() {
+fn static_angry_mob_two_clause_turn_window_setter() {
     let defs = parse_static_line_multi(
         "During your turn, Angry Mob's power and toughness are each equal to 2 plus the number of Swamps your opponents control. During turns other than yours, Angry Mob's power and toughness are each 2.",
     );
     assert_eq!(
         defs.len(),
         2,
-        "expected two turn-window CDA statics, got {defs:?}"
+        "expected two turn-window statics, got {defs:?}"
     );
 
     // On-turn: dynamic P/T (Offset over opponent Swamp count), gated DuringYourTurn.
     let on_turn = &defs[0];
     assert!(
-        on_turn.characteristic_defining,
-        "on-turn clause must be a CDA"
+        !on_turn.characteristic_defining,
+        "on-turn clause must be an ordinary setter"
     );
     assert_eq!(on_turn.condition, Some(StaticCondition::DuringYourTurn));
     // Prove the full quantity, not just that *some* dynamic power exists: both
@@ -969,22 +970,22 @@ fn static_angry_mob_two_clause_turn_window_cda() {
     assert_eq!(
         on_turn.modifications,
         vec![
-            ContinuousModification::SetDynamicPower {
+            ContinuousModification::SetPowerDynamic {
                 value: two_plus_opponent_swamps.clone(),
             },
-            ContinuousModification::SetDynamicToughness {
+            ContinuousModification::SetToughnessDynamic {
                 value: two_plus_opponent_swamps,
             },
         ],
-        "on-turn CDA must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
+        "on-turn static must set BOTH power and toughness to (2 + opponent Swamp count): {:?}",
         on_turn.modifications
     );
 
     // Off-turn: constant 2/2, gated Not{DuringYourTurn}.
     let off_turn = &defs[1];
     assert!(
-        off_turn.characteristic_defining,
-        "off-turn clause must be a CDA"
+        !off_turn.characteristic_defining,
+        "off-turn clause must be an ordinary setter"
     );
     assert_eq!(
         off_turn.condition,
@@ -29310,6 +29311,51 @@ fn effect_subject_prefix_word_boundary() {
     assert!(parse_effect_subject_prefix("eachother").is_err());
 }
 
+// SHAPE: the shared inverted normalizer recognizes exactly the possessive P/T
+// subjects, and preserves commas inside the condition before that subject.
+#[test]
+fn static_gaeas_liege_possessive_subject_boundaries() {
+    for effect in [
+        "its power and toughness are each equal to 2",
+        "its power is equal to 2",
+        "its toughness is equal to 2",
+    ] {
+        assert!(parse_effect_subject_prefix(effect).is_ok(), "{effect}");
+        let text = format!("As long as ~ is attacking, {effect}.");
+        let lower = text.to_lowercase();
+        let split = try_split_inverted_as_long_as(&TextPair::new(&text, &lower)).unwrap();
+        assert_eq!(split.condition_text, "~ is attacking");
+        assert_eq!(split.effect_text, effect);
+        assert_eq!(
+            split.canonical,
+            format!("{effect} as long as ~ is attacking")
+        );
+    }
+    for adjacent in [
+        "its controller has a creature",
+        "its mana value is 4",
+        "its powerful friend attacks",
+        "its toughnesses are equal",
+    ] {
+        assert!(parse_effect_subject_prefix(adjacent).is_err(), "{adjacent}");
+    }
+    for existing in ["it gets +1/+1", "~ has flying", "each creature gets +1/+1"] {
+        assert!(parse_effect_subject_prefix(existing).is_ok(), "{existing}");
+    }
+    let text = "As long as ~ is attacking, its controller has a creature, its power is equal to 2.";
+    let lower = text.to_lowercase();
+    let split = try_split_inverted_as_long_as(&TextPair::new(text, &lower)).unwrap();
+    assert_eq!(
+        split.condition_text,
+        "~ is attacking, its controller has a creature"
+    );
+    assert_eq!(split.effect_text, "its power is equal to 2");
+    assert_eq!(
+        split.canonical,
+        "its power is equal to 2 as long as ~ is attacking, its controller has a creature"
+    );
+}
+
 #[test]
 fn inverted_splits_auriok_condition_cleanly() {
     // The primary success criterion: the condition is separated from the effect clause.
@@ -41228,5 +41274,140 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
                 )),
             },
         ]
+    );
+}
+
+// SHAPE: the full Oracle line and its canonical trailing forms must preserve
+// both the live Forest census and the complementary combat gates.
+// CR 604.3a + CR 611.3a + CR 613.4b: conditional equality is not a CDA.
+#[test]
+fn static_gaeas_liege_complementary_forest_setters() {
+    // The static parser receives card-name references normalized to `~` by the
+    // Oracle pipeline; full-card dispatch below covers the verbatim Oracle text.
+    let defs = parse_static_line_multi("As long as ~ isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as ~ is attacking, its power and toughness are each equal to the number of Forests defending player controls.");
+    assert_eq!(defs.len(), 2, "{defs:?}");
+    let gates = [
+        StaticCondition::Not {
+            condition: Box::new(StaticCondition::SourceIsAttacking),
+        },
+        StaticCondition::SourceIsAttacking,
+    ];
+    for ((def, gate), controller) in defs
+        .iter()
+        .zip(gates)
+        .zip([ControllerRef::You, ControllerRef::DefendingPlayer])
+    {
+        let value = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Subtype("Forest".to_string()))
+                        .controller(controller),
+                ),
+            },
+        };
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(gate));
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::SetPowerDynamic {
+                    value: value.clone()
+                },
+                ContinuousModification::SetToughnessDynamic { value }
+            ]
+        );
+        assert!(!def.characteristic_defining);
+    }
+    for (line, expected) in [
+        ("Gaea's Liege's power and toughness are each equal to the number of Forests you control as long as it isn't attacking.", &defs[0]),
+        ("Gaea's Liege's power and toughness are each equal to the number of Forests defending player controls as long as it is attacking.", &defs[1]),
+    ] {
+        let def = parse_static_line(line).expect("canonical equality must parse");
+        assert_eq!(def.condition, expected.condition);
+        assert_eq!(def.modifications, expected.modifications);
+        assert!(!def.characteristic_defining);
+    }
+}
+
+// SHAPE: exercise the shared equality family's axes, preserve unconditional
+// CDAs, and retain unsupported gate text rather than erasing a rules condition.
+// CR 604.3a + CR 613.4a + CR 613.4b: only ungated equality is characteristic defining.
+#[test]
+fn static_gaeas_liege_equality_siblings_and_honest_gaps() {
+    let maro = parse_static_line(
+        "Maro's power and toughness are each equal to the number of cards in your hand.",
+    )
+    .unwrap();
+    assert!(maro.characteristic_defining);
+    assert_eq!(maro.modifications.len(), 2);
+    assert!(matches!(
+        maro.modifications[0],
+        ContinuousModification::SetDynamicPower { .. }
+    ));
+    for (axis, power) in [("power", true), ("toughness", false)] {
+        let line = format!("This creature's {axis} is equal to the number of Forests you control as long as it is attacking.");
+        let def = parse_static_line(&line).unwrap();
+        assert_eq!(def.condition, Some(StaticCondition::SourceIsAttacking));
+        assert_eq!(def.modifications.len(), 1);
+        assert_eq!(
+            matches!(
+                def.modifications[0],
+                ContinuousModification::SetPowerDynamic { .. }
+            ),
+            power
+        );
+        assert!(!def.characteristic_defining);
+    }
+    let unknown = parse_static_line("This creature's power and toughness are each equal to the number of Forests you control as long as the moon is made of cheese.").unwrap();
+    assert_eq!(
+        unknown.modifications.len(),
+        2,
+        "recognized equality body must survive"
+    );
+    assert!(matches!(
+        unknown.condition,
+        Some(StaticCondition::Unrecognized { .. })
+    ));
+    assert!(!unknown.characteristic_defining);
+    assert!(
+        unknown.condition.as_ref().unwrap().contains_unrecognized(),
+        "coverage must retain the unsupported condition gap"
+    );
+    assert!(super::cda::parse_cda_pt_equality(
+        "this creature's power and toughness are each equal to the smell of morning.",
+        "This creature's power and toughness are each equal to the smell of morning."
+    )
+    .is_none());
+    assert!(super::cda::parse_cda_pt_equality("this creature's power and toughness are each equal to the number of forests you control for as long as it is attacking.", "This creature's power and toughness are each equal to the number of Forests you control for as long as it is attacking.").is_none());
+    let combined = parse_static_line("During your turn, this creature's power and toughness are each equal to the number of Forests you control as long as it is attacking.").unwrap();
+    assert_eq!(
+        combined.condition,
+        Some(StaticCondition::And {
+            conditions: vec![
+                StaticCondition::DuringYourTurn,
+                StaticCondition::SourceIsAttacking
+            ]
+        })
+    );
+}
+
+// SHAPE: full card dispatch must reach both statics and its existing activation,
+// without a swallowed clause or an unsupported effect replacing either half.
+#[test]
+fn static_gaeas_liege_full_oracle_dispatch() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "As long as Gaea's Liege isn't attacking, its power and toughness are each equal to the number of Forests you control. As long as Gaea's Liege is attacking, its power and toughness are each equal to the number of Forests defending player controls.\n{T}: Target land becomes a Forest until this creature leaves the battlefield.",
+        "Gaea's Liege", &[], &["Creature".to_string()], &[],
+    );
+    assert_eq!(parsed.statics.len(), 2, "{parsed:?}");
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:?}");
+    assert!(parsed
+        .abilities
+        .iter()
+        .all(|a| a.effect.unimplemented_description().is_none()));
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "{:?}",
+        parsed.parse_warnings
     );
 }
