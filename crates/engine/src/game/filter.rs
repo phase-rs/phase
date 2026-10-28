@@ -85,14 +85,15 @@ use crate::game::quantity::{
 };
 use crate::game::targeting::{DeclaredSlotBinding, SlotReferent};
 use crate::types::ability::{
-    filter_contains, filter_grammar_any, filter_prop_grammar_any, player_filter_grammar_any,
-    quantity_expr_grammar_any, quantity_ref_grammar_any, rewrite_filter_prop, rewrite_filter_props,
-    rewrite_player_filter_props, rewrite_quantity_expr_filter_props, AbilityCondition,
-    AttachmentReferent, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
-    ChosenAttribute, CombatRelation, CombatRelationSubject, ContinuousModification, ControllerRef,
-    CountScope, CrewRelation, FilterGrammarNode, FilterProp, Parity, ParitySource, PlayerFilter,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    filter_contains, filter_contains_filter_prop, filter_grammar_any, filter_prop_grammar_any,
+    player_filter_grammar_any, quantity_expr_grammar_any, quantity_ref_grammar_any,
+    rewrite_filter_prop, rewrite_filter_props, rewrite_player_filter_props,
+    rewrite_quantity_expr_filter_props, AbilityCondition, AttachmentReferent, AttackerBlockStatus,
+    CardTypeSetSource, CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation,
+    CombatRelationSubject, ContinuousModification, ControllerRef, CountScope, CrewRelation,
+    FilterGrammarNode, FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope,
+    QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -9749,6 +9750,7 @@ pub(crate) fn ability_controller_ref_player(
         ctx.recipient_id,
         ctx.triggering_object,
         ctx.granting_object,
+        ctx.casting_spell,
     );
     source_controller_ref_player(state, &source, controller)
 }

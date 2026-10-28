@@ -1979,7 +1979,7 @@ fn apply_source_parity_statics(doc: &mut OracleDocIr, relations: &[DocumentRelat
                 _ => return None,
             };
             let mut complete = true;
-            rewrite_filter_props(
+            rewrite_filter_props::<()>(
                 &mut filter,
                 &mut |_, _, _| {},
                 &mut |prop| {

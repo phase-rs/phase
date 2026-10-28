@@ -11200,6 +11200,7 @@ impl CollectedCostModifiers {
                 caster,
                 object_id,
                 SpellCostTargets::Chosen(ability),
+                casting_variant,
             )
         });
 
@@ -11319,10 +11320,17 @@ impl CollectedCostFloors {
     fn collect_target_independent(
         state: &GameState,
         caster: PlayerId,
-        object_id: ObjectId,
+        casting_spell: CastSpellContext,
     ) -> Self {
         Self {
-            target_independent: collect_cost_floors(state, caster, object_id, None, false, false),
+            target_independent: collect_cost_floors_for_cast(
+                state,
+                caster,
+                casting_spell.object_id,
+                None,
+                false,
+                casting_spell,
+            ),
             target_dependent: Vec::new(),
         }
     }
@@ -12445,6 +12453,7 @@ pub(super) fn apply_target_dependent_cost_modifiers(
             player,
             object_id,
             SpellCostTargets::Chosen(ability),
+            None,
         ),
         None,
     );
@@ -12485,21 +12494,24 @@ fn apply_target_dependent_cost_modifiers_using(
 
 /// CR 601.2f: Collect the cost modifiers whose `spell_filter` reads the chosen
 /// targets — self-spell statics then battlefield statics, in that order.
+/// CR 601.2b: previews retain their selected casting variant before the live
+/// spell announcement exists; settlement callers can recover that announcement.
 fn collect_target_dependent_cost_modifiers(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     targets: SpellCostTargets<'_>,
+    casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
     let mut collected =
-        collect_self_spell_cost_modifiers(state, player, object_id, targets, true, None);
+        collect_self_spell_cost_modifiers(state, player, object_id, targets, true, casting_variant);
     collected.extend(collect_battlefield_cost_modifiers(
-        state, player, object_id, targets, true,
-        // CR 702.102b: this target-dependent pass runs after finalization sets the
-        // `fused_split_spell` marker, so the marker (OR-gated inside
-        // `spell_cast_record_for`) already yields the combined projection — no
-        // pre-payment variant hint is needed or available here.
-        None,
+        state,
+        player,
+        object_id,
+        targets,
+        true,
+        casting_variant,
     ));
     collected
 }
@@ -22428,8 +22440,12 @@ fn target_dependent_reduction_makes_payable(
         };
         let plain_cast = collect_cast(false);
         let defiler_cast = defiler.is_some().then(|| collect_cast(true));
+        let casting_spell = CastSpellContext {
+            object_id: prepared.object_id,
+            casting_variant: prepared.casting_variant,
+        };
         let floors =
-            CollectedCostFloors::collect_target_independent(flushed, player, prepared.object_id);
+            CollectedCostFloors::collect_target_independent(flushed, player, casting_spell);
         let price = |(pending, ctx, modifiers): &(
             PendingCast,
             CostFinalizeContext,
@@ -22465,6 +22481,7 @@ fn target_dependent_reduction_makes_payable(
                 player,
                 prepared.object_id,
                 SpellCostTargets::Any,
+                Some(prepared.casting_variant),
             )
             .into_iter()
             .filter(|modification| !modification.is_raise)
@@ -22512,14 +22529,15 @@ fn target_dependent_reduction_makes_payable(
                     player,
                     prepared.object_id,
                     SpellCostTargets::Chosen(&chosen),
+                    Some(prepared.casting_variant),
                 ),
-                collect_cost_floors(
+                collect_cost_floors_for_cast(
                     flushed,
                     player,
                     prepared.object_id,
                     Some(&chosen),
                     true,
-                    false,
+                    casting_spell,
                 ),
             );
             let priced = price(&plain_cast, &chosen, &target_dependent);
@@ -22673,7 +22691,6 @@ fn target_dependent_cost_reduction_present(
                         spell_id,
                         source,
                         definition,
-                        fused,
                         casting_variant,
                     )
             },
@@ -38618,6 +38635,101 @@ mod selected_cast_intent_tests {
             ..Default::default()
         });
         object.casting_permissions = vec![normal_exile_permission(ManaCost::generic(4))];
+    }
+
+    // CR 601.2b-c + CR 601.2f + CR 702.102b: target pricing and both floor
+    // channels read the selected fused spell before its live marker exists.
+    #[test]
+    fn selected_fuse_target_pricing_retains_combined_characteristics_and_floors() {
+        for floor_targets in [None, Some(false), Some(true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let target = scenario.add_creature(P0, "Synthetic target", 2, 2).id();
+            let spell = scenario
+                .add_spell_to_hand(P0, "Synthetic split removal", true)
+                .with_mana_cost(ManaCost::generic(2))
+                .with_keyword(Keyword::Fuse)
+                .with_ability(Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    cant_regenerate: false,
+                })
+                .id();
+            let combined = FilterProp::Cmc {
+                comparator: crate::types::ability::Comparator::GE,
+                value: QuantityExpr::Fixed { value: 4 },
+            };
+            let targets = FilterProp::Targets {
+                filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+            };
+            scenario
+                .add_artifact_from_oracle(P0, "Synthetic target reducer", "")
+                .with_static(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::generic(3),
+                    spell_filter: Some(TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![combined.clone(), targets.clone()]),
+                    )),
+                    dynamic_count: None,
+                    reach: CostReductionReach::SpillsToGeneric,
+                });
+            if let Some(target_sensitive) = floor_targets {
+                let mut properties = vec![combined];
+                if target_sensitive {
+                    properties.push(targets);
+                }
+                scenario
+                    .add_artifact_from_oracle(P0, "Synthetic filtered floor", "")
+                    .with_static(StaticMode::ModifyCost {
+                        mode: CostModifyMode::Minimum,
+                        amount: ManaCost::generic(2),
+                        spell_filter: Some(TargetFilter::Typed(
+                            TypedFilter::card().properties(properties),
+                        )),
+                        dynamic_count: None,
+                        reach: CostReductionReach::SpillsToGeneric,
+                    });
+            }
+            let mut runner = scenario.build();
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&spell)
+                .unwrap()
+                .back_face = Some(BackFaceData {
+                name: "Synthetic split second half".into(),
+                layout_kind: Some(LayoutKind::Split),
+                card_types: CardType {
+                    core_types: vec![CoreType::Instant],
+                    ..Default::default()
+                },
+                mana_cost: ManaCost::generic(2),
+                abilities: vec![AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)],
+                ..Default::default()
+            });
+            pool(&mut runner, 1, false);
+            assert!(CastSpellContext::announced(runner.state(), spell).is_none());
+            assert!(!runner.state().objects[&spell].fused_split_spell);
+            let options = current_casting_variant_choice_options(runner.state(), P0, spell);
+            assert!(!options
+                .iter()
+                .any(|option| option.variant == CastingVariant::Normal));
+            assert_eq!(
+                options
+                    .iter()
+                    .any(|option| option.variant == CastingVariant::Fuse),
+                floor_targets.is_none(),
+                "combined target reduction pays one mana; either filtered floor requires two"
+            );
+            if floor_targets.is_none() {
+                let outcome = runner
+                    .cast(spell)
+                    .casting_variant(CastingVariant::Fuse)
+                    .target_object(target)
+                    .resolve();
+                outcome.assert_zone(&[target, spell], Zone::Graveyard);
+                assert_eq!(outcome.mana_pool_total(P0), 0);
+            }
+        }
     }
 
     // CR 601.2b + CR 708.4: selection precedes offer-time mana projections.

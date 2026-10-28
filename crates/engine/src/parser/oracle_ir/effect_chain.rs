@@ -1550,9 +1550,16 @@ macro_rules! define_disposition_quantity_walk {
                     }
                     Self::SearchDestination { attach_host: filter, .. }
                     | Self::RevealHandFilter { card_filter: filter, .. }
-                    | Self::EntersTappedAttacking { moved_filter: filter }
                     | Self::ChooseAndSacrificeRestFilter { sacrifice_filter: filter } => {
                         if let Some(filter) = filter { filter.$nested(f); }
+                    }
+                    Self::EntersTappedAttacking { moved_filter, destination, .. } => {
+                        if let Some(filter) = moved_filter { filter.$nested(f); }
+                        match destination {
+                            crate::types::ability::TokenAttackDestination::EachPlayer { filter, .. } => filter.$nested(f),
+                            crate::types::ability::TokenAttackDestination::ControllerChooses
+                            | crate::types::ability::TokenAttackDestination::Player { .. } => {}
+                        }
                     }
                     Self::CounterSourceStatic { source_filter, .. } => {
                         if let Some(filter) = source_filter { filter.$nested(f); }
@@ -3653,6 +3660,79 @@ mod tests {
     use super::*;
     use crate::parser::oracle_ir::ast::parsed_clause;
     use crate::types::ability::{Duration, Effect};
+
+    #[test]
+    fn attacking_continuation_quantity_walk_reaches_moved_and_defender_predicates() {
+        use crate::types::ability::{
+            Comparator, NamedDefenderScope, PlayerRelation, TokenAttackDestination,
+        };
+
+        let predicate = |name: &str| PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::All,
+            attr: Box::new(QuantityRef::Variable {
+                name: format!("{name}_attribute"),
+            }),
+            comparator: Comparator::GE,
+            value: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: format!("{name}_threshold"),
+                },
+            }),
+        };
+        for destination in [
+            TokenAttackDestination::ControllerChooses,
+            TokenAttackDestination::Player {
+                player: ControllerRef::DeclaredPlayer {
+                    group: ChosenGroupId(7),
+                },
+                scope: NamedDefenderScope::PlayerOrPlaneswalker,
+            },
+            TokenAttackDestination::EachPlayer {
+                filter: PlayerFilter::AllExcept {
+                    exclude: Box::new(PlayerFilter::AnyOf {
+                        filters: vec![PlayerFilter::Opponent, predicate("defender")],
+                    }),
+                },
+                scope: NamedDefenderScope::Player,
+            },
+        ] {
+            let mut expected = vec!["moved_attribute", "moved_threshold"];
+            if matches!(&destination, TokenAttackDestination::EachPlayer { .. }) {
+                expected.extend(["defender_attribute", "defender_threshold"]);
+            }
+            let mut continuation = ContinuationAst::EntersTappedAttacking {
+                moved_filter: Some(TargetFilter::PlayerMatching {
+                    player: Box::new(predicate("moved")),
+                }),
+                destination,
+            };
+            let mut observed = Vec::new();
+            continuation.for_each_quantity_ref(&mut |reference| {
+                if let QuantityRef::Variable { name } = reference {
+                    observed.push(name.clone());
+                }
+            });
+            assert_eq!(observed, expected);
+            continuation.for_each_quantity_ref_mut(&mut |reference| {
+                if let QuantityRef::Variable { name } = reference {
+                    name.push('!');
+                }
+            });
+            observed.clear();
+            continuation.for_each_quantity_ref(&mut |reference| {
+                if let QuantityRef::Variable { name } = reference {
+                    observed.push(name.clone());
+                }
+            });
+            assert_eq!(
+                observed,
+                expected
+                    .iter()
+                    .map(|name| format!("{name}!"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn nested_chosen_namespace_keeps_local_clause_ids_and_exact_enclosing_roles() {

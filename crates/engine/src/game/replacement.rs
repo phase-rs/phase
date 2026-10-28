@@ -4,13 +4,14 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, CastingPermission, ChoiceType, ChosenAttribute, CoinFlipRun,
-    CombatDamageScope, ControllerRef, DamageModification, DamageRedirectTarget, DamageTargetFilter,
-    DamageTargetPlayerScope, DrawReplacementScope, Duration, Effect, EffectScope,
-    EntryAttackDestination, ManaSpendPermission, PermissionGrantee, PostReplacementContinuation,
-    PreventionAmount, PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
-    ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    filter_contains, AbilityCost, AbilityDefinition, CastingPermission, ChoiceType,
+    ChosenAttribute, CoinFlipRun, CombatDamageScope, ControllerRef, DamageModification,
+    DamageRedirectTarget, DamageTargetFilter, DamageTargetPlayerScope, DrawReplacementScope,
+    Duration, Effect, EffectScope, EntryAttackDestination, ManaSpendPermission, PermissionGrantee,
+    PostReplacementContinuation, PreventionAmount, PreventionFormula, QuantityExpr,
+    QuantityModification, RedirectionLifetime, ReplacementChoiceAuthority, ReplacementCondition,
+    ReplacementDefinition, ReplacementMode, ResolvedAbility, RoundingMode, ShieldKind,
+    TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -6828,7 +6829,7 @@ fn is_external_battlefield_entry_tap_modifier(def: &ReplacementDefinition) -> bo
         || def.mode != ReplacementMode::Mandatory
         || !def.valid_card.as_ref().is_some_and(|filter| {
             super::filter::filter_implies_battlefield_permanent(filter)
-                && !super::filter::filter_contains(filter, &|node| {
+                && !filter_contains(filter, &|node| {
                     !matches!(
                         node,
                         TargetFilter::Typed(_)

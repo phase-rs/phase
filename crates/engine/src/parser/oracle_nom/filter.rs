@@ -8,7 +8,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::{alphanumeric1, space1};
 use nom::combinator::{map, not, opt, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::error::OracleResult;

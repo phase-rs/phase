@@ -12,13 +12,14 @@ use crate::game::quantity::{
 use crate::game::replacement;
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AttachCardinality,
-    AttachSelection, CastingPermission, ChosenAttribute, Comparator, ContinuousModification,
-    ControllerRef, CopiableValues, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,
-    EffectError, EffectKind, FilterProp, ManaContribution, ManaProduction, PermissionGrantee,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, ResolvedAbility, SacrificeCost,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TargetRef, TokenAttackDestination,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    quantity_expr_contains_scope, AbilityCost, AbilityDefinition, AbilityKind,
+    ActivationRestriction, AttachCardinality, AttachSelection, CastingPermission, ChosenAttribute,
+    Comparator, ContinuousModification, ControllerRef, CopiableValues, DelayedTriggerCondition,
+    DelayedTriggerKind, Duration, Effect, EffectError, EffectKind, FilterProp, ManaContribution,
+    ManaProduction, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    ResolvedAbility, SacrificeCost, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    TargetRef, TokenAttackDestination, TriggerCondition, TriggerDefinition, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card::PrintedLoyalty;
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -4001,7 +4002,7 @@ pub(crate) fn resolve_token_spec(
     if scripted.is_none()
         && ability.target_reads == crate::types::ability::TargetReadOrigin::ParentAnnouncement
         && [power, toughness].iter().any(|value| matches!(value,
-            PtValue::Quantity(expr) if crate::game::quantity::quantity_expr_contains_scope(expr, crate::types::ability::ObjectScope::Target)))
+            PtValue::Quantity(expr) if quantity_expr_contains_scope(expr, crate::types::ability::ObjectScope::Target)))
         && crate::game::quantity::selected_target_object_occurrence(ability).is_none()
     {
         return None;

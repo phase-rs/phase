@@ -14907,12 +14907,18 @@ fn retained_payment_result_owners(
             ManaAbilityResume::ManaAbilityManaPayment {
                 pending_mana_ability,
             } => pending(pending_mana_ability, out),
+            // Special-action and combat-tax resumes retain locked prices and
+            // selected objects, not a resolving ability's instruction-result owner.
             ManaAbilityResume::Priority
             | ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
             | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Foretell { .. }
             | ManaAbilityResume::ManaPayment { .. }
             | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::CombatTaxPayment { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => {}
         }
@@ -14979,6 +14985,9 @@ fn retained_payment_result_owners(
             | PendingCostMoveResume::Foretell { .. }
             | PendingCostMoveResume::ActivationMillPayment { .. }
             | PendingCostMoveResume::LoyaltyActivation { .. } => {}
+            // Its unpaid cost resumes in PaymentScope::TurnFaceUp, without a
+            // resolving ability or instruction-result occurrence to retain.
+            PendingCostMoveResume::TurnFaceUpCostMove { .. } => {}
         }
     }
     if let Some(DeferredLifeCostResume::ManaRoot { resume: value, .. }) =
