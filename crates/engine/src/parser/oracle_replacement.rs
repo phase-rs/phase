@@ -6536,9 +6536,7 @@ fn parse_self_exile_from_graveyard(instruction_text: &str) -> Option<AbilityDefi
             ..
         }
     ) && instruction.sub_ability.is_none()
-        && instruction.else_ability.is_none()
-        && instruction.condition.is_none()
-        && !instruction.optional;
+        && is_mandatory_unconditional_node(&instruction);
     supported.then_some(instruction)
 }
 
@@ -11802,19 +11800,7 @@ fn as_enters_one_shot_is_admissible(execute: &AbilityDefinition) -> bool {
     // Node leg: walk `execute` and its `sub_ability` chain.
     let mut node = Some(execute);
     while let Some(def) = node {
-        if def.condition.is_some()
-            || def.optional
-            || def.optional_player.is_some()
-            || def.optional_for.is_some()
-            || def.unless_pay.is_some()
-            || def.else_ability.is_some()
-            || def.player_scope.is_some()
-            || def.repeat_for.is_some()
-            || def.repeat_until.is_some()
-            || def.modal.is_some()
-            || !def.mode_abilities.is_empty()
-            || def.unlowered_guard.is_some()
-        {
+        if !is_mandatory_unconditional_node(def) {
             return false;
         }
         node = def.sub_ability.as_deref();
@@ -11828,6 +11814,24 @@ fn as_enters_one_shot_is_admissible(execute: &AbilityDefinition) -> bool {
         }
     })
     .is_continue()
+}
+
+/// One ability node that always runs as written: no condition, optionality,
+/// payment, else branch, player scope, repetition, modes or unlowered guard.
+/// Reads this node only; callers decide how to treat its `sub_ability` chain.
+fn is_mandatory_unconditional_node(def: &AbilityDefinition) -> bool {
+    def.condition.is_none()
+        && !def.optional
+        && def.optional_player.is_none()
+        && def.optional_for.is_none()
+        && def.unless_pay.is_none()
+        && def.else_ability.is_none()
+        && def.player_scope.is_none()
+        && def.repeat_for.is_none()
+        && def.repeat_until.is_none()
+        && def.modal.is_none()
+        && def.mode_abilities.is_empty()
+        && def.unlowered_guard.is_none()
 }
 
 /// The as-enters one-shot kind allowlist. CR 115.1: a replacement never goes on
@@ -29809,6 +29813,8 @@ mod tests {
             "exile this card from your hand",
             "exile target card from your graveyard",
             "if you control a creature, exile this card from your graveyard",
+            "exile this card from your graveyard unless a player has this creature deal 3 \
+             damage to them",
         ] {
             let line = format!(
                 "When you cast a Bolas planeswalker spell, {prelude}. \
