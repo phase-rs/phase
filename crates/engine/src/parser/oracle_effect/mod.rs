@@ -46455,6 +46455,77 @@ fn parse_effect_chain_ir_body(
         {
             clause.effect = Effect::unimplemented("non_controller_reveal_choice", normalized_text);
         }
+        // CR 608.2c: the newly supported mandatory/conjugated top selection
+        // is a partition only when the next instruction names the remainder.
+        // "The chosen cards" shares a generic tracked-set operand, so it must
+        // retain its separate selecting instruction rather than become a rest.
+        if let Some(ContinuationAst::DigFromAmong {
+            quantity,
+            destination: Some(Zone::Library),
+            rest_destination: None,
+            ..
+        }) = &followup_continuation
+        {
+            let conjugated = tag::<_, _, OracleError<'_>>("puts ")
+                .parse(normalized_text.to_lowercase().as_str())
+                .is_ok();
+            if matches!(quantity, PutCount::Exactly(_)) || conjugated {
+                let next_is_rest = chunks.get(chunk_idx + 1).is_some_and(|next| {
+                    let mut next_ctx = ctx.clone();
+                    effective_prev_effect.as_ref().is_some_and(|previous| {
+                        matches!(
+                            parse_followup_continuation_ast(
+                                strip_leading_sequence_connector(&next.text).trim(),
+                                previous,
+                                &mut next_ctx,
+                            ),
+                            Some(ContinuationAst::PutRest { .. })
+                        )
+                    })
+                });
+                if !next_is_rest {
+                    followup_continuation = None;
+                }
+            }
+        }
+        // CR 109.5 + CR 608.2c: a selecting Dig can fuse only instructions
+        // performed by its own looker. A separately named player keeps a real
+        // instruction, and a looker's different library operand stays intact.
+        if matches!(
+            followup_continuation,
+            Some(ContinuationAst::DigFromAmong {
+                destination: Some(Zone::Library),
+                ..
+            }) | Some(ContinuationAst::PutRest {
+                destination: Zone::Exile,
+                ..
+            })
+        ) {
+            if let Some(previous) = non_absorbed.first() {
+                if let Effect::Dig { player, .. } = &previous.parsed.effect {
+                    let prior_actor = previous
+                        .parsed
+                        .instruction_actor
+                        .as_ref()
+                        .and_then(|actor| actor.as_controller())
+                        .cloned()
+                        .unwrap_or(ControllerRef::You);
+                    let current_actor = clause
+                        .instruction_actor
+                        .as_ref()
+                        .and_then(|actor| actor.as_controller())
+                        .cloned()
+                        .unwrap_or(ControllerRef::You);
+                    let library_actor = instruction_actor_for_subject(Some(player), Some(player))
+                        .unwrap_or(ControllerRef::You);
+                    if library_actor != prior_actor
+                        || (inherited_player_subject.is_none() && current_actor != prior_actor)
+                    {
+                        followup_continuation = None;
+                    }
+                }
+            }
+        }
         let absorb_followup = followup_continuation
             .as_ref()
             .is_some_and(|continuation| continuation_absorbs_current(continuation, &clause.effect));

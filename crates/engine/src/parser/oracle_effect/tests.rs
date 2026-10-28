@@ -101,6 +101,38 @@ fn instruction_actor_declared_library_subject_survives_conjugated_counter() {
     }
 }
 
+#[test]
+fn selecting_top_library_partition_keeps_other_subjects_and_chosen_cards_separate() {
+    for tail in [
+        "puts one of them back on top of their library, then exiles the chosen cards.",
+        "You put one of them back on top of your library, then exile the rest.",
+        "puts one of them back on top of your library, then exiles the rest.",
+    ] {
+        let definition = parse_effect_chain(
+            &format!("Target player looks at the top three cards of their library, {tail}"),
+            AbilityKind::Spell,
+        );
+        assert_attachment_chain_has_no_unimplemented(&definition);
+        assert!(
+            matches!(
+                definition.effect.as_ref(),
+                Effect::Dig {
+                    player: TargetFilter::Player,
+                    keep_count: Some(0),
+                    destination: None,
+                    ..
+                }
+            ),
+            "the independent instruction must not become a Dig partition: {tail}: {definition:?}"
+        );
+        assert!(
+            std::iter::successors(Some(&definition), |node| node.sub_ability.as_deref())
+                .any(|node| matches!(node.effect.as_ref(), Effect::PutAtLibraryPosition { .. })),
+            "retain the independent placement: {tail}"
+        );
+    }
+}
+
 /// SHAPE: grammatical actors are retained before owned-body assembly. Runtime
 /// counterparts use the ordinary cast and optional-choice pipeline.
 #[test]
@@ -88591,16 +88623,22 @@ mod controller_anaphor_antecedent_writer_tests {
             instruction.instruction_actor,
             Some(ControllerRef::TargetPlayer.into())
         );
-        let group = instruction
-            .declares_chosen_group
-            .expect("the player target is declared");
-        let placement = instruction
-            .sub_ability
-            .as_deref()
-            .expect("the declared-player continuation");
-        assert_eq!(
-            placement.instruction_actor,
-            Some(ControllerRef::DeclaredPlayer { group }.into())
+        assert!(
+            matches!(
+                instruction.effect.as_ref(),
+                Effect::Dig {
+                    keep_count: Some(1),
+                    up_to: false,
+                    destination: Some(Zone::Library),
+                    rest_destination: Some(Zone::Exile),
+                    ..
+                }
+            ),
+            "{json}"
+        );
+        assert!(
+            instruction.sub_ability.is_none(),
+            "the partition is a single Dig: {json}"
         );
     }
 

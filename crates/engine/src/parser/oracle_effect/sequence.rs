@@ -1130,21 +1130,41 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
-    let (rest, _) = (
-        alt((
-            tag::<_, _, OracleError<'_>>("you may put "),
-            tag("may put "),
-            tag("put "),
-        )),
+/// CR 608.2c + CR 401.4: keep a selected subset on top of the library
+/// already being inspected. The selecting and remaining piles stay separate.
+fn parse_put_one_dig_card_on_top(
+    lower: &str,
+    library_player: &TargetFilter,
+) -> Option<(PutCount, DigRestOrder)> {
+    let (rest, (_, may, _, up_to, count, _, _, _, own_library)) = (
+        opt(tag::<_, _, OracleError<'_>>("you ")),
+        opt(tag("may ")),
+        alt((tag("put "), tag("puts "))),
         opt(tag("up to ")),
-        alt((tag("one of those cards"), tag("one of them"))),
+        nom_primitives::parse_number,
+        alt((tag(" of those cards"), tag(" of them"))),
         opt(tag(" back")),
-        tag(" "),
-        alt((tag("on top of your library"), tag("on top"))),
+        tag(" on top"),
+        opt(preceded(
+            tag(" of "),
+            alt((
+                value(true, tag("your library")),
+                value(false, tag("their library")),
+            )),
+        )),
     )
         .parse(lower.trim())
         .ok()?;
+    // CR 109.5 + CR 608.2c: an explicit "your library" must not be
+    // silently redirected into a previously declared other player's library.
+    if own_library == Some(true)
+        && !matches!(
+            library_player,
+            TargetFilter::Controller | TargetFilter::OriginalController
+        )
+    {
+        return None;
+    }
     let (rest, order) = opt(value(
         DigRestOrder::Random,
         tag::<_, _, OracleError<'_>>(
@@ -1156,12 +1176,20 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(rest)
         .ok()?;
-    Some(order.unwrap_or(DigRestOrder::Preserve))
+    let quantity = if may.is_some() || up_to.is_some() {
+        PutCount::up(count)
+    } else {
+        PutCount::exactly(count)
+    };
+    Some((quantity, order.unwrap_or(DigRestOrder::Preserve)))
 }
 
 fn parse_exile_rest_clause(lower: &str) -> bool {
     (
-        tag::<_, _, OracleError<'_>>("exile the rest"),
+        alt((
+            tag::<_, _, OracleError<'_>>("exile the rest"),
+            tag("exiles the rest"),
+        )),
         opt(tag(".")),
         eof,
     )
@@ -8693,19 +8721,20 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // "You may put one of those cards back on top of your library" after
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
-        Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
+        Effect::Dig { player, .. } if parse_put_one_dig_card_on_top(&lower, player).is_some() => {
+            let (quantity, rest_order) = parse_put_one_dig_card_on_top(&lower, player)
+                .expect("continuation guard just matched");
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::up(1),
+                quantity,
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
                 rest_destination: matches!(
-                    parse_put_one_dig_card_on_top(&lower),
-                    Some(DigRestOrder::Random)
+                    rest_order,
+                    DigRestOrder::Random
                 )
                 .then_some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: parse_put_one_dig_card_on_top(&lower)
-                    .expect("continuation guard just matched"),
+                rest_order,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,

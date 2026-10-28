@@ -60,8 +60,23 @@ fn ashnods_cylix_declared_player_keeps_their_library_and_choice() {
     let kept = target_library[1];
     let outcome = runner.activate(cylix, 0).target_player(P1).resolve();
     let (player, cards) = match outcome.final_waiting_for() {
-        WaitingFor::ChooseFromZoneChoice { player, cards, .. }
-        | WaitingFor::EffectZoneChoice { player, cards, .. } => (*player, cards),
+        WaitingFor::DigChoice {
+            player,
+            library_owner,
+            cards,
+            keep_count,
+            up_to,
+            kept_destination,
+            rest_destination,
+            ..
+        } => {
+            assert_eq!(*library_owner, P1);
+            assert_eq!(*keep_count, 1);
+            assert!(!up_to);
+            assert_eq!(*kept_destination, Some(Zone::Library));
+            assert_eq!(*rest_destination, Some(Zone::Exile));
+            (*player, cards)
+        }
         other => panic!("the target must choose a looked-at card, got {other:?}"),
     };
     assert_eq!(player, P1);
@@ -83,6 +98,62 @@ fn ashnods_cylix_declared_player_keeps_their_library_and_choice() {
         runner.state().waiting_for,
         WaitingFor::Priority { .. }
     ));
+}
+
+/// CR 609.3 + CR 608.2c: a short library clamps a mandatory selecting dig,
+/// while the following printed "you" still addresses the activator.
+#[test]
+fn selecting_top_library_partition_clamps_count_and_keeps_independent_you() {
+    for available in [1, 3] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_artifact_from_oracle(P0, "Synthetic library partition",
+            "{T}: Target player looks at the top five cards of their library, puts two of them back on top of their library, then exiles the rest. You gain 3 life.").id();
+        let names = ["First", "Second", "Third"];
+        scenario.with_library_top(P1, &names[..available]);
+        let mut runner = scenario.build();
+        let original = runner.state().players[1].library.clone();
+        let kept: Vec<_> = original.iter().rev().take(2).copied().collect();
+        let outcome = runner.activate(source, 0).target_player(P1).resolve();
+        let WaitingFor::DigChoice {
+            player,
+            library_owner,
+            cards,
+            ..
+        } = outcome.final_waiting_for()
+        else {
+            panic!(
+                "the counted partition must reach its own choice: {:?}",
+                outcome.final_waiting_for()
+            );
+        };
+        assert_eq!((*player, *library_owner), (P1, P1));
+        assert_eq!(cards.len(), available);
+        runner
+            .act(GameAction::SelectCards {
+                cards: kept.clone(),
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().players[1]
+                .library
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            kept
+        );
+        assert!(original
+            .iter()
+            .filter(|card| !kept.contains(card))
+            .all(|card| runner.state().objects[card].zone == Zone::Exile));
+        assert_eq!(runner.life(P0), 23);
+        assert_eq!(runner.life(P1), 20);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
 }
 
 fn assert_restored_state(restored: &GameState, prepared: &GameState) {
