@@ -64,9 +64,11 @@ pub fn apply_debug_action(
                 // the `DebugCommand` exempt cause, which is FULLY inert: it skips
                 // both the replacement consult and the delivery tail (no
                 // enters-with-counter statics, no pending-ETB-counter consumption,
-                // no devour snapshot), while the unconditional primitive guards
-                // still run. DebugCommand is non-pausing by construction (always
-                // `Done`), so the result is safely discarded. The library-position
+                // no devour snapshot); the CR 306.5b / CR 310.4b characteristic
+                // counters are installed by the DebugCommand arm, and the
+                // unconditional primitive guards still run. DebugCommand is
+                // non-pausing by construction (always `Done`), so the result is
+                // safely discarded. The library-position
                 // arm folds the raw `move_to_library_position` / `_at_index`
                 // siblings in via the placement request.
                 let mut req =
@@ -1048,9 +1050,10 @@ pub fn route_debug_create_to_battlefield(
     if !run_etb {
         // Debug staging — route through the pipeline under `DebugCommand`,
         // which is FULLY inert: no replacement consult AND no delivery tail
-        // (no intrinsic or statics-derived enters-with counters, no
-        // pending-ETB-counter consumption, no devour snapshot), matching the
-        // prior raw placement exactly. ETB triggers / SBA are NOT run here;
+        // (no replacement-derived or statics-derived enters-with counters, no
+        // pending-ETB-counter consumption, no devour snapshot); the CR 306.5b
+        // / CR 310.4b characteristic counters are installed by the
+        // DebugCommand arm. ETB triggers / SBA are NOT run here;
         // that is `run_etb`'s job below. DebugCommand is non-pausing by
         // construction (always `Done`), so the result is safely discarded.
         let req = crate::game::zone_pipeline::ZoneMoveRequest::debug(object_id, Zone::Battlefield);
@@ -1073,8 +1076,9 @@ pub fn route_debug_create_to_battlefield(
 
 /// CR 614.12 + CR 603.6a: Move an existing object onto the battlefield through
 /// the real entry pipeline — the replacement consult (enters tapped, enters
-/// with counters, "as enters" choices), delivery, ETB triggers, then SBAs. A
-/// replacement choice parks on `state.waiting_for`. Shared by debug card
+/// with counters, including the CR 306.5b / CR 310.4b intrinsic
+/// loyalty/defense counters, "as enters" choices), delivery, ETB triggers,
+/// then SBAs. A replacement choice parks on `state.waiting_for`. Shared by debug card
 /// creation and `MoveToZone { simulate: true }`; tokens that already left the
 /// battlefield stay put via the CR 111.8 delivery guard.
 fn enter_battlefield_with_etb(
@@ -1089,7 +1093,7 @@ fn enter_battlefield_with_etb(
         .map(|o| o.zone)
         .unwrap_or(Zone::Hand);
 
-    let proposed = ProposedEvent::ZoneChange {
+    let mut proposed = ProposedEvent::ZoneChange {
         object_id,
         from,
         to: Zone::Battlefield,
@@ -1109,6 +1113,10 @@ fn enter_battlefield_with_etb(
         performed_by: None,
         applied: HashSet::new(),
     };
+    // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with
+    // counters the effect-driven pipeline seeds, so the replacement consult
+    // (Doubling Season, CR 614.1a) and the delivery tail see them.
+    crate::game::zone_pipeline::seed_intrinsic_entry_counters(state, &mut proposed);
 
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
@@ -1159,6 +1167,18 @@ fn route_debug_token_to_battlefield(
     zones::remove_from_zone(state, object_id, staged.zone, staged.owner);
 
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
+    // CR 306.5b + CR 614.1c: the sandbox token's body is the card's copiable
+    // printed characteristics; its printed loyalty seeds the intrinsic loyalty
+    // counters onto the TokenEntry proposal, which the liminal commit applies
+    // through the replacement pipeline (CR 614.1a). The production copy-token
+    // path seeds the same counters itself and uses this liminal seam only when
+    // it has none. CopiableValues carries no defense.
+    let intrinsic_counters = super::printed_cards::intrinsic_face_entry_counters(
+        values.printed_loyalty,
+        values.loyalty,
+        None,
+        None,
+    );
     let copy = CopyTokenSpec {
         values: Box::new(values.clone()),
         display: super::game_object::DisplayIdentity {
@@ -1219,7 +1239,7 @@ fn route_debug_token_to_battlefield(
     let proposed = ProposedEvent::TokenEntry {
         entry_ref: object_id,
         enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enter_with_counters: Vec::new(),
+        enter_with_counters: intrinsic_counters,
         enter_with_choices: None,
         applied: HashSet::new(),
     };
