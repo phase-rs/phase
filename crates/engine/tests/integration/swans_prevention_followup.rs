@@ -54,10 +54,10 @@ fn ashnods_cylix_declared_player_keeps_their_library_and_choice() {
         &["Activator first", "Activator second", "Activator third"],
     );
     scenario.with_library_top(P1, &["Target first", "Target second", "Target third"]);
-    let own_library = scenario.state.players[0].library.clone();
-    let target_library = scenario.state.players[1].library.clone();
-    let kept = target_library[1];
     let mut runner = scenario.build();
+    let own_library = runner.state().players[0].library.clone();
+    let target_library = runner.state().players[1].library.clone();
+    let kept = target_library[1];
     let outcome = runner.activate(cylix, 0).target_player(P1).resolve();
     let (player, cards) = match outcome.final_waiting_for() {
         WaitingFor::ChooseFromZoneChoice { player, cards, .. }
