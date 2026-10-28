@@ -4450,8 +4450,60 @@ impl LogicalZoneChangeGroup {
                 return Err(format!("logical zone-change group {:?} has incoherent primary battlefield identity/origin", self.logical_group_id));
             }
             let records = self.instruction_records_for_binding(delivery.binding);
-            if delivery.completion == Some(ZoneMoveCompletion::Moved) && records.len() != 1 {
-                return Err(format!("logical zone-change group {:?} primary Moved lacks exactly one original record", self.logical_group_id));
+            match delivery.completion {
+                Some(ZoneMoveCompletion::Moved) if records.len() != 1 => {
+                    return Err(format!("logical zone-change group {:?} primary Moved lacks exactly one original record", self.logical_group_id));
+                }
+                Some(ZoneMoveCompletion::Remained | ZoneMoveCompletion::Prevented)
+                    if !records.is_empty() =>
+                {
+                    return Err(format!("logical zone-change group {:?} primary no-move completion owns an original movement record", self.logical_group_id));
+                }
+                Some(
+                    ZoneMoveCompletion::Moved
+                    | ZoneMoveCompletion::Remained
+                    | ZoneMoveCompletion::Prevented,
+                )
+                | None => {}
+            }
+            if let Some((index, _)) = self
+                .prospective_battlefield_members
+                .iter()
+                .enumerate()
+                .find(|(_, member)| member.identity == delivery.binding.reference)
+            {
+                // CR 608.2c + CR 614.6: completed primary delivery and its
+                // observer reservation describe the same action. Pending primary
+                // consumption may already have a physical hook's Moved witness;
+                // independent retirement remains a separate child's authority.
+                let coherent = matches!((delivery.completion, self.terminal_outcomes.get(index)),
+                    (None, Some(_)) |
+                    (
+                        Some(ZoneMoveCompletion::Moved),
+                        Some(LogicalZoneChangeTerminalOutcome::Moved { .. }),
+                    ) |
+                    (
+                        Some(ZoneMoveCompletion::Remained | ZoneMoveCompletion::Prevented),
+                        Some(
+                            LogicalZoneChangeTerminalOutcome::Pending
+                            | LogicalZoneChangeTerminalOutcome::RetiredByIndependentDeparture {
+                                ..
+                            }
+                            | LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft,
+                        ),
+                    ) |
+                    (
+                        Some(ZoneMoveCompletion::Remained),
+                        Some(LogicalZoneChangeTerminalOutcome::Remained),
+                    )
+                    | (
+                        Some(ZoneMoveCompletion::Prevented),
+                        Some(LogicalZoneChangeTerminalOutcome::Prevented),
+                    )
+                );
+                if !coherent {
+                    return Err(format!("logical zone-change group {:?} primary completion disagrees with its battlefield terminal", self.logical_group_id));
+                }
             }
             if complete && delivery.completion.is_none() {
                 return Err(format!(
@@ -16658,6 +16710,160 @@ pub(crate) fn validate_trigger_firing_coherence(state: &GameState) -> Result<(),
         return Err(
             "delayed-trigger instance allocator is not above its install roots".to_string(),
         );
+    }
+    Ok(())
+}
+
+/// Recover the old unit grant only from its own retained Adventure resolution.
+/// The old successful-resolution writer alone installed AdventureCreature, and
+/// the zone authority removed it on every exile exit. Its presence is the
+/// earned-success witness; an Adventure program and an exile move without that
+/// grant never create a permission here (a countered Adventure can have both).
+fn normalize_adventure_permissions(state: &mut GameState) -> Result<(), String> {
+    use crate::types::ability::CastingPermission;
+
+    let mut recovered = Vec::new();
+    for object in state.objects.values() {
+        for (permission_index, permission) in object.casting_permissions.iter().enumerate() {
+            let CastingPermission::AdventureCreature {
+                granted_to,
+                exile_incarnation,
+            } = permission
+            else {
+                continue;
+            };
+            let invalid =
+                |reason: &str| format!("Adventure permission for object {} {reason}", object.id.0);
+            // CR 715.3d + CR 400.7: the permission ends with this exact exile
+            // stay, including an away-and-back using the same storage id.
+            if object.zone != Zone::Exile
+                || exile_incarnation.is_some_and(|birth| {
+                    birth != object.incarnation
+                        || birth == crate::types::identifiers::LEGACY_INCARNATION
+                })
+                || granted_to
+                    .is_some_and(|player| !state.players.iter().any(|seat| seat.id == player))
+            {
+                return Err(invalid("has a contradictory grantee or exile lifetime"));
+            }
+
+            // This query is bounded to this grant's object and uninterrupted
+            // Stack stay. A removal entry has no independent object pin, so an
+            // intervening transition invalidates it. Never select a similar
+            // program from another cast, another object, or current card text.
+            let mut removed = None;
+            let mut removal_count = 0;
+            let mut origin = None;
+            for entry in state.resolved_rules_journal.entries() {
+                match entry.command.as_ref() {
+                    Some(ResolvedRulesCommand::StackRemoval(command))
+                        if command.entry.id == object.id =>
+                    {
+                        removal_count += 1;
+                        removed = Some(command.entry.as_ref());
+                    }
+                    Some(ResolvedRulesCommand::ZoneChange(command))
+                        if command.object.object_id == object.id =>
+                    {
+                        if command.from == Zone::Stack
+                            && command.to == Zone::Exile
+                            && command.resulting_incarnation == object.incarnation
+                        {
+                            if origin.is_some() {
+                                return Err(invalid("has ambiguous successful Adventure origin"));
+                            }
+                            if state.departed_stack_spells.get(&object.id).is_some_and(
+                                |departures| departures.contains_key(&command.object.incarnation),
+                            ) {
+                                return Err(invalid(
+                                    "contradicts an exact nonresolving stack departure",
+                                ));
+                            }
+                            let context = command.zone_change_record.trigger_source_context();
+                            let original = ObjectIdentityBinding::new(command.object, Zone::Stack);
+                            let program = removed.filter(|owner| {
+                                owner.source_id == object.id
+                                    && matches!(&owner.kind, StackEntryKind::Spell { card_id, casting_variant: CastingVariant::Adventure, ability, .. }
+                                        if context.is_none_or(|context| context.card_id == *card_id)
+                                            && ability.as_deref().is_none_or(|ability| ability.source_id == object.id
+                                                && ability.source_incarnation.is_none_or(|birth| birth == command.object.incarnation)))
+                            });
+                            // CR 715.3d: "that player" is the controller at
+                            // resolution, captured by the departure. The stack
+                            // entry's default controller can predate a control
+                            // change and is deliberately not a substitute.
+                            let controller = context
+                                .filter(|context| {
+                                    context.identity == original
+                                        && context.lki.owner == command.zone_change_record.owner
+                                        && context.lki.controller
+                                            == command.zone_change_record.controller
+                                        && command.zone_change_record.object_id == object.id
+                                        && command.zone_change_record.from_zone == Some(Zone::Stack)
+                                        && command.zone_change_record.to_zone == Zone::Exile
+                                        && command.object.incarnation.checked_add(1)
+                                            == Some(command.resulting_incarnation)
+                                        && command.object.incarnation
+                                            != crate::types::identifiers::LEGACY_INCARNATION
+                                })
+                                .map(|context| context.lki.controller);
+                            if removal_count > 1 {
+                                return Err(invalid(
+                                    "has ambiguous Adventure stack-owner authority",
+                                ));
+                            }
+                            if (removed.is_some() && program.is_none())
+                                || (context.is_some() && controller.is_none())
+                            {
+                                return Err(invalid(
+                                    "has contradictory retained Adventure origin authority",
+                                ));
+                            }
+                            origin = Some(if removal_count == 1 && program.is_some() {
+                                controller
+                            } else {
+                                None
+                            });
+                        }
+                        removed = None;
+                        removal_count = 0;
+                    }
+                    _ => {}
+                }
+            }
+            let missing = granted_to.is_none() || exile_incarnation.is_none();
+            match origin {
+                Some(Some(controller)) => {
+                    if granted_to.is_some_and(|player| player != controller) {
+                        return Err(invalid("contradicts its resolving-controller witness"));
+                    }
+                    if missing {
+                        recovered.push((
+                            object.id,
+                            permission_index,
+                            controller,
+                            object.incarnation,
+                        ));
+                    }
+                }
+                Some(None) | None if missing => {
+                    return Err(invalid(
+                        "lacks unique successful Adventure origin/current exile-stay authority",
+                    ));
+                }
+                Some(None) | None => {}
+            }
+        }
+    }
+    for (object, permission_index, controller, birth) in recovered {
+        state
+            .objects
+            .get_mut(&object)
+            .expect("validated Adventure object remains present")
+            .casting_permissions[permission_index] = CastingPermission::AdventureCreature {
+            granted_to: Some(controller),
+            exile_incarnation: Some(birth),
+        };
     }
     Ok(())
 }
@@ -31361,7 +31567,9 @@ impl GameStateDecode {
     pub(crate) fn materialize_prepared(value: serde_json::Value) -> Result<GameState, String> {
         let raw = serde_json::from_value::<RawGameStateFields>(value)
             .map_err(|error| error.to_string())?;
-        Ok(GameState::from(raw))
+        let mut state = GameState::from(raw);
+        normalize_adventure_permissions(&mut state)?;
+        Ok(state)
     }
 }
 
@@ -43801,6 +44009,203 @@ mod tests {
     }
 
     #[test]
+    fn legacy_adventure_grant_recovers_only_its_exact_journal_stay_and_departure_controller() {
+        use crate::types::ability::CastingPermission;
+        use crate::types::resolved_commands::ResolvedStackRemovalCommand;
+        let mut state = GameState::new_two_player(72);
+        let spell = create_object(
+            &mut state,
+            CardId(72),
+            PlayerId(1),
+            "Synthetic Adventure grant".into(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&spell).unwrap().controller = PlayerId(0);
+        let original = ObjectIncarnationRef::from_object(&state.objects[&spell]);
+        // The retained program's default controller may predate a spell-control
+        // change; the physical departure is the resolving-player authority.
+        let owner = StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(72),
+                casting_variant: CastingVariant::Adventure,
+                ability: Some(Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    spell,
+                    PlayerId(1),
+                ))),
+                actual_mana_spent: 2,
+            },
+        };
+        let cause = state.current_or_begin_rules_execution_node();
+        state
+            .resolved_rules_journal
+            .record_stack_removal(ResolvedStackRemovalCommand {
+                entry: Box::new(owner),
+                index: 0,
+                resulting_depth: 0,
+                cause,
+            })
+            .unwrap();
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, spell, Zone::Exile, &mut events);
+        let birth = state.objects[&spell].incarnation;
+        assert_eq!(original.incarnation.checked_add(1), Some(birth));
+        assert_eq!(events.len(), 1);
+        for (granted_to, exile_incarnation) in
+            [(None, None), (Some(PlayerId(0)), None), (None, Some(birth))]
+        {
+            let mut legacy = state.clone();
+            legacy
+                .objects
+                .get_mut(&spell)
+                .unwrap()
+                .casting_permissions
+                .push(CastingPermission::AdventureCreature {
+                    granted_to,
+                    exile_incarnation,
+                });
+            let raw = serde_json::to_value(&legacy).unwrap();
+            let loaded: GameState = serde_json::from_value(raw.clone()).unwrap();
+            let current: ResolutionStateWire = serde_json::from_value(
+                serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone())).unwrap(),
+            )
+            .unwrap();
+            let persisted: PersistedGameState = serde_json::from_value(raw).unwrap();
+            for loaded in [
+                loaded,
+                current.into_game_state(),
+                persisted.into_game_state().unwrap(),
+            ] {
+                assert!(loaded.objects[&spell].casting_permissions.contains(
+                    &CastingPermission::resolved_adventure(
+                        PlayerId(0),
+                        ObjectIncarnationRef::of(spell, birth)
+                    )
+                ));
+                assert_eq!(loaded.resolved_rules_journal, legacy.resolved_rules_journal);
+            }
+        }
+        let mut legacy = state.clone();
+        legacy
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::AdventureCreature {
+                granted_to: None,
+                exile_incarnation: None,
+            });
+        let mut no_program = serde_json::to_value(&legacy).unwrap();
+        let mut removed_optional_program = false;
+        for entry in no_program["resolved_rules_journal"]["entries"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if let Some(program) =
+                entry.pointer_mut("/command/StackRemoval/entry/kind/data/ability")
+            {
+                *program = serde_json::Value::Null;
+                removed_optional_program = true;
+            }
+        }
+        assert!(removed_optional_program);
+        let complete: GameState = serde_json::from_value(no_program)
+            .expect("typed Adventure owner does not require an optional spell program");
+        assert!(complete.objects[&spell].casting_permissions.contains(
+            &CastingPermission::resolved_adventure(
+                PlayerId(0),
+                ObjectIncarnationRef::of(spell, birth)
+            )
+        ));
+        let mut pruned = serde_json::to_value(&complete).unwrap();
+        for entry in pruned["resolved_rules_journal"]["entries"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if entry.pointer("/command/StackRemoval").is_some() {
+                entry["command"] = serde_json::Value::Null;
+            }
+        }
+        let mut pruned: GameState = serde_json::from_value(pruned).expect(
+            "complete current permission is independent of missing historical owner evidence",
+        );
+        pruned.resolved_rules_journal = Default::default();
+        let restored: GameState =
+            serde_json::from_value(serde_json::to_value(&pruned).unwrap()).unwrap();
+        assert_eq!(
+            restored.objects[&spell].casting_permissions,
+            complete.objects[&spell].casting_permissions
+        );
+        for corruption in 0..4 {
+            let mut bad = legacy.clone();
+            match corruption {
+                0 => bad.resolved_rules_journal = Default::default(),
+                1 => {
+                    bad.objects.get_mut(&spell).unwrap().casting_permissions[0] =
+                        CastingPermission::AdventureCreature {
+                            granted_to: Some(PlayerId(1)),
+                            exile_incarnation: None,
+                        }
+                }
+                2 => {
+                    bad.objects.get_mut(&spell).unwrap().casting_permissions[0] =
+                        CastingPermission::AdventureCreature {
+                            granted_to: None,
+                            exile_incarnation: Some(birth + 1),
+                        }
+                }
+                3 => {
+                    crate::game::zones::move_to_zone(&mut bad, spell, Zone::Hand, &mut Vec::new());
+                    crate::game::zones::move_to_zone(&mut bad, spell, Zone::Exile, &mut Vec::new());
+                    assert!(
+                        bad.objects[&spell].casting_permissions.is_empty(),
+                        "real exile exit expires the grant"
+                    );
+                    bad.objects
+                        .get_mut(&spell)
+                        .unwrap()
+                        .casting_permissions
+                        .push(CastingPermission::AdventureCreature {
+                            granted_to: None,
+                            exile_incarnation: None,
+                        });
+                }
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&bad).unwrap();
+            assert!(normalize_adventure_permissions(&mut bad)
+                .unwrap_err()
+                .starts_with("Adventure permission for object"));
+            assert_eq!(serde_json::to_value(&bad).unwrap(), before);
+            assert!(serde_json::from_value::<GameState>(before).is_err());
+        }
+        // Completing an earlier normalization cannot partially mutate another
+        // missing grant before a contradictory current payload is refused.
+        legacy
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .casting_permissions
+            .push(CastingPermission::AdventureCreature {
+                granted_to: Some(PlayerId(0)),
+                exile_incarnation: Some(birth + 1),
+            });
+        let before = serde_json::to_value(&legacy).unwrap();
+        assert!(normalize_adventure_permissions(&mut legacy).is_err());
+        assert_eq!(serde_json::to_value(legacy).unwrap(), before);
+        let no_grant: GameState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert!(
+            no_grant.objects[&spell].casting_permissions.is_empty(),
+            "a program and movement never mint an absent earned grant"
+        );
+    }
+
+    #[test]
     fn adventure_final_part_capture_requires_the_exact_proposal_and_incarnation() {
         let mut state = GameState::new_two_player(73);
         let spell = create_object(
@@ -55007,6 +55412,258 @@ mod tests {
             2,
             "primary membership also captures the hand member"
         );
+    }
+
+    #[test]
+    fn logical_instruction_completed_no_move_requires_zero_own_records_and_coherent_terminal() {
+        let mut state = GameState::new_two_player(86);
+        let member = create_object(
+            &mut state,
+            CardId(86),
+            PlayerId(0),
+            "Primary receipt".into(),
+            Zone::Battlefield,
+        );
+        let mut group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[member]);
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, member, Zone::Hand, &mut events);
+        group.append_delivery_events(&events).unwrap();
+        assert_eq!(
+            group
+                .instruction_records_for_binding(group.instruction_binding(member).unwrap())
+                .len(),
+            1
+        );
+        assert!(matches!(
+            group.terminal_outcomes[0],
+            LogicalZoneChangeTerminalOutcome::Moved { .. }
+        ));
+        assert!(group.instruction_deliveries.as_ref().unwrap()[0]
+            .completion
+            .is_none());
+        group
+            .validate_serialized_authority()
+            .expect("the physical hook may precede primary-owner consumption");
+        group
+            .record_delivery_completion(member, ZoneMoveCompletion::Moved)
+            .unwrap();
+        group.validate_serialized_authority().unwrap();
+        for completion in [ZoneMoveCompletion::Remained, ZoneMoveCompletion::Prevented] {
+            let mut bad = group.clone();
+            bad.instruction_deliveries.as_mut().unwrap()[0].completion = Some(completion);
+            assert!(bad
+                .validate_serialized_authority()
+                .unwrap_err()
+                .contains("primary no-move"));
+            assert!(serde_json::from_value::<LogicalZoneChangeGroup>(
+                serde_json::to_value(&bad).unwrap()
+            )
+            .is_err());
+            bad.all_origin_occurrences.clear();
+            assert!(
+                bad.validate_instruction_deliveries(false)
+                    .unwrap_err()
+                    .contains("battlefield terminal"),
+                "removing the record alone cannot repair the conflicting terminal"
+            );
+        }
+        for completion in [ZoneMoveCompletion::Remained, ZoneMoveCompletion::Prevented] {
+            let mut remained_state = GameState::new_two_player(87);
+            let member = create_object(
+                &mut remained_state,
+                CardId(87),
+                PlayerId(0),
+                "No move".into(),
+                Zone::Battlefield,
+            );
+            let mut no_move = crate::game::triggers::allocate_logical_zone_change_group(
+                &mut remained_state,
+                &[member],
+            );
+            no_move
+                .record_delivery_completion(member, completion)
+                .unwrap();
+            no_move
+                .validate_serialized_authority()
+                .expect("completed no-move may await observer finalization");
+            no_move.finalize_instruction_observer_outcomes().unwrap();
+            no_move.validate_serialized_authority().unwrap();
+            assert!(no_move
+                .instruction_records_for_binding(no_move.instruction_binding(member).unwrap())
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn completed_prefix_no_move_corruption_refuses_every_ingress_and_public_response() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::actions::GameAction;
+        use crate::types::resolution::ResolutionFrame;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let first = scenario.add_creature(P0, "Delivered prefix", 2, 2).id();
+        let last = scenario.add_creature(P0, "Commander tail", 3, 3).id();
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::BounceAll {
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::SpecificObject { id: first },
+                        TargetFilter::SpecificObject { id: last },
+                    ],
+                },
+                destination: Some(Zone::Hand),
+                count: None,
+            },
+        );
+        definition.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+        )));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Synthetic prefix delivery", false)
+            .with_ability_definition(definition)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(1))
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![crate::types::mana::ManaUnit::new(
+                crate::types::mana::ManaType::Colorless,
+                ObjectId(0),
+                false,
+                vec![],
+            )],
+        );
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&last)
+            .unwrap()
+            .is_commander = true;
+        runner.cast(spell).resolve();
+        let state = runner.state().clone();
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        else {
+            panic!("actual commander delivery must pause")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[1].description, "Put into hand");
+        assert_eq!(state.objects[&first].zone, Zone::Hand);
+        assert_eq!(state.objects[&last].zone, Zone::Battlefield);
+        assert_eq!(state.players[0].life, 20);
+        let group = state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::BatchDelivery(batch) => Some(&batch.logical_zone_change_group),
+                _ => None,
+            })
+            .expect("real batch owner is retained");
+        let index = group
+            .instruction_deliveries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|delivery| delivery.binding.reference.object_id == first)
+            .unwrap();
+        let binding = group.instruction_deliveries.as_ref().unwrap()[index].binding;
+        assert_eq!(
+            group.instruction_deliveries.as_ref().unwrap()[index].completion,
+            Some(ZoneMoveCompletion::Moved)
+        );
+        assert_eq!(group.instruction_records_for_binding(binding).len(), 1);
+        assert!(group
+            .terminal_outcomes
+            .iter()
+            .any(|terminal| matches!(terminal, LogicalZoneChangeTerminalOutcome::Moved { .. })));
+        validate_retained_zone_result_owners(&state).unwrap();
+        let raw: GameState = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        let current: ResolutionStateWire = serde_json::from_value(
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+        )
+        .unwrap();
+        let persisted: PersistedGameState = serde_json::from_value(
+            serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap(),
+        )
+        .unwrap();
+        for intact in [
+            raw,
+            current.into_game_state(),
+            persisted.into_game_state().unwrap(),
+        ] {
+            let mut resumed = GameRunner::from_state(intact);
+            resumed
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap();
+            resumed.advance_until_stack_empty();
+            assert_eq!(resumed.state().objects[&first].zone, Zone::Hand);
+            assert_eq!(resumed.state().objects[&last].zone, Zone::Hand);
+            assert_eq!(resumed.state().players[0].life, 27);
+            assert!(resumed.state().resolution_stack.is_empty());
+            assert!(resumed.state().stack.is_empty());
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+        for completion in [ZoneMoveCompletion::Remained, ZoneMoveCompletion::Prevented] {
+            let mut bad = state.clone();
+            let batch = bad
+                .resolution_stack
+                .active_batch_delivery_or_post_replacement_child_mut()
+                .expect("exact paused batch/child relation");
+            batch
+                .logical_zone_change_group
+                .instruction_deliveries
+                .as_mut()
+                .unwrap()[index]
+                .completion = Some(completion);
+            assert!(validate_retained_zone_result_owners(&bad)
+                .unwrap_err()
+                .contains("primary no-move"));
+            let raw = serde_json::to_value(&bad).unwrap();
+            let frozen = raw.clone();
+            assert!(serde_json::from_value::<GameState>(raw.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("primary no-move"));
+            assert!(serde_json::from_value::<ResolutionStateWire>(
+                serde_json::to_value(ResolutionStateWire::from_game_state(bad.clone())).unwrap()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("primary no-move"));
+            assert!(serde_json::from_value::<PersistedGameState>(raw)
+                .unwrap_err()
+                .to_string()
+                .contains("primary no-move"));
+            assert!(serde_json::from_value::<PersistedGameState>(
+                serde_json::to_value(PersistedGameState::capture(bad.clone())).unwrap()
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("primary no-move"));
+            let error = crate::game::engine::apply(
+                &mut bad,
+                P0,
+                GameAction::ChooseReplacement { index: 1 },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("primary no-move"));
+            assert_eq!(
+                serde_json::to_value(&bad).unwrap(),
+                frozen,
+                "public response refuses before any mutation"
+            );
+        }
     }
 
     #[test]

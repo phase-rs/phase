@@ -2881,6 +2881,32 @@ fn whole_stoke_payment_and_cancel_negatives_have_a_paid_positive_twin() {
             assert!(
                 outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty()
             );
+            // CR 715.3d: countering the paid Adventure and subsequently
+            // exiling its card earns no play permission. Retaining its actual
+            // stack program and later exile history must never mint a grant.
+            let mut counter_exiled = outcome.state().clone();
+            engine::game::zones::move_to_zone(
+                &mut counter_exiled,
+                hearth,
+                Zone::Exile,
+                &mut Vec::new(),
+            );
+            assert_eq!(counter_exiled.objects[&hearth].zone, Zone::Exile);
+            for (route, payload) in adventure_current_save_payloads(&counter_exiled)
+                .into_iter()
+                .enumerate()
+            {
+                let loaded = restore_adventure_current_save(route, payload).unwrap();
+                assert!(loaded.objects[&hearth].casting_permissions.is_empty());
+                for player in [P0, P1] {
+                    assert!(
+                        !engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                            &loaded.objects[&hearth],
+                            player
+                        )
+                    );
+                }
+            }
             runner
                 .cast(hearth)
                 .adventure_face(false)
@@ -3900,13 +3926,87 @@ fn stoke_genius_face() -> BackFaceData {
 const ADVENTURE_COMMANDEER: &str = "You may exile two blue cards from your hand rather than pay this spell's mana cost.\nGain control of target noncreature spell. You may choose new targets for it. (If that spell is an artifact, enchantment, or planeswalker, the permanent enters under your control.)";
 const ADVENTURE_STOLEN_GOODS: &str = "Target opponent exiles cards from the top of their library until they exile a nonland card. Until end of turn, you may cast that card without paying its mana cost.";
 
+fn adventure_current_save_payloads(state: &GameState) -> [Value; 3] {
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::resolution::ResolutionStateWire;
+    [
+        serde_json::to_value(state).unwrap(),
+        serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+        serde_json::to_value(PersistedGameState::capture(state.clone())).unwrap(),
+    ]
+}
+
+fn restore_adventure_current_save(route: usize, payload: Value) -> Result<GameState, String> {
+    use engine::types::game_state::PersistedGameState;
+    use engine::types::resolution::ResolutionStateWire;
+    match route {
+        0 => serde_json::from_value(payload).map_err(|error| error.to_string()),
+        1 => serde_json::from_value::<ResolutionStateWire>(payload)
+            .map(ResolutionStateWire::into_game_state)
+            .map_err(|error| error.to_string()),
+        2 => serde_json::from_value::<PersistedGameState>(payload)
+            .map_err(|error| error.to_string())?
+            .into_game_state()
+            .map_err(|error| error.to_string()),
+        _ => unreachable!("the three existing full-save routes"),
+    }
+}
+
 fn assert_public_adventure_grant_current_and_legacy_saves(
     state: &GameState,
     spell: ObjectId,
     grantee: engine::types::player::PlayerId,
+    normal_payment: u32,
 ) {
     use engine::types::ability::CastingPermission;
     use engine::types::game_state::PersistedGameState;
+    use engine::types::resolved_commands::ResolvedRulesCommand;
+    let departures: Vec<_> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .filter_map(|entry| match &entry.command {
+            Some(ResolvedRulesCommand::ZoneChange(command))
+                if command.object.object_id == spell
+                    && command.from == Zone::Stack
+                    && command.to == Zone::Exile
+                    && command.resulting_incarnation == state.objects[&spell].incarnation =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        departures.len(),
+        1,
+        "the real successful Adventure exit is retained"
+    );
+    let departure = departures[0];
+    assert!(
+        !state
+            .departed_stack_spells
+            .get(&spell)
+            .is_some_and(|departures| departures.contains_key(&departure.object.incarnation)),
+        "successful Adventure resolution is not a nonresolving Stack removal"
+    );
+    let context = departure
+        .zone_change_record
+        .trigger_source_context
+        .as_ref()
+        .unwrap();
+    assert_eq!(context.identity.reference, departure.object);
+    assert_eq!(context.identity.expected_zone, Zone::Stack);
+    assert_eq!(context.lki.controller, grantee);
+    assert!(state.resolved_rules_journal.entries().iter().any(|entry| matches!(
+        &entry.command,
+        Some(ResolvedRulesCommand::StackRemoval(removal))
+            if removal.entry.id == spell && removal.entry.source_id == spell
+                && matches!(&removal.entry.kind, StackEntryKind::Spell {
+                    casting_variant: engine::types::game_state::CastingVariant::Adventure,
+                    ability: Some(ability), ..
+                } if ability.source_id == spell && ability.source_incarnation.is_none_or(|incarnation| incarnation == departure.object.incarnation))
+    )), "the exact resolving Adventure program, rather than owner resemblance, survives");
     let expected = CastingPermission::resolved_adventure(
         grantee,
         engine::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&spell]),
@@ -3946,46 +4046,456 @@ fn assert_public_adventure_grant_current_and_legacy_saves(
             )
         );
     }
+    // CR 715.3d + CR 400.7j: these full saves retain the real successful
+    // Adventure's original program, departure and unchanged exile stay. BASE
+    // stack::finish_spell_stack_exit wrote the unit {type: AdventureCreature};
+    // zones removed it on every exile exit. Only the permission payload below
+    // is changed to that actual old writer's shape; none of its proof is made up.
     for missing in [
         vec!["granted_to", "exile_incarnation"],
         vec!["granted_to"],
         vec!["exile_incarnation"],
     ] {
-        let mut legacy = raw.clone();
-        let object = &mut legacy["objects"][spell.0.to_string()];
-        let permission = object["casting_permissions"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|p| p["type"] == "AdventureCreature")
-            .unwrap()
-            .as_object_mut()
-            .unwrap();
-        for field in missing {
-            permission.remove(field);
-        }
-        let loaded: GameState = serde_json::from_value(legacy).unwrap();
-        for player in [P0, P1] {
+        for (route, mut legacy) in adventure_current_save_payloads(state)
+            .into_iter()
+            .enumerate()
+        {
+            let saved_state = if route == 2 {
+                &mut legacy["state"]
+            } else {
+                &mut legacy
+            };
+            let object = &mut saved_state["objects"][spell.0.to_string()];
+            let permission = object["casting_permissions"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|p| p["type"] == "AdventureCreature")
+                .unwrap()
+                .as_object_mut()
+                .unwrap();
+            for field in &missing {
+                permission.remove(*field);
+            }
+            if missing.len() == 2 {
+                assert_eq!(
+                    Value::Object(permission.clone()),
+                    serde_json::json!({"type": "AdventureCreature"})
+                );
+            }
+            let loaded = restore_adventure_current_save(route, legacy).unwrap();
+            assert!(loaded.objects[&spell]
+                .casting_permissions
+                .contains(&expected));
+            assert!(
+                engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                    &loaded.objects[&spell],
+                    grantee
+                )
+            );
+            let other = if grantee == P0 { P1 } else { P0 };
             assert!(
                 !engine::game::casting::has_potentially_authorizing_object_cast_permission(
                     &loaded.objects[&spell],
-                    player
+                    other
                 )
             );
+            let mut independent = loaded.clone();
+            independent
+                .objects
+                .get_mut(&spell)
+                .unwrap()
+                .casting_permissions
+                .retain(|permission| {
+                    !matches!(permission, CastingPermission::AdventureCreature { .. })
+                });
+            assert!(
+                !engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                    &independent.objects[&spell],
+                    grantee
+                )
+            );
+            independent
+                .objects
+                .get_mut(&spell)
+                .unwrap()
+                .casting_permissions
+                .push(alternative_permission(grantee, 0, 0));
+            assert!(
+                engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                    &independent.objects[&spell],
+                    grantee
+                )
+            );
+            let owner = loaded.objects[&spell].owner;
+            let mut resumed = GameRunner::from_state(loaded);
+            if resumed.state().active_player != grantee {
+                resumed.advance_to_end_step();
+                resumed.advance_to_phase(Phase::PreCombatMain);
+            }
+            assert_eq!(resumed.state().active_player, grantee);
+            assert!(
+                matches!(resumed.state().waiting_for, WaitingFor::Priority { player } if player == grantee)
+            );
+            assert_eq!(
+                resumed.state().players[grantee.0 as usize]
+                    .mana_pool
+                    .total(),
+                0
+            );
+            for _ in 0..normal_payment {
+                resumed.state_mut().players[grantee.0 as usize]
+                    .mana_pool
+                    .add(ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]));
+            }
+            assert!(engine::game::casting::can_cast_object_now(
+                resumed.state(),
+                grantee,
+                spell
+            ));
+            assert!(!engine::game::casting::can_cast_adventure_face_now(
+                resumed.state(),
+                grantee,
+                spell,
+                false
+            ));
+            resumed
+                .act(GameAction::CastSpell {
+                    object_id: spell,
+                    card_id: resumed.state().objects[&spell].card_id,
+                    targets: vec![],
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(resumed.state().objects[&spell].zone, Zone::Stack);
+            assert_eq!(resumed.state().objects[&spell].name, "Hearth Elemental");
+            assert!(matches!(resumed.state().stack.back().unwrap().kind,
+            StackEntryKind::Spell { actual_mana_spent, casting_variant: engine::types::game_state::CastingVariant::Normal, .. }
+                if actual_mana_spent == normal_payment));
+            assert_eq!(
+                resumed.state().players[grantee.0 as usize]
+                    .mana_pool
+                    .total(),
+                0
+            );
+            resumed.resolve_top();
+            let creature = &resumed.state().objects[&spell];
+            assert_eq!(creature.zone, Zone::Battlefield);
+            assert_eq!((creature.owner, creature.controller), (owner, grantee));
+            assert_eq!((creature.power, creature.toughness), (Some(4), Some(5)));
+            assert!(creature.casting_permissions.is_empty());
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(
+                resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+            );
         }
+    }
+}
+
+#[test]
+fn resolving_adventure_countered_directly_to_exile_cannot_recover_legacy_grant() {
+    use engine::types::resolved_commands::ResolvedRulesCommand;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hearth = scenario
+        .add_creature_to_hand(P0, "Hearth Elemental", 4, 5)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 5,
+            shards: vec![ManaCostShard::Red],
+        })
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text(HEARTH)
+        .id();
+    let untouched = scenario
+        .add_creature_to_hand(P0, "Unspent Stoke hand", 1, 1)
+        .id();
+    scenario.with_library_top(
+        P0,
+        &[
+            "Counter exile draw A",
+            "Counter exile draw B",
+            "Counter exile reserve",
+        ],
+    );
+    let dissipate = scenario.add_spell_to_hand_from_oracle(P1, "Dissipate", true,
+        "Counter target spell. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.")
+        .with_mana_cost(blue_cost(1, 2)).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    scenario.with_mana_pool(
+        P1,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&hearth)
+        .unwrap()
+        .back_face = Some(stoke_genius_face());
+    let library_before = runner.state().players[0].library.clone();
+    let committed = runner.cast(hearth).adventure_face(false).commit();
+    assert!(matches!(
+        committed.state().stack.back().unwrap().kind,
+        StackEntryKind::Spell {
+            actual_mana_spent: 2,
+            ..
+        }
+    ));
+    let stack_birth = committed.state().objects[&hearth].incarnation;
+    drop(committed);
+    runner.act(GameAction::PassPriority).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1 }
+    ));
+    let committed = runner.cast(dissipate).target_object(hearth).commit();
+    assert!(matches!(
+        committed.state().stack.back().unwrap().kind,
+        StackEntryKind::Spell {
+            actual_mana_spent: 3,
+            ..
+        }
+    ));
+    let outcome = committed.resolve();
+    outcome.assert_zone(&[hearth], Zone::Exile);
+    outcome.assert_zone(&[dissipate], Zone::Graveyard);
+    outcome.assert_zone(&[untouched], Zone::Hand);
+    assert_eq!(outcome.state().players[0].library, library_before);
+    assert!(!outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::Discarded { player_id: P0, .. } | GameEvent::CardDrawn { player_id: P0, .. }
+    )));
+    assert!(outcome.state().objects[&hearth]
+        .casting_permissions
+        .is_empty());
+    let departed = &outcome.state().departed_stack_spells[&hearth][&stack_birth];
+    assert_eq!(departed.object.incarnation, stack_birth);
+    assert!(matches!(
+        departed.entry.kind,
+        StackEntryKind::Spell {
+            casting_variant: engine::types::game_state::CastingVariant::Adventure,
+            ..
+        }
+    ));
+    assert!(outcome.state().resolved_rules_journal.entries().iter().any(|entry| matches!(
+        &entry.command, Some(ResolvedRulesCommand::ZoneChange(command))
+            if command.object.object_id == hearth && command.object.incarnation == stack_birth
+                && command.from == Zone::Stack && command.to == Zone::Exile
+                && command.resulting_incarnation == outcome.state().objects[&hearth].incarnation
+    )), "the hostile case really reaches the same Stack-to-Exile proof boundary");
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty() && outcome.state().resolution_stack.is_empty());
+    // CR 715.3d: this direct exile was a counter, not successful Adventure
+    // resolution. Its retained nonresolving Stack departure defeats a grafted
+    // old unit permission even though original program and exact stay survive.
+    for (route, payload) in adventure_current_save_payloads(outcome.state())
+        .into_iter()
+        .enumerate()
+    {
+        let loaded = restore_adventure_current_save(route, payload.clone()).unwrap();
+        assert!(loaded.objects[&hearth].casting_permissions.is_empty());
+        let mut forged = payload;
+        let state = if route == 2 {
+            &mut forged["state"]
+        } else {
+            &mut forged
+        };
+        state["objects"][hearth.0.to_string()]["casting_permissions"] =
+            serde_json::json!([{"type":"AdventureCreature"}]);
+        let before = forged.clone();
+        let error = restore_adventure_current_save(route, forged.clone()).unwrap_err();
+        assert!(
+            error.contains("Adventure permission"),
+            "direct counter-exile route {route}: {error}"
+        );
+        assert_eq!(forged, before);
+    }
+}
+
+#[test]
+fn resolving_adventure_legacy_success_witness_rejects_ambiguous_and_expired_authority() {
+    use engine::types::ability::CastingPermission;
+    let (runner, hearth, _) = paid_whole_stoke_authority_scene();
+    assert_eq!(runner.state().objects[&hearth].zone, Zone::Exile);
+    assert_eq!(runner.state().players[0].hand.len(), 2);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_public_adventure_grant_current_and_legacy_saves(runner.state(), hearth, P0, 6);
+
+    for corruption in [
+        "wrong_grantee",
+        "stale_birth",
+        "no_success",
+        "no_original_program",
+        "ambiguous_controller",
+    ] {
+        for (route, mut payload) in adventure_current_save_payloads(runner.state())
+            .into_iter()
+            .enumerate()
+        {
+            let state = if route == 2 {
+                &mut payload["state"]
+            } else {
+                &mut payload
+            };
+            let permission = state["objects"][hearth.0.to_string()]["casting_permissions"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|permission| permission["type"] == "AdventureCreature")
+                .unwrap();
+            match corruption {
+                "wrong_grantee" => permission["granted_to"] = serde_json::json!(P1),
+                "stale_birth" => {
+                    permission["exile_incarnation"] =
+                        serde_json::json!(runner.state().objects[&hearth].incarnation + 1)
+                }
+                _ => *permission = serde_json::json!({"type": "AdventureCreature"}),
+            }
+            if !matches!(corruption, "wrong_grantee" | "stale_birth") {
+                let next_ordinal = state["resolved_rules_journal"]["next_command_ordinal"]
+                    .as_u64()
+                    .unwrap();
+                let entries = state["resolved_rules_journal"]["entries"]
+                    .as_array_mut()
+                    .unwrap();
+                let departure_index = entries
+                    .iter()
+                    .position(|entry| {
+                        let command = &entry["command"]["ZoneChange"];
+                        command["object"]["object_id"] == serde_json::json!(hearth)
+                            && command["from"] == "Stack"
+                            && command["to"] == "Exile"
+                    })
+                    .unwrap();
+                let removal_index = entries
+                    .iter()
+                    .position(|entry| {
+                        let original = &entry["command"]["StackRemoval"]["entry"];
+                        original["id"] == serde_json::json!(hearth)
+                            && original["kind"]["data"]["casting_variant"] == "Adventure"
+                    })
+                    .unwrap();
+                match corruption {
+                    "no_success" => {
+                        entries[departure_index]["command"] = Value::Null;
+                    }
+                    "no_original_program" => {
+                        for entry in entries.iter_mut() {
+                            for kind in ["StackPush", "StackRemoval", "StackEntryFinalize"] {
+                                if entry["command"][kind]["entry"]["id"]
+                                    == serde_json::json!(hearth)
+                                {
+                                    entry["command"][kind]["entry"]["kind"]["data"]
+                                        ["casting_variant"] = serde_json::json!("Normal");
+                                }
+                            }
+                        }
+                        state["resolving_stack_entry"] = Value::Null;
+                    }
+                    "ambiguous_controller" => {
+                        let mut competing_exit = entries[departure_index].clone();
+                        competing_exit["ordinal"] = serde_json::json!(next_ordinal);
+                        competing_exit["command"]["ZoneChange"]["zone_change_record"]
+                            ["controller"] = serde_json::json!(P1);
+                        competing_exit["command"]["ZoneChange"]["zone_change_record"]
+                            ["trigger_source_context"]["lki"]["controller"] = serde_json::json!(P1);
+                        let mut competing_owner = entries[removal_index].clone();
+                        competing_owner["ordinal"] = serde_json::json!(next_ordinal + 1);
+                        competing_owner["command"]["StackRemoval"]["entry"]["controller"] =
+                            serde_json::json!(P1);
+                        competing_owner["command"]["StackRemoval"]["entry"]["kind"]["data"]
+                            ["ability"]["controller"] = serde_json::json!(P1);
+                        // Keep every actual original command and its ordinal:
+                        // this sibling adds a competing complete authority.
+                        entries.push(competing_exit);
+                        entries.push(competing_owner);
+                        state["resolved_rules_journal"]["next_command_ordinal"] =
+                            serde_json::json!(next_ordinal + 2);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let before = payload.clone();
+            let error = restore_adventure_current_save(route, payload.clone()).unwrap_err();
+            assert!(
+                error.contains("Adventure permission"),
+                "{corruption} route {route}: {error}"
+            );
+            assert_eq!(payload, before, "a refused full save is kept intact");
+        }
+    }
+
+    // CR 715.3d: the earned permission ends on the first exile exit, even
+    // when the same card immediately returns to exile (CR 400.7).
+    let original_birth = runner.state().objects[&hearth].incarnation;
+    let mut expired = runner.state().clone();
+    let mut events = Vec::new();
+    engine::game::zones::move_to_zone(&mut expired, hearth, Zone::Hand, &mut events);
+    engine::game::zones::move_to_zone(&mut expired, hearth, Zone::Exile, &mut events);
+    assert!(expired.objects[&hearth].incarnation > original_birth);
+    assert!(expired.objects[&hearth].casting_permissions.is_empty());
+    assert!(events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Exile), to: Zone::Hand, .. } if *object_id == hearth)));
+    for (route, payload) in adventure_current_save_payloads(&expired)
+        .into_iter()
+        .enumerate()
+    {
+        let loaded = restore_adventure_current_save(route, payload.clone()).unwrap();
+        assert!(loaded.objects[&hearth].casting_permissions.is_empty());
+        assert!(
+            !engine::game::casting::has_potentially_authorizing_object_cast_permission(
+                &loaded.objects[&hearth],
+                P0
+            )
+        );
+        let mut stale = payload;
+        let state = if route == 2 {
+            &mut stale["state"]
+        } else {
+            &mut stale
+        };
+        state["objects"][hearth.0.to_string()]["casting_permissions"] =
+            serde_json::json!([{"type": "AdventureCreature"}]);
+        let before = stale.clone();
+        let error = restore_adventure_current_save(route, stale.clone()).unwrap_err();
+        assert!(
+            error.contains("Adventure permission"),
+            "away/back route {route}: {error}"
+        );
+        assert_eq!(stale, before);
         let mut independent = loaded;
         independent
             .objects
-            .get_mut(&spell)
+            .get_mut(&hearth)
             .unwrap()
             .casting_permissions
-            .push(alternative_permission(grantee, 0, 0));
+            .push(alternative_permission(P0, 0, 0));
         assert!(
             engine::game::casting::has_potentially_authorizing_object_cast_permission(
-                &independent.objects[&spell],
-                grantee
+                &independent.objects[&hearth],
+                P0
             )
         );
+        assert!(!independent.objects[&hearth]
+            .casting_permissions
+            .iter()
+            .any(|permission| matches!(permission, CastingPermission::AdventureCreature { .. })));
     }
 }
 
@@ -4208,23 +4718,24 @@ fn resolving_adventure_public_commandeer_binds_resolving_controller_and_paid_cos
                             })
                             .unwrap();
                     }
-                    if let WaitingFor::TargetSelection {
+                    let WaitingFor::TargetSelection {
                         player,
                         target_slots,
                         selection,
                         ..
                     } = &runner.state().waiting_for
-                    {
-                        assert_eq!(*player, grantee);
-                        assert!(target_slots[selection.current_slot]
-                            .legal_targets
-                            .contains(&engine::types::ability::TargetRef::Object(hearth)));
-                        runner
-                            .act(GameAction::ChooseTarget {
-                                target: Some(engine::types::ability::TargetRef::Object(hearth)),
-                            })
-                            .unwrap();
-                    }
+                    else {
+                        panic!("Commandeer must choose the actual noncreature Adventure spell");
+                    };
+                    assert_eq!(*player, grantee);
+                    assert!(target_slots[selection.current_slot]
+                        .legal_targets
+                        .contains(&engine::types::ability::TargetRef::Object(hearth)));
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(engine::types::ability::TargetRef::Object(hearth)),
+                        })
+                        .unwrap();
                     assert!(matches!(
                         runner.state().waiting_for,
                         WaitingFor::Priority { .. }
@@ -4313,6 +4824,7 @@ fn resolving_adventure_public_commandeer_binds_resolving_controller_and_paid_cos
                         runner.state(),
                         hearth,
                         grantee,
+                        if relative_population { 2 } else { 5 },
                     );
                     if !alternative {
                         assert_eq!(runner.state().objects[&first].zone, Zone::Graveyard);
@@ -4532,7 +5044,7 @@ fn resolving_adventure_paid_stolen_goods_offers_native_face_free_and_later_norma
     assert_eq!(runner.state().objects[&hearth].zone, Zone::Exile);
     let object = &runner.state().objects[&hearth];
     assert!(object.incarnation > first_exile);
-    assert_public_adventure_grant_current_and_legacy_saves(runner.state(), hearth, P0);
+    assert_public_adventure_grant_current_and_legacy_saves(runner.state(), hearth, P0, 5);
     assert!(object
         .casting_permissions
         .contains(&CastingPermission::resolved_adventure(
