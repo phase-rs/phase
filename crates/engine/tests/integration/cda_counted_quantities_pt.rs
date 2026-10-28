@@ -3002,16 +3002,19 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
                 refusal = runner.act(GameAction::ChooseTarget {
                     target: Some(engine::types::ability::TargetRef::Object(recipient)),
                 });
-                if refusal
+                assert!(refusal
                     .as_ref()
-                    .is_ok_and(|result| result.disposition.is_applied())
-                {
-                    assert!(matches!(
-                        runner.state().waiting_for,
-                        WaitingFor::ManaPayment { .. }
-                    ));
-                    refusal = runner.act(GameAction::PassPriority);
-                }
+                    .is_ok_and(|result| result.disposition.is_applied()));
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ManaPayment { player: P0, .. }
+                ));
+                refusal = runner.act(GameAction::PassPriority);
+                assert!(matches!(
+                    &refusal,
+                    Err(engine::game::engine::EngineError::ActionNotAllowed(message))
+                        if message == "Cannot pay mana cost"
+                ));
             }
             let refused = match refusal {
                 Err(_) => true,
@@ -3027,6 +3030,35 @@ fn cda_scavenge_wrong_colors_no_targets_and_sorcery_timing_have_funded_controls(
                     .get(&CounterType::Plus1Plus1),
                 None
             );
+            if hostile == "colors" {
+                // CR 601.2h + CR 602.2b: unpayable mana cannot satisfy the
+                // activation. The engine retains its payment prompt until the
+                // owner obtains mana or withdraws the announcement.
+                // The failed Pay above, before cancellation, proves refusal.
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ManaPayment { player: P0, .. }
+                ));
+                assert!(runner.state().pending_cast.as_ref().is_some_and(|pending| {
+                    pending.object_id == lord && pending.activation_ability_index == Some(index)
+                }));
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+                let cancelled = runner
+                    .act(GameAction::CancelCast)
+                    .expect("withdraw the unpaid Scavenge announcement through its public action");
+                assert!(cancelled.disposition.is_applied());
+                assert!(runner.state().pending_cast.is_none());
+                assert_eq!(runner.state().objects[&lord].zone, Zone::Graveyard);
+                assert_eq!(runner.state().objects[&lord].incarnation, before);
+                assert_eq!(runner.state().players[0].mana_pool.total(), 5);
+                assert_eq!(
+                    runner.state().objects[&recipient]
+                        .counters
+                        .get(&CounterType::Plus1Plus1),
+                    None
+                );
+            }
             cda_complete(runner.state());
         }
         // SAME-TEST positive, same full producer/definition/index/source shape.

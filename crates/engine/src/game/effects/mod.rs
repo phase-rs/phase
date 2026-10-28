@@ -24030,7 +24030,16 @@ fn resolve_chain_body(
                     return Ok(ResolutionProgress::Waiting);
                 }
                 progress = resolve_ability_chain_step(state, &else_resolved, events, depth + 1)?;
-            } else if let Some(ref sub) = ability.sub_ability {
+            } else if let Some(sub) = ability.sub_ability.as_deref().and_then(|sub| {
+                // CR 608.2c: skipping an instruction also skips its dependent
+                // resolution steps, but not the next printed instruction.
+                // A surviving performed/event gate still owns its direct step.
+                if sub_outlives_false_parent_gate(sub) {
+                    Some(sub)
+                } else {
+                    next_independent_instruction(Some(sub))
+                }
+            }) {
                 // CR 608.2c: A skipped `IfYouDo` head whose effect
                 // did not happen must still hand off to a paired `Not(IfYouDo)`
                 // continuation. The head's own condition gates only the head's
@@ -24118,7 +24127,7 @@ fn resolve_chain_body(
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && (sub.condition.is_none() || is_ordinal_sequential_sibling))
                 {
-                    let mut sub_resolved = sub.as_ref().clone();
+                    let mut sub_resolved = sub.clone();
                     // CR 608.2d: a `Resolution`-timed sub makes its OWN
                     // untargeted choice at its own resolution (see the
                     // interactive `PutCounter` recipient prompt in this

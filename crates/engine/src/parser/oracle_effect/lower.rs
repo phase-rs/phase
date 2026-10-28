@@ -11212,24 +11212,85 @@ pub(super) fn compute_sentence_where_x(chunks: &[ClauseChunk]) -> Vec<Option<Str
 /// change to the splitter rather than to this binding.
 pub(super) fn compute_sentence_leading_duration(chunks: &[ClauseChunk]) -> Vec<Option<Duration>> {
     let mut out = vec![None; chunks.len()];
-    let mut group_start = 0usize;
+    let mut governing = None;
     for (idx, chunk) in chunks.iter().enumerate() {
-        let ends_sentence = matches!(chunk.boundary_after, Some(ClauseBoundary::Sentence) | None);
-        if !ends_sentence {
-            continue;
+        // CR 608.2c + CR 611.2a: a leading window can open a coordinated
+        // run after an earlier action in the same sentence. The connector
+        // belongs to the sequence, not the duration grammar. Earlier actions
+        // remain outside the run; later conjuncts receive its typed window.
+        let text = strip_leading_sequence_connector(&chunk.text).trim();
+        if let Some((duration, _)) = strip_leading_duration(text) {
+            governing = Some(duration);
+        } else {
+            out[idx] = governing.clone();
         }
-        // The duration must HEAD the sentence to scope it; one stated mid-sentence
-        // belongs to its own clause and is handled by that clause's own seams
-        // (the trailing-duration fixup, or `from_among_batch_cast_driver`'s
-        // in-clause scan for Ral, Leyline Prodigy's mid-clause "this turn").
-        if let Some((duration, _)) = strip_leading_duration(chunks[group_start].text.trim()) {
-            for slot in &mut out[group_start + 1..=idx] {
-                *slot = Some(duration.clone());
-            }
+        if matches!(chunk.boundary_after, Some(ClauseBoundary::Sentence) | None) {
+            governing = None;
         }
-        group_start = idx + 1;
     }
     out
+}
+
+#[cfg(test)]
+mod coordinated_duration_tests {
+    use super::*;
+    use crate::types::ability::PlayerScope;
+
+    #[test]
+    fn a_middle_leading_window_governs_only_the_following_coordinated_run() {
+        let chunks = [
+            (
+                "all permanents you control phase out",
+                Some(ClauseBoundary::Comma),
+            ),
+            (
+                "and until your next turn, your life total can't change",
+                Some(ClauseBoundary::Comma),
+            ),
+            (
+                "and you gain protection from everything",
+                Some(ClauseBoundary::Sentence),
+            ),
+            ("exile ~", None),
+        ]
+        .map(|(text, boundary_after)| ClauseChunk {
+            text: text.into(),
+            boundary_after,
+            leading_duration: None,
+        });
+        let next_turn = Duration::UntilNextTurnOf {
+            player: PlayerScope::Controller,
+        };
+        assert_eq!(
+            compute_sentence_leading_duration(&chunks),
+            vec![None, None, Some(next_turn), None]
+        );
+    }
+
+    #[test]
+    fn a_new_leading_window_replaces_the_coordinated_run_without_crossing_sentences() {
+        let chunks = [
+            (
+                "until your next turn, target creature gains flying",
+                Some(ClauseBoundary::Comma),
+            ),
+            (
+                "and until end of turn, it gains vigilance",
+                Some(ClauseBoundary::Comma),
+            ),
+            ("and it gains first strike", Some(ClauseBoundary::Sentence)),
+            ("it gains trample", None),
+        ]
+        .map(|(text, boundary_after)| ClauseChunk {
+            text: text.into(),
+            boundary_after,
+            leading_duration: None,
+        });
+        assert_eq!(
+            compute_sentence_leading_duration(&chunks),
+            vec![None, None, Some(Duration::UntilEndOfTurn), None,]
+        );
+    }
 }
 
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {

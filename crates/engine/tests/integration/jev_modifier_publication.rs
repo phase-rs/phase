@@ -3099,6 +3099,14 @@ fn modifier_owner_perch_paid_gift_keeps_the_bounded_tail_and_independent_instruc
         if promised {
             assert_eq!(runner.state().extra_turns[0].player, P1);
         }
+        assert_eq!(
+            engine::game::static_abilities::player_has_protection_from_everything(
+                runner.state(),
+                P0
+            ),
+            promised,
+            "only promising the gift installs the printed protection"
+        );
         settled(&runner);
         fund(&mut runner, 1, &[ManaType::White]);
         runner.cast(passage[0]).resolve();
@@ -3115,6 +3123,13 @@ fn modifier_owner_perch_paid_gift_keeps_the_bounded_tail_and_independent_instruc
             }
         }
         assert_eq!(runner.state().active_player, P0);
+        assert!(
+            !engine::game::static_abilities::player_has_protection_from_everything(
+                runner.state(),
+                P0
+            ),
+            "the coordinated protection expires at the same printed next-turn boundary"
+        );
         assert!(matches!(
             runner.state().objects[&own].phase_status,
             PhaseStatus::PhasedIn
