@@ -15183,7 +15183,7 @@ mod tests {
             entry_ref,
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: vec![],
-            enter_with_choices: vec![],
+            enter_with_choices: None,
             applied: HashSet::new(),
         };
         state.pending_damage_replacements = vec![tap.clone(), untap.clone()];

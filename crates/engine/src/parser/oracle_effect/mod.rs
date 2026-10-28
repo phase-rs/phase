@@ -55077,7 +55077,7 @@ mod retained_complete_relation_unit_tests {
 #[cfg(test)]
 mod coordinated_interior_duration_tests {
     use super::*;
-    use crate::types::ability::PlayerScope;
+    use crate::types::ability::{AdditionalCostPaymentSource, ObjectScope, PlayerScope};
     use crate::types::keywords::ProtectionTarget;
 
     #[test]
@@ -55100,7 +55100,15 @@ mod coordinated_interior_duration_tests {
         assert_eq!(phasing.duration, None);
         assert_eq!(
             phasing.condition,
-            Some(AbilityCondition::AdditionalCostPaid)
+            Some(AbilityCondition::AdditionalCostPaid {
+                subject: ObjectScope::Source,
+                source: AdditionalCostPaymentSource::Any,
+                origin: None,
+                origin_ordinal: None,
+                variant: None,
+                kicker_cost: None,
+                min_count: 1,
+            })
         );
         let expected = Duration::UntilNextTurnOf {
             player: PlayerScope::Controller,

@@ -1136,6 +1136,7 @@ pub(crate) fn parse_animation_conjunct_keywords(tail: &str) -> Option<Vec<Keywor
 #[cfg(test)]
 mod test_den_bugbear {
     use super::*;
+    use crate::types::ContinuousModification;
 
     /// #2917 (CR 305.7 / 613.1d): a trailing "that's still a land" rider must
     /// not truncate the keyword list. Nissa, Who Shakes the World grants the

@@ -2234,9 +2234,7 @@ mod tests {
         // Registered creation occurs in another resolution; it does not
         // shadow the installing ability's following ordinary instruction.
         let mut registered = resolved(Effect::CreateDelayedTrigger {
-            condition: DelayedTriggerCondition::AtNextPhase {
-                phase: Phase::EndStep,
-            },
+            condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
             effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, token.clone())),
             uses_tracked_set: false,
         })
