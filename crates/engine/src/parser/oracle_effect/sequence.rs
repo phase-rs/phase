@@ -1704,13 +1704,14 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         let search_put_destination = has_search_prefix
                             && is_search_result_put_onto_battlefield_restatement(remainder_trimmed);
                         let seek_put_destination =
-                            nom_primitives::scan_contains(&before_lower, "seek ")
-                                && terminated(
+                            nom_primitives::scan_contains(&before_lower, "seek ") && {
+                                let remainder_lower = remainder_trimmed.to_lowercase();
+                                let mut destination_parser = terminated(
                                     parse_seek_put_destination,
                                     peek(alt((eof, tag("."), tag(", then ")))),
-                                )
-                                .parse(&*remainder_trimmed.to_lowercase())
-                                .is_ok();
+                                );
+                                destination_parser.parse(remainder_lower.as_str()).is_ok()
+                            };
                         // CR 707.9: ", except <body> and <body> [and …]" — inside
                         // a copy-effect except clause, " and " is an internal
                         // delimiter between recognised body shapes (SetName, P/T,
