@@ -13304,7 +13304,7 @@ mod tests {
             let mut control = filter.clone();
             let mut count = 0;
             let mut complete = true;
-            rewrite_filter_props(
+            rewrite_filter_props::<()>(
                 &mut control,
                 &mut |_, _, _| {},
                 &mut |prop| {

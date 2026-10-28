@@ -3161,13 +3161,16 @@ pub(crate) mod tests {
             donor: None,
         };
         let mut events = Vec::new();
-        let status = apply_copy_token_after_replacement(
+        let status = apply_copy_token_after_replacement_with_created_ids(
             &mut state,
+            None,
+            None,
             PlayerId(0),
             copy,
             EtbTapState::Tapped,
             Vec::new(),
             2,
+            Vec::new(),
             &mut events,
         );
 
@@ -3315,13 +3318,16 @@ pub(crate) mod tests {
         );
 
         let mut events = Vec::new();
-        let status = apply_copy_token_after_replacement(
+        let status = apply_copy_token_after_replacement_with_created_ids(
             &mut state,
+            None,
+            None,
             PlayerId(0),
             copy,
             EtbTapState::Tapped,
             Vec::new(),
             3,
+            Vec::new(),
             &mut events,
         );
         assert!(
@@ -3402,13 +3408,16 @@ pub(crate) mod tests {
         );
 
         let mut events = Vec::new();
-        let status = apply_copy_token_after_replacement(
+        let status = apply_copy_token_after_replacement_with_created_ids(
             &mut state,
+            None,
+            None,
             PlayerId(0),
             copy,
             EtbTapState::Tapped,
             Vec::new(),
             3,
+            Vec::new(),
             &mut events,
         );
         assert!(
@@ -3513,13 +3522,16 @@ pub(crate) mod tests {
         let copy = named_attack_copy_spec(&state, source_id, Vec::new());
 
         let mut events = Vec::new();
-        let status = apply_copy_token_after_replacement(
+        let status = apply_copy_token_after_replacement_with_created_ids(
             &mut state,
+            None,
+            None,
             PlayerId(0),
             copy,
             EtbTapState::Tapped,
             Vec::new(),
             2,
+            Vec::new(),
             &mut events,
         );
         assert!(

@@ -12266,11 +12266,12 @@ mod tests {
 
         // The choice must go to the tapper P1 with both produced options —
         // never to the source controller P0.
-        let pending_effect = match &state.waiting_for {
+        let (pending_effect, prompt_player, return_result_occurrence) = match &state.waiting_for {
             WaitingFor::ChooseManaColor {
                 player,
                 choice: ManaChoicePrompt::SingleColor { options },
                 context: ManaChoiceContext::ResolvingEffect(pending_effect),
+                return_result_occurrence,
             } => {
                 assert_eq!(
                     *player,
@@ -12279,17 +12280,22 @@ mod tests {
                 );
                 assert_eq!(options.len(), 2);
                 assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
-                (**pending_effect).clone()
+                (
+                    (**pending_effect).clone(),
+                    *player,
+                    *return_result_occurrence,
+                )
             }
             other => panic!("expected a SingleColor echo choice for P1, got {other:?}"),
         };
         crate::game::effects::mana::handle_choose_mana_effect(
             &mut state,
             &pending_effect,
-            PlayerId(1),
+            prompt_player,
             &ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::Blue],
             },
+            return_result_occurrence,
             ManaChoice::SingleColor(ManaType::Green),
             &mut vec![],
         )
@@ -12365,14 +12371,19 @@ mod tests {
                 tap_state: crate::types::events::ManaTapState::FromTap,
             }],
         );
-        let pending_effect = match &state.waiting_for {
+        let (pending_effect, prompt_player, return_result_occurrence) = match &state.waiting_for {
             WaitingFor::ChooseManaColor {
                 player,
                 context: ManaChoiceContext::ResolvingEffect(pending_effect),
+                return_result_occurrence,
                 ..
             } => {
                 assert_eq!(*player, PlayerId(1));
-                (**pending_effect).clone()
+                (
+                    (**pending_effect).clone(),
+                    *player,
+                    *return_result_occurrence,
+                )
             }
             other => panic!("expected a SingleColor echo choice for P1, got {other:?}"),
         };
@@ -12383,10 +12394,11 @@ mod tests {
         crate::game::effects::mana::handle_choose_mana_effect(
             &mut state,
             &pending_effect,
-            PlayerId(1),
+            prompt_player,
             &ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::Blue],
             },
+            return_result_occurrence,
             ManaChoice::SingleColor(ManaType::Blue),
             &mut vec![],
         )

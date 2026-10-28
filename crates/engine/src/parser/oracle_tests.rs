@@ -5433,7 +5433,7 @@ fn u15_joint_reader_transaction_refuses_every_stale_half() {
             };
             if let Some(filter) = filter {
                 let mut complete = true;
-                rewrite_filter_props(
+                rewrite_filter_props::<()>(
                     filter,
                     &mut |_, _, _| {},
                     &mut |prop| {
@@ -43136,7 +43136,7 @@ fn u14_relation_is_transactional_and_exact_item_bound() {
                 }) {
                     reader_ids.push(item.id);
                     let mut complete = true;
-                    rewrite_filter_props(
+                    rewrite_filter_props::<()>(
                         ir.definition.affected.as_mut().unwrap(),
                         &mut |_, _, _| {},
                         &mut |p| {

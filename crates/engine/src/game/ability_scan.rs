@@ -7782,7 +7782,7 @@ mod tests {
             let mut filter = original.clone();
             let mut leaves = 0;
             let mut complete = true;
-            crate::game::filter::rewrite_filter_props(
+            crate::types::ability::rewrite_filter_props::<()>(
                 &mut filter,
                 &mut |_, _, _| {},
                 &mut |prop| {

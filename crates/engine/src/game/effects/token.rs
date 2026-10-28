@@ -6056,6 +6056,8 @@ mod tests {
             spec: Box::new(spec),
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Tapped,
+            creation_frame: None,
+            instructions: None,
             count: 2,
             appended: Vec::new(),
             applied: std::collections::HashSet::new(),

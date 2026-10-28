@@ -15081,6 +15081,7 @@ mod tests {
             additional_modifications: vec![],
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(30),
             controller: PlayerId(0),
@@ -15361,7 +15362,7 @@ mod tests {
         state.pending_damage_replacements = vec![sourced.clone()];
         assert!(find_applicable_replacements(&state, &ordinary, replacement_registry()).is_empty());
         let mut complete = true;
-        crate::game::filter::rewrite_filter_props(
+        crate::types::ability::rewrite_filter_props::<()>(
             sourced.valid_card.as_mut().unwrap(),
             &mut |_, _, _| {},
             &mut |prop| {
@@ -26182,6 +26183,8 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![],
                         enter_with_counters: vec![],

@@ -4825,7 +4825,7 @@ mod tests {
             players: Vec<(u32, HashMap<PlayerCounterKind, u32>, u32)>,
             state_revision: u64,
             waiting_for: WaitingFor,
-            pending_replacement: Option<PendingReplacement>,
+            pending_replacement: Option<Box<PendingReplacement>>,
             stack_len: usize,
             journal_len: usize,
         }

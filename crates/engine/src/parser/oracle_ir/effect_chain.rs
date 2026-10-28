@@ -2818,7 +2818,9 @@ impl ClauseDraft<'_> {
 mod departure_result_tests {
     use super::*;
     use crate::parser::oracle_effect::{assembly::assemble_effect_chain, parse_effect_chain_ir};
-    use crate::types::ability::{ReturnResultId, ZoneChangeRecordSource};
+    use crate::types::ability::{
+        validate_instruction_result_definition, ReturnResultId, ZoneChangeRecordSource,
+    };
 
     const PRINTED: &str = "Exile all creatures. Each player creates a 0/0 green and blue Fractal creature token and puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way.";
 
