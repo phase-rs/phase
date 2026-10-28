@@ -35515,7 +35515,7 @@ mod snapshot_tests {
             } => {
                 assert_eq!(target, TargetFilter::Controller);
                 let Some(TargetFilter::ChosenDamageSource {
-                    chooser: None,
+                    chooser: Some(crate::types::ability::Chooser::Controller),
                     filter: Some(inner),
                 }) = damage_source_filter
                 else {

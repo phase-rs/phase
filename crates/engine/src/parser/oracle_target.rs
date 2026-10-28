@@ -9536,6 +9536,29 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
     if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
+        if let Ok((rest, property)) = crate::types::text_grammar::parse_property_filter(after_intro)
+        {
+            if matches!(
+                property,
+                FilterProp::Tapped
+                    | FilterProp::Untapped
+                    | FilterProp::Attacking { .. }
+                    | FilterProp::Blocking
+                    | FilterProp::BlockStatus { .. }
+            ) {
+                let property = if negated {
+                    FilterProp::Not {
+                        prop: Box::new(property),
+                    }
+                } else {
+                    property
+                };
+                return Some((
+                    vec![property],
+                    leading_ws + intro_len + after_intro.len() - rest.len(),
+                ));
+            }
+        }
         if let Ok((mut rest, mut kinds)) = parse_attachment_kind_disjunction(after_intro) {
             let mut controller = None;
             if let Ok((after_by, _)) = tag::<_, _, OracleError<'_>>(" by ").parse(rest) {

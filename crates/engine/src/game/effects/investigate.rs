@@ -165,11 +165,30 @@ mod tests {
                     event,
                     GameEvent::EffectResolved {
                         kind: crate::types::ability::EffectKind::Token,
+                        source_id,
+                        ..
+                    } if state.objects[source_id].name == "Caller source"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event,
+            GameEvent::EffectResolved { kind: crate::types::ability::EffectKind::Token, source_id, .. }
+                if state.objects[source_id].name == "Queued Squirrel substitution"
+        )).count(), 1, "the independent Jinnie substitute completes once");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
                         ..
                     }
                 ))
                 .count(),
-            1
+            2,
+            "one completion for each actual token instruction"
         );
         assert!(!events.iter().any(|event| matches!(
             event,
@@ -247,11 +266,30 @@ mod tests {
                     event,
                     GameEvent::EffectResolved {
                         kind: crate::types::ability::EffectKind::Token,
+                        source_id,
+                        ..
+                    } if state.objects[source_id].name == "Caller source"
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(events.iter().filter(|event| matches!(event,
+            GameEvent::EffectResolved { kind: crate::types::ability::EffectKind::Token, source_id, .. }
+                if state.objects[source_id].name == "Queued Squirrel substitution"
+        )).count(), 1, "the independent Jinnie substitute completes once");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: crate::types::ability::EffectKind::Token,
                         ..
                     }
                 ))
                 .count(),
-            1
+            2,
+            "one completion for each actual token instruction"
         );
         assert!(!events.iter().any(|event| matches!(
             event,

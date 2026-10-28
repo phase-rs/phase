@@ -224,6 +224,9 @@ pub(crate) enum FilterReadContext {
     /// arises only from a genuine board-reading component of the filter, so a bare
     /// `Typed` under `LoopFirewall` is relaxed (the CR 732.2a coverability gate).
     SnapshotOrEvent,
+    /// The subject's characteristics were frozen in an instruction result.
+    /// Independent quantity/controller operands in the predicate remain live.
+    FrozenDeparture,
 }
 
 /// Walk a resolved ability's read-bearing fields.
@@ -2973,7 +2976,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             };
             acc = acc.or(scan_target_filter(
                 filter,
-                FilterReadContext::SnapshotOrEvent,
+                FilterReadContext::FrozenDeparture,
                 mode,
             ));
             acc
@@ -3602,7 +3605,7 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             projected: false,
             history: HistoryReads::NONE,
         },
-        FilterReadContext::SnapshotOrEvent => Axes::NONE,
+        FilterReadContext::SnapshotOrEvent | FilterReadContext::FrozenDeparture => Axes::NONE,
     };
     base.or(match x {
         TargetFilter::None => Axes::NONE,
@@ -3642,6 +3645,9 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
             // a bare type/controller predicate (the canary's untap-all
             // `Typed{Creature}` relaxes, permitting the offer).
             let props = typed_filter_axes(tf, mode);
+            if ctx == FilterReadContext::FrozenDeparture {
+                return base.or(props);
+            }
             Axes {
                 event: true,
                 sibling: match mode {
@@ -5845,11 +5851,13 @@ fn scan_ability_cost(cost: &AbilityCost, mode: ScanMode) -> Axes {
         // Fixed / bounded / structural costs: no dynamic board read (a
         // board-reading tap/exile aggregate that varies the *reduction* is caught
         // by the cost-keyword classifier, not here).
+        AbilityCost::Sacrifice(cost) => {
+            scan_target_filter(&cost.target, FilterReadContext::LiveBoardCensus, mode)
+        }
         AbilityCost::Mana { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
-        | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }
         | AbilityCost::ExileMaterials { .. }
         | AbilityCost::CollectEvidence { .. }

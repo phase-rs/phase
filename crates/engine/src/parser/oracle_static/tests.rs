@@ -35142,7 +35142,7 @@ fn rowan_scion_of_war_activated_ability_parses_clean() {
     };
     let StaticMode::ModifyCost {
         dynamic_count: Some(QuantityRef::LifeLostThisTurn { .. }),
-        spell_filter: Some(TF::Typed(tf)),
+        spell_filter: Some(filter),
         ..
     } = &definition.mode
     else {
@@ -35151,15 +35151,16 @@ fn rowan_scion_of_war_activated_ability_parses_clean() {
             definition.mode
         );
     };
-    assert!(
-        tf.properties.iter().any(|p| matches!(
-            p,
-            FilterProp::AnyOf { props }
-                if props.contains(&FilterProp::HasColor { color: ManaColor::Black })
-                    && props.contains(&FilterProp::HasColor { color: ManaColor::Red })
-        )),
-        "granted static must reduce only black/red spells, got {:?}",
-        tf.properties
+    assert_eq!(
+        filter,
+        &TF::Or {
+            filters: [ManaColor::Black, ManaColor::Red]
+                .into_iter()
+                .map(|color| TF::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::HasColor { color }])
+                ))
+                .collect()
+        }
     );
 }
 
@@ -35211,7 +35212,7 @@ fn will_scion_of_peace_activated_ability_parses_clean() {
     };
     let StaticMode::ModifyCost {
         dynamic_count: Some(QuantityRef::LifeGainedThisTurn { .. }),
-        spell_filter: Some(TF::Typed(tf)),
+        spell_filter: Some(filter),
         ..
     } = &definition.mode
     else {
@@ -35220,15 +35221,16 @@ fn will_scion_of_peace_activated_ability_parses_clean() {
             definition.mode
         );
     };
-    assert!(
-        tf.properties.iter().any(|p| matches!(
-            p,
-            FilterProp::AnyOf { props }
-                if props.contains(&FilterProp::HasColor { color: ManaColor::White })
-                    && props.contains(&FilterProp::HasColor { color: ManaColor::Blue })
-        )),
-        "granted static must reduce only white/blue spells, got {:?}",
-        tf.properties
+    assert_eq!(
+        filter,
+        &TF::Or {
+            filters: [ManaColor::White, ManaColor::Blue]
+                .into_iter()
+                .map(|color| TF::Typed(
+                    TypedFilter::card().properties(vec![FilterProp::HasColor { color }])
+                ))
+                .collect()
+        }
     );
 }
 
@@ -43001,43 +43003,57 @@ fn u14_noncontinuous_companions_own_pt_and_unknown_tail() {
     .into_iter()
     .enumerate()
     {
-        let predicate = format!("{restriction} and has haste and gets +1/+1");
-        let line = format!("Enchanted creature {predicate}.");
-        let filter = TargetFilter::SelfRef;
-        let direct = super::grammar::parse_enchanted_equipped_predicate(&predicate, filter, &line);
-        let public = parse_static_line_multi(&line);
-        for defs in [&direct, &public] {
-            assert_eq!(defs.len(), 2, "{line}: {defs:?}");
-            assert!(match branch {
-                0 => matches!(defs[0].mode, StaticMode::CantBeBlocked),
-                1 => matches!(defs[0].mode, StaticMode::CantBeBlockedBy { .. }),
-                _ => matches!(defs[0].mode, StaticMode::CantBeBlockedExceptBy { .. }),
-            });
-            for modification in [
-                ContinuousModification::AddKeyword {
-                    keyword: Keyword::Haste,
-                },
-                ContinuousModification::AddPower { value: 1 },
-                ContinuousModification::AddToughness { value: 1 },
-            ] {
-                assert!(
-                    defs[1].modifications.contains(&modification),
+        for (companion, has_haste) in [("has haste and gets +1/+1", true), ("gets +1/+1", false)] {
+            let predicate = format!("{restriction} and {companion}");
+            let line = format!("Enchanted creature {predicate}.");
+            let filter = TargetFilter::SelfRef;
+            let direct =
+                super::grammar::parse_enchanted_equipped_predicate(&predicate, filter, &line);
+            let public = parse_static_line_multi(&line);
+            for defs in [&direct, &public] {
+                assert_eq!(defs.len(), 2, "{line}: {defs:?}");
+                assert!(match branch {
+                    0 => matches!(defs[0].mode, StaticMode::CantBeBlocked),
+                    1 => matches!(defs[0].mode, StaticMode::CantBeBlockedBy { .. }),
+                    _ => matches!(defs[0].mode, StaticMode::CantBeBlockedExceptBy { .. }),
+                });
+                let mut expected = vec![
+                    ContinuousModification::AddPower { value: 1 },
+                    ContinuousModification::AddToughness { value: 1 },
+                ];
+                if has_haste {
+                    expected.insert(
+                        0,
+                        ContinuousModification::AddKeyword {
+                            keyword: Keyword::Haste,
+                        },
+                    );
+                }
+                assert_eq!(
+                    defs[1].modifications.len(),
+                    expected.len(),
                     "{line}: {defs:?}"
                 );
+                for modification in expected {
+                    assert!(
+                        defs[1].modifications.contains(&modification),
+                        "{line}: {defs:?}"
+                    );
+                }
             }
-        }
-        let bad_predicate = format!("{predicate} and draw two cards");
-        let bad = format!("Enchanted creature {bad_predicate}.");
-        for defs in [
-            super::grammar::parse_enchanted_equipped_predicate(
-                &bad_predicate,
-                TargetFilter::SelfRef,
-                &bad,
-            ),
-            parse_static_line_multi(&bad),
-        ] {
-            assert!(!defs.is_empty());
-            assert!(defs.iter().all(u14_static_residual), "{bad}: {defs:?}");
+            let bad_predicate = format!("{predicate} and draw two cards");
+            let bad = format!("Enchanted creature {bad_predicate}.");
+            for defs in [
+                super::grammar::parse_enchanted_equipped_predicate(
+                    &bad_predicate,
+                    TargetFilter::SelfRef,
+                    &bad,
+                ),
+                parse_static_line_multi(&bad),
+            ] {
+                assert!(!defs.is_empty());
+                assert!(defs.iter().all(u14_static_residual), "{bad}: {defs:?}");
+            }
         }
     }
 }

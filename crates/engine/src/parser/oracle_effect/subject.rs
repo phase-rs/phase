@@ -1186,7 +1186,7 @@ fn build_additive_type_continuous_clause(
             target: application.target.clone(),
             end_cost: None,
         },
-        duration: Some(Duration::Permanent),
+        duration: None,
         sub_ability: None,
         distribute: None,
         multi_target: None,
@@ -5780,7 +5780,33 @@ pub(super) fn retain_fallback_grant_duration(
     };
     let local = super::strip_trailing_duration(original)
         .1
-        .or_else(|| super::lower::strip_leading_duration(original).map(|(duration, _)| duration));
+        .or_else(|| super::lower::strip_leading_duration(original).map(|(duration, _)| duration))
+        .or_else(|| {
+            let lower = original.to_lowercase();
+            let start = find_predicate_start(&lower).unwrap_or(0);
+            let predicate = TextPair::new(&original[start..], &lower[start..]);
+            predicate.scan_around_outside_quotes(
+                |input| tag::<_, _, OracleError<'_>>(" and ").parse(input),
+                |head, _, _| {
+                    let (body, duration) = super::strip_trailing_duration(head.original);
+                    let duration = duration?;
+                    let modifications =
+                        crate::parser::oracle_static::parse_complete_continuous_modifications(
+                            body,
+                        )?;
+                    (modifications == definition.modifications).then_some(duration)
+                },
+            )
+        });
+    let stated = local
+        .clone()
+        .or_else(|| ctx.stated_clause_duration.clone())
+        .or_else(|| {
+            clause
+                .duration
+                .clone()
+                .filter(|duration| *duration != Duration::Permanent)
+        });
     let window = continuous_grant_duration(
         affected.unwrap_or(&TargetFilter::None),
         original,
@@ -5796,7 +5822,7 @@ pub(super) fn retain_fallback_grant_duration(
     );
     if let Some(window) = window {
         *duration = Some(window.clone());
-        clause.duration = Some(window);
+        clause.duration = stated;
     }
 }
 
@@ -5935,6 +5961,9 @@ fn build_continuous_clause(
         return None;
     }
 
+    let stated_duration = duration
+        .clone()
+        .or_else(|| ctx.stated_clause_duration.clone());
     let duration = continuous_grant_duration(
         &static_affected_for_application(&application),
         predicate_text,
@@ -5991,7 +6020,7 @@ fn build_continuous_clause(
             target: application.target,
             end_cost: None,
         },
-        duration,
+        duration: stated_duration,
         sub_ability: None,
         distribute: None,
         multi_target: None,

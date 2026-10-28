@@ -1640,6 +1640,7 @@ fn parse_modal_mode_irs(
             mode_ctx.body_scope = super::oracle_ir::context::BodyScope::ModalMode;
             mode_ctx.diagnostics.clear();
             let mut ability = parse_ability_ir_with_context(&mode.body, kind, &mut mode_ctx);
+            ability.shell.description = Some(mode.body.clone());
             guard_unsupported_mode_qualifiers_ir(&mut ability, kind, &mode_ctx);
             base_ctx.diagnostics.extend(mode_ctx.diagnostics);
             // CR 700.2: the selected modes resolve as one chain, so their declared-player groups must not repeat.

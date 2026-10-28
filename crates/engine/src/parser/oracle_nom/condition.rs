@@ -9380,6 +9380,11 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     }
     let type_text = type_text.trim();
     let (filter, leftover) = parse_type_phrase_folding(type_text);
+    if leftover.trim().is_empty()
+        && matches!(&filter, TargetFilter::Typed(typed) if typed.type_filters.iter().all(|kind| matches!(kind, TypeFilter::Non(_))))
+    {
+        return None;
+    }
     if leftover.trim().is_empty() && filter != TargetFilter::Any && !is_empty_typed_filter(&filter)
     {
         return Some(filter);

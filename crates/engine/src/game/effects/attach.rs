@@ -6396,6 +6396,7 @@ mod player_enchant_legality_tests {
                     "Enchant player",
                 )
                 .with_subtypes(vec!["Aura"])
+                .with_keyword(Keyword::Enchant(TargetFilter::Player))
                 .id();
             let mut runner = scenario.build();
             let rider = ReplacementDefinition::new(ReplacementEvent::Attached)
@@ -6557,6 +6558,7 @@ mod player_enchant_legality_tests {
         let aura = scenario
             .add_enchantment_from_oracle(P0, "Synthetic lawful player Aura", "Enchant player")
             .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TargetFilter::Player))
             .id();
         let source = scenario
             .add_creature(P0, "Distinct effect source", 1, 1)
@@ -6648,6 +6650,39 @@ mod player_enchant_legality_tests {
         );
         assert_eq!(stale.resolved_rules_journal, journal);
         assert!(apply_resolved_attachment(&mut stale, &command).is_err());
+    }
+
+    #[test]
+    fn opponent_enchant_restriction_survives_public_activated_attachment() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, AttachSelection};
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Typed opponent Aura", "")
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TargetFilter::Opponent))
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Opponent,
+                    selection: AttachSelection::Targeted,
+                },
+            ))
+            .id();
+        let mut runner = scenario.build();
+        assert!(!can_attach_to_player(runner.state(), aura, P0));
+        runner.activate(aura, 0).target_player(P1).resolve();
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(AttachTarget::Player(P1))
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 
     #[test]

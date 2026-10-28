@@ -3564,6 +3564,47 @@ mod complete_source_choice_publication_tests {
                 }
             }
             omit_source_choosers(&mut raw, false);
+            let flip_index = raw[frames]["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .position(|frame| frame["type"] == "CoinFlip")
+                .unwrap();
+            let custody = &raw[frames]["frames"][flip_index]["data"]["branch_context"]
+                ["coin_branch_target_abilities"];
+            assert_eq!(custody.as_array().unwrap().len(), 2);
+            for child in custody.as_array().unwrap() {
+                let capture: crate::types::game_state::ChosenDamageSource =
+                    serde_json::from_value(child[1]["context"]["damage_source_choice"].clone())
+                        .unwrap();
+                assert_eq!(
+                    capture.source.unwrap().identity.reference,
+                    first_ref,
+                    "the active flip's canonical outcomes retain the actual selected birth"
+                );
+            }
+            let mut conflicting = raw.clone();
+            conflicting[frames]["frames"][flip_index]["data"]["branch_context"]
+                ["coin_branch_target_abilities"][1][1]["context"]["damage_source_choice"]
+                ["source"]["identity"]["reference"]["incarnation"] =
+                serde_json::json!(first_ref.incarnation + 1);
+            let saved_conflict = serde_json::to_vec(&conflicting).unwrap();
+            let conflict = if wire {
+                serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    conflicting.clone(),
+                )
+                .unwrap_err()
+                .to_string()
+            } else {
+                serde_json::from_value::<crate::types::game_state::GameState>(conflicting.clone())
+                    .unwrap_err()
+                    .to_string()
+            };
+            assert!(
+                conflict.contains("conflicting owned coin custody"),
+                "{conflict}"
+            );
+            assert_eq!(serde_json::to_vec(&conflicting).unwrap(), saved_conflict);
             let mut solely_registered = raw.clone();
             fn remove_own_readers(node: &mut serde_json::Value) {
                 match node {
@@ -3670,6 +3711,26 @@ mod complete_source_choice_publication_tests {
         runner.activate(driver, 1).resolve();
         let second_ref = offered(&runner, second);
         assert_ne!(second_ref, first_ref);
+        runner
+            .state()
+            .resolution_stack
+            .validate(&runner.state().waiting_for)
+            .expect("the real source prompt owns its pause above the replaced draw");
+        let mut foreign_prompt = runner.state().waiting_for.clone();
+        let WaitingFor::DamageSourceChoice { player, .. } = &mut foreign_prompt else {
+            unreachable!()
+        };
+        *player = crate::types::player::PlayerId(1);
+        assert!(
+            runner
+                .state()
+                .resolution_stack
+                .validate(&foreign_prompt)
+                .is_err(),
+            "a different player cannot supply the direct owner above the draw pair"
+        );
+        *runner.state_mut() = serde_json::from_value(serde_json::to_value(runner.state()).unwrap())
+            .expect("the whole paused draw/source workflow restores with its exact owner");
         assert!(
             runner
                 .state()

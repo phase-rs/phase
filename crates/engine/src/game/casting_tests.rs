@@ -16413,9 +16413,16 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         .push(CoreType::Creature);
 
     let card_id = state.objects[&spell_id].card_id;
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
-        .expect("Snuff Out should reach the alternative-cost choice");
-    state.waiting_for = waiting;
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Snuff Out should reach the alternative-cost choice");
     assert!(
         matches!(
             state.waiting_for,
@@ -27967,9 +27974,9 @@ fn deadly_fixture() -> (
 }
 
 /// Drive Deadly through the full cast+resolution pipeline. The seed exile
-/// ("exile a card from an opponent's graveyard") surfaces a cast-time
-/// `TargetSelection` — a same-named `Grizzly Bears` is chosen as the seed so
-/// `SameNameAsParentTarget` binds that name. Collect evidence is opted in/out via
+/// ("exile a card from an opponent's graveyard") is an untargeted resolution
+/// choice. A same-named `Grizzly Bears` is chosen from the offered graveyard
+/// cards so the following search binds its name. Collect evidence is opted in/out via
 /// `pay_evidence`; `SearchChoice` selects all offered (name-matched) cards.
 fn drive_deadly(
     runner: &mut crate::game::scenario::GameRunner,
@@ -28012,6 +28019,22 @@ fn drive_deadly(
                 runner
                     .act(GameAction::ChooseTarget { target: bears })
                     .expect("seed target accepted");
+            }
+            WaitingFor::EffectZoneChoice {
+                effect_kind: crate::types::ability::EffectKind::ChangeZone,
+                zone: Zone::Graveyard,
+                destination: Some(Zone::Exile),
+                count: 1,
+                cards,
+                ..
+            } => {
+                let bears = cards
+                    .into_iter()
+                    .find(|id| runner.state().objects[id].name == "Grizzly Bears")
+                    .expect("seed choice offers a Grizzly Bears");
+                runner
+                    .act(GameAction::SelectCards { cards: vec![bears] })
+                    .expect("untargeted seed exile accepted");
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
@@ -41262,7 +41285,41 @@ mod alt_cost_reduction_509 {
             "the emerge-cast spell must be on the stack"
         );
 
-        // Resolve the spell (Adipose enters) and its ETB trigger.
+        let paid = runner.state().objects[&adipose]
+            .cast_cost_paid_object
+            .as_ref()
+            .expect("paid stack spell retains the emerge sacrifice capture");
+        assert_eq!(paid.object_id, sacrifice);
+        assert_eq!(paid.lki.toughness, Some(3));
+        runner.pass_both_players();
+        assert_eq!(
+            runner.state().objects[&adipose].zone,
+            Zone::Battlefield,
+            "the first resolution enters the emerged permanent before its ETB resolves"
+        );
+        let entered = runner.state().objects[&adipose]
+            .cast_cost_paid_object
+            .as_ref()
+            .expect("entry retains its own cast-cost capture");
+        assert_eq!(entered.object_id, sacrifice);
+        assert_eq!(entered.lki.toughness, Some(3));
+        let etb = runner
+            .state()
+            .stack
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                StackEntryKind::TriggeredAbility { ability, .. } if entry.source_id == adipose => {
+                    Some(ability)
+                }
+                _ => None,
+            })
+            .expect("the entered permanent publishes its actual ETB trigger");
+        let captured = etb
+            .cost_paid_object
+            .as_ref()
+            .expect("the triggered token reader retains the sacrifice capture");
+        assert_eq!(captured.object_id, sacrifice);
+        assert_eq!(captured.lki.toughness, Some(3));
         runner.advance_until_stack_empty();
 
         assert_eq!(

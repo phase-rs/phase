@@ -7985,7 +7985,7 @@ mod revealed_result_codec_tests {
         ] {
             assert!(serde_json::from_value::<InstructionResult>(bad).is_err());
         }
-        let ordinary = serde_json::json!({"object_id": 1, "destination": "Battlefield", "cause": {"Effect": {"source": 9}}, "expected_origin": null});
+        let ordinary = serde_json::json!({"object_id": 1, "destination": "Battlefield", "cause": {"type": "effect", "source": 9}, "expected_origin": null});
         let request: PendingBatchZoneMoveRequest =
             serde_json::from_value(ordinary.clone()).unwrap();
         assert_eq!(request.expected_origin, None);
@@ -17172,6 +17172,83 @@ fn normalize_adventure_permissions(state: &mut GameState) -> Result<(), String> 
                         removal_count = 0;
                     }
                     _ => {}
+                }
+            }
+            // The ordinary zone mover deliberately journals neither Stack nor
+            // Command container transitions. Its exact departure ledger still
+            // records this move; join it only to the one retained Adventure
+            // removal in this uninterrupted owner window (CR 715.3d + CR 400.7).
+            if origin.is_none() && removal_count == 1 {
+                if let Some((index, record)) = state
+                    .zone_changes_this_turn
+                    .iter()
+                    .enumerate()
+                    .rfind(|(_, record)| record.object_id == object.id)
+                {
+                    if record.from_zone == Some(Zone::Stack)
+                        && record.to_zone == Zone::Exile
+                        && record.recorded_turn_number == state.turn_number
+                        && record.turn_zone_change_index == index
+                    {
+                        if let Some(context) = record.trigger_source_context().filter(|context| {
+                            context.identity.expected_zone == Zone::Stack
+                                && context.identity.reference.object_id == object.id
+                                && context.identity.reference.incarnation.checked_add(1)
+                                    == Some(object.incarnation)
+                                && context.identity.reference.incarnation
+                                    != crate::types::identifiers::LEGACY_INCARNATION
+                                && context.lki.owner == record.owner
+                                && context.lki.controller == record.controller
+                        }) {
+                            if state.departed_stack_spells.get(&object.id).is_some_and(
+                                |departures| {
+                                    departures.contains_key(&context.identity.reference.incarnation)
+                                },
+                            ) {
+                                return Err(invalid(
+                                    "contradicts an exact nonresolving stack departure",
+                                ));
+                            }
+                            let program = removed.filter(|owner| {
+                                let StackEntryKind::Spell {
+                                    card_id,
+                                    casting_variant: CastingVariant::Adventure,
+                                    ability,
+                                    ..
+                                } = &owner.kind
+                                else {
+                                    return false;
+                                };
+                                let original = context.identity.reference.incarnation;
+                                let exact_program = ability.as_deref().is_some_and(|ability| {
+                                    ability.source_incarnation == Some(original)
+                                });
+                                let unique_departure = state
+                                    .zone_changes_this_turn
+                                    .iter()
+                                    .filter(|departure| {
+                                        departure.object_id == object.id
+                                            && departure.from_zone == Some(Zone::Stack)
+                                            && departure.to_zone != Zone::Stack
+                                    })
+                                    .take(2)
+                                    .count()
+                                    == 1;
+                                owner.source_id == object.id
+                                    && *card_id == context.card_id
+                                    && ability.as_deref().is_none_or(|ability| {
+                                        ability.source_id == object.id
+                                            && ability
+                                                .source_incarnation
+                                                .is_none_or(|birth| birth == original)
+                                    })
+                                    && (exact_program || unique_departure)
+                            });
+                            if program.is_some() {
+                                origin = Some(Some(context.lki.controller));
+                            }
+                        }
+                    }
                 }
             }
             let missing = granted_to.is_none() || exile_incarnation.is_none();
@@ -30086,7 +30163,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
     // actual source-producing continuation owns the reconstructed captures.
     if value.pointer("/waiting_for/type").and_then(Value::as_str) == Some("DamageSourceChoice") {
         if let Some(old_options) = value
-            .pointer("/waiting_for/options")
+            .pointer("/waiting_for/data/options")
             .and_then(Value::as_array)
             .filter(|options| !options.is_empty() && options.iter().all(Value::is_u64))
             .cloned()
@@ -30127,7 +30204,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     })
                 });
             if !producer
-                || owner.pointer("/chain/controller") != value.pointer("/waiting_for/player")
+                || owner.pointer("/chain/controller") != value.pointer("/waiting_for/data/player")
             {
                 return Err(
                     "legacy damage source prompt has incoherent source producer or controller"
@@ -30229,7 +30306,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     "damage_source_candidates".into(),
                     serde_json::to_value(candidates).map_err(|error| error.to_string())?,
                 );
-            *value.pointer_mut("/waiting_for/options").unwrap() =
+            *value.pointer_mut("/waiting_for/data/options").unwrap() =
                 serde_json::to_value(options).map_err(|error| error.to_string())?;
         }
     }
@@ -30423,6 +30500,60 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             }
             agreeing.push(capture);
         }
+        // Targetless coin bodies also retain their complete inherited input
+        // custody. These are THIS active flip's canonical outcome bodies, not
+        // an unordered search through other saved resolutions or registered work.
+        if flip && agreeing.is_empty() {
+            let mut raw_owner = value.pointer(&owner_path).cloned().unwrap();
+            let retained: Vec<Option<ChosenDamageSource>> = raw_owner
+                .pointer("/branch_context/coin_branch_target_abilities")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|entry| {
+                    serde_json::from_value(
+                        entry
+                            .pointer("/1/context/damage_source_choice")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    )
+                    .map_err(|_| {
+                        "last_chosen_damage_source: incoherent owned coin custody".to_string()
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            if let Some(choice) = retained.iter().find_map(Option::as_ref) {
+                if retained.iter().any(|other| other.as_ref() != Some(choice))
+                    || choice.source.as_ref().is_none_or(|source| {
+                        source.identity.reference.object_id.0 != id
+                            || source.identity.reference.incarnation
+                                == crate::types::identifiers::LEGACY_INCARNATION
+                    })
+                {
+                    return Err("last_chosen_damage_source: conflicting owned coin custody".into());
+                }
+                raw_owner["branch_context"]["damage_source_choice"] =
+                    serde_json::to_value(choice).map_err(|error| error.to_string())?;
+                crate::types::ability::normalize_legacy_damage_source_program(&mut raw_owner);
+                let owner: crate::types::resolution::PendingCoinFlip =
+                    serde_json::from_value(raw_owner).map_err(|error| error.to_string())?;
+                if owner
+                    .branch_context
+                    .coin_branch_target_abilities
+                    .iter()
+                    .any(|(_, child)| {
+                        child.source_id != owner.source_id || child.controller != owner.controller
+                    })
+                {
+                    return Err("last_chosen_damage_source: foreign owned coin custody".into());
+                }
+                owner.branch_context.validate_branches(&[
+                    owner.win_effect.as_deref(),
+                    owner.lose_effect.as_deref(),
+                ])?;
+                agreeing.extend(choice.source.iter().cloned());
+            }
+        }
         // A complete current-turn ledger with no transition of this selected
         // id proves one birth throughout this active choice's interval. This
         // recovery is reached only AFTER the historical scalar establishes
@@ -30450,7 +30581,9 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     if let Ok(object) =
                         serde_json::from_value::<crate::game::game_object::GameObject>(raw.clone())
                     {
-                        if object.incarnation != crate::types::identifiers::LEGACY_INCARNATION {
+                        if object.id.0 == id
+                            && object.incarnation != crate::types::identifiers::LEGACY_INCARNATION
+                        {
                             agreeing.extend(
                                 object
                                     .snapshot_for_zone_change(
@@ -30746,19 +30879,17 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn validate_damage_source_authority(state: &GameState) -> Result<(), String> {
-    if state.viewer_projection.is_some() {
-        return Ok(());
-    }
+/// The same private prompt authority is used by whole-state and stack admission.
+pub(crate) fn validate_damage_source_continuation(
+    owner: &PendingContinuation,
+    waiting_for: &WaitingFor,
+) -> Result<(), String> {
     if let WaitingFor::DamageSourceChoice {
         player,
         options,
         source_filter,
-    } = &state.waiting_for
+    } = waiting_for
     {
-        let owner = state
-            .active_ability_continuation()
-            .ok_or_else(|| "damage source prompt has no owning continuation".to_string())?;
         let expected: Vec<_> = owner
             .damage_source_candidates
             .iter()
@@ -30804,6 +30935,19 @@ pub(crate) fn validate_damage_source_authority(state: &GameState) -> Result<(), 
             return Err("damage source prompt has incoherent exact candidate identities".into());
         }
     }
+    Ok(())
+}
+
+pub(crate) fn validate_damage_source_authority(state: &GameState) -> Result<(), String> {
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    if matches!(state.waiting_for, WaitingFor::DamageSourceChoice { .. }) {
+        let owner = state
+            .active_ability_continuation()
+            .ok_or_else(|| "damage source prompt has no owning continuation".to_string())?;
+        validate_damage_source_continuation(owner, &state.waiting_for)?;
+    }
     if let Some(batch) = &state.pending_combat_lifelink {
         if let Some(work) = &batch.replacement_work {
             let settled = work.survivors.len() + work.remaining.len();
@@ -30818,8 +30962,10 @@ pub(crate) fn validate_damage_source_authority(state: &GameState) -> Result<(), 
                         is_combat: true,
                         ..
                     }
-                ) || work.opportunity != pending.damage_opportunity
-                {
+                ) || !crate::game::replacement::same_damage_opportunity_work(
+                    &work.opportunity,
+                    &pending.damage_opportunity,
+                ) {
                     return Err("combat replacement work and paused damage are incoherent".into());
                 }
             } else if work.entries.len() != settled
@@ -44652,6 +44798,27 @@ mod tests {
         let birth = state.objects[&spell].incarnation;
         assert_eq!(original.incarnation.checked_add(1), Some(birth));
         assert_eq!(events.len(), 1);
+        assert!(
+            !state
+                .resolved_rules_journal
+                .entries()
+                .iter()
+                .any(|entry| matches!(
+                    entry.command.as_ref(),
+                    Some(ResolvedRulesCommand::ZoneChange(_))
+                )),
+            "the production Stack transition is represented in its departure ledger"
+        );
+        let departure = state.zone_changes_this_turn.last().unwrap();
+        assert_eq!(
+            departure
+                .trigger_source_context()
+                .unwrap()
+                .identity
+                .reference,
+            original
+        );
+        assert_eq!(departure.controller, PlayerId(0));
         for (granted_to, exile_incarnation) in
             [(None, None), (Some(PlayerId(0)), None), (None, Some(birth))]
         {
@@ -44780,6 +44947,29 @@ mod tests {
             assert_eq!(serde_json::to_value(&bad).unwrap(), before);
             assert!(serde_json::from_value::<GameState>(before).is_err());
         }
+        let mut wrong_owner = serde_json::to_value(&legacy).unwrap();
+        let mut changed_owner = false;
+        for entry in wrong_owner["resolved_rules_journal"]["entries"]
+            .as_array_mut()
+            .unwrap()
+        {
+            if let Some(variant) =
+                entry.pointer_mut("/command/StackRemoval/entry/kind/data/casting_variant")
+            {
+                *variant = serde_json::to_value(CastingVariant::Normal).unwrap();
+                changed_owner = true;
+            }
+        }
+        assert!(
+            changed_owner,
+            "the exact historical Adventure owner is present"
+        );
+        let original_bytes = serde_json::to_vec(&wrong_owner).unwrap();
+        assert!(
+            serde_json::from_value::<GameState>(wrong_owner.clone()).is_err(),
+            "an ordinary spell removal cannot authorize this Adventure grant"
+        );
+        assert_eq!(serde_json::to_vec(&wrong_owner).unwrap(), original_bytes);
         // Completing an earlier normalization cannot partially mutate another
         // missing grant before a contradictory current payload is refused.
         legacy
@@ -44979,6 +45169,16 @@ mod tests {
         );
         let mut events = Vec::new();
         park_warp_delivery_fixture(&mut state, paused.clone());
+        paused.owner_group = Some(
+            state
+                .active_change_zone_frame()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .logical_zone_change_group
+                .logical_group_id,
+        );
         crate::game::zones::move_to_zone(
             &mut state,
             paused.member.object_id,
@@ -56499,7 +56699,9 @@ mod tests {
         use crate::game::scenario::{GameRunner, GameScenario, P0};
         use crate::types::actions::GameAction;
         use crate::types::resolution::ResolutionFrame;
-        let mut scenario = GameScenario::new();
+        let mut scenario =
+            GameScenario::new_with_format(crate::types::format::FormatConfig::commander(), 2, 42);
+        scenario.with_life(P0, 20);
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
         let first = scenario.add_creature(P0, "Delivered prefix", 2, 2).id();
         let last = scenario.add_creature(P0, "Commander tail", 3, 3).id();
@@ -61250,6 +61452,18 @@ mod restored_exact_attack_authority_tests {
         let mut node = leaf.clone();
         node.effect = Effect::NoOp;
         node.sub_ability = Some(leaf);
+        let mut mana_node = node.clone();
+        mana_node.effect = Effect::Mana {
+            produced: crate::types::ability::ManaProduction::AnyOneColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                color_options: vec![ManaColor::Red, ManaColor::Blue],
+                contribution: crate::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        };
         let mana_pending = |resume: ManaAbilityResume| PendingManaAbility {
             player: P0,
             source_id: attacker,
@@ -61447,8 +61661,10 @@ mod restored_exact_attack_authority_tests {
                 9 => WaitingFor::ChooseManaColor {
                     return_result_occurrence: None,
                     player: P0,
-                    choice: ManaChoicePrompt::SingleColor { options: vec![] },
-                    context: ManaChoiceContext::ResolvingEffect(node.clone()),
+                    choice: ManaChoicePrompt::SingleColor {
+                        options: vec![ManaColor::Red, ManaColor::Blue],
+                    },
+                    context: ManaChoiceContext::ResolvingEffect(mana_node.clone()),
                 },
                 // A triggered-mana fixed point whose outer root holds the rider.
                 10 => {
@@ -61538,8 +61754,10 @@ mod restored_exact_attack_authority_tests {
                         outer_resume: ManaTriggerFixedPointResume::ColorChoice(Box::new(
                             ManaColorChoiceResume {
                                 player: P0,
-                                choice: ManaChoicePrompt::SingleColor { options: vec![] },
-                                context: ManaChoiceContext::ResolvingEffect(node.clone()),
+                                choice: ManaChoicePrompt::SingleColor {
+                                    options: vec![ManaColor::Red, ManaColor::Blue],
+                                },
+                                context: ManaChoiceContext::ResolvingEffect(mana_node.clone()),
                             },
                         )),
                         stage: TriggeredManaStage::ChoosingModes,
@@ -62895,7 +63113,7 @@ mod damage_source_canonical_admission_tests {
             }
         }
         if let WaitingFor::DamageSourceChoice { options, .. } = &state.waiting_for {
-            value["waiting_for"]["options"] = serde_json::to_value(
+            value["waiting_for"]["data"]["options"] = serde_json::to_value(
                 options
                     .iter()
                     // BASE's scalar writer offered only its live domain,
@@ -63002,7 +63220,7 @@ mod damage_source_canonical_admission_tests {
                     }
                     assert_eq!(legacy.get("pending_continuation").is_some(), v1);
                     assert_eq!(
-                        legacy["waiting_for"]["options"]
+                        legacy["waiting_for"]["data"]["options"]
                             .as_array()
                             .unwrap()
                             .iter()
@@ -63011,7 +63229,7 @@ mod damage_source_canonical_admission_tests {
                         1,
                         "the historical live-only writer offered this id exactly once"
                     );
-                    assert!(legacy["waiting_for"]["options"]
+                    assert!(legacy["waiting_for"]["data"]["options"]
                         .as_array()
                         .unwrap()
                         .iter()
@@ -63125,7 +63343,7 @@ mod damage_source_canonical_admission_tests {
                 serde_json::to_value(runner.state()).unwrap()
             };
             let mut scalar = current.clone();
-            scalar["waiting_for"]["options"] = serde_json::to_value(
+            scalar["waiting_for"]["data"]["options"] = serde_json::to_value(
                 options
                     .iter()
                     .map(|option| option.identity.reference.object_id)
@@ -63133,12 +63351,12 @@ mod damage_source_canonical_admission_tests {
             )
             .unwrap();
             let mut missing_options = scalar.clone();
-            missing_options["waiting_for"]["options"]
+            missing_options["waiting_for"]["data"]["options"]
                 .as_array_mut()
                 .unwrap()
                 .retain(|id| id.as_u64() != Some(source.0));
             assert!(
-                !missing_options["waiting_for"]["options"]
+                !missing_options["waiting_for"]["data"]["options"]
                     .as_array()
                     .unwrap()
                     .is_empty(),

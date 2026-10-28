@@ -2119,6 +2119,9 @@ pub(crate) fn find_refused_loyalty_grant_sentence(static_line: &str) -> Option<S
 pub(crate) fn parse_complete_continuous_modifications(
     text: &str,
 ) -> Option<Vec<ContinuousModification>> {
+    if complete_predicate_is_keyword_choice(text) {
+        return None;
+    }
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     if let Some((_, _)) = super::split_type_retention_clause(&lower) {
@@ -2198,6 +2201,9 @@ impl ContinuousConditionSeparator {
 pub(crate) fn parse_complete_continuous_members(
     text: &str,
 ) -> Option<Vec<CompleteContinuousMember>> {
+    if complete_predicate_is_keyword_choice(text) {
+        return None;
+    }
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let (predicate, where_x, remaining) = complete_static_where_x(tp)?;
@@ -2207,6 +2213,24 @@ pub(crate) fn parse_complete_continuous_members(
         members.extend(complete_continuous_members(remaining, where_x, verb)?.0);
     }
     Some(members)
+}
+
+/// A resolving keyword menu has its own choice owner. It cannot become a
+/// conjunction of unconditional modifications, and retrying each list separator
+/// cannot change that grammatical role.
+fn complete_predicate_is_keyword_choice(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    (
+        alt((
+            tag::<_, _, OracleError<'_>>("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+        )),
+        tag("your choice of "),
+    )
+        .parse(lower.trim())
+        .is_ok()
 }
 
 fn complete_continuous_members(
@@ -2790,6 +2814,13 @@ fn complete_modification_clause(
                 ));
             }
             if let Some(quantity_text) = nom_tag_lower(rest, &rest.to_lowercase(), " for each ") {
+                if let Ok((tail, QuantityRef::CountersOn { .. })) =
+                    super::oracle_nom::quantity::parse_for_each_clause_ref(quantity_text)
+                {
+                    if !tail.trim().is_empty() {
+                        return None;
+                    }
+                }
                 if let Some(quantity) =
                     super::oracle_quantity::parse_for_each_clause_expr_deferred(quantity_text)
                 {

@@ -452,6 +452,26 @@ pub(crate) fn try_parse_thats_a_subtype_list(input: &str) -> Option<(TargetFilte
 /// benign Continuous lines ("gets +1/+1 and has trample and lifelink") are
 /// already merged into one def by `parse_continuous_modifications` and must NOT
 /// be split.
+fn continuous_companion_start(predicate: &str) -> Option<usize> {
+    let lower = predicate.to_lowercase();
+    TextPair::new(predicate, &lower).scan_around_outside_quotes(
+        |input| alt((tag(", and "), tag(" and "), tag(", "))).parse(input),
+        |_, _, tail| {
+            alt((
+                tag::<_, _, OracleError<'_>>("gets "),
+                tag("get "),
+                tag("has "),
+                tag("have "),
+                tag("gains "),
+                tag("gain "),
+            ))
+            .parse(tail.lower)
+            .ok()?;
+            Some(predicate.len() - tail.original.len())
+        },
+    )
+}
+
 pub(crate) fn with_keyword_companion(
     primary: StaticDefinition,
     predicate: &str,
@@ -462,10 +482,8 @@ pub(crate) fn with_keyword_companion(
     if matches!(primary.mode, StaticMode::Continuous) {
         return vec![primary];
     }
-    let companion_mods = if let Some(keyword_text) = extract_keyword_clause(predicate) {
-        match super::keyword_grant::parse_complete_continuous_modifications(&format!(
-            "has {keyword_text}"
-        )) {
+    let companion_mods = if let Some(start) = continuous_companion_start(predicate) {
+        match super::keyword_grant::parse_complete_continuous_modifications(&predicate[start..]) {
             Some(modifications) => modifications,
             None => return vec![continuous_predicate_residual(affected.clone(), description)],
         }
@@ -818,7 +836,9 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // ("can't attack, block, or transform" — Bound by Moonsilver class). Must
     // precede continuous-grant parsing, which would otherwise return an empty vec
     // and let the line fall through to a SelfRef combat lock on the Aura source.
-    if let Some(modes) = parse_restriction_modes(pred_lower.trim().trim_end_matches('.')) {
+    if let Some(modes) = parse_restriction_modes(pred_lower.trim().trim_end_matches('.'))
+        .filter(|_| continuous_companion_start(predicate).is_none())
+    {
         return modes
             .into_iter()
             .map(|mode| {

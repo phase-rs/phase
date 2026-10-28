@@ -17701,10 +17701,7 @@ fn validate_result_process_node(
     let mut error = None;
     let mut read = |id: ReturnResultId, required_zones: Option<(Option<Zone>, Option<Zone>)>| {
         let result = if let Some(producer) = seen.get(&id) {
-            if !local.contains_key(&id)
-                && !local.is_empty()
-                && entry != InstructionResultEntry::ResumeOwned
-            {
+            if !local.contains_key(&id) && !local.is_empty() {
                 Err(EffectError::InvalidParam(format!(
                     "mixed local/imported instruction-result scope: local {:?}, imported {id:?}",
                     local.keys().collect::<Vec<_>>()
@@ -17724,7 +17721,7 @@ fn validate_result_process_node(
             Err(EffectError::InvalidParam(format!(
                 "instruction-result read precedes producer {id:?}"
             )))
-        } else if !local.is_empty() && entry != InstructionResultEntry::ResumeOwned {
+        } else if !local.is_empty() {
             Err(EffectError::InvalidParam(format!(
                 "mixed local/imported instruction-result scope: local {:?}, imported {id:?}",
                 local.keys().collect::<Vec<_>>()
@@ -59534,14 +59531,14 @@ mod departure_raw_runtime_replacement_tests {
         token.clear_embedded_return_result_processes();
         assert_redacted(&original, &serde_json::to_value(&token).unwrap());
         for value in [
-            serde_json::json!({"type":"CastWithAlternativeCost","cost":cost}),
-            serde_json::json!({"type":"AlternativeKeywordCost","keyword":"Cycling","cost":cost}),
-            serde_json::json!({"type":"TopOfLibraryCastPermission","play_mode":"Cast","alt_cost":cost}),
-            serde_json::json!({"type":"GraveyardCastPermission","frequency":"Unlimited","play_mode":"Cast","extra_cost":{"mode":"Additional","cost":cost}}),
-            serde_json::json!({"type":"ExileCastPermission","frequency":"Unlimited","play_mode":"Cast","extra_cost":{"mode":"Additional","cost":cost}}),
-            serde_json::json!({"type":"ImposeAdditionalCost","cost":cost,"spell_filter":null,"action":"Cast"}),
-            serde_json::json!({"type":"CastWithKeyword","keyword":keyword_value}),
-            serde_json::json!({"type":"CantHaveKeyword","keyword":keyword_value}),
+            serde_json::json!({"CastWithAlternativeCost":{"cost":cost}}),
+            serde_json::json!({"AlternativeKeywordCost":{"keyword":"Cycling","cost":cost}}),
+            serde_json::json!({"TopOfLibraryCastPermission":{"play_mode":"Cast","alt_cost":cost}}),
+            serde_json::json!({"GraveyardCastPermission":{"frequency":"Unlimited","play_mode":"Cast","extra_cost":{"mode":"Additional","cost":cost}}}),
+            serde_json::json!({"ExileCastPermission":{"frequency":"Unlimited","play_mode":"Cast","extra_cost":{"mode":"Additional","cost":cost}}}),
+            serde_json::json!({"ImposeAdditionalCost":{"cost":cost,"spell_filter":null,"action":"Cast"}}),
+            serde_json::json!({"CastWithKeyword":{"keyword":keyword_value}}),
+            serde_json::json!({"CantHaveKeyword":{"keyword":keyword_value}}),
         ] {
             let mut mode: StaticMode = serde_json::from_value(value).unwrap();
             let original = serde_json::to_value(&mode).unwrap();

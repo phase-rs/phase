@@ -13674,7 +13674,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }
@@ -13693,7 +13693,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }
@@ -13812,7 +13812,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13840,7 +13840,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13874,7 +13874,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13929,7 +13929,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,

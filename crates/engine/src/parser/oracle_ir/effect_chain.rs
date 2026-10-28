@@ -1917,37 +1917,43 @@ impl ClauseIrBuilder {
         // preceding producer coexist. Never rediscover it in the lowered tree.
         let expression = self.clauses[index].where_x_expression.clone();
         if let Some(expression) = expression {
+            let previous =
+                crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(&expression);
+            let mut reads_variable = false;
+            self.clauses[index].for_each_quantity_ref(&mut |reference| {
+                reads_variable |= matches!(reference, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X"))
+                    || previous.as_ref().is_some_and(|value| matches!(value, QuantityExpr::Ref { qty } if qty == reference));
+            });
             let lower = expression.to_lowercase();
-            if let Ok(("", (filter, function, property))) =
-                crate::parser::oracle_nom::quantity::parse_exiled_card_aggregate(&lower)
-            {
-                if let Some((producer, Zone::Graveyard, Zone::Exile)) =
-                    self.zone_result_antecedent_before(index)
+            if reads_variable {
+                if let Ok(("", (filter, function, property))) =
+                    crate::parser::oracle_nom::quantity::parse_exiled_card_aggregate(&lower)
                 {
-                    let bound = QuantityRef::ZoneChangeAggregate {
-                        source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
-                            result: crate::types::ability::ReturnResultId(producer.0),
-                        },
-                        from: Some(Zone::Graveyard),
-                        to: Some(Zone::Exile),
-                        filter,
-                        function,
-                        property,
-                    };
-                    let previous =
-                        crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(
-                            &expression,
-                        );
-                    self.clauses[index].for_each_quantity_ref_mut(&mut |reference| {
+                    if let Some((producer, Zone::Graveyard, Zone::Exile)) =
+                        self.zone_result_antecedent_before(index)
+                    {
+                        let bound = QuantityRef::ZoneChangeAggregate {
+                            source:
+                                crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                                    result: crate::types::ability::ReturnResultId(producer.0),
+                                },
+                            from: Some(Zone::Graveyard),
+                            to: Some(Zone::Exile),
+                            filter,
+                            function,
+                            property,
+                        };
+                        self.clauses[index].for_each_quantity_ref_mut(&mut |reference| {
                         if matches!(reference, QuantityRef::Variable { name } if name.eq_ignore_ascii_case("X"))
                             || previous.as_ref().is_some_and(|value| matches!(value, QuantityExpr::Ref { qty } if qty == reference))
                         {
                             *reference = bound.clone();
                         }
                     });
-                    self.clauses[index].where_x_expression = None;
-                } else {
-                    self.clauses[index].replace_with_gap("departure_result_antecedent");
+                        self.clauses[index].where_x_expression = None;
+                    } else {
+                        self.clauses[index].replace_with_gap("departure_result_antecedent");
+                    }
                 }
             }
         }

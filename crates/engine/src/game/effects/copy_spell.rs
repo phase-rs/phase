@@ -4144,6 +4144,8 @@ mod tests {
             .objects
             .insert(iteration_member, iteration_member_object);
 
+        state.battlefield.push_back(original_target);
+        state.battlefield.push_back(iteration_member);
         let mut original_spell = ResolvedAbility::new(
             Effect::Destroy {
                 target: TargetFilter::Typed(crate::types::ability::TypedFilter {

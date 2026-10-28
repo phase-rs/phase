@@ -177,6 +177,26 @@ where
 mod outer_domain_quantity_tests {
     use super::*;
 
+    #[test]
+    fn historical_generic_card_noun_is_not_an_empty_failed_noun() {
+        let (_, descriptor) = parse_historical_zone_aggregate(
+            "the total mana value of cards you controlled that were exiled this way",
+        )
+        .expect("Card is a genuine historical population noun");
+        assert_eq!(descriptor.filter, TargetFilter::Typed(TypedFilter::card()));
+        assert_eq!(descriptor.from, Zone::Battlefield);
+        assert_eq!(descriptor.to, Zone::Exile);
+        assert_eq!(descriptor.function, AggregateFunction::Sum);
+        assert_eq!(descriptor.property, ObjectProperty::ManaValue);
+        assert_eq!(descriptor.controller.tense, ControllerTense::Past);
+        for phrase in [
+            "the total mana value of you controlled that were exiled this way",
+            "the total mana value of nonsuchnoun you controlled that were exiled this way",
+        ] {
+            assert!(parse_historical_zone_aggregate(phrase).is_err(), "{phrase}");
+        }
+    }
+
     fn hand_boundary(input: &str) -> OracleResult<'_, &str> {
         tag("from your hand").parse(input)
     }
@@ -2332,7 +2352,10 @@ pub(crate) fn parse_historical_zone_aggregate(
     let (rest, _) = tag(" that were ").parse(rest)?;
     let (rest, to) = value(Zone::Exile, tag("exiled this way")).parse(rest)?;
     let (filter, remaining) = parse_type_phrase_folding(noun.trim());
-    if !remaining.trim().is_empty() || matches!(filter, TargetFilter::Any | TargetFilter::None) {
+    if !remaining.trim().is_empty()
+        || matches!(filter, TargetFilter::Any | TargetFilter::None)
+        || crate::parser::oracle_quantity::is_empty_typed_filter(&filter)
+    {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Verify,
@@ -6803,13 +6826,13 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
         // Gagglemaster, Aerial Assault, Alert Heedbonder, Overgrown Battlement).
         parse_for_each_controlled_type_with_keyword,
         parse_for_each_object_spell_could_target,
-        parse_for_each_controlled_type,
         // CR 201.2: "for each [other] <type> named <CardName> you control"
         // (Seven Dwarves). The `named X` qualifier sits between the type word
         // and " you control", so the bare-type `parse_for_each_controlled_type`
-        // arm above cannot reach the controller suffix. Tried last so it only
-        // catches the qualified case the bare-type arm rejects.
+        // arm cannot reach the controller suffix. Keep the complete noun owner
+        // ahead of the bare prefix, including any post-controller relative clause.
         parse_qualified_controlled_type,
+        parse_for_each_controlled_type,
     )))
     .parse(input)
 }

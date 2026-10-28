@@ -5435,7 +5435,29 @@ impl ResolutionStack {
                     });
                 }
             }
-            if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
+            let owns_damage_source_prompt =
+                if let ResolutionFrame::AbilityContinuation(frame) = frame {
+                    if matches!(waiting_for, WaitingFor::DamageSourceChoice { .. })
+                        && !frame.pending.damage_source_candidates.is_empty()
+                    {
+                        crate::types::game_state::validate_damage_source_continuation(
+                            &frame.pending,
+                            waiting_for,
+                        )
+                        .map_err(|message| {
+                            ResolutionStackError::InvalidPayload {
+                                frame: FrameKind::AbilityContinuation,
+                                message,
+                            }
+                        })?;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+            if matches!(frame.gate(), FrameGate::DirectChoice(_)) || owns_damage_source_prompt {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
                     buried_direct_choice = Some(frame.kind());
@@ -5554,7 +5576,12 @@ impl ResolutionStack {
                 let paired_child_is_reachable = match self.frames.frame_at_offset(index + 2) {
                     None => true,
                     Some(above) => {
-                        matches!(above.gate(), FrameGate::DirectChoice(_))
+                        (matches!(above.gate(), FrameGate::DirectChoice(_))
+                            || matches!(above, ResolutionFrame::AbilityContinuation(owner)
+                                if matches!(waiting_for, WaitingFor::DamageSourceChoice { .. })
+                                    && !owner.pending.damage_source_candidates.is_empty()
+                                    && crate::types::game_state::validate_damage_source_continuation(
+                                        &owner.pending, waiting_for).is_ok()))
                             && index + 3 == self.frames.len()
                     }
                 };

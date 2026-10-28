@@ -31763,6 +31763,29 @@ its replicate cost was paid.)\nDraw a card.";
             } if choices == &vec![white, second_white]
         ));
 
+        assert!(
+            !state
+                .pending_cast
+                .as_ref()
+                .unwrap()
+                .ability
+                .context
+                .additional_cost_paid,
+            "the obsolete ambient preview deliberately remains unpaid"
+        );
+        let WaitingFor::PayCost { resume, .. } = &waiting else {
+            unreachable!()
+        };
+        let announced = match resume {
+            CostResume::Spell { spell } | CostResume::SpellCost { spell, .. } => spell,
+            other => panic!("March owns a spell payment: {other:?}"),
+        };
+        assert_eq!(announced.object_id, march);
+        assert!(
+            announced.ability.context.additional_cost_paid,
+            "the actual selected payment owns the accepted additional cost"
+        );
+
         state.waiting_for = waiting;
         let candidates = candidate_actions(&state);
         assert!(candidates.iter().any(|candidate| matches!(

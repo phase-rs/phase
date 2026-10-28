@@ -5941,6 +5941,9 @@ mod tests {
             PlayerId(0),
         );
         resolve(&mut state, &named, &mut events).unwrap();
+        assert_eq!(state.last_created_token_ids.len(), 1,
+            "a named defender miss still completes one token: wait={:?}, frames={:?}, events={events:?}",
+            state.waiting_for, state.resolution_stack);
         let named_token = state.last_created_token_ids[0];
 
         let twin = ResolvedAbility::new(

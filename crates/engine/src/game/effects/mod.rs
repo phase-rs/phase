@@ -22253,6 +22253,9 @@ fn resolve_ability_chain_with_root_result(
         return Err(EffectError::ChainTooDeep);
     }
 
+    // Authenticate the selected reader before the top-level prelude mutates
+    // resolution-local values; a refused reader leaves the game intact.
+    validate_addressed_quantity_reads(state, ability)?;
     // Clear stale revealed IDs at the top-level chain entry to prevent leaking
     // across unrelated ability resolutions.
     if depth == 0 {
@@ -26715,9 +26718,7 @@ fn resolve_chain_body(
                     &state.waiting_for,
                 );
             if (matches!(ability.effect, Effect::RollDie { .. })
-                || ability.declares_return_result.is_some_and(|result_id| {
-                    crate::types::game_state::reads_return_result_id(&sub_clone, result_id)
-                })
+                || ability.declares_return_result.is_some()
                 || is_named_revealed_reader(ability)
                 || state
                     .resolution_stack
@@ -26726,7 +26727,8 @@ fn resolve_chain_body(
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
                 // so insert it outside the whole child stack, at the boundary captured
-                // before resolving the producer. A named-result reader needs this because
+                // before resolving the producer. Every tail of a named producer waits,
+                // including independent instructions before a later named reader:
                 // a replacement post-effect may have parked a continuation beneath the
                 // producer's batch frame; a copy-token producer parks its own batch owner
                 // at that boundary.

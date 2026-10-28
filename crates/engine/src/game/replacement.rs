@@ -3188,7 +3188,7 @@ fn damage_done_applier_with_definition(
                 target: target.clone(),
                 amount: dmg,
             });
-            let accumulated_in_batch = if !reflects_per_event {
+            let accumulated_in_batch = if aggregate_rider {
                 if let Some(tally) = state.combat_prevention_tally.as_mut() {
                     *tally.entry(applied_key).or_insert(0) += dmg as i32;
                     true
@@ -26238,26 +26238,30 @@ mod tests {
                 state.objects.remove(&source);
                 state.battlefield.retain(|id| *id != source);
             }
-            assert!(matches!(
-                crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    &mut state,
-                    None,
-                    None,
-                    Some(ReplacementEvent::CreateToken),
-                    &mut events,
-                ),
-                Some(WaitingFor::ChooseOneOfBranch { .. })
-            ));
-            let pending = state
-                .resolution_stack
-                .active_choose_one_of()
-                .expect("real branch owner");
+            let prompt = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                &mut state,
+                None,
+                None,
+                Some(ReplacementEvent::CreateToken),
+                &mut events,
+            )
+            .expect("actual substitute opens its branch prompt");
+            let WaitingFor::ChooseOneOfBranch {
+                source_id,
+                replacement_applied,
+                ..
+            } = &prompt
+            else {
+                panic!("actual substitute has a branch prompt: {prompt:?}");
+            };
             assert_eq!(
-                pending.source_id,
+                *source_id,
                 if missing_source { ObjectId(0) } else { source }
             );
-            let applied = pending.replacement_applied.clone();
-            assert!(state.has_legacy_token_substitution_authority(pending.source_id, &applied));
+            let bound_source = *source_id;
+            let applied = replacement_applied.clone();
+            state.waiting_for = prompt;
+            assert!(state.has_legacy_token_substitution_authority(bound_source, &applied));
             assert!(!state.has_legacy_token_substitution_authority(
                 if missing_source {
                     ObjectId(999)
@@ -26276,10 +26280,8 @@ mod tests {
             }
             let mut foreign = applied.clone();
             foreign.insert(AppliedReplacementKey::object(ObjectId(999), 4));
-            assert!(!state.has_legacy_token_substitution_authority(pending.source_id, &foreign));
-            assert!(
-                !state.has_legacy_token_substitution_authority(pending.source_id, &HashSet::new())
-            );
+            assert!(!state.has_legacy_token_substitution_authority(bound_source, &foreign));
+            assert!(!state.has_legacy_token_substitution_authority(bound_source, &HashSet::new()));
             state = serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
             state.pending_damage_replacements.push(
                 ReplacementDefinition::new(ReplacementEvent::CreateToken)

@@ -3225,10 +3225,27 @@ mod tests {
         )
         .unwrap();
 
-        // CR 106.7: Per-unit `first()` selection out of the type union — the
-        // union is order-dependent on object iteration, so we assert that the
-        // produced mana is one of the two valid contributing types (W or B)
-        // rather than pinning to a single iteration order.
+        let crate::types::game_state::WaitingFor::ChooseManaColor {
+            choice: crate::types::game_state::ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("the land-type union offers its public mana choice");
+        };
+        assert!(options.contains(&ManaType::White));
+        assert!(options.contains(&ManaType::Black));
+        assert_eq!(options.len(), 2);
+        let color = options[0];
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(color),
+                count: 1,
+            },
+        )
+        .expect("choose an actually offered mana type");
+
+        // CR 106.7: the selected mana must belong to the complete type union.
         assert_eq!(state.players[0].mana_pool.total(), 1);
         let white = state.players[0].mana_pool.count_color(ManaType::White);
         let black = state.players[0].mana_pool.count_color(ManaType::Black);
@@ -5365,7 +5382,7 @@ mod tests {
                     }),
                 },
             );
-            let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+            let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile", "target": TargetFilter::Typed(TypedFilter::creature())})).unwrap();
             let mut root = AbilityDefinition::new(AbilityKind::Spell, producer);
             root.declares_return_result = Some(ReturnResultId(7));
             root.sub_ability = Some(Box::new(mana));

@@ -696,7 +696,10 @@ mod tests {
             "one-shot must be consumed after its single use"
         );
 
-        // Second damage: 3 → UNMODIFIED 3 (one-shot spent). 14 → 11.
+        // Second damage: a new opportunity sees the consumed shield.
+        // Reusing `ctx` would keep the first opportunity's captured replacements.
+        let ctx = deal_damage::DamageContext::from_source(&state, source).unwrap();
+        // 3 → UNMODIFIED 3 (one-shot spent). 14 → 11.
         let mut events = Vec::new();
         let r2 = deal_damage::apply_damage_to_target(
             &mut state,

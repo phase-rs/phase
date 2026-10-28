@@ -8522,6 +8522,9 @@ fn damage_to_itself_equal_to_power_low_level() {
 
 #[test]
 fn damage_to_itself_equal_to_power_full_pipeline() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::events::GameEvent;
+    use crate::types::phase::Phase;
     // Full pipeline: subject stripping + imperative → should produce DealDamage
     let clause = parse_effect_clause(
         "~ deals damage to itself equal to its power",
@@ -8533,17 +8536,91 @@ fn damage_to_itself_equal_to_power_full_pipeline() {
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
                     qty: QuantityRef::Power {
-                        scope: crate::types::ability::ObjectScope::Target
+                        scope: crate::types::ability::ObjectScope::Source
                     },
                 },
-                target: TargetFilter::ParentTarget,
-                damage_source: Some(DamageSource::Target),
+                target: TargetFilter::SelfRef,
+                damage_source: None,
                 excess: _,
             }
         ),
-        "expected DealDamage with TargetPower/ParentTarget, got: {:?}",
+        "expected the explicit source to damage itself using its own power, got: {:?}",
         clause.effect
     );
+
+    let targeted = crate::parser::oracle::parse_oracle_text(
+        "Target creature deals damage to itself equal to its power.",
+        "Inner Struggle",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    let root = &targeted.abilities[0];
+    assert!(
+        matches!(root.effect.as_ref(), Effect::TargetOnly { target: TargetFilter::Typed(typed) } if typed.type_filters == vec![TypeFilter::Creature])
+    );
+    let damage = root
+        .sub_ability
+        .as_deref()
+        .expect("the declared creature deals the damage");
+    assert!(
+        matches!(
+            damage.effect.as_ref(),
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target
+                    }
+                },
+                target: TargetFilter::ParentTarget,
+                damage_source: Some(DamageSource::Target),
+                ..
+            }
+        ),
+        "{targeted:#?}"
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Synthetic source-self grammar witness",
+            2,
+            5,
+            "{0}: This creature deals damage to itself equal to its power.",
+        )
+        .id();
+    let other = scenario
+        .add_creature(P1, "Independent recipient", 7, 8)
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Inner Struggle",
+            true,
+            "Target creature deals damage to itself equal to its power.",
+        )
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.activate(source, 0).resolve();
+    assert_eq!(outcome.state().objects[&source].damage_marked, 2);
+    assert_eq!(outcome.state().objects[&other].damage_marked, 0);
+    assert!(outcome.events().iter().any(|event| matches!(event,
+        GameEvent::DamageDealt { source_id, target: TargetRef::Object(recipient), amount: 2, .. }
+        if *source_id == source && *recipient == source)));
+    let outcome = runner.cast(spell).target_object(other).resolve();
+    assert_eq!(outcome.state().objects[&other].damage_marked, 7);
+    assert!(outcome.events().iter().any(|event| matches!(event,
+        GameEvent::DamageDealt { source_id, target: TargetRef::Object(recipient), amount: 7, .. }
+        if *source_id == other && *recipient == other)));
+    assert!(matches!(
+        outcome.state().waiting_for,
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().resolution_stack.is_empty());
 }
 
 #[test]
@@ -86061,7 +86138,9 @@ fn every_gets_pt_or_pt_card_lowers_to_an_inverse_two_branch_choice() {
     ];
 
     for (name, oracle) in CARDS {
+        eprintln!("P/T disjunction full-face parse begins: {name}");
         let parsed = crate::parser::oracle::parse_oracle_text(oracle, name, &[], &[], &[]);
+        eprintln!("P/T disjunction full-face parse completed: {name}");
         // The clause lives in an activated ability for six of the seven and in
         // `triggers[0].execute` for Shaper Parasite; walk both homes plus the
         // one-level `sub_ability` a declared target hangs the choice from.

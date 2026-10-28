@@ -4202,6 +4202,7 @@ fn parse_hand_reveal_target_and_card_filter<'a>(
             let mut hand_ctx = ctx.clone();
             hand_ctx.chain_prior_hand_reveal_target = Some(target.clone());
             let choice_filter = super::parse_hand_choice_filter(choice, &mut hand_ctx)?;
+            ctx.pending_printed_color_choice = hand_ctx.pending_printed_color_choice;
             // CR 608.2c: this is a filter-validation probe, not a second
             // hand-choice producer. Its speculative player-group allocation
             // must not replace the enclosing reveal's declared identity.
@@ -11079,6 +11080,17 @@ pub(super) fn parse_destroy_ast<'a>(
 ) -> Option<Result<ZoneCounterImperativeAst, &'a str>> {
     let (ast, remainder, tentative) = parse_destroy_target_core(text, lower, ctx)?;
     let lower_remainder = remainder.to_lowercase();
+    let owned_distinct_controllers =
+        matches!(&ast, ZoneCounterImperativeAst::Destroy { all: false, .. })
+            && all_consuming(terminated(
+                alt((
+                    tag::<_, _, OracleError<'_>>(super::lower::CONTROLLED_BY_DIFFERENT_PLAYERS),
+                    tag(" with different controllers"),
+                )),
+                (space0, opt(tag(".")), space0),
+            ))
+            .parse(lower_remainder.as_str())
+            .is_ok();
     let owned_total_budget = super::lower::parse_total_mana_value_target_constraint(text).is_some()
         && all_consuming(terminated(
             preceded(
@@ -11092,7 +11104,7 @@ pub(super) fn parse_destroy_ast<'a>(
         ))
         .parse(lower_remainder.as_str())
         .is_ok();
-    if !terminal_punctuation_only(remainder) && !owned_total_budget {
+    if !terminal_punctuation_only(remainder) && !owned_total_budget && !owned_distinct_controllers {
         return Some(Err(text));
     }
     *ctx = tentative;

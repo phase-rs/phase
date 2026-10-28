@@ -31602,6 +31602,23 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
     if matches!(subject_filter, TargetFilter::SelfRef) {
         if let Effect::DealDamage {
             amount,
+            target: target @ TargetFilter::ParentTarget,
+            damage_source: Some(DamageSource::Target),
+            ..
+        } = effect
+        {
+            // CR 120.1 + CR 608.2h: the explicit self subject owns both
+            // reflexive operands; the imperative's target default is unbound.
+            *target = TargetFilter::SelfRef;
+            rebind_object_scope_amount(
+                amount,
+                ObjectScope::Target,
+                ObjectScope::Source,
+                SourceRefRebind::AllObjectRefs,
+            );
+        }
+        if let Effect::DealDamage {
+            amount,
             damage_source,
             ..
         }
@@ -43964,11 +43981,13 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
 ) -> EffectChainIr {
     let enclosing_chosen_objects = ctx.enclosing_chosen_objects.clone();
     let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
+    let enclosing_full_source = ctx.effect_chain_full_lower.clone();
     let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen);
     // Nested delayed, reflexive, and continuation bodies may inherit an outer
     // chain's tracked exile binding. Keep that context scoped to this call.
     ctx.chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer;
     ctx.enclosing_chosen_objects = enclosing_chosen_objects;
+    ctx.effect_chain_full_lower = enclosing_full_source;
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
 }
@@ -50153,6 +50172,12 @@ fn parse_effect_chain_ir_body(
             } else {
                 None
             };
+            if let Some(ContinuationAst::RevealHandFilter {
+                choice_optional, ..
+            }) = &mut followup_for_this
+            {
+                *choice_optional |= is_optional;
+            }
 
             if let Some(ContinuationAst::RevealHandFilter {
                 card_filter,

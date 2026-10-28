@@ -175,6 +175,7 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
     assert!(!state.stack.is_empty(), "ability is on the stack");
 
     resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::flush_layers(&mut state);
 
     // CR 702.141a: exactly one token (one opponent in a two-player game).
     assert_eq!(
@@ -256,6 +257,7 @@ fn encore_three_player_one_token_per_opponent_then_sacrificed_at_end_step() {
         .expect("activation must succeed");
     assert_eq!(state.objects[&source].zone, Zone::Exile);
     resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::flush_layers(&mut state);
 
     // The resolver collects every created token into the delayed sacrifice's
     // explicit targets (`last_created_token_ids` only holds the LAST opponent's

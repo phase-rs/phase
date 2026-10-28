@@ -4431,6 +4431,16 @@ fn walk_ability(
     let (eff, own_scope) = rw_effect(effect, chain_root, pscope, chain_move_owner);
     acc.merge(eff);
     acc.reads_member_bound |= reads_return_result.is_some();
+    if let Some((_, read)) = reads_return_result {
+        if read.destination == Zone::Library && read.recipient == ControllerRef::ParentTargetOwner {
+            // CR 608.2c: revealed membership is bound, but its current Library
+            // membership and the universal noun predicate are evaluated now.
+            let mut profile = board_membership_read(&read.noun);
+            profile.reads_membership_zones = ZoneSpan::one(Zone::Library);
+            profile.merge(rw_target_filter(&read.noun));
+            acc.merge(profile);
+        }
+    }
     let child_root = own_scope.or(chain_root);
     let child_move_owner = effect_move_owner(effect).or(chain_move_owner);
 
@@ -4574,6 +4584,14 @@ fn walk_definition(
     let (eff, own_scope) = rw_effect(effect, chain_root, pscope, chain_move_owner);
     acc.merge(eff);
     acc.reads_member_bound |= reads_return_result.is_some();
+    if let Some((_, read)) = reads_return_result {
+        if read.destination == Zone::Library && read.recipient == ControllerRef::ParentTargetOwner {
+            let mut profile = board_membership_read(&read.noun);
+            profile.reads_membership_zones = ZoneSpan::one(Zone::Library);
+            profile.merge(rw_target_filter(&read.noun));
+            acc.merge(profile);
+        }
+    }
     let child_root = own_scope.or(chain_root);
     let child_move_owner = effect_move_owner(effect).or(chain_move_owner);
 
@@ -6756,7 +6774,6 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         QuantityRef::CardsExiledBySource
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::TrackedSetSize
-        | QuantityRef::FilteredTrackedSetSize { .. }
         | QuantityRef::ChosenNumber
         // CR 101.4 + CR 608.2d: the player-axis chosen-number read. Its producer
         // is a persisting `Effect::Choose`, whose own arm below already declares
@@ -6772,6 +6789,12 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         | QuantityRef::ConvokedCreatureCount
         | QuantityRef::VoteCount { .. } => {
             let mut p = RwProfile::empty();
+            p.reads_member_bound = true;
+            p
+        }
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => {
+            let mut p = board_membership_read(filter);
+            p.merge(rw_target_filter(filter));
             p.reads_member_bound = true;
             p
         }

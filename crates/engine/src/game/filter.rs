@@ -5050,6 +5050,8 @@ fn target_filter_face_state(
     match filter {
         TargetFilter::Any => Some(true),
         TargetFilter::None => Some(false),
+        // CR 201.2: the printed English name is available without a live object.
+        TargetFilter::Named { name } => Some(face.name == *name),
         TargetFilter::Typed(typed) => {
             let mut terms = vec![controller_ref_face_state(typed.controller.as_ref(), scope)];
             terms.extend(
@@ -13187,6 +13189,10 @@ fn player_matches_target_filter_with(
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
+        // CR 102.2 + CR 102.3: use the same opponent relation as other player filters.
+        TargetFilter::Opponent => {
+            source_controller.is_some_and(|controller| is_opponent(controller, player_id))
+        }
         // CR 109.5: Without ability context, OriginalController is indistinguishable
         // from Controller — both refer to the source controller in this matcher.
         TargetFilter::OriginalController => source_controller == Some(player_id),

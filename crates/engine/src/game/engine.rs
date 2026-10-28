@@ -24732,7 +24732,7 @@ mod stage2_injector_tests {
             vec![
                 "game/effects/mod.rs::offer_repeated_payment {player,decision_subject_id:None,source_id:payment_unit.source_id,description:payment_unit.description.clone(),may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
                 "game/effects/mod.rs::resolve_chain_body {player:prompt_player,decision_subject_id,source_id:ability.source_id,description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
-                "game/effects/scoped_library_search.rs::advance_acceptance {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
+                "game/effects/scoped_library_search.rs::advance_acceptance_in_occurrence {player,decision_subject_id:None,source_id,description,may_trigger_key:None,same_card_may_trigger_choice_available:false}".to_string(),
                 "game/engine.rs::begin_pending_trigger_target_selection {player,decision_subject_id:None,source_id,description:trigger_description,may_trigger_key,same_card_may_trigger_choice_available}".to_string(),
             ],
             "the four production producers, each keyed by its ENCLOSING FUNCTION and the \

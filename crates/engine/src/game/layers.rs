@@ -170,8 +170,9 @@ fn filter_names_single_object(filter: &TargetFilter, source_id: ObjectId) -> Opt
 /// 6. is a member of the zone it claims (a `Zone::Stack` object needs a real
 ///    stack entry).
 ///
-/// Admission (`static_functions_in_zone`) already happened when the effect was
-/// gathered, and the effect's condition is evaluated by the ordinary apply path.
+/// The current definition and its zone admission are reauthenticated here;
+/// cached or forged effect metadata cannot create off-zone permission. The
+/// effect's condition is evaluated by the ordinary apply path.
 fn declared_zone_self_static_candidates(
     state: &GameState,
     effect: &ActiveContinuousEffect,
@@ -184,7 +185,21 @@ fn declared_zone_self_static_candidates(
     {
         return None;
     }
-    let zone = state.objects.get(&effect.source_id)?.zone;
+    let source = state.objects.get(&effect.source_id)?;
+    let definition = source
+        .static_definitions
+        .as_slice()
+        .get(effect.def_index?)?;
+    if effect.transient_id.is_some()
+        || definition.mode != StaticMode::Continuous
+        || definition.characteristic_defining
+        || definition.affected != Some(TargetFilter::SelfRef)
+        || definition.modifications.get(effect.mod_index) != Some(&effect.modification)
+        || !crate::game::functioning_abilities::static_functions_in_zone(source, definition)
+    {
+        return None;
+    }
+    let zone = source.zone;
     if zone == Zone::Battlefield || !zone_cache.zone_contains(state, zone, effect.source_id) {
         return None;
     }
@@ -3770,6 +3785,8 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
         if let Some(object) = state.objects.get_mut(&id) {
             object.sync_missing_base_characteristics();
             object.reset_numeric_characteristics_to_base();
+            // CR 718.3b: remote layer resets preserve the selected prototype form.
+            super::stickers::reset_pt_to_object_baseline(object);
         }
     }
     for &id in &bf_ids {

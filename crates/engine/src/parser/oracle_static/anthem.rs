@@ -437,15 +437,6 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
         let affected = parse_continuous_subject_filter(subject)?;
         parse_complete_continuous_predicate(predicate, affected, text)
     })
-    .or_else(|| {
-        parse_continuous_subject_predicate(&tp, |subject, predicate| {
-            if parse_rule_static_predicate(predicate).is_some() {
-                return None;
-            }
-            let affected = parse_continuous_subject_filter(subject)?;
-            Some(continuous_predicate_residual(affected, text))
-        })
-    })
 }
 
 pub(crate) fn parse_complete_continuous_predicate(
@@ -486,6 +477,20 @@ pub(crate) fn parse_complete_continuous_predicate(
         }
     }
     let (body, condition) = strip_suffix_turn_condition(predicate);
+    if let Ok((_, (rule, defended))) = all_consuming(terminated(
+        alt((
+            parse_combat_rule_static_predicate_with_defended_nom,
+            map(parse_rule_static_predicate_nom, |rule| (rule, None)),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(body.to_lowercase().as_str())
+    {
+        let mut definition =
+            lower_rule_static(rule, None, affected, description).attack_defended(defended);
+        definition.condition = condition;
+        return Some(definition);
+    }
     let modifications = super::keyword_grant::parse_complete_continuous_modifications(&body)?;
     let mut def = with_protection_does_not_remove(
         StaticDefinition::continuous()
@@ -1123,6 +1128,20 @@ pub(crate) fn parse_continuous_gets_has(
             def.condition = Some(condition);
             return Some(def);
         }
+    }
+
+    if let Ok((_, (rule, defended))) = all_consuming(terminated(
+        alt((
+            parse_combat_rule_static_predicate_with_defended_nom,
+            map(parse_rule_static_predicate_nom, |rule| (rule, None)),
+        )),
+        opt(tag(".")),
+    ))
+    .parse(lower.as_str())
+    {
+        return Some(
+            lower_rule_static(rule, None, affected, description).attack_defended(defended),
+        );
     }
 
     // CR 613.4c: Handle repeated dynamic pump terms — "gets +N/+M for each X and

@@ -27752,7 +27752,7 @@ mod captured_numeric_source_tests {
         object.toughness = Some(6);
         object.layer_base_power = Some(3);
         object.intensity = 99;
-        for (reference, value) in expressions.iter().zip([4, 5, 4, 0]) {
+        for (reference, value) in expressions.iter().zip([4, 5, 4, 2]) {
             assert_eq!(
                 resolve_quantity_with_targets(
                     &state,
@@ -27812,6 +27812,14 @@ mod captured_numeric_source_tests {
             .unwrap()
             .remove(&epoch);
         assert_eq!(resolve_quantity_with_targets(&state, &power, &restored), 0);
+        let intensity = QuantityExpr::Ref {
+            qty: expressions[3].clone(),
+        };
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &intensity, &restored),
+            0,
+            "missing exact history cannot read the newer incarnation's intensity 99"
+        );
         ability.set_source_incarnation_recursive(None);
         assert_eq!(
             resolve_quantity_with_targets(&state, &power, &ability),

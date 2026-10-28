@@ -9545,10 +9545,18 @@ fn casting_candidates(
     // permission (Omniscience) admits this hand object, the casting-method
     // election IS the existing N-way `CastingVariantChoice` prompt — free, printed,
     // and each keyword alternative cost are one mutually-exclusive announcement
-    // (CR 118.9a), not a chain of two-slot modals. Gate every push on that
-    // permission being active: without it this block adds nothing, so every
-    // no-permission board is byte-identical to prior behavior (containment).
+    // (CR 118.9a), not a chain of two-slot modals. The permission-specific
+    // candidates join independently available keyword casting methods.
     if obj.zone == Zone::Hand {
+        // CR 702.37c / CR 702.168b + CR 708.4: Morph / Megamorph / Disguise
+        // face-down cast — offered when an effective face-down keyword is present
+        // and the face-down cast is permitted (parity with the FaceDown offer
+        // block; the fixed {3} affordability is checked by `can_cast_prepared_now`).
+        if object_has_effective_face_down_keyword(state, object_id)
+            && face_down_cast_is_permitted(state, player, object_id)
+        {
+            candidates.push(CastingVariant::FaceDown);
+        }
         if let Some(source) = unlimited_hand_cast_free_source(state, player, obj) {
             // CR 118.9: the effect-applied free alternative cost (X = 0 per
             // CR 107.3b, resolved by the NoCost prepare — no mana spent).
@@ -9582,15 +9590,6 @@ fn casting_candidates(
             candidates.extend(hand_alternative_cost_keyword_candidates(
                 state, player, object_id, obj,
             ));
-            // CR 702.37c / CR 702.168b + CR 708.4: Morph / Megamorph / Disguise
-            // face-down cast — offered when an effective face-down keyword is present
-            // and the face-down cast is permitted (parity with the FaceDown offer
-            // block; the fixed {3} affordability is checked by `can_cast_prepared_now`).
-            if object_has_effective_face_down_keyword(state, object_id)
-                && face_down_cast_is_permitted(state, player, object_id)
-            {
-                candidates.push(CastingVariant::FaceDown);
-            }
         } else {
             // CR 118.9 + CR 601.2b: without a free-cast permission the alternative-cost
             // keywords are still announceable casts of a hand card (sole candidates, no
@@ -11166,6 +11165,7 @@ impl CollectedCostModifiers {
             SpellCostTargets::Unchosen,
             false,
             casting_variant,
+            ability,
         );
         non_floor.extend(collect_battlefield_cost_modifiers(
             state,
@@ -12503,8 +12503,18 @@ fn collect_target_dependent_cost_modifiers(
     targets: SpellCostTargets<'_>,
     casting_variant: Option<CastingVariant>,
 ) -> Vec<CostModification> {
-    let mut collected =
-        collect_self_spell_cost_modifiers(state, player, object_id, targets, true, casting_variant);
+    let mut collected = collect_self_spell_cost_modifiers(
+        state,
+        player,
+        object_id,
+        targets,
+        true,
+        casting_variant,
+        match targets {
+            SpellCostTargets::Chosen(ability) => Some(ability),
+            _ => None,
+        },
+    );
     collected.extend(collect_battlefield_cost_modifiers(
         state,
         player,
@@ -12561,6 +12571,7 @@ pub(crate) fn compute_spend_only_on_x_generic_count(
         SpellCostTargets::Chosen(&pending.ability),
         false,
         casting_variant,
+        Some(&pending.ability),
     );
     collected.extend(collect_battlefield_cost_modifiers(
         state,
@@ -13066,6 +13077,7 @@ fn apply_self_spell_cost_modifiers(
         SpellCostTargets::Unchosen,
         false,
         None,
+        None,
     );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -13085,6 +13097,7 @@ pub(super) fn apply_self_spell_cost_modifiers_with_selected_targets(
         SpellCostTargets::Chosen(ability),
         true,
         None,
+        Some(ability),
     );
     apply_cost_modifications_in_order(mana_cost, &collected);
 }
@@ -13157,18 +13170,44 @@ fn self_spell_cost_condition_matches(
     caster: PlayerId,
     spell_id: ObjectId,
     casting_variant: Option<CastingVariant>,
+    cast_ability: Option<&ResolvedAbility>,
 ) -> bool {
     match condition {
         StaticCondition::And { conditions } => conditions.iter().all(|cond| {
-            self_spell_cost_condition_matches(state, cond, caster, spell_id, casting_variant)
+            self_spell_cost_condition_matches(
+                state,
+                cond,
+                caster,
+                spell_id,
+                casting_variant,
+                cast_ability,
+            )
         }),
         StaticCondition::Or { conditions } => conditions.iter().any(|cond| {
-            self_spell_cost_condition_matches(state, cond, caster, spell_id, casting_variant)
+            self_spell_cost_condition_matches(
+                state,
+                cond,
+                caster,
+                spell_id,
+                casting_variant,
+                cast_ability,
+            )
         }),
-        StaticCondition::Not { condition } => {
-            !self_spell_cost_condition_matches(state, condition, caster, spell_id, casting_variant)
-        }
+        StaticCondition::Not { condition } => !self_spell_cost_condition_matches(
+            state,
+            condition,
+            caster,
+            spell_id,
+            casting_variant,
+            cast_ability,
+        ),
         StaticCondition::CastingAsVariant { variant } => casting_variant == Some(*variant),
+        // CR 601.2f + CR 601.2h: settlement reads the declared cost of this
+        // invocation, even while an older payment prompt remains ambient.
+        StaticCondition::AdditionalCostPaid => match cast_ability {
+            Some(ability) => ability.source_id == spell_id && ability.context.additional_cost_paid,
+            None => super::layers::evaluate_condition(state, condition, caster, spell_id),
+        },
         _ => super::layers::evaluate_condition(state, condition, caster, spell_id),
     }
 }
@@ -13180,6 +13219,7 @@ fn collect_self_spell_cost_modifiers(
     targets: SpellCostTargets<'_>,
     target_sensitive_only: bool,
     casting_variant: Option<CastingVariant>,
+    cast_ability: Option<&ResolvedAbility>,
 ) -> Vec<CostModification> {
     let Some(spell_obj) = state.objects.get(&spell_id) else {
         return Vec::new();
@@ -13203,6 +13243,7 @@ fn collect_self_spell_cost_modifiers(
             spell_id,
             def,
             casting_variant,
+            cast_ability,
         ) {
             continue;
         }
@@ -13245,7 +13286,14 @@ fn collect_self_spell_cost_modifiers(
 
         // CR 604.1: Evaluate any trailing condition ("if you control a Wizard").
         if let Some(ref cond) = def.condition {
-            if !self_spell_cost_condition_matches(state, cond, caster, spell_id, casting_variant) {
+            if !self_spell_cost_condition_matches(
+                state,
+                cond,
+                caster,
+                spell_id,
+                casting_variant,
+                cast_ability,
+            ) {
                 continue;
             }
         }
@@ -13520,6 +13568,7 @@ fn self_spell_cost_modifier_applies_before_targets(
     spell_id: ObjectId,
     definition: &StaticDefinition,
     casting_variant: Option<CastingVariant>,
+    cast_ability: Option<&ResolvedAbility>,
 ) -> bool {
     let Some(spell) = state.objects.get(&spell_id) else {
         return false;
@@ -13557,7 +13606,14 @@ fn self_spell_cost_modifier_applies_before_targets(
         return false;
     }
     definition.condition.as_ref().is_none_or(|condition| {
-        self_spell_cost_condition_matches(state, condition, caster, spell_id, casting_variant)
+        self_spell_cost_condition_matches(
+            state,
+            condition,
+            caster,
+            spell_id,
+            casting_variant,
+            cast_ability,
+        )
     })
 }
 
@@ -22669,6 +22725,7 @@ fn target_dependent_cost_reduction_present(
             spell_id,
             definition,
             casting_variant,
+            None,
         )
     }) {
         return true;
@@ -23275,6 +23332,7 @@ pub(crate) fn pending_mana_obligation_is_stable_before_targets(
                     pending.object_id,
                     definition,
                     Some(pending.casting_variant),
+                    Some(&pending.ability),
                 )
         })
     {

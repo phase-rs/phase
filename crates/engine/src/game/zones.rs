@@ -712,6 +712,8 @@ pub(crate) fn apply_zone_exit_cleanup(
         if let Some(object) = state.objects.get_mut(&object_id) {
             object.sync_missing_base_characteristics();
             object.reset_numeric_characteristics_to_base();
+            // CR 718.3b: a preserved prototype form is the spell's P/T baseline.
+            super::stickers::reset_pt_to_object_baseline(object);
         }
     }
 
@@ -1480,6 +1482,8 @@ pub fn apply_resolved_zone_change(
         if let Some(object) = state.objects.get_mut(&command.object.object_id) {
             object.sync_missing_base_characteristics();
             object.reset_numeric_characteristics_to_base();
+            // CR 718.3b: replay preserves the same prototype P/T as live movement.
+            super::stickers::reset_pt_to_object_baseline(object);
         }
     }
     // CR 701.3d: the command carries no attachment

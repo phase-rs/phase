@@ -8455,19 +8455,18 @@ pub(crate) const CONTROLLED_BY_DIFFERENT_PLAYERS: &str = " controlled by differe
 /// constraint is absent, so callers keep the original span. Composed from the
 /// shared constraint phrase so the detector and the stripper can never drift.
 pub(crate) fn strip_controlled_by_different_players(span: &str) -> Option<&str> {
-    take_until::<_, _, OracleError<'_>>(CONTROLLED_BY_DIFFERENT_PLAYERS)
-        .parse(span)
-        .ok()
-        .map(|(_, before)| before.trim_end())
+    alt((
+        take_until::<_, _, OracleError<'_>>(CONTROLLED_BY_DIFFERENT_PLAYERS),
+        take_until(" with different controllers"),
+    ))
+    .parse(span)
+    .ok()
+    .map(|(_, before)| before.trim_end())
 }
 
 pub(super) fn parse_controlled_by_different_players_target_constraint(text: &str) -> bool {
     let lower = text.to_lowercase();
-    let mut parser = preceded(
-        take_until::<_, _, OracleError<'_>>(CONTROLLED_BY_DIFFERENT_PLAYERS),
-        tag(CONTROLLED_BY_DIFFERENT_PLAYERS),
-    );
-    parser.parse(lower.as_str()).is_ok()
+    strip_controlled_by_different_players(&lower).is_some()
 }
 
 /// CR 115.1 + CR 601.2c + CR 400.1: Detect target-set constraints that require

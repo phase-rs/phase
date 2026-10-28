@@ -235,6 +235,57 @@ mod creation_completion_tests {
         CardSelectionMode, Comparator, Effect, QuantityExpr, TargetFilter,
     };
     #[test]
+    fn public_pool_copy_honors_the_named_face_filter() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::ability::{AbilityDefinition, AbilityKind};
+        use crate::types::zones::Zone;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Typed named pool copy", false)
+            .with_mana_cost(crate::types::mana::ManaCost::generic(0))
+            .with_ability_definition(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::CreateTokenCopyFromPool {
+                    owner: TargetFilter::Controller,
+                    type_filter: TargetFilter::Named {
+                        name: "Grizzly Bears".into(),
+                    },
+                    mv: Comparator::EQ,
+                    mv_bound: QuantityExpr::Fixed { value: 2 },
+                    selection: CardSelectionMode::Random,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    tapped: false,
+                    enters_attacking: false,
+                },
+            ))
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().card_db = Some(
+            std::sync::Arc::new(
+                crate::database::card_db::CardDatabase::from_mtgjson(
+                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../data/mtgjson/test_fixture.json"),
+                )
+                .unwrap(),
+            )
+            .into(),
+        );
+        runner.cast(spell).resolve();
+        let tokens = runner
+            .state()
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.zone == Zone::Battlefield)
+            .collect::<Vec<_>>();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].name, "Grizzly Bears");
+        assert_eq!((tokens[0].power, tokens[0].toughness), (Some(2), Some(2)));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+    }
+
+    #[test]
     fn pool_copy_completion_sync_queued_counter_and_current_reload() {
         use super::super::token_copy::tests::{creation_wrapper_case, CreationPauseCase};
         for pause in [

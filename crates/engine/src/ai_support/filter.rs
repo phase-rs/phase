@@ -3103,8 +3103,8 @@ mod tests {
 
     /// Brave the Elements ("Choose a color. White creatures you control gain
     /// protection from the chosen color until end of turn."), cast and resolved
-    /// up to its CR 608.2d color prompt. Its `Choose` does not persist, so the
-    /// prompt carries no source.
+    /// up to its CR 608.2d color prompt. The nonpersisting answer retains the
+    /// resolving spell's source context for its protection continuation.
     fn brave_the_elements_named_choice_state() -> GameState {
         let mut scenario = GameScenario::new();
         scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
@@ -3131,9 +3131,13 @@ mod tests {
         assert!(
             matches!(
                 &state.waiting_for,
-                WaitingFor::NamedChoice { source: None, .. }
+                WaitingFor::NamedChoice { source: Some(source), .. }
+                    if source.binding == crate::types::game_state::NamedChoiceSourceBinding::ResolutionContext
+                        && source.context.as_ref().is_some_and(|context|
+                            source.prompt.matches_trigger_source(context)
+                                && context.identity.reference.object_id == brave)
             ),
-            "Brave the Elements must halt on its source-less color prompt"
+            "Brave the Elements must retain its own resolving color-choice source"
         );
         state
     }
@@ -3239,7 +3243,7 @@ mod tests {
     }
 
     /// U1. Every enumerated answer the hatch admits is one the real reducer
-    /// admits — for a source-less prompt (Brave the Elements), a `PendingEntry`
+    /// admits — for a resolution-context prompt (Brave the Elements), a `PendingEntry`
     /// prompt (Thriving Grove) and `ExactObjectAndResolution` prompts (Distant
     /// Melody, Stave Off). The `true` assertion is the positive reach guard;
     /// `pass_oracle_accepts` is the soundness check.

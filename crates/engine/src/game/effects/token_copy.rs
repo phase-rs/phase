@@ -5111,6 +5111,8 @@ pub(crate) mod tests {
         );
         {
             let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_card_types.core_types = vec![CoreType::Creature];
+            source.card_types = source.base_card_types.clone();
             source.base_power = Some(2);
             source.base_toughness = Some(2);
             source.power = Some(2);
@@ -7145,7 +7147,9 @@ pub(crate) mod tests {
         }
         let mut combat = crate::game::combat::CombatState::default();
         if matches!(effect, Effect::CopyTokenBlockingAttacker { .. }) {
-            state.objects.get_mut(&source).unwrap().controller = PlayerId(1);
+            let attacker = state.objects.get_mut(&source).unwrap();
+            attacker.controller = PlayerId(1);
+            attacker.base_controller = Some(PlayerId(1));
             combat
                 .attackers
                 .push(crate::game::combat::AttackerInfo::new(
@@ -7909,7 +7913,7 @@ pub(crate) mod tests {
         );
         let good =
             serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap();
-        assert!(serde_json::from_value::<ResolutionStateWire>(good).is_ok());
+        assert!(serde_json::from_value::<ResolutionStateWire>(good.clone()).is_ok());
         let TokenCreationWork::Proposed(proposed) = state
             .resolution_stack
             .token_creation(id)
@@ -7926,22 +7930,45 @@ pub(crate) mod tests {
             copy: proposed.copy.clone().unwrap(),
         };
         for fault in 0..7 {
-            let mut bad = state.clone();
-            let owner = bad.resolution_stack.token_creation_mut(id).unwrap();
+            let mut bad = good.clone();
+            let owner = bad["resolution_frames"]["frames"][0]["data"]
+                .as_object_mut()
+                .expect("actual serialized creation frame");
             match fault {
-                0 => owner.creation_id = Some(TokenCreationFrameId(0)),
-                1 => owner.result_parent = Some(TokenCreationFrameId(id.0 + 99)),
-                2 => owner.creator = None,
-                3 => owner.segment_start = 2,
-                4 => owner.replacement_queue_tail = Some(0),
-                5 => owner.remaining.push_back(legacy.clone()),
-                _ => owner.created_incarnations.push(member),
+                0 => {
+                    owner.insert("creation_id".into(), serde_json::json!(0));
+                }
+                1 => {
+                    owner.insert("result_parent".into(), serde_json::json!(id.0 + 99));
+                }
+                2 => {
+                    owner.insert("creator".into(), serde_json::Value::Null);
+                }
+                3 => {
+                    owner.insert("segment_start".into(), serde_json::json!(2));
+                }
+                4 => {
+                    owner.insert("replacement_queue_tail".into(), serde_json::json!(0));
+                }
+                5 => {
+                    owner
+                        .entry("remaining")
+                        .or_insert_with(|| serde_json::json!([]))
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::to_value(&legacy).unwrap());
+                }
+                _ => {
+                    owner
+                        .get_mut("created_incarnations")
+                        .unwrap()
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::to_value(member).unwrap());
+                }
             };
             assert!(
-                serde_json::from_value::<ResolutionStateWire>(
-                    serde_json::to_value(ResolutionStateWire::from_game_state(bad)).unwrap()
-                )
-                .is_err(),
+                serde_json::from_value::<ResolutionStateWire>(bad).is_err(),
                 "malformed current authority {fault}"
             );
         }

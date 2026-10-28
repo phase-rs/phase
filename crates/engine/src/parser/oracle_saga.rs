@@ -414,7 +414,7 @@ fn grant_recipients(
 fn duration_free_grant_recipients(effect: &Effect) -> Option<GrantRecipients> {
     match effect {
         Effect::GenericEffect {
-            duration: None,
+            duration: None | Some(Duration::Permanent),
             static_abilities,
             ..
         } if !static_abilities.is_empty() => Some(grant_recipients(static_abilities)),
@@ -445,7 +445,11 @@ fn apply_duration_free_lifetime(effect: &mut Effect) {
     else {
         return;
     };
-    if !matches!(duration, None | Some(Duration::UntilEndOfTurn)) || static_abilities.is_empty() {
+    if !matches!(
+        duration,
+        None | Some(Duration::UntilEndOfTurn | Duration::Permanent)
+    ) || static_abilities.is_empty()
+    {
         return;
     }
     match grant_recipients(static_abilities) {
