@@ -1085,10 +1085,13 @@ fn moving_a_battlefield_permanent_onto_the_battlefield_reapplies_no_entry_replac
 /// and ceases to exist, exactly as when it is sent to a hand. Paired positive:
 /// a Comet card set up the same way does enter, with five loyalty counters.
 ///
-/// Red at base on the Spike Feeder row, and with the no-op guard reverted (the
-/// intrinsic seeding kept) on both rows: the move put the token's entry
-/// counters (+1/+1 2; loyalty 5) on it in the graveyard before it ceased to
-/// exist.
+/// Red at base on the Spike Feeder row: the move put the token's entry
+/// counters (+1/+1 2) on it in the graveyard before it ceased to exist. The
+/// delivery tail's `entered_battlefield` gate now also keeps those counters
+/// off, so reverting the no-op guard alone leaves these rows green; the guard
+/// is pinned by the Battlefield -> Battlefield rows (its call) and by
+/// `the_zone_pipeline_refuses_battlefield_to_battlefield_and_a_returning_token`
+/// (its CR 111.8 half).
 #[test]
 fn a_token_that_left_the_battlefield_stays_out_of_the_simulated_entry() {
     // (token, the counter it enters with, how many)
@@ -1195,7 +1198,7 @@ fn pipeline_move_to_battlefield(runner: &mut GameRunner, id: ObjectId) -> (bool,
 ///
 /// Preservation: base reads the same. Red if either half of the shared
 /// predicate is dropped (Battlefield -> Battlefield: +1/+1 4 and loyalty 10;
-/// CR 111.8: the graveyard token gets two +1/+1 counters).
+/// CR 111.8: the replacement consult runs, so the event slice is not empty).
 #[test]
 fn the_zone_pipeline_refuses_battlefield_to_battlefield_and_a_returning_token() {
     for (name, counter_type, count) in [

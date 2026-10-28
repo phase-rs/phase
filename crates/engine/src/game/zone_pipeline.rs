@@ -780,7 +780,8 @@ pub fn move_object_for_test(
 
 /// Whether `zones::move_to_zone` will reject moving `object` to `to` as one of
 /// its two object-level no-ops (below); its other rejections — CR 304.4 /
-/// CR 307.4 instants and sorceries, CR 614.17 "can't enter" statics — are
+/// CR 307.4 instants and sorceries, CR 712.14a a card with no back face put
+/// onto the battlefield transformed, CR 614.17 "can't enter" statics — are
 /// decided at delivery. Its callers (below) run it before they build a
 /// proposal, so no replacement is consulted, consumed (`last_effect_count`,
 /// CR 616.1 choices) or prompted for a move that never happens.

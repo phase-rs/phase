@@ -2789,8 +2789,9 @@ mod tests {
         assert_eq!(state.players[0].library.back(), Some(&to_bottom));
     }
 
-    /// Phase D review fix: a `DebugCommand` zone change is FULLY inert — it
-    /// skips the delivery tail, not just the replacement consult. Pending ETB
+    /// Phase D review fix: a `DebugCommand` zone change skips the delivery
+    /// tail, not just the replacement consult (it installs only a planeswalker's
+    /// or battle's CR 306.5b / CR 310.4b counters on arrival). Pending ETB
     /// counters from delayed triggers ("that creature enters with an
     /// additional +1/+1 counter") must NOT be applied to or consumed by a
     /// debug-staged battlefield entry. Pre-fix, the exempt path delivered
