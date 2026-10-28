@@ -23,11 +23,14 @@
 //!
 //! Move to zone with simulate on an object already on the battlefield (or on a
 //! token that has left it) is no entry, so it consults and applies nothing
-//! (CR 400.6, CR 603.6d, CR 111.8).
+//! (CR 400.6, CR 603.6d, CR 111.8). An entry a "can't enter the battlefield"
+//! static refuses puts no counters on the card it leaves behind (CR 614.17c).
 //!
-//! Every card is the committed fixture's verbatim Oracle face, and every entry
-//! goes through `create_debug_cards` (the engine entry both transports call) or
-//! `GameAction::Debug(DebugAction::MoveToZone)`.
+//! Every card is the committed fixture's verbatim Oracle face (Weathered
+//! Runestone, absent from the fixture, is built from its verbatim Oracle
+//! text), and every entry goes through `create_debug_cards` (the engine entry
+//! both transports call), `GameAction::Debug(DebugAction::MoveToZone)` or, for
+//! the zone pipeline's own caller, `ZoneMoveRequest::effect`.
 
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -58,6 +61,11 @@ const BLOODFELL_CAVES: &str = "Bloodfell Caves";
 
 /// Verbatim Oracle text of Shock.
 const SHOCK: &str = "Shock deals 2 damage to any target.";
+
+/// Weathered Runestone is not in the committed fixture, so it is built from
+/// its verbatim Oracle text.
+const WEATHERED_RUNESTONE: &str = "Weathered Runestone";
+const WEATHERED_RUNESTONE_ORACLE: &str = "Nonland permanent cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.";
 
 /// The three Create Card routes that put the created object onto the
 /// battlefield: `(run_etb, creation_kind)`. A token with `run_etb: false`
@@ -99,6 +107,12 @@ fn with_doubling_season(scenario: &mut GameScenario) {
 fn with_order_matters(scenario: &mut GameScenario) {
     with_doubling_season(scenario);
     scenario.add_real_card(P1, VORINCLEX, Zone::Battlefield, db());
+}
+
+/// P0's Weathered Runestone: "Nonland permanent cards in graveyards and
+/// libraries can't enter the battlefield." (CR 614.17d).
+fn with_weathered_runestone(scenario: &mut GameScenario) {
+    scenario.add_artifact_from_oracle(P0, WEATHERED_RUNESTONE, WEATHERED_RUNESTONE_ORACLE);
 }
 
 /// Create one `name` through the engine's debug Create Card entry.
@@ -1293,4 +1307,110 @@ fn the_zone_pipeline_refuses_battlefield_to_battlefield_and_a_returning_token() 
         Some(2),
         "{row}: it enters with two +1/+1 counters"
     );
+}
+
+/// How a graveyard card is sent onto the battlefield.
+#[derive(Clone, Copy, Debug)]
+enum GraveyardEntry {
+    /// `MoveToZone { simulate: true }`, the sandbox consulting entry.
+    SimulatedMove,
+    /// `MoveToZone { simulate: false }`, the sandbox raw placement.
+    RawMove,
+    /// `ZoneMoveRequest::effect`, the zone pipeline's effect-driven entry.
+    Effect,
+}
+
+/// Send `id` onto the battlefield by `route`, returning the move's events.
+fn send_to_battlefield(
+    runner: &mut GameRunner,
+    id: ObjectId,
+    route: GraveyardEntry,
+) -> Vec<GameEvent> {
+    match route {
+        GraveyardEntry::SimulatedMove => move_to(runner, id, Zone::Battlefield, true),
+        GraveyardEntry::RawMove => move_to(runner, id, Zone::Battlefield, false),
+        GraveyardEntry::Effect => {
+            let (parked, events) = pipeline_move_to_battlefield(runner, id);
+            assert!(!parked, "{route:?}: nothing is asked");
+            events
+        }
+    }
+}
+
+/// CR 614.17c + CR 614.17d: an entry a "can't enter the battlefield" static
+/// refuses is an event that can't happen, so no enters-with replacement
+/// modifies it and the CR 306.5b loyalty counters are not put on the card it
+/// leaves in the graveyard. Under P0's Weathered Runestone, a Comet card in
+/// the graveyard sent onto the battlefield stays there with no loyalty counter,
+/// on the sandbox simulated move, the sandbox raw move and the zone pipeline's
+/// effect-driven entry. Paired positive on each route: the same send without
+/// the Runestone enters Comet with five loyalty counters.
+///
+/// Red with the delivery tail's counter block gated on the destination rather
+/// than on the entry: the simulated and effect rows then put Loyalty 5 (and a
+/// `CounterAdded`) on the graveyard card. The raw row is a preservation
+/// sibling: the DebugCommand arm installs only on an arrival.
+#[test]
+fn a_refused_entry_puts_no_loyalty_counters_on_the_card() {
+    for route in [
+        GraveyardEntry::SimulatedMove,
+        GraveyardEntry::RawMove,
+        GraveyardEntry::Effect,
+    ] {
+        for runestone in [false, true] {
+            let row = format!("{route:?}, Weathered Runestone={runestone}");
+            let mut runner = board(|scenario| {
+                if runestone {
+                    with_weathered_runestone(scenario);
+                }
+            });
+            create(
+                &mut runner,
+                COMET,
+                P0,
+                Zone::Graveyard,
+                true,
+                DebugCardCreationKind::Card,
+            );
+            let comet = only_object_named(&runner, COMET);
+            assert_eq!(
+                zone_of(&runner, comet),
+                Zone::Graveyard,
+                "{row}: precondition"
+            );
+            assert_eq!(
+                counter(&runner, comet, CounterType::Loyalty),
+                None,
+                "{row}: precondition, no counters in the graveyard"
+            );
+
+            let events = send_to_battlefield(&mut runner, comet, route);
+
+            if runestone {
+                assert_eq!(
+                    zone_of(&runner, comet),
+                    Zone::Graveyard,
+                    "{row}: the Runestone refuses the entry; Comet stays in the graveyard"
+                );
+                assert_no_entry_events(&events, &row);
+                assert_eq!(
+                    counter(&runner, comet, CounterType::Loyalty),
+                    None,
+                    "{row}: no loyalty counter is put on the graveyard card"
+                );
+            } else {
+                assert!(
+                    events.iter().any(is_zone_changed),
+                    "{row}: Comet enters: {events:?}"
+                );
+                assert_eq!(zone_of(&runner, comet), Zone::Battlefield, "{row}");
+                assert_loyalty(&runner, comet, 5, &row);
+            }
+            assert!(
+                is_priority(&runner),
+                "{row}: {}",
+                short(&runner.state().waiting_for)
+            );
+        }
+    }
 }

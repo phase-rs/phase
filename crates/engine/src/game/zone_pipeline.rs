@@ -778,8 +778,10 @@ pub fn move_object_for_test(
     )
 }
 
-/// Whether `zones::move_to_zone` will reject moving `object` to `to` as a
-/// no-op. Its callers (below) run it before they build a
+/// Whether `zones::move_to_zone` will reject moving `object` to `to` as one of
+/// its two object-level no-ops (below); its other rejections — CR 304.4 /
+/// CR 307.4 instants and sorceries, CR 614.17 "can't enter" statics — are
+/// decided at delivery. Its callers (below) run it before they build a
 /// proposal, so no replacement is consulted, consumed (`last_effect_count`,
 /// CR 616.1 choices) or prompted for a move that never happens.
 /// CR 111.8: a token that has left the battlefield can't move to another zone
@@ -4008,7 +4010,7 @@ pub(crate) fn deliver_replaced_zone_change(
                 crate::game::exile_links::record_exiling_player(state, object_id, player);
             }
         }
-        // CR 614.1d: determine whether the object actually entered the battlefield.
+        // CR 614.17d: determine whether the object actually entered the battlefield.
         // `move_to_zone` rejects a battlefield entry without moving the object when
         // a `CantEnterBattlefieldFrom` static (e.g. Grafdigger's Cage) matches, so
         // a `to == Battlefield` request can leave the object in its origin zone.
@@ -4270,7 +4272,14 @@ pub(crate) fn deliver_replaced_zone_change(
         }
         // CR 614.1c: Apply counters from replacement pipeline (e.g., saga lore counters,
         // planeswalker intrinsic loyalty, battle intrinsic defense).
-        if to == Zone::Battlefield {
+        // CR 614.17c + CR 614.17d + CR 122.6: gated on `entered_battlefield`,
+        // not `to == Battlefield`. When `move_to_zone` refused the entry (a
+        // "can't enter the battlefield" static of the Grafdigger's Cage class,
+        // or any other rejection that leaves the object in its origin zone), no
+        // event put it onto the battlefield for an enters-with replacement to
+        // modify: the object gets none of these counters, and its
+        // `pending_etb_counters` are not consumed.
+        if entered_battlefield {
             let mut counters_to_apply = enter_with_counters;
             // CR 614.1c + CR 122.1: Apply additional counters from continuous
             // "[scope] creatures you control enter with an additional [counter]
@@ -4327,7 +4336,7 @@ pub(crate) fn deliver_replaced_zone_change(
                     .pending_etb_counters
                     .retain(|(oid, _, _)| *oid != object_id);
             }
-        } else if !enter_with_counters.is_empty() {
+        } else if to != Zone::Battlefield && !enter_with_counters.is_empty() {
             // CR 122.1: Effect-driven counters for non-battlefield
             // destinations — e.g., "exile it with three egg counters
             // on it" (Darigaaz Reincarnated), Delay's three time

@@ -61,7 +61,7 @@ pub fn apply_debug_action(
                 enter_battlefield_with_etb(state, object_id, None, events);
             } else {
                 // Debug forces a zone change — route through the zone pipeline under
-                // the `DebugCommand` exempt cause, which is FULLY inert: it skips
+                // the `DebugCommand` exempt cause, which skips
                 // both the replacement consult and the delivery tail (no
                 // enters-with-counter statics, no pending-ETB-counter consumption,
                 // no devour snapshot); the CR 306.5b / CR 310.4b characteristic
@@ -1049,7 +1049,7 @@ pub fn route_debug_create_to_battlefield(
     // stack.
     if !run_etb {
         // Debug staging — route through the pipeline under `DebugCommand`,
-        // which is FULLY inert: no replacement consult AND no delivery tail
+        // which makes no replacement consult AND runs no delivery tail
         // (no replacement-derived or statics-derived enters-with counters, no
         // pending-ETB-counter consumption, no devour snapshot); the CR 306.5b
         // / CR 310.4b characteristic counters are installed by the
