@@ -177,6 +177,9 @@ fn is_zero_u64(value: &u64) -> bool {
 /// allocated only while it holds an entry: `None` when empty (so cloning an
 /// empty table allocates nothing), collapsed back to `None` whenever it
 /// empties. Serializes exactly as the map it holds.
+// The box is the point: it keeps the map off the stack frame (the
+// `game_state_size` budget), and the `Option` keeps an empty one unallocated.
+#[allow(clippy::box_collection)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct LazyBoxedMap<K, V>(Option<Box<BTreeMap<K, V>>>);
 
