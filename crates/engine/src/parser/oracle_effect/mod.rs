@@ -46466,8 +46466,9 @@ fn parse_effect_chain_ir_body(
             ..
         }) = &followup_continuation
         {
+            let selection_lower = normalized_text.to_lowercase();
             let conjugated = tag::<_, _, OracleError<'_>>("puts ")
-                .parse(normalized_text.to_lowercase().as_str())
+                .parse(selection_lower.as_str())
                 .is_ok();
             if matches!(quantity, PutCount::Exactly(_)) || conjugated {
                 let next_is_rest = chunks.get(chunk_idx + 1).is_some_and(|next| {
