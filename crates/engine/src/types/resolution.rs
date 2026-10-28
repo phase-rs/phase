@@ -8602,7 +8602,9 @@ mod tests {
             }],
             search_found_candidates: Vec::new(),
             depth: 0,
-            is_optional: false,
+            // This sole optional candidate has already reached its accept/decline
+            // prompt, rather than an ordering prompt that would ask again.
+            is_optional: true,
             choice_player: None,
             library_placement: None,
             exile_controller: None,
@@ -8623,9 +8625,18 @@ mod tests {
         let mut spell = serde_json::from_value::<ResolutionStateWire>(spell)
             .expect("v1 spell fixture restores")
             .into_game_state();
+        assert!(spell.pending_replacement.as_ref().unwrap().is_optional);
+        assert!(spell.active_spell_resolution().is_some());
         apply_as_current(&mut spell, GameAction::ChooseReplacement { index: 0 })
             .expect("spell fixture resumes through the real replacement action");
-        assert_eq!(spell.objects[&spell_id].zone, Zone::Battlefield);
+        assert_eq!(
+            spell.objects[&spell_id].zone,
+            Zone::Battlefield,
+            "entry acceptance must deliver the restored spell; waiting={:?}, pending={:?}",
+            spell.waiting_for,
+            spell.pending_replacement,
+        );
+        assert!(spell.pending_replacement.is_none());
         assert!(spell.active_spell_resolution().is_none());
         assert_reserializes_current_only(spell);
 
