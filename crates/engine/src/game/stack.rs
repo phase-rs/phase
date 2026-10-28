@@ -10697,7 +10697,7 @@ mod tests {
             PendingResolutionCompletion, PendingTokenBattlefieldEntry, PriorityPassingMode,
             StackEntry, StackEntryKind, StackPaidSnapshot, StackResolutionAutoPassOverlay,
             StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-            StackResolutionSession,
+            StackResolutionSession, WaitingFor,
         };
         use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
         use crate::types::mana::ManaColor;

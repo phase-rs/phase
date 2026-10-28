@@ -30153,8 +30153,9 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
-        ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
-        ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
+        ChooseOneOfKind, CoinFlipRun, DrawReplacementScope, LibraryInstructionActor,
+        LibraryPosition, ParentTargetMissingReason, SearchSelectionConstraint, SpentColor,
+        UNION_DEPTH_BUDGET,
     };
 
     /// CR 608.2c + CR 702.185a: pending parent delivery retains its dependent tail.
