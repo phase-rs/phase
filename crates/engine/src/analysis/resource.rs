@@ -8497,6 +8497,11 @@ mod tests {
     use crate::analysis::decision_template::ChoicePoint;
     use crate::game::game_object::GameObject;
     use crate::types::ability::TriggerDefinitionRef;
+    use crate::types::actions::ReplacementAutoChoice;
+    use crate::types::game_state::{
+        ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+        ReplacementAutoChoiceRecord, ReplacementChoiceKind,
+    };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
@@ -28074,7 +28079,6 @@ mod tests {
     /// CR 615.5: a floating prevention shield naming `rider` through a freshly
     /// installed arena entry, after `padding` earlier entries.
     fn floating_rider_frame(padding: usize, rider_amount: i32) -> GameState {
-        use crate::types::ability::{Effect, QuantityExpr, ReplacementDefinition, TargetFilter};
         let rider = |amount| {
             crate::types::ability::ResolvedAbility::new(
                 Effect::GainLife {
@@ -28105,11 +28109,6 @@ mod tests {
     /// choice whose rider differs is still compared, and makes the samples unequal.
     #[test]
     fn loop_samples_differing_only_in_continuation_allocation_compare_equal() {
-        use crate::types::actions::ReplacementAutoChoice;
-        use crate::types::game_state::{
-            ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
-            ReplacementAutoChoiceRecord, ReplacementChoiceKind,
-        };
         let a = floating_rider_frame(2, 5);
         let b = floating_rider_frame(3, 5);
         assert_ne!(

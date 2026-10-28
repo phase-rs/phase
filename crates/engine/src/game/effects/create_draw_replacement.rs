@@ -79,8 +79,12 @@ mod tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -374,11 +378,6 @@ mod tests {
     /// preference can be offered for it.
     #[test]
     fn words_of_worship_twice_replaces_two_draws_under_distinct_handles() {
-        use crate::game::scenario::GameScenario;
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::WaitingFor;
-        use crate::types::mana::{ManaType, ManaUnit};
-        use crate::types::phase::Phase;
         const WORDS_OF_WORSHIP: &str =
             "{1}: The next time you would draw a card this turn, you gain 5 life instead.";
 

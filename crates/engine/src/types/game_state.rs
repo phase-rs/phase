@@ -8215,6 +8215,17 @@ impl GameState {
             rider,
         )
     }
+
+    /// CR 615.5 + CR 614.6: the `replacement_continuations` positions some
+    /// `ReplacementDefinition::runtime_execute` in this state names. It reads the
+    /// serialized state with the walk the decode check runs, so every holder of a
+    /// definition is covered, a holder added later included.
+    pub(crate) fn referenced_replacement_continuations(
+        &self,
+    ) -> Result<BTreeSet<u64>, serde_json::Error> {
+        serde_json::to_value(self)
+            .map(|value| collect_serialized_state_handles(&value).replacement_continuations)
+    }
 }
 
 fn default_copy_retarget_effect_kind() -> EffectKind {
@@ -37364,6 +37375,7 @@ mod tests {
     use crate::types::phase::PhaseGroup;
     use crate::types::resolved_commands::ResolvedDelayedTriggerCommand;
     use crate::types::triggers::TriggerMode;
+    use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
 
     fn exact_destination() -> EntryAttackDestination {
         EntryAttackDestination::Exact {
@@ -42785,7 +42797,6 @@ mod tests {
     /// unmutated value decodes, keeping the arena and a handle that resolves.
     #[test]
     fn dangling_replacement_continuation_handle_is_refused_at_every_decode_ingress() {
-        use EpicIngress::{BareGameState, PersistedRaw, TrustedEnvelope};
         for carrier in [RiderCarrier::Object, RiderCarrier::Pending] {
             let state = rider_state(carrier);
             for ingress in [BareGameState, PersistedRaw, TrustedEnvelope] {
