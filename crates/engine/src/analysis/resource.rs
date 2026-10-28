@@ -11173,7 +11173,7 @@ mod tests {
 
         // ── (b) ZERO announcement choices, two ways. `Effect::target_filter()` returns
         // `Some` for both, but the SLOT BUILDER surfaces no stack slot: CR 701.21a
-        // `Sacrifice` is carved out of `triggers::extract_target_filter_from_effect` (the
+        // `Sacrifice` is carved out of `types::ability::extract_target_filter_from_effect` (the
         // accessor the builder actually uses), and a CR 601.2c choice made at resolution
         // (`TargetChoiceTiming::Resolution`) is not announced at all.
         let zero_slot_cases: [(&str, ResolvedAbility); 2] = [
@@ -23361,6 +23361,8 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![],
                         enter_with_counters: vec![],

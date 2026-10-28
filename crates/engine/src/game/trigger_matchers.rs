@@ -1218,6 +1218,20 @@ fn named_origin_zone(origin: &OriginConstraint, from: Option<Zone>) -> Option<Zo
     }
 }
 
+/// CR 603.6c: whether a zone-change clause requires the object to have gone to a
+/// particular zone. "Leaves the battlefield without dying" (`NotEquals`) names
+/// only where it didn't go.
+fn clause_names_destination(
+    destination: Option<&Zone>,
+    destination_constraint: &DestinationConstraint,
+) -> bool {
+    destination.is_some()
+        || matches!(
+            destination_constraint,
+            DestinationConstraint::Equals(_) | DestinationConstraint::OneOf(_)
+        )
+}
+
 fn destination_matches_constraint(zone: Zone, constraint: &DestinationConstraint) -> bool {
     match constraint {
         DestinationConstraint::Any => true,
@@ -1257,13 +1271,29 @@ fn zone_change_clause_matches(
     if !origin_ok {
         return false;
     }
-    if let Some(dest) = destination {
-        if dest != to {
+    if record.departure.left_game() {
+        // CR 800.4a + CR 603.6c + CR 702.26k: an object that left the game with
+        // its owner went to no zone, so only a leaves-the-battlefield clause sees
+        // it: one naming the battlefield as origin and no destination it went to.
+        if named_origin_zone(origin, *from) != Some(Zone::Battlefield)
+            || !record
+                .departure
+                .observed_leaving_battlefield(clause_names_destination(
+                    destination,
+                    destination_constraint,
+                ))
+        {
             return false;
         }
-    }
-    if !destination_matches_constraint(*to, destination_constraint) {
-        return false;
+    } else {
+        if let Some(dest) = destination {
+            if dest != to {
+                return false;
+            }
+        }
+        if !destination_matches_constraint(*to, destination_constraint) {
+            return false;
+        }
     }
     if let Some(filter) = valid_card {
         let ctx = super::filter::FilterContext::from_trigger_source(source_context);
@@ -3392,8 +3422,15 @@ pub(super) fn match_exiled(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::ZoneChanged { object_id, to, .. } = event {
-        if *to != Zone::Exile {
+    if let GameEvent::ZoneChanged {
+        object_id,
+        to,
+        record,
+        ..
+    } = event
+    {
+        // CR 800.4a: an object that left the game with its owner was not exiled.
+        if *to != Zone::Exile || record.departure.left_game() {
             return false;
         }
         if !valid_card_matches(trigger, state, *object_id, source_context) {

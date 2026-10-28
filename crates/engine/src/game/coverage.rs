@@ -3168,6 +3168,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             keywords,
             count,
             tapped,
+            attack_destination,
             attach_to,
             ..
         } => {
@@ -3206,6 +3207,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             if *tapped {
                 desc.push_str(" tapped");
+            }
+            if !attack_destination.is_controller_chooses() {
+                desc.push_str(&format!(" attacking {attack_destination:?}"));
             }
             if attach_to.is_some() {
                 desc.push_str(" attached");
@@ -4386,11 +4390,18 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CopyTokenOf {
             target,
             enters_attacking,
+            attack_destination,
             ..
         } => {
             d.push(("copies".into(), fmt_target(target)));
             if *enters_attacking {
                 d.push(("attacking".into(), "yes".into()));
+            }
+            if !attack_destination.is_controller_chooses() {
+                d.push((
+                    "attack_destination".into(),
+                    format!("{attack_destination:?}"),
+                ));
             }
         }
         Effect::CreateTokenCopyFromPool {
@@ -5557,6 +5568,13 @@ fn static_details(stat: &StaticDefinition) -> Vec<(String, String)> {
     d
 }
 
+/// A `TokenSpec` detail line with `attack_request` left out while it names no
+/// destination, so a spec that names none renders as it did before the field
+/// existed.
+fn without_unspecified_attack_request(debug: String) -> String {
+    debug.replace(", attack_request: Unspecified", "")
+}
+
 /// Extract detail pairs from a `ReplacementDefinition` (non-effect fields).
 ///
 /// Mirrors `trigger_details`/`static_details`: the replacement's scoping and
@@ -5637,10 +5655,16 @@ fn replacement_details(repl: &ReplacementDefinition) -> Vec<(String, String)> {
         ));
     }
     if let Some(spec) = &repl.additional_token_spec {
-        d.push(("additional token".into(), format!("{spec:?}")));
+        d.push((
+            "additional token".into(),
+            without_unspecified_attack_request(format!("{spec:?}")),
+        ));
     }
     if let Some(specs) = &repl.ensure_token_specs {
-        d.push(("ensure tokens".into(), format!("{specs:?}")));
+        d.push((
+            "ensure tokens".into(),
+            without_unspecified_attack_request(format!("{specs:?}")),
+        ));
     }
     if let Some(cm) = &repl.counter_match {
         d.push(("counter match".into(), format!("{cm:?}")));
@@ -5685,6 +5709,7 @@ fn keyword_supported(kw: &Keyword) -> bool {
     match kw {
         Keyword::Unknown(_) => false,
         Keyword::CumulativeUpkeep(cost) => cost.supports_cumulative_upkeep_payment(),
+        Keyword::Morph(cost) => cost.is_supported(),
         kw if printed_color_set_protection_is_unexpanded(kw) => false,
         _ => true,
     }
@@ -5695,6 +5720,9 @@ fn keyword_gap_label(kw: &Keyword) -> Option<String> {
         Keyword::Unknown(s) => Some(format!("Keyword:{s}")),
         Keyword::CumulativeUpkeep(cost) if !cost.supports_cumulative_upkeep_payment() => {
             Some("Keyword:CumulativeUpkeepUnsupportedCost".to_string())
+        }
+        Keyword::Morph(cost) if !cost.is_supported() => {
+            Some("Keyword:MorphUnsupportedCost".to_string())
         }
         kw if printed_color_set_protection_is_unexpanded(kw) => {
             Some("Keyword:ProtectionColorSetUnexpanded".to_string())
@@ -9874,7 +9902,7 @@ fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
 }
 
 /// CR 608.2c + CR 614.1a: true when `def` is a counter whose graveyard-exile
-/// rider (`cast_from_zone::is_graveyard_exile_rider_subability`, the shape
+/// rider (`types::ability::is_graveyard_exile_rider_subability`, the shape
 /// `resolve_chain_body`'s counter rider branch consumes) carries a tail the
 /// resolver drops (`effects::counter_exile_rider_runs_tail`). The rider and the
 /// tail are asked of the resolver's own authorities; the `Effect::Counter`
@@ -9882,7 +9910,7 @@ fn delayed_trigger_strands_a_tracked_set(def: &AbilityDefinition) -> bool {
 fn counter_exile_rider_drops_its_tail(def: &AbilityDefinition) -> bool {
     matches!(&*def.effect, Effect::Counter { .. })
         && def.sub_ability.as_deref().is_some_and(|rider| {
-            crate::game::effects::cast_from_zone::is_graveyard_exile_rider_subability(
+            crate::types::ability::is_graveyard_exile_rider_subability(
                 &rider.effect,
                 rider.condition.as_ref(),
             ) && rider.sub_ability.as_deref().is_some_and(|tail| {
@@ -10982,7 +11010,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // `cargo run --profile tool --bin coverage-report -- data --all`.
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
             "BattlefieldEntriesThisTurn",
-            if crate::game::restrictions::ledger_filter_is_evaluable(filter) {
+            if crate::types::ability::ledger_filter_is_evaluable(filter) {
                 Handled
             } else {
                 Unhandled
@@ -14649,7 +14677,7 @@ mod tests {
         let rider_head = |def: &AbilityDefinition| {
             matches!(&*def.effect, Effect::Counter { .. })
                 && def.sub_ability.as_deref().is_some_and(|rider| {
-                    crate::game::effects::cast_from_zone::is_graveyard_exile_rider_subability(
+                    crate::types::ability::is_graveyard_exile_rider_subability(
                         &rider.effect,
                         rider.condition.as_ref(),
                     )
@@ -15749,6 +15777,154 @@ mod tests {
             8,
             "every AttackTargetFilter variant must map to a distinct label: {labels:?}"
         );
+    }
+
+    /// A token spec that names no attack destination renders as it did before
+    /// the field existed; one that names a destination stays distinguishable.
+    #[test]
+    fn token_spec_attack_request_reaches_replacement_details_only_when_named() {
+        use crate::types::proposed_event::{
+            TokenAttackRequest, TokenCharacteristics, TokenHostRequest, TokenSpec,
+        };
+
+        let spec = |attack_request: TokenAttackRequest| TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Goblin".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![],
+                subtypes: vec![],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Goblin".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        };
+        let details = |attack_request: TokenAttackRequest| {
+            let mut repl = ReplacementDefinition::new(ReplacementEvent::CreateToken);
+            repl.additional_token_spec = Some(Box::new(spec(attack_request.clone())));
+            repl.ensure_token_specs = Some(vec![spec(attack_request)]);
+            replacement_details(&repl)
+        };
+
+        let unnamed = details(TokenAttackRequest::Unspecified);
+        assert!(
+            unnamed.iter().any(|(label, _)| label == "additional token")
+                && unnamed.iter().any(|(label, _)| label == "ensure tokens"),
+            "reach guard: both token specs are rendered: {unnamed:?}"
+        );
+        assert!(
+            unnamed
+                .iter()
+                .all(|(_, value)| !value.contains("attack_request")),
+            "{unnamed:?}"
+        );
+
+        let named =
+            details(TokenAttackRequest::named([PlayerId(1)]).expect("one player names a request"));
+        for label in ["additional token", "ensure tokens"] {
+            assert!(
+                named
+                    .iter()
+                    .any(|(l, value)| l == label && value.contains("attack_request: Named")),
+                "{label}: {named:?}"
+            );
+        }
+    }
+
+    /// A token instruction's named attack destination reaches the parse
+    /// details; an unnamed one renders as before.
+    #[test]
+    fn token_effect_attack_destination_reaches_effect_details_only_when_named() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let token = |attack_destination| Effect::Token {
+            name: "Glimmer".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: true,
+            attack_destination,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        };
+        let token_detail = |effect: &Effect| {
+            effect_details(effect)
+                .into_iter()
+                .find(|(label, _)| label == "token")
+                .map(|(_, value)| value)
+                .expect("a token effect renders a token detail")
+        };
+
+        let unnamed = token_detail(&token(TokenAttackDestination::ControllerChooses));
+        assert!(!unnamed.contains("attacking"), "{unnamed}");
+        let named = token_detail(&token(TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        }));
+        assert!(named.contains("attacking Player"), "{named}");
+        assert_ne!(named, unnamed);
+    }
+
+    /// A copy-token instruction's named attack destination reaches the parse
+    /// details; an unnamed one renders as before.
+    #[test]
+    fn copy_token_effect_attack_destination_reaches_effect_details_only_when_named() {
+        use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
+
+        let copy_token = |attack_destination| Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            owner: TargetFilter::Controller,
+            source_filter: None,
+            enters_attacking: true,
+            attack_destination,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+        };
+
+        let unnamed = effect_details(&copy_token(TokenAttackDestination::ControllerChooses));
+        assert!(
+            unnamed
+                .iter()
+                .any(|(label, value)| label == "attacking" && value == "yes"),
+            "reach guard: the copy-token arm rendered: {unnamed:?}"
+        );
+        assert!(
+            !unnamed
+                .iter()
+                .any(|(label, _)| label == "attack_destination"),
+            "{unnamed:?}"
+        );
+        let named = effect_details(&copy_token(TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        }));
+        assert!(
+            named
+                .iter()
+                .any(|(label, value)| label == "attack_destination" && value.contains("Player")),
+            "{named:?}"
+        );
+        assert_ne!(named, unnamed);
     }
 
     #[test]
@@ -17739,6 +17915,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![static_ability],
                 enter_with_counters: vec![],
@@ -22676,6 +22854,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -22717,6 +22897,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![(

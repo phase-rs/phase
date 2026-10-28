@@ -1057,7 +1057,7 @@ mod tests {
                 .static_abilities
                 .iter()
                 .any(|s| s.affected.as_ref().is_some_and(|f| {
-                    crate::game::filter::filter_contains_filter_prop(f, &|p| {
+                    crate::types::ability::filter_contains_filter_prop(f, &|p| {
                         matches!(
                             p,
                             FilterProp::ManaValueParity {

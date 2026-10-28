@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 #[cfg(test)]
 mod nested_operand_extent_tests {
     use super::*;
@@ -127,7 +125,7 @@ mod u14_quality_tests {
                     let (filter, rest) =
                         parse_type_phrase_folding_with_ctx(&text, &mut ParseContext::default());
                     assert!(rest.is_empty(), "{text}: {rest}");
-                    assert!(crate::game::filter::filter_contains_filter_prop(
+                    assert!(crate::types::ability::filter_contains_filter_prop(
                         &filter,
                         &|p| matches!(
                             p,
@@ -157,7 +155,7 @@ mod u14_quality_tests {
         ] {
             let (filter, rest) = parse_type_phrase_folding_with_ctx(text, &mut ctx);
             assert!(rest.is_empty(), "{text}: {rest}");
-            assert!(!crate::game::filter::filter_contains_filter_prop(
+            assert!(!crate::types::ability::filter_contains_filter_prop(
                 &filter,
                 &|p| matches!(p, FilterProp::ManaValueParity { .. })
             ));
@@ -344,7 +342,7 @@ use crate::types::ability::{
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::identifiers::TrackedSetId;
-use crate::types::keywords::{Keyword, KeywordKind};
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
@@ -354,7 +352,7 @@ use super::oracle_effect::{
 };
 use super::oracle_ir::context::{bind_controller_phrase, ChosenColorQualifierScope, ParseContext};
 use super::oracle_ir::diagnostic::OracleDiagnostic;
-use super::oracle_nom::error::{OracleError, OracleResult};
+use super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -366,6 +364,14 @@ use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, strip_where_x_is_clause, TextPair,
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
+};
+use crate::types::text_grammar::{
+    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_leading_pt_designation,
+    parse_token_suffix, separator_continues_enclosing_list, starts_with_type_phrase_lead,
+};
+pub(crate) use crate::types::text_grammar::{
+    parse_combat_status_prefix, parse_keyword_membership, parse_without_keyword_suffix,
+    starts_with_type_word,
 };
 
 /// CR 115.1: Whether a parsed target phrase used the "target" keyword
@@ -2696,6 +2702,52 @@ pub(super) fn parse_definite_parent_reference<'a>(
     if slots.is_empty() {
         return None;
     }
+    let (rest, anaphor) = parse_definite_anaphor(input).ok()?;
+    // A possessive continuation ("the creature's controller") is a distinct
+    // anaphor class (controller/owner of the slot), not a bare slot reference —
+    // refuse it so the possessive arms downstream keep their bindings.
+    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
+        return None;
+    }
+    unique_slot_for_anaphor(&anaphor, slots)
+        .map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
+}
+
+/// CR 601.2c + CR 608.2c: the noun phrase of a definite anaphor ("that
+/// creature", "the artifact card", "the creature you control"), shared by the
+/// bare slot binder and the cross-choice antecedent binder; a possessive
+/// continuation is left unconsumed in the remainder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DefiniteAnaphor {
+    /// The printed noun ("creature", "Equipment").
+    pub(super) noun: AnaphorNoun,
+    /// Whether the noun names a battlefield permanent or, through a printed
+    /// "card"/"cards" qualifier, a card in another zone.
+    pub(super) zone_class: AnaphorZoneClass,
+    /// The controller qualifier of the noun phrase ("the creature you
+    /// control"). Always `None` for a possessive ("that creature's
+    /// controller"), whose continuation stays in the remainder.
+    pub(super) controller: Option<ControllerRef>,
+}
+
+impl DefiniteAnaphor {
+    /// CR 601.2c: whether this anaphor's noun phrase names the declared slot
+    /// `slot` — its controller qualifier, if any, agrees with the slot's, and
+    /// its noun and zone class match (`slot_matches_anaphor`).
+    pub(super) fn names_slot(&self, slot: &TargetFilter) -> bool {
+        let controller_matches = self.controller.as_ref().is_none_or(
+            |ctrl| matches!(slot, TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(ctrl)),
+        );
+        controller_matches && slot_matches_anaphor(&self.noun, self.zone_class, slot)
+    }
+}
+
+/// CR 601.2c + CR 608.2c: parse the noun phrase of a definite anaphor at the
+/// start of lowercase `input` (see [`DefiniteAnaphor`]). A possessive ("that
+/// creature's controller") returns with the remainder at the apostrophe and no
+/// controller qualifier; the head of a compound type phrase ("the artifact
+/// creature") is not an anaphor and fails.
+pub(super) fn parse_definite_anaphor(input: &str) -> OracleResult<'_, DefiniteAnaphor> {
     // A definite determiner is REQUIRED — a bare type word ("creature") is a
     // fresh target, not a back-reference. Longest-match-first: "the chosen "
     // before "the ".
@@ -2704,9 +2756,8 @@ pub(super) fn parse_definite_parent_reference<'a>(
         tag("the "),
         tag("that "),
     ))
-    .parse(input)
-    .ok()?;
-    let (after_type_word, anaphor_type) = nom_target::parse_type_filter_word(rest).ok()?;
+    .parse(input)?;
+    let (after_type_word, anaphor_type) = nom_target::parse_type_filter_word(rest)?;
     // Optional trailing "card"/"cards" zone qualifier (Goblin Welder's "the
     // artifact card"). When present, the anaphor names a non-battlefield
     // (card-zone) slot.
@@ -2714,18 +2765,28 @@ pub(super) fn parse_definite_parent_reference<'a>(
         Ok((r, _)) => (r, AnaphorZoneClass::CardInNonBattlefieldZone),
         Err(_) => (after_type_word, AnaphorZoneClass::BattlefieldPermanent),
     };
-    // A possessive continuation ("the creature's controller") is a distinct
-    // anaphor class (controller/owner of the slot), not a bare slot reference —
-    // refuse it so the possessive arms downstream keep their bindings.
-    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
-        return None;
+    // CR 205.3: `parse_type_filter_word` yields only card types and subtypes, so
+    // this parser can never produce `AnaphorNoun::Token` — the token arm is
+    // reachable only from the demonstrative-route gate in `conditions.rs`.
+    let noun = AnaphorNoun::Type(anaphor_type);
+    // A possessive continuation ("the creature's controller") ends the noun
+    // phrase; leave it in the remainder for the caller to read or refuse.
+    if peek(tag::<_, _, OracleError<'_>>("'")).parse(rest).is_ok() {
+        return Ok((
+            rest,
+            DefiniteAnaphor {
+                noun,
+                zone_class,
+                controller: None,
+            },
+        ));
     }
     // Guard against consuming the head of a COMPOUND type phrase ("the artifact
     // creature") as an anaphor: if the remainder begins with another type word,
     // this is a fresh typed filter, not a slot back-reference.
     let tail = rest.trim_start();
     if !tail.is_empty() && nom_target::parse_type_filter_word(tail).is_ok() {
-        return None;
+        return Err(oracle_err(input));
     }
     // CR 601.2c + CR 608.2c: a controller qualifier belongs to the anaphor's
     // noun phrase ("the creature you control", "the chosen creature an opponent
@@ -2739,27 +2800,34 @@ pub(super) fn parse_definite_parent_reference<'a>(
             not(satisfy(|c: char| c.is_alphanumeric())),
         ),
     ))
-    .parse(rest)
-    .ok()?;
-    // CR 601.2c: each anaphor names exactly one earlier slot — bind only a
-    // UNIQUE match; zero or ≥2 matches fall through as `None`.
+    .parse(rest)?;
+    Ok((
+        rest,
+        DefiniteAnaphor {
+            noun,
+            zone_class,
+            controller,
+        },
+    ))
+}
+
+/// CR 601.2c: the index of the UNIQUE slot in `slots` that `anaphor` names
+/// ([`DefiniteAnaphor::names_slot`]); zero or ≥2 matches give `None`, so an
+/// anaphor is never bound on a guess.
+pub(super) fn unique_slot_for_anaphor(
+    anaphor: &DefiniteAnaphor,
+    slots: &[TargetFilter],
+) -> Option<usize> {
     let mut matched: Option<usize> = None;
-    // CR 205.3: `parse_type_filter_word` yields only card types and subtypes, so
-    // this call site can never produce `AnaphorNoun::Token` — the token arm is
-    // reachable only from the demonstrative-route gate in `conditions.rs`.
-    let anaphor_noun = AnaphorNoun::Type(anaphor_type);
     for (index, slot) in slots.iter().enumerate() {
-        let controller_matches = controller.as_ref().is_none_or(
-            |ctrl| matches!(slot, TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(ctrl)),
-        );
-        if controller_matches && slot_matches_anaphor(&anaphor_noun, zone_class, slot) {
+        if anaphor.names_slot(slot) {
             if matched.is_some() {
                 return None;
             }
             matched = Some(index);
         }
     }
-    matched.map(|index| (TargetFilter::ParentTargetSlot { index }, rest))
+    matched
 }
 
 /// CR 205.3 + CR 111.1: the matching axis a demonstrative or definite anaphor's
@@ -2811,7 +2879,20 @@ pub(super) fn slot_matches_anaphor(
     let TargetFilter::Typed(tf) = slot else {
         return false;
     };
-    let type_ok = match noun {
+    if !typed_filter_admits_anaphor_noun(noun, tf) {
+        return false;
+    }
+    // CR 400.1: a bare demonstrative names a battlefield permanent; a printed
+    // "card" qualifier names a non-battlefield zone (Goblin Welder's graveyard
+    // slot). The two classes must agree.
+    slot_zone_class(slot) == zone_class
+}
+
+/// CR 205.3 + CR 111.1: whether a typed filter carries the anaphor noun's
+/// matching axis — core-type membership, subtype equality, or the token object
+/// property.
+fn typed_filter_admits_anaphor_noun(noun: &AnaphorNoun, tf: &TypedFilter) -> bool {
+    match noun {
         AnaphorNoun::Type(TypeFilter::Subtype(sub)) => tf
             .get_subtype()
             .is_some_and(|slot_sub| slot_sub.eq_ignore_ascii_case(sub)),
@@ -2819,14 +2900,7 @@ pub(super) fn slot_matches_anaphor(
         // slot carrying the token object property.
         AnaphorNoun::Token => tf.properties.iter().any(|p| matches!(p, FilterProp::Token)),
         AnaphorNoun::Type(other) => tf.type_filters.iter().any(|t| t == other),
-    };
-    if !type_ok {
-        return false;
     }
-    // CR 400.1: a bare demonstrative names a battlefield permanent; a printed
-    // "card" qualifier names a non-battlefield zone (Goblin Welder's graveyard
-    // slot). The two classes must agree.
-    slot_zone_class(slot) == zone_class
 }
 
 /// CR 201.2: Match a clause boundary that ends a card name in a board-filter
@@ -5189,101 +5263,6 @@ fn continues_suffixed_type_list(filter: &TargetFilter, rest: &str) -> bool {
             .is_ok_and(|(leg, _)| starts_with_type_word(leg))
 }
 
-/// Guard: does text start with something `parse_type_phrase_folding` would recognize?
-/// Used to prevent comma/and/or recursion on non-type text.
-pub(crate) fn starts_with_type_word(text: &str) -> bool {
-    // Core type: "creature", "artifact", "permanent", etc.
-    if parse_core_type(text).0.is_some() {
-        return true;
-    }
-    // Subtype: "zombie", "vampires", "elves", etc.
-    if parse_subtype(text).is_some() {
-        return true;
-    }
-    // Standalone "token"/"tokens" (property word, not a core type or subtype).
-    // Reuses parse_token_suffix which handles singular/plural with word boundary.
-    if parse_token_suffix(text).is_some() {
-        return true;
-    }
-    // CR 105.1: Color adjective prefix: "blue creature", "red permanent", etc.
-    // parse_type_phrase_folding handles color prefixes internally, but the article guard
-    // must recognize them to strip "a "/"an " correctly.
-    if let Ok((rest, _)) = nom_primitives::parse_color(text) {
-        if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
-            if starts_with_type_word(after_space) {
-                return true;
-            }
-        }
-    }
-    // CR 105.2b/c: Color-quality adjective prefix: "multicolored card",
-    // "colorless creature", etc.
-    if let Some((_prop, consumed)) = parse_color_quality_prefix(text) {
-        if starts_with_type_word(&text[consumed..]) {
-            return true;
-        }
-    }
-    // CR 205.2a + CR 205.3: Negated type prefix: "noncreature spell", "nonland permanent",
-    // "non-Saga token" (Good King Mog XII chapter II — issue #3294), and
-    // negated-adjective compounds like "nontoken modified creature" (Akki
-    // Ember-Keeper / issue #3677 class) or "nontoken legendary permanent"
-    // (Cadric, Soul Kindler). Recurses into `starts_with_type_phrase_lead`
-    // (rather than only `parse_core_type`/`parse_token_suffix`) so the article
-    // guard recognizes every adjective that can lead a type phrase after a
-    // `non-` prefix — color, supertype, "modified", "renowned", "historic" —
-    // not just bare core types and tokens.
-    if let Ok((after_non, _)) = alt((tag::<_, _, OracleError<'_>>("non-"), tag("non"))).parse(text)
-    {
-        // Consume the negated word up to whitespace, then check what follows.
-        if let Ok((after_space, _)) = (
-            take_till::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
-            tag::<_, _, OracleError<'_>>(" "),
-        )
-            .parse(after_non)
-        {
-            if starts_with_type_phrase_lead(after_space) {
-                return true;
-            }
-        }
-    }
-    // CR 700.9: "modified <type>" adjective phrase leads a type
-    // phrase (e.g., "modified creatures you control"). Consume the adjective
-    // and verify a type word follows so the comma/and-list recursion can
-    // continue across the "modified" leg.
-    if let Ok((after_modified, _)) = tag::<_, _, OracleError<'_>>("modified ").parse(text) {
-        if starts_with_type_phrase_lead(after_modified) {
-            return true;
-        }
-    }
-    // CR 702.112b: "renowned <type>" adjective phrase leads a type phrase.
-    if let Ok((after_renowned, _)) = tag::<_, _, OracleError<'_>>("renowned ").parse(text) {
-        if starts_with_type_phrase_lead(after_renowned) {
-            return true;
-        }
-    }
-    // CR 700.6: "historic <type>" adjective phrase leads a type phrase
-    // (e.g., "historic permanents you control"). Consume the adjective and
-    // verify a type word follows so the comma/and-list recursion can continue
-    // across the "historic" leg.
-    if let Ok((after_historic, _)) = tag::<_, _, OracleError<'_>>("historic ").parse(text) {
-        if starts_with_type_phrase_lead(after_historic) {
-            return true;
-        }
-    }
-    false
-}
-
-fn starts_with_type_phrase_lead(text: &str) -> bool {
-    let text = text.trim_start();
-    starts_with_type_word(text)
-        || nom_target::parse_supertype_prefix(text).is_ok()
-        || parse_color_prefix(text).is_some()
-        || parse_color_quality_prefix(text).is_some()
-        || parse_combat_status_prefix(text).is_some()
-        // CR 208.1 (#2912): "1/1 creature" leads a type phrase (the P/T
-        // designation is followed by a type word).
-        || parse_leading_pt_designation(text).is_some()
-}
-
 /// Guard for comma/and/or type-list continuations where core-type segments may
 /// carry their own article — e.g. "an artifact, a creature, or a land" (Braids,
 /// Cabal Minion / issue #847).
@@ -6716,17 +6695,6 @@ pub(crate) fn parse_prior_controller_population<'a>(
     Some((TargetFilter::Typed(typed), after))
 }
 
-fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
-    // Delegate to the shared nom combinator table which handles both singular
-    // and plural forms in longest-match-first order.
-    if let Ok((rest, tf)) = nom_target::parse_type_filter_word(text) {
-        let consumed = text.len() - rest.len();
-        return (Some(tf), None, consumed);
-    }
-
-    (None, None, 0)
-}
-
 /// Parse a controller suffix like " you control", " that player controls",
 /// " they controlled". Returns `(ControllerRef, bytes_consumed)` where consumed
 /// includes leading whitespace.
@@ -6852,22 +6820,6 @@ fn look_back_scoped_player_seed(phrase: &nom_target::ControllerPhrase) -> Option
             ControllerTense::Present | ControllerTense::Past,
         ) => None,
     }
-}
-
-fn parse_token_suffix(text: &str) -> Option<usize> {
-    let trimmed = text.trim_start();
-
-    // Try "tokens" before "token" (longest match first), with word boundary.
-    for word in &["tokens", "token"] {
-        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*word).parse(trimmed) {
-            match rest.chars().next() {
-                None | Some(' ' | ',' | '.') => return Some(text.len() - rest.len()),
-                _ => {}
-            }
-        }
-    }
-
-    None
 }
 
 /// CR 702.122c: postnominal participle "crewed by ~ this turn" ("a Vehicle
@@ -7016,135 +6968,6 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
     ))
 }
 
-/// Parse a color adjective prefix: "white ", "blue ", "black ", "red ", "green ".
-/// Returns (FilterProp::HasColor, bytes consumed including trailing space).
-///
-/// Delegates to `nom_primitives::parse_color` for color word recognition,
-/// then verifies a trailing space exists (color as adjective, not standalone).
-fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
-    let (rest, color) = nom_primitives::parse_color(text).ok()?;
-    // CR 105.1: A color word is an adjective prefix only when a separator
-    // follows, so a bare color word ("whiteness") never matches. Two separators
-    // are accepted:
-    //   * a trailing space — the ordinary "white creature" prefix (consumed);
-    //   * a comma — the color-list continuation "white, blue, or black
-    //     creature", where the comma is left in place for the `TYPE_SEPARATORS`
-    //     recursion to consume as a ", " / ", or " disjunction separator. That
-    //     recursion + `distribute_core_type_to_or` then assemble the ≥3-color
-    //     prenominal chain into the same Or-of-legs shape the 2-color "green or
-    //     white creature" form already produces, with the core type backfilled
-    //     onto every color-only leg.
-    let consumed = if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
-        text.len() - after_space.len()
-    } else if peek(tag::<_, _, OracleError<'_>>(",")).parse(rest).is_ok() {
-        // Comma left in place for the `TYPE_SEPARATORS` recursion to consume.
-        text.len() - rest.len()
-    } else {
-        return None;
-    };
-    Some((FilterProp::HasColor { color }, consumed))
-}
-
-/// Parse color-quality adjective prefixes: "colorless creature",
-/// "monocolored permanent", "multicolored card", etc.
-/// Returns the filter property and bytes consumed including trailing space.
-fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
-    let (rest, prop) = alt((
-        value(
-            FilterProp::ColorCount {
-                comparator: Comparator::EQ,
-                count: 0,
-            },
-            tag::<_, _, OracleError<'_>>("colorless "),
-        ),
-        value(
-            FilterProp::ColorCount {
-                comparator: Comparator::EQ,
-                count: 1,
-            },
-            tag("monocolored "),
-        ),
-        value(
-            FilterProp::ColorCount {
-                comparator: Comparator::GE,
-                count: 2,
-            },
-            tag("multicolored "),
-        ),
-    ))
-    .parse(text)
-    .ok()?;
-    Some((prop, text.len() - rest.len()))
-}
-
-/// CR 208.1 (#2912): Parse a leading "N/M " power/toughness designation
-/// ("1/1 creature", "2/2 creatures") into fixed `(power, toughness)` plus the
-/// bytes consumed (including the trailing space). Only matches when a type word
-/// follows, so a bare "1/1" elsewhere is not hijacked. Fixed integers only;
-/// dynamic "*/*" / "X/X" designations are left to the existing P/T paths.
-fn parse_leading_pt_designation(input: &str) -> Option<(i32, i32, usize)> {
-    let (after_power, power) = nom_primitives::parse_number(input).ok()?;
-    let (after_slash, _) = tag::<_, _, OracleError<'_>>("/").parse(after_power).ok()?;
-    let (after_toughness, toughness) = nom_primitives::parse_number(after_slash).ok()?;
-    let (after_space, _) = tag::<_, _, OracleError<'_>>(" ")
-        .parse(after_toughness)
-        .ok()?;
-    if !starts_with_type_phrase_lead(after_space) {
-        return None;
-    }
-    Some((
-        power as i32,
-        toughness as i32,
-        input.len() - after_space.len(),
-    ))
-}
-
-/// CR 509.1h / CR 302.6 / CR 701.60b: Parse status prefixes from type phrases.
-/// Called in a loop to consume multiple prefixes (e.g. "unblocked attacking ").
-/// Handles combat status (attacking, unblocked), tap status (tapped, untapped),
-/// and designation status (suspected — CR 701.60b).
-///
-/// Delegates to `nom_filter::parse_property_filter` for the common property keywords,
-/// then handles "face-down " (hyphenated variant not in the nom combinator).
-pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usize)> {
-    // Try the shared nom property filter combinator for combat/tap status keywords.
-    // Filter to only the status properties relevant as type phrase prefixes.
-    if let Ok((rest, prop)) = nom_filter::parse_property_filter(text) {
-        if matches!(
-            prop,
-            FilterProp::BlockStatus { .. }
-                | FilterProp::Attacking { defender: None }
-                | FilterProp::Blocking
-                | FilterProp::Tapped
-                | FilterProp::Untapped
-                // CR 702.171b: "saddled" designation as a type-phrase prefix
-                // ("saddled Mount", "saddled creature").
-                | FilterProp::IsSaddled
-                | FilterProp::ProtectorMatches { .. }
-                | FilterProp::FaceDown
-                // CR 701.27g: "transformed" is a battlefield designation that appears
-                // as an adjective prefix in type phrases ("transformed permanent",
-                // Mutagen Connoisseur).
-                | FilterProp::Transformed
-                // CR 701.60b: "suspected" is a battlefield designation that appears
-                // as an adjective prefix in type phrases ("suspected creatures").
-                | FilterProp::Suspected
-        ) {
-            // Must be followed by space (prefix, not standalone)
-            if let Ok((after_space, _)) = tag::<_, _, OracleError<'_>>(" ").parse(rest) {
-                return Some((prop, text.len() - after_space.len()));
-            }
-        }
-    }
-
-    // Handle "face-down " (hyphenated variant not in the nom combinator).
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("face-down ").parse(text) {
-        return Some((FilterProp::FaceDown, text.len() - rest.len()));
-    }
-
-    None
-}
-
 /// CR 508.1b: Postnominal "attacking you" / "attacking your opponents" on a
 /// typed phrase ("target creature attacking you"). The prefix form emits
 /// `Attacking { defender: None }`; this suffix scopes the defending player.
@@ -7283,8 +7106,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 ///   attacking creature" and Echoing Assault is an Enchantment that can never
 ///   attack. Their antecedent is the attacked player the CR 508.3e trigger
 ///   fired for, carried on the firing's own synthesized event by
-///   `trigger_matchers::matching_you_attack_events_by_attacked_player` and read
-///   back as that event's `defending_player`.
+///   `trigger_matchers::matching_you_attack_events_by_attacked_player`.
 ///
 /// So a CR 508.5-shaped name on the runtime helper does not mean CR 508.5 binds
 /// every caller — for the CR 508.3e lane it is the per-firing event, not the
@@ -7324,8 +7146,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 ///
 /// 1. Inline token specs — `oracle_effect::token` scans word boundaries for the
 ///    `that's|that is|that are` + `tapped and attacking|attacking` clause and
-///    TRUNCATES the token body at that byte offset; the trailing "that player"
-///    is discarded with the clause.
+///    TRUNCATES the token body at that byte offset.
 /// 2. Battlefield-entry tails — `parse_battlefield_entry_qualifiers` matches
 ///    " tapped and attacking" and its qualifier boundary absorbs the trailing
 ///    player phrase; only `(enter_tapped, enters_attacking)` flags come back.
@@ -7342,7 +7163,7 @@ fn parse_attacking_alone_suffix_status(input: &str) -> OracleResult<'_, FilterPr
 /// copula ("are now ", "is "), not with `tag("attacking")`.
 ///
 /// "attacking that opponent" is deliberately EXCLUDED: a corpus scan shows it
-/// occurs only in the positions enumerated above (Kaalia of the Vast, Adeline,
+/// occurs only in the positions enumerated above (Kaalia of the Vast,
 /// Mardu Siegebreaker, ...), never as an object-filter suffix, so accepting it
 /// here would add zero coverage.
 fn parse_attacking_defender_anaphor(input: &str) -> OracleResult<'_, FilterProp> {
@@ -8222,7 +8043,7 @@ fn rebind_compound_slot_referent_in_prop(prop: &mut FilterProp) {
 /// leaves listed below, recursing through every `QuantityExpr` composition
 /// arm. This list is NOT exhaustive: it omits `Intensity`, which the parser
 /// only emits as `Intensity { Source }`. The exhaustive object-scope
-/// classification is `game::quantity::quantity_ref_object_scope_read`, which
+/// classification is `types::ability::quantity_ref_object_scope_read`, which
 /// backs `quantity_expr_contains_scope`.
 fn rebind_compound_slot_referent_in_quantity(expr: &mut QuantityExpr) {
     fn rebind_ref(qty: &mut QuantityRef) {
@@ -8750,25 +8571,6 @@ fn parse_counters_put_this_turn_clause(input: &str) -> Option<(FilterProp, usize
     None
 }
 
-/// A keyword-list separator followed by something other than a keyword, where
-/// that something opens another leg of the enclosing list — a type word ("creature
-/// with disturb, or enchantment") or a determiner-led leg ("each creature without
-/// flying and each planeswalker", "target creature with flying and all Equipment
-/// attached to that creature") — belongs to the enclosing list and stays
-/// unconsumed.
-fn separator_continues_enclosing_list(after_separator: &str) -> bool {
-    parse_leading_keyword_match(after_separator).is_none()
-        && (starts_with_type_word(after_separator)
-            || alt((
-                tag::<_, _, OracleError<'_>>("each "),
-                tag("all "),
-                tag("target "),
-                tag("up to "),
-            ))
-            .parse(after_separator)
-            .is_ok())
-}
-
 struct KeywordSuffix {
     properties: Vec<FilterProp>,
     disjunctive: bool,
@@ -8822,53 +8624,6 @@ fn parse_keyword_suffix(text: &str) -> Option<(KeywordSuffix, usize)> {
             },
             consumed,
         ))
-    }
-}
-
-/// Parse "without [keyword]" suffix — negated keyword filter.
-/// Handles "without flying", "without first strike", etc.
-/// Parallels `parse_keyword_suffix` but emits `WithoutKeyword`.
-pub(crate) fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
-    let trimmed = text.trim_start();
-    let leading_ws = text.len() - trimmed.len();
-    let (after_without, _) = tag::<_, _, OracleError<'_>>("without ")
-        .parse(trimmed)
-        .ok()?;
-    let mut remaining = after_without;
-    let mut consumed = leading_ws + "without ".len();
-    let mut properties = Vec::new();
-
-    while let Ok((rest, property)) = parse_keyword_membership(remaining) {
-        properties.push(match property {
-            FilterProp::WithKeyword { value } => FilterProp::WithoutKeyword { value },
-            FilterProp::HasKeywordKind { value } => FilterProp::WithoutKeywordKind { value },
-            _ => unreachable!("membership returns only keyword predicates"),
-        });
-        consumed += remaining.len() - rest.len();
-        remaining = rest;
-
-        // Try keyword list separators in longest-match-first order.
-        let mut found_sep = false;
-        for sep in &[", and ", ", or ", " and ", " or ", ", "] {
-            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*sep).parse(remaining) {
-                if separator_continues_enclosing_list(rest) {
-                    break;
-                }
-                consumed += sep.len();
-                remaining = rest;
-                found_sep = true;
-                break;
-            }
-        }
-        if !found_sep {
-            break;
-        }
-    }
-
-    if properties.is_empty() {
-        None
-    } else {
-        Some((properties, consumed))
     }
 }
 
@@ -9178,149 +8933,6 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
             min_sources,
         },
     ))
-}
-
-enum KeywordMatch {
-    Concrete(Keyword),
-    Kind(KeywordKind),
-}
-
-/// Shared remainder-preserving keyword membership for recipient predicates and
-/// with/without suffixes. Concrete qualities and kind-only names stay distinct.
-pub(crate) fn parse_keyword_membership(
-    input: &str,
-) -> nom::IResult<&str, FilterProp, OracleError<'_>> {
-    let (keyword, consumed) = parse_leading_keyword_match(input).ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
-    let property = match keyword {
-        KeywordMatch::Concrete(value) => FilterProp::WithKeyword { value },
-        KeywordMatch::Kind(value) => FilterProp::HasKeywordKind { value },
-    };
-    Ok((&input[consumed..], property))
-}
-
-fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
-    let trimmed = text.trim_start();
-    let leading_ws = text.len() - trimmed.len();
-    let mut candidate_ends = vec![trimmed.len()];
-
-    for (idx, ch) in trimmed.char_indices() {
-        if matches!(ch, ' ' | ',' | '.') {
-            candidate_ends.push(idx);
-        }
-    }
-
-    candidate_ends.sort_unstable();
-    candidate_ends.dedup();
-
-    for end in candidate_ends.into_iter().rev() {
-        let candidate = trimmed[..end].trim();
-        if let Some(keyword) = parse_keyword_match(candidate) {
-            return Some((keyword, leading_ws + end));
-        }
-    }
-
-    None
-}
-
-fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
-    if let Ok((rest, kind)) = value(
-        KeywordKind::Disturb,
-        tag::<_, _, OracleError<'_>>("disturb"),
-    )
-    .parse(text)
-    {
-        if rest.is_empty() {
-            return Some(KeywordMatch::Kind(kind));
-        }
-    }
-
-    if let Ok((rest, kind)) = value(
-        KeywordKind::Augment,
-        tag::<_, _, OracleError<'_>>("augment"),
-    )
-    .parse(text)
-    {
-        if rest.is_empty() {
-            return Some(KeywordMatch::Kind(kind));
-        }
-    }
-
-    // CR 702.140: Mutate is a parameterized keyword (`Mutate(ManaCost)`), so the
-    // `Keyword::from_str` fallback below would yield `Concrete(Keyword::Mutate(cost))`
-    // and force an exact-cost match. Text like "creature card with mutate" refers to the
-    // keyword class regardless of cost, so map it to the discriminant-level `Kind`.
-    if let Ok((rest, kind)) =
-        value(KeywordKind::Mutate, tag::<_, _, OracleError<'_>>("mutate")).parse(text)
-    {
-        if rest.is_empty() {
-            return Some(KeywordMatch::Kind(kind));
-        }
-    }
-
-    // CR 702.168: Disguise is a parameterized keyword (`Disguise(ManaCost)`), so
-    // the `Keyword::from_str` fallback would yield a concrete `Keyword::Disguise(cost)`
-    // and force an exact-cost match. "creatures you control with disguise" names
-    // the keyword class regardless of cost, so map it to the discriminant `Kind`.
-    if let Ok((rest, kind)) = value(
-        KeywordKind::Disguise,
-        tag::<_, _, OracleError<'_>>("disguise"),
-    )
-    .parse(text)
-    {
-        if rest.is_empty() {
-            return Some(KeywordMatch::Kind(kind));
-        }
-    }
-
-    // CR 702.113: "card with awaken" (and the other parameterized graveyard/cast
-    // keywords) is a keyword-presence meta-reference that must match by
-    // discriminant, not exact payload — a `WithKeyword(Awaken { count, cost })`
-    // would never match a real instance. Route to `KeywordMatch::Kind`.
-    if matches!(
-        text,
-        "flashback"
-            | "cycling"
-            | "escape"
-            | "embalm"
-            | "eternalize"
-            | "harmonize"
-            | "unearth"
-            | "awaken"
-            | "foretell"
-            | "miracle"
-    ) {
-        let kind = match text {
-            "flashback" => KeywordKind::Flashback,
-            "cycling" => KeywordKind::Cycling,
-            "escape" => KeywordKind::Escape,
-            "embalm" => KeywordKind::Embalm,
-            "eternalize" => KeywordKind::Eternalize,
-            "harmonize" => KeywordKind::Harmonize,
-            "unearth" => KeywordKind::Unearth,
-            "awaken" => KeywordKind::Awaken, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
-            // CR 702.143 / CR 702.94: "card in your hand without foretell" and the
-            // miracle analogue are keyword-presence meta-references — match by
-            // discriminant so a granted (cost-bearing) instance still matches.
-            "foretell" => KeywordKind::Foretell, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above), not Oracle-text dispatch
-            "miracle" => KeywordKind::Miracle, // allow-noncombinator: normalized keyword-token -> KeywordKind lookup (finite set, gated by matches! above; mirrors flashback/cycling arms), not Oracle-text dispatch
-            _ => unreachable!(),
-        };
-        return Some(KeywordMatch::Kind(kind));
-    }
-
-    let keyword = Keyword::from_str(text).ok()?;
-    if matches!(keyword, Keyword::Unknown(_))
-        && !matches!(
-            text,
-            "plainswalk" | "islandwalk" | "swampwalk" | "mountainwalk" | "forestwalk"
-        )
-    {
-        return None;
-    }
-
-    Some(KeywordMatch::Concrete(keyword))
 }
 
 pub(crate) fn parse_shared_quality(
@@ -12106,6 +11718,7 @@ mod tests {
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
+    use crate::types::keywords::Keyword;
 
     #[test]
     fn attacking_defender_suffix_marker() {
@@ -15835,18 +15448,6 @@ mod tests {
         );
     }
 
-    /// CR 702.113: "card with awaken" is a parameterized-keyword presence
-    /// meta-reference and must map to `KeywordMatch::Kind(Awaken)` (matched by
-    /// discriminant), not an exact-payload `WithKeyword` that never matches a
-    /// real `Awaken { count, cost }`. Mirrors the flashback/cycling/escape arms.
-    #[test]
-    fn parse_keyword_match_awaken_is_kind() {
-        assert!(matches!(
-            parse_keyword_match("awaken"),
-            Some(KeywordMatch::Kind(KeywordKind::Awaken))
-        ));
-    }
-
     /// Goblin Welder's two artifact slots: `[artifact on battlefield, artifact
     /// card in graveyard]` — the registry the "Choose target artifact a player
     /// controls and target artifact card in that player's graveyard" head
@@ -15990,6 +15591,79 @@ mod tests {
             parse_definite_parent_reference("the creature you controlled", &you_vs_opponent),
             None
         );
+    }
+
+    #[test]
+    fn definite_anaphor_leaves_possessive_continuation_in_remainder() {
+        // CR 608.2c: "that creature's controller" names the creature's
+        // controller; the noun phrase stops at the apostrophe so the
+        // cross-choice binder can read the noun, while the bare slot wrapper
+        // still refuses the possessive.
+        let (rest, anaphor) =
+            parse_definite_anaphor("that creature's controller").expect("possessive anaphor");
+        assert_eq!(rest, "'s controller");
+        assert_eq!(
+            anaphor,
+            DefiniteAnaphor {
+                noun: AnaphorNoun::Type(TypeFilter::Creature),
+                zone_class: AnaphorZoneClass::BattlefieldPermanent,
+                controller: None,
+            }
+        );
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        assert_eq!(
+            parse_definite_parent_reference("that creature's controller", &[creature]),
+            None
+        );
+    }
+
+    #[test]
+    fn definite_anaphor_card_qualifier_names_a_non_battlefield_card() {
+        // CR 400.1: a printed "card" qualifier names an object outside the
+        // battlefield.
+        let (rest, anaphor) = parse_definite_anaphor("the creature card").expect("card anaphor");
+        assert_eq!(rest, "");
+        assert_eq!(anaphor.noun, AnaphorNoun::Type(TypeFilter::Creature));
+        assert_eq!(
+            anaphor.zone_class,
+            AnaphorZoneClass::CardInNonBattlefieldZone
+        );
+        assert_eq!(anaphor.controller, None);
+    }
+
+    #[test]
+    fn definite_anaphor_consumes_controller_qualifier() {
+        let (rest, anaphor) = parse_definite_anaphor("that creature an opponent controls")
+            .expect("controller-qualified anaphor");
+        assert_eq!(rest, "");
+        assert_eq!(anaphor.noun, AnaphorNoun::Type(TypeFilter::Creature));
+        assert_eq!(anaphor.zone_class, AnaphorZoneClass::BattlefieldPermanent);
+        assert_eq!(anaphor.controller, Some(ControllerRef::Opponent));
+    }
+
+    #[test]
+    fn definite_anaphor_refuses_compound_type_phrase_head() {
+        // "the artifact creature" is a fresh compound type phrase, never an
+        // anaphor.
+        assert!(parse_definite_anaphor("the artifact creature").is_err());
+        // Positive reach-guard: the same determiner + head noun alone parses.
+        assert!(parse_definite_anaphor("the artifact").is_ok());
+    }
+
+    #[test]
+    fn unique_slot_for_anaphor_requires_exactly_one_named_slot() {
+        let (_, anaphor) = parse_definite_anaphor("that creature").expect("bare anaphor");
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
+        assert_eq!(
+            unique_slot_for_anaphor(&anaphor, &[artifact.clone(), creature.clone()]),
+            Some(1)
+        );
+        assert_eq!(
+            unique_slot_for_anaphor(&anaphor, &[creature.clone(), creature]),
+            None
+        );
+        assert_eq!(unique_slot_for_anaphor(&anaphor, &[artifact]), None);
     }
 
     #[test]

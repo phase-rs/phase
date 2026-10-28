@@ -832,12 +832,20 @@ export type PayCostKind =
   | { type: "TapCreatures"; mode: TapCreaturesSelectionMode }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
 
-// CR 118.12 + CR 601.2b + CR 605.3b: resumption context after a `PayCost`
+// CR 118.12 + CR 601.2b + CR 605.3b + CR 702.37e: resumption context after a `PayCost`
 // choice. The frontend treats the inner pending payload as opaque pass-through.
 export type CostResume =
   | { type: "Spell"; Spell: PendingCast }
+  | { type: "SpellCost"; Spell: PendingCast; cost: unknown; source: "Other" | "Offering" | "Emerge" }
   | { type: "Resolution" }
-  | { type: "ManaAbility"; ManaAbility: unknown };
+  | { type: "ManaAbility"; ManaAbility: unknown }
+  | {
+      type: "TurnFaceUp";
+      source?: ObjectIncarnationRef;
+      object_id?: number;
+      cost_source: "Morph" | "Megamorph" | "Disguise" | "ManifestManaCost";
+      remaining_cost?: unknown;
+    };
 
 export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
@@ -948,7 +956,9 @@ export type SpecialAction =
   | "TurnFaceUp"
   | "RollPlanarDie"
   // CR 116.2c: pay a continuous effect's printed termination cost to end it.
-  | "EndContinuousEffect";
+  | "EndContinuousEffect"
+  // CR 116.2h: pay {2} to exile a card with foretell from hand face down.
+  | "Foretell";
 
 export type ManaRestriction =
   // "Spend this mana only to cast spells."
@@ -1529,9 +1539,12 @@ export type ChooseFromZoneConstraint =
   | { type: "DistinctCardTypes"; categories: string[] }
   | { type: "TotalManaValue"; comparator: string; value: number };
 
+// Mirrors Rust `SharedQualityRelation` (relation among the chosen cards).
+export type SharedQualityRelation = "Shares" | "DoesNotShare";
+
 export type SearchSelectionConstraint =
   | { type: "None" }
-  | { type: "DistinctQualities"; qualities: string[] }
+  | { type: "SharesQualities"; qualities: string[]; relation: SharedQualityRelation }
   | { type: "TotalManaValue"; comparator: string; value: number }
   | { type: "MatchEachFilter"; filters: TargetFilter[] };
 
@@ -3238,6 +3251,8 @@ export type DebugAction =
   | { type: "LoseLife"; data: { player_id: PlayerId; amount: number } }
   | { type: "ModifyPlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; delta: number } }
   | { type: "ModifyEnergy"; data: { player_id: PlayerId; delta: number } }
+  | { type: "GivePlayerCounters"; data: { player_id: PlayerId; counter_kind: PlayerCounterKind; count: number } }
+  | { type: "GiveEnergy"; data: { player_id: PlayerId; count: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetInfiniteMana"; data: { player_id: PlayerId; enabled: boolean } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }
@@ -5227,6 +5242,21 @@ export function supportsAiDecisionDiagnostics(
   return adapter != null
     && "setAiDecisionDiagnosticsEnabled" in adapter
     && "subscribeAiDecisionDiagnostics" in adapter;
+}
+
+/**
+ * Local-engine transports that can ask the engine to disclose every hand in the
+ * local seat's projection ("Show AI Hand"). The engine decides whether
+ * the seat is entitled to it; the client never reconstructs hidden cards.
+ */
+export interface DebugHandRevealCapability {
+  setDebugHandReveal(enabled: boolean): Promise<void>;
+}
+
+export function supportsDebugHandReveal(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & DebugHandRevealCapability {
+  return adapter != null && "setDebugHandReveal" in adapter;
 }
 
 /** Result of the engine-owned game-scoped AI worker card-data build. */

@@ -6968,7 +6968,7 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // would turn a conservative never-fires into an over-permit. Those sites are covered by the
         // `coverage.rs` classifier instead.
         EnteredControlBinding::EntryEvent(player) => {
-            if !crate::game::restrictions::ledger_filter_is_evaluable(&filter) {
+            if !crate::types::ability::ledger_filter_is_evaluable(&filter) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Fail,
@@ -8365,22 +8365,35 @@ fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, Qua
 
 fn parse_for_each_blocking_source_type(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, tf) = parse_type_filter_word(input)?;
-    let (rest, _) = alt((
-        tag(" blocking it"),
-        tag(" blocking ~"),
-        tag(" blocking this creature"),
-    ))
-    .parse(rest)?;
+    let (rest, prop) = parse_blocking_source_referent(rest)?;
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![tf],
                 controller: None,
-                properties: vec![FilterProp::BlockingSource],
+                properties: vec![prop],
             }),
         },
     ))
+}
+
+/// CR 509.1g: the " blocking <source>" referent — " blocking it" /
+/// " blocking ~" / " blocking this creature" → `FilterProp::BlockingSource`
+/// (a creature blocking the ability's SOURCE object). The single authority for
+/// this referent, shared by the "for each creature blocking it" quantity and
+/// the "<count> creature(s) is/are blocking it" condition. "it" binds the
+/// source; a host-relative "it" (an Aura's enchanted creature) is not modeled.
+pub(crate) fn parse_blocking_source_referent(input: &str) -> OracleResult<'_, FilterProp> {
+    value(
+        FilterProp::BlockingSource,
+        alt((
+            tag(" blocking it"),
+            tag(" blocking ~"),
+            tag(" blocking this creature"),
+        )),
+    )
+    .parse(input)
 }
 
 fn parse_for_each_recipient_shared_quality(input: &str) -> OracleResult<'_, QuantityRef> {

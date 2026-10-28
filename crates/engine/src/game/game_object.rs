@@ -3077,6 +3077,9 @@ impl GameObject {
             // departed source's intervening-if recheck ("isn't prepared")
             // reads the exit-time value through the LKI record.
             was_prepared: self.prepared.is_some(),
+            // CR 800.4a: stamped by the player-leaves-game procedure, which owns
+            // that fact; every other move is an ordinary move.
+            departure: crate::types::game_state::ZoneDeparture::Moved,
         }
     }
 

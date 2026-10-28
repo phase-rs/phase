@@ -151,7 +151,7 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         family: ResourceFamily::Mana,
         win_kind: WinKind::Advantage,
         gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        deferral: None,
     },
     ComboRow {
         name: "Grim Monolith + Power Artifact",
@@ -766,6 +766,7 @@ pub(crate) enum ComboDriver {
 pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
     (0, ComboDriver::Offline(drive_offline_heliod_ballista)),
     (1, ComboDriver::Offline(drive_offline_kilo_freed_relic)),
+    (3, ComboDriver::Offline(drive_offline_basalt_rings)),
     (4, ComboDriver::Offline(drive_offline_grim_power)),
     (6, ComboDriver::Offline(drive_offline_devoted_vizier)),
     (9, ComboDriver::Offline(drive_offline_bloom_freed)),
@@ -1712,6 +1713,106 @@ pub(crate) fn drive_offline_grim_power(db: &CardDatabase) -> Option<LoopCertific
             activate_and_resolve(probe, grim, tap_idx, None);
         }
     })
+}
+
+/// BASALT MONOLITH + RINGS OF BRIGHTHEARTH — infinite colorless mana. Basalt Monolith ("{T}:
+/// Add {C}{C}{C}." / "{3}: Untap this artifact.") taps for {C}{C}{C}, then activates its untap;
+/// Rings of Brighthearth ("Whenever you activate an ability, if it isn't a mana ability, you may
+/// pay {2}. If you do, copy that ability. You may choose new targets for the copy.") copies it
+/// (CR 707.10). The copy resolves first and untaps Monolith, which taps again while the original
+/// waits on the stack (CR 605.3a: a mana ability is activated whenever its controller has
+/// priority), and the original then untaps it once more. A steady cycle starts and ends with
+/// Monolith tapped: two taps for {C}x6 in, {3} + {2} out, +{C} net.
+pub(crate) fn drive_offline_basalt_rings(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_basalt_rings(db, true)
+}
+
+/// [`drive_offline_basalt_rings`] answering Rings' "you may pay {2}" with `copy`. Declining
+/// leaves one tap per {3} untap, so no loop stands.
+pub(crate) fn drive_basalt_rings(db: &CardDatabase, copy: bool) -> Option<LoopCertificate> {
+    let (board, cycle) = basalt_rings_board(db)?;
+    run_combo(board, |probe| {
+        let _ = cycle.run(probe, copy);
+    })
+}
+
+/// The Basalt Monolith + Rings of Brighthearth board and the cycle that drives it.
+pub(crate) fn basalt_rings_board(db: &CardDatabase) -> Option<(ComboBoard, BasaltRingsCycle)> {
+    let board = build_board(db, CORPUS[3].cards)?;
+    let monolith = board.ids[0];
+    let untap_idx = ability_index_where(board.runner.state(), monolith, is_untap_effect)?;
+    let tap_idx = ability_index_where(board.runner.state(), monolith, is_mana_effect)?;
+    Some((
+        board,
+        BasaltRingsCycle {
+            monolith,
+            untap_idx,
+            tap_idx,
+        },
+    ))
+}
+
+/// One Basalt Monolith + Rings of Brighthearth cycle: tap Monolith if it is untapped, activate
+/// its untap, answer Rings' "you may pay {2}", and tap Monolith whenever it is untapped while P0
+/// holds priority, until the stack is empty.
+pub(crate) struct BasaltRingsCycle {
+    pub(crate) monolith: ObjectId,
+    untap_idx: usize,
+    tap_idx: usize,
+}
+
+impl BasaltRingsCycle {
+    /// Drives one cycle, answering Rings' prompt with `copy`. `Some(answered)` when the cycle
+    /// reached an empty-stack priority window, `answered` saying whether Rings' prompt came;
+    /// `None` when an action was refused or an unexpected prompt appeared.
+    pub(crate) fn run(&self, probe: &mut LoopProbe, copy: bool) -> Option<bool> {
+        let tapped = |probe: &LoopProbe| {
+            probe
+                .runner()
+                .state()
+                .objects
+                .get(&self.monolith)
+                .is_some_and(|object| object.tapped)
+        };
+        let activate = |probe: &mut LoopProbe, ability_index: usize| {
+            probe
+                .act(GameAction::ActivateAbility {
+                    source_id: self.monolith,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .ok()
+        };
+        if !tapped(probe) {
+            activate(probe, self.tap_idx)?;
+        }
+        activate(probe, self.untap_idx)?;
+        let mut answered = false;
+        for _ in 0..32 {
+            let state = probe.runner().state();
+            let action = match &state.waiting_for {
+                // CR 605.3a: tap the untapped Monolith for mana whenever P0 holds priority,
+                // including between the copy and the original untap resolving.
+                WaitingFor::Priority { .. } if !tapped(probe) => {
+                    activate(probe, self.tap_idx)?;
+                    continue;
+                }
+                WaitingFor::Priority { .. } if state.stack.is_empty() => return Some(answered),
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                    GameAction::PassPriority
+                }
+                // Rings' "you may pay {2}": accepting copies the untap.
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    answered = true;
+                    GameAction::DecideOptionalEffect { accept: copy }
+                }
+                WaitingFor::CopyRetarget { .. } => GameAction::KeepAllCopyTargets,
+                _ => return None,
+            };
+            probe.act(action).ok()?;
+        }
+        None
+    }
 }
 
 /// #47 SPIKE FEEDER + ARCHANGEL OF THUNE — infinite +1/+1 counters + life. Spike

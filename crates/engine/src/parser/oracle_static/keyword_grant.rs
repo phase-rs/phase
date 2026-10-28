@@ -113,7 +113,7 @@ fn grant_boundary_has_foreign_owner(
     let complete_nominal = remainder.trim().is_empty() && !matches!(nominal, TargetFilter::Any);
     // A fully parsed name is noun content, including relative-looking words.
     if complete_nominal
-        && crate::game::filter::filter_contains_filter_prop(&nominal, &|property| {
+        && crate::types::ability::filter_contains_filter_prop(&nominal, &|property| {
             matches!(property, FilterProp::Named { .. })
         })
     {

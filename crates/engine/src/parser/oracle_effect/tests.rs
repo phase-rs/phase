@@ -570,7 +570,7 @@ fn contextual_hand_addle_explicit_color_and_strict_anaphor_clients() {
         ctx.pending_choice_type = Some(ChoiceType::color());
         let (rest, filter) = parse_choose_filter(command, &mut ctx).unwrap();
         assert_eq!(rest, "");
-        assert!(crate::game::filter::filter_contains_filter_prop(
+        assert!(crate::types::ability::filter_contains_filter_prop(
             &filter,
             &|prop| matches!(prop, FilterProp::IsChosenColor)
         ));
@@ -1727,13 +1727,13 @@ fn all_revealed_relation_refuses_ambiguous_producers_and_residuals() {
     }
 }
 use crate::game::coverage::card_face_has_unimplemented_parts;
-use crate::game::triggers::extract_target_filter_from_effect;
 use crate::parser::oracle_ir::ast::{EntersUnderSpec, TargetedImperativeAst};
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind};
 use crate::parser::oracle_nom::enters_under::{
     bind_control_clause, ControlAnaphorAntecedent, ControlClausePossessor,
 };
 use crate::parser::parse_oracle_text;
+use crate::types::ability::extract_target_filter_from_effect;
 use crate::types::ability::CardPlayMode::{Cast, Play};
 use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermission};
 use crate::types::ability::{
@@ -48923,7 +48923,7 @@ fn an_o1a_rider_shape_under_a_state_guard_is_not_an_ownership_candidate() {
     );
     // Reach-guard 2: the body really IS the O1a rider shape, so only the reading can refuse it.
     assert!(
-        crate::game::effects::cast_from_zone::graveyard_destination_rider(
+        crate::types::ability::graveyard_destination_rider(
             &clause.effect,
             clause.condition.as_ref(),
         )
@@ -84404,7 +84404,7 @@ fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
 }
 
 fn parks_reveal_choice(def: &AbilityDefinition) -> bool {
-    crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&def.effect)
+    crate::types::ability::effect_parks_reveal_card_choice(&def.effect)
 }
 
 fn non_controller_gaps(root: &AbilityDefinition) -> Vec<&AbilityDefinition> {

@@ -1413,6 +1413,8 @@ fn dragonstorm_globe_counters_created_dragon_token() {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -3117,8 +3119,8 @@ fn a_room_cast_from_exile_offers_the_face_choice_per_cast() {
 /// IS eligible. Before this fix the unlock cost paid via
 /// `PaymentContext::Effect`, which rejects every restriction — the restricted
 /// {R} could not pay and the unlock failed. Reverting the
-/// `pay_special_action_mana_cost` wiring flips this assertion (the unlock
-/// would error "Cannot pay mana cost").
+/// `pay_special_action_mana_cost_with_resume` wiring flips this assertion (the
+/// unlock would error "Cannot pay mana cost").
 #[test]
 fn unlock_door_restricted_mana_pays_room_unlock_cost() {
     use crate::types::mana::{ManaRestriction, ManaType, ManaUnit, SpecialAction};
@@ -3215,7 +3217,7 @@ fn setup_face_down_morph(state: &mut GameState, player: PlayerId) -> ObjectId {
         };
         obj.power = Some(4);
         obj.toughness = Some(5);
-        obj.keywords = vec![crate::types::keywords::Keyword::Morph(ManaCost::Cost {
+        obj.keywords = vec![crate::types::keywords::Keyword::morph(ManaCost::Cost {
             generic: 3,
             shards: vec![],
         })];
@@ -3255,7 +3257,8 @@ fn fund_restricted_pool(
 /// is paid through `PaymentContext::SpecialAction(TurnFaceUp)`, the permanent
 /// flips face up, a `TurnedFaceUp` event fires, and the pool empties. This is the
 /// positive reach-guard proving the payment routes through the real
-/// `pay_special_action_mana_cost` site, so R2/R3's negatives aren't vacuous.
+/// `pay_special_action_mana_cost_with_resume` site, so R2/R3's negatives aren't
+/// vacuous.
 #[test]
 fn turn_face_up_restricted_mana_funds_special_action() {
     use crate::types::mana::{ManaRestriction, SpecialAction};
@@ -11288,7 +11291,7 @@ fn morph_creature_offers_face_down_alternative_cast() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11374,7 +11377,7 @@ fn face_down_cast_puts_blank_2_2_on_stack() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11445,7 +11448,7 @@ fn face_down_cast_resolves_to_face_down_permanent() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11507,7 +11510,7 @@ fn tin_street_gossip_restricted_mana_funds_face_down_cast() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     fund_restricted_pool(
@@ -11591,7 +11594,7 @@ fn disguise_face_down_has_ward_morph_does_not() {
         "CR 702.168a: a disguise face-down 2/2 must have ward {{2}}"
     );
     assert!(
-        !cast_face_down(crate::types::keywords::Keyword::Morph(ManaCost::generic(4))),
+        !cast_face_down(crate::types::keywords::Keyword::morph(ManaCost::generic(4))),
         "a morph face-down 2/2 must NOT have ward"
     );
 }
@@ -11606,7 +11609,7 @@ fn countered_face_down_spell_is_revealed_in_graveyard() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11665,7 +11668,7 @@ fn face_down_spell_on_stack_is_redacted_to_opponents() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11769,7 +11772,7 @@ fn morph_creature_in_graveyard_offers_and_casts_face_down() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     grant_graveyard_creature_cast_and_bury(&mut state, PlayerId(0), morph);
@@ -11909,7 +11912,7 @@ fn face_down_cast_cancel_at_mana_payment_restores_real_card() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);
@@ -11998,7 +12001,7 @@ fn morph_free_normal_cast_not_robbed_by_face_down_autoroute() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
@@ -12094,7 +12097,7 @@ fn nocost_morph_auto_casts_face_down_for_three() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::NoCost,
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
@@ -12187,7 +12190,7 @@ fn nocost_morph_without_three_mana_rejected() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::NoCost,
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
@@ -12223,7 +12226,7 @@ fn nocost_morph_offered_as_legal_action() {
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::NoCost,
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
@@ -12297,7 +12300,7 @@ fn prohibited_morph_fixture(axis: ProhibitionAxis, mana: usize) -> (GameState, O
     let morph = add_face_down_castable_to_hand(
         &mut state,
         PlayerId(0),
-        crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+        crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
         ManaCost::generic(5),
     );
     add_mana(&mut state, PlayerId(0), ManaType::Colorless, mana);
@@ -12494,7 +12497,7 @@ fn morph_casts_face_down_under_multiple_name_prohibitions() {
         let morph = add_face_down_castable_to_hand(
             &mut state,
             PlayerId(0),
-            crate::types::keywords::Keyword::Morph(ManaCost::generic(4)),
+            crate::types::keywords::Keyword::morph(ManaCost::generic(4)),
             ManaCost::generic(5),
         );
         add_mana(&mut state, PlayerId(0), ManaType::Colorless, 5);

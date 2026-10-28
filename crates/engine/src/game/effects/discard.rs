@@ -342,7 +342,7 @@ pub fn resolve(
 
     // CR 115.1d: Only a declared targeted discard (using the word "target") may consume targets chosen at cast time.
     let declared_target_discard =
-        crate::game::triggers::extract_target_filter_from_effect(&ability.effect).is_some();
+        crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some();
     // CR 608.2c: "That player discards that card" (Dread Fugue) binds the reveal
     // choice via `ParentTarget` — not a cast-time target slot, but the forwarded
     // object id must still be discarded. Controller-scoped "discard a card"

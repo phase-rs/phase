@@ -5916,6 +5916,8 @@ fn cda_cost_source_finite_consumers_follow_only_their_own_returned_object() {
                     owner: TargetFilter::Controller,
                     source_filter: None,
                     enters_attacking: false,
+                    attack_destination:
+                        engine::types::ability::TokenAttackDestination::ControllerChooses,
                     tapped: false,
                     count: QuantityExpr::Fixed { value: 1 },
                     extra_keywords: vec![],

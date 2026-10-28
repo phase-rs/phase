@@ -119,6 +119,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             recorded_turn_number: 0,
             is_suspected: false,
             was_prepared: false,
+            departure: engine::types::game_state::ZoneDeparture::Moved,
         }),
     });
 }

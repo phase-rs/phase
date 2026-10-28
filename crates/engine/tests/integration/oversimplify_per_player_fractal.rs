@@ -9873,6 +9873,7 @@ fn departure_selected_local_body(
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -10633,6 +10634,8 @@ fn departure_token_host_runner(
                     owner: TargetFilter::Controller,
                     attach_to: Some(TargetFilter::ParentTarget),
                     enters_attacking: false,
+                    attack_destination:
+                        engine::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![(
@@ -11653,6 +11656,8 @@ fn departure_token_and_emblem_later_bodies_start_fresh_after_the_creating_proces
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            engine::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![StaticDefinition::new(StaticMode::Continuous)
                             .affected(TargetFilter::SelfRef)
@@ -13307,6 +13312,7 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
     use engine::types::game_state::{ReturnResultProcessId, StackEntryKind, WaitingFor};
     use engine::types::identifiers::ObjectId;
     for mode in 0..3 {
+        let mut retained_snapshot = None;
         let (mut runner, spell, _) = departure_public_program_runner(false, false, 2, |_| {
             let definition = if mode == 0 {
                 departure_selected_local_body(false, false)
@@ -13330,6 +13336,7 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
             };
             let mut snapshot = build_resolved_from_def(&definition, ObjectId(0), P0);
             snapshot.return_result_process = Some(ReturnResultProcessId(901));
+            retained_snapshot = Some(snapshot);
             (
                 AbilityDefinition::new(
                     AbilityKind::Spell,
@@ -13340,7 +13347,7 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
                             AbilityDefinition::new(
                                 AbilityKind::Spell,
                                 Effect::EpicCopy {
-                                    spell: Box::new(snapshot),
+                                    epic: engine::types::identifiers::EpicEffectId(0),
                                 },
                             ),
                         ],
@@ -13350,6 +13357,16 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
                 vec![],
             )
         });
+        // CR 702.50b: the public spell was committed before this rest-of-game lock exists.
+        // Its parked handle names the independently owned future program.
+        runner
+            .state_mut()
+            .epic_effects
+            .push(engine::types::game_state::EpicEffect {
+                controller: P0,
+                prototype_id: spell,
+                spell: Box::new(retained_snapshot.unwrap()),
+            });
         let WaitingFor::ChooseOneOfBranch {
             player, branches, ..
         } = &runner.state().waiting_for
@@ -13357,13 +13374,47 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
             panic!("retain the raw Epic snapshot before consumption/copy-time clearing");
         };
         assert_eq!(*player, P0);
-        let Effect::EpicCopy { spell: snapshot } = branches[1].effect.as_ref() else {
+        let Effect::EpicCopy { epic } = branches[1].effect.as_ref() else {
             unreachable!()
         };
+        let snapshot = &runner.state().epic_effect(*epic).unwrap().spell;
         assert_eq!(
             snapshot.return_result_process,
             Some(ReturnResultProcessId(901))
         );
+        assert_eq!(*epic, runner.state().canonical_epic_effect_id(0));
+        assert!(!serde_json::to_value(&branches[1])
+            .unwrap()
+            .to_string()
+            .contains("return_result_process"));
+        for viewer in [Some(P0), Some(PlayerId(1)), None] {
+            let public = match viewer {
+                Some(player) => {
+                    engine::game::visibility::filter_state_for_viewer(runner.state(), player)
+                }
+                None => engine::game::visibility::filter_state_for_unseated_viewer(runner.state()),
+            };
+            assert_eq!(
+                public.epic_effects.len(),
+                1,
+                "projection retains the real body owner"
+            );
+            assert_eq!(public.epic_effects[0].prototype_id, spell);
+            assert_eq!(public.epic_effects[0].spell.effect, snapshot.effect);
+            assert_eq!(
+                public.epic_effects[0].spell.sub_ability.is_some(),
+                snapshot.sub_ability.is_some()
+            );
+            let wire = serde_json::to_value(engine::game::derived_views::ClientGameStateRef::wrap(
+                runner.state(),
+                viewer,
+            ))
+            .unwrap();
+            assert_eq!(wire["state"]["epic_effects"].as_array().unwrap().len(), 1);
+            assert!(wire["state"]["waiting_for"]
+                .to_string()
+                .contains("EpicCopy"));
+        }
         departure_assert_private_result_views(runner.state());
         let retained = serde_json::to_value(runner.state()).unwrap();
         *runner.state_mut() = serde_json::from_value(retained.clone()).unwrap();
@@ -13411,6 +13462,11 @@ fn departure_epic_snapshot_validates_locally_and_public_copy_gets_fresh_process(
         }
         departure_assert_program_complete(&runner, spell, if mode == 0 { 3 } else { 5 }, 0);
         assert!(runner.state().next_return_result_process_id > 1);
+        assert_eq!(
+            runner.state().epic_effects[0].spell.return_result_process,
+            Some(ReturnResultProcessId(901)),
+            "copy-time clearing leaves the independently owned persistent template intact"
+        );
     }
 }
 
@@ -13573,7 +13629,7 @@ fn departure_next_matches_filter_survives_actual_replacement_delivery_and_reload
 }
 
 #[test]
-fn departure_epic_import_is_refused_before_the_outer_producer_can_execute() {
+fn departure_independent_replacement_import_is_refused_before_the_outer_producer_can_execute() {
     use engine::game::scenario::{GameScenario, P0};
     use engine::types::ability::{AbilityDefinition, AbilityKind, Effect};
     let mut scenario = GameScenario::new();
@@ -13581,14 +13637,19 @@ fn departure_epic_import_is_refused_before_the_outer_producer_can_execute() {
     let victim = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
     let mut root = departure_exile_definition(7);
     let snapshot = build_resolved_from_def(&departure_gain_definition(7, P0), victim, P0);
+    let mut replacement = engine::types::ability::ReplacementDefinition::new(
+        engine::types::replacements::ReplacementEvent::DamageDone,
+    );
+    replacement.runtime_execute = Some(Box::new(snapshot));
     root.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
-        Effect::EpicCopy {
-            spell: Box::new(snapshot),
+        Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: engine::types::ability::TargetFilter::None,
         },
     )));
     let spell = scenario
-        .add_spell_to_hand(P0, "Supplemental invalid Epic import", false)
+        .add_spell_to_hand(P0, "Supplemental invalid replacement import", false)
         .with_ability_definition(root.clone())
         .id();
     let mut runner = scenario.build();
@@ -13611,7 +13672,7 @@ fn departure_epic_import_is_refused_before_the_outer_producer_can_execute() {
     departure_assert_program_complete(&runner, spell, 0, 0);
 }
 
-fn departure_independent_epic_cost(mode: u8) -> engine::types::ability::AbilityCost {
+fn departure_independent_replacement_cost(mode: u8) -> engine::types::ability::AbilityCost {
     use engine::game::scenario::P0;
     use engine::types::ability::*;
     use engine::types::game_state::ReturnResultProcessId;
@@ -13638,15 +13699,21 @@ fn departure_independent_epic_cost(mode: u8) -> engine::types::ability::AbilityC
     };
     let mut snapshot = build_resolved_from_def(&definition, ObjectId(0), P0);
     snapshot.return_result_process = Some(ReturnResultProcessId(901));
+    let mut replacement = engine::types::ability::ReplacementDefinition::new(
+        engine::types::replacements::ReplacementEvent::DamageDone,
+    );
+    replacement.runtime_execute = Some(Box::new(snapshot));
     AbilityCost::EffectCost {
-        effect: Box::new(Effect::EpicCopy {
-            spell: Box::new(snapshot),
+        effect: Box::new(Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::None,
         }),
     }
 }
 
 #[test]
-fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_epic_results() {
+fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_replacement_results(
+) {
     use engine::game::scenario::P0;
     use engine::types::ability::*;
     use engine::types::actions::{GameAction, UnlessCostBranch};
@@ -13661,7 +13728,7 @@ fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_
                             AbilityCost::PayLife {
                                 amount: QuantityExpr::Fixed { value: 1 },
                             },
-                            departure_independent_epic_cost(mode),
+                            departure_independent_replacement_cost(mode),
                         ],
                     },
                     payer: TargetFilter::Controller,
@@ -13685,9 +13752,10 @@ fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_
             let AbilityCost::EffectCost { effect } = &costs[1] else {
                 unreachable!()
             };
-            let Effect::EpicCopy { spell: retained } = effect.as_ref() else {
+            let Effect::AddTargetReplacement { replacement, .. } = effect.as_ref() else {
                 unreachable!()
             };
+            let retained = replacement.runtime_execute.as_ref().unwrap();
             assert_eq!(
                 retained.return_result_process,
                 Some(engine::types::game_state::ReturnResultProcessId(901))
@@ -13710,14 +13778,15 @@ fn departure_payment_ordinary_alternative_and_decline_do_not_import_independent_
             departure_assert_program_complete(&runner, spell, if decline { 5 } else { 4 }, 2);
             assert!(
                 runner.state().stack.is_empty(),
-                "the unsupported Epic cost alternative was never executed"
+                "the unsupported replacement cost alternative was never executed"
             );
         }
     }
 }
 
 #[test]
-fn departure_nested_mana_payment_custody_validates_its_independent_epic_alternative_separately() {
+fn departure_nested_mana_payment_custody_validates_its_independent_replacement_alternative_separately(
+) {
     use engine::types::ability::AbilityCost;
     use engine::types::game_state::{ManaAbilityResume, PendingCostMoveResume};
     for effect_cost in [false, true] {
@@ -13726,7 +13795,7 @@ fn departure_nested_mana_payment_custody_validates_its_independent_epic_alternat
         let mut reached_count = 0;
         departure_finish_payment_mana_child(&mut runner, |reached| {
             reached_count += 1;
-            // Supplemental typed custody: Epic is not a payable EffectCost.
+            // Supplemental typed custody: AddTargetReplacement is not a payable EffectCost.
             // The public source/payment pause is real; only the retained cost
             // alternative is changed here to isolate the second validator.
             let mut custody = reached.state().clone();
@@ -13741,7 +13810,7 @@ fn departure_nested_mana_payment_custody_validates_its_independent_epic_alternat
                 _ => unreachable!(),
             };
             **cost = AbilityCost::OneOf {
-                costs: vec![(**cost).clone(), departure_independent_epic_cost(0)],
+                costs: vec![(**cost).clone(), departure_independent_replacement_cost(0)],
             };
             let saved = serde_json::to_value(&custody).unwrap();
             let loaded: GameState = serde_json::from_value(saved.clone())
@@ -14288,7 +14357,7 @@ fn departure_prevention_rider_installs_unbound_and_gets_a_fresh_process_on_actua
 }
 
 #[test]
-fn departure_unselected_epic_cost_and_installed_rider_cannot_import_the_callers_result() {
+fn departure_unselected_replacement_cost_and_installed_rider_cannot_import_the_callers_result() {
     use engine::game::scenario::{GameScenario, P0};
     use engine::types::ability::*;
     use engine::types::phase::Phase;
@@ -14305,7 +14374,7 @@ fn departure_unselected_epic_cost_and_installed_rider_cannot_import_the_callers_
                             AbilityCost::PayLife {
                                 amount: QuantityExpr::Fixed { value: 1 },
                             },
-                            departure_independent_epic_cost(3),
+                            departure_independent_replacement_cost(3),
                         ],
                     },
                     payer: TargetFilter::Controller,
@@ -15019,15 +15088,17 @@ fn departure_raw_runtime_replacement_rejects_caller_import_before_install_and_ru
     }
 }
 
-fn departure_retained_epic_definition(mode: u8) -> engine::types::ability::AbilityDefinition {
+fn departure_retained_replacement_definition(
+    mode: u8,
+) -> engine::types::ability::AbilityDefinition {
     use engine::types::ability::*;
-    let AbilityCost::EffectCost { effect } = departure_independent_epic_cost(mode) else {
+    let AbilityCost::EffectCost { effect } = departure_independent_replacement_cost(mode) else {
         unreachable!()
     };
     AbilityDefinition::new(AbilityKind::Activated, *effect)
 }
 
-fn departure_retained_epic_values(mode: u8) -> engine::types::ability::CopiableValues {
+fn departure_retained_replacement_values(mode: u8) -> engine::types::ability::CopiableValues {
     use engine::types::ability::*;
     use std::sync::Arc;
     CopiableValues {
@@ -15040,7 +15111,7 @@ fn departure_retained_epic_values(mode: u8) -> engine::types::ability::CopiableV
         loyalty: None,
         printed_loyalty: None,
         keywords: vec![],
-        abilities: Arc::new(vec![departure_retained_epic_definition(mode)]),
+        abilities: Arc::new(vec![departure_retained_replacement_definition(mode)]),
         trigger_definitions: Arc::new(vec![]),
         trigger_printed_origins: Arc::new(vec![]),
         replacement_definitions: Arc::new(vec![]),
@@ -15065,7 +15136,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                     let recipient = scenario
                         .add_artifact_from_oracle(P0, "Supplemental continuous recipient", "")
                         .id();
-                    let definition = departure_retained_epic_definition(mode);
+                    let definition = departure_retained_replacement_definition(mode);
                     let modification = match arm {
                         0 => ContinuousModification::GrantAbility {
                             definition: Box::new(definition),
@@ -15097,7 +15168,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                             ),
                         },
                         4 => ContinuousModification::CopyValues {
-                            values: Box::new(departure_retained_epic_values(mode)),
+                            values: Box::new(departure_retained_replacement_values(mode)),
                             display: engine::game::game_object::DisplayIdentity {
                                 display_source: Default::default(),
                                 printed_ref: None,
@@ -15107,12 +15178,12 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                         },
                         5 => ContinuousModification::RemoveKeyword {
                             keyword: engine::types::keywords::Keyword::CumulativeUpkeep(
-                                departure_independent_epic_cost(mode),
+                                departure_independent_replacement_cost(mode),
                             ),
                         },
                         6 => ContinuousModification::AddStaticMode {
                             mode: StaticMode::CastWithAlternativeCost {
-                                cost: departure_independent_epic_cost(mode),
+                                cost: departure_independent_replacement_cost(mode),
                                 timing_permission: None,
                                 frequency: Default::default(),
                             },
@@ -15180,7 +15251,7 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
                         tce[0]["modifications"][0]["type"],
                         retained[0]["modifications"][0]["type"]
                     );
-                    assert_eq!(tce.to_string().matches("EpicCopy").count(), retained.to_string().matches("EpicCopy").count(), "redaction preserves the executable template rather than dropping the public rider");
+                    assert_eq!(tce.to_string().matches("AddTargetReplacement").count(), retained.to_string().matches("AddTargetReplacement").count(), "redaction preserves the executable template rather than dropping the public rider");
                 }
             }
             assert_eq!(
@@ -15192,12 +15263,12 @@ fn departure_actual_continuous_install_redacts_all_five_retained_definition_arms
     }
 }
 
-fn departure_runtime_replacement_epic_cost() -> engine::types::ability::AbilityCost {
+fn departure_nested_runtime_replacement_cost() -> engine::types::ability::AbilityCost {
     use engine::game::scenario::P0;
     use engine::types::ability::*;
     use engine::types::identifiers::ObjectId;
     use engine::types::replacements::ReplacementEvent;
-    let definition = departure_retained_epic_definition(0);
+    let definition = departure_retained_replacement_definition(0);
     let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
     replacement.runtime_execute = Some(Box::new(build_resolved_from_def(
         &definition,
@@ -15213,7 +15284,7 @@ fn departure_runtime_replacement_epic_cost() -> engine::types::ability::AbilityC
 }
 
 #[test]
-fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_runtime_epic() {
+fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_runtime_replacement() {
     use engine::game::game_object::CleaveFormState;
     use engine::game::scenario::P0;
     use engine::types::ability::*;
@@ -15232,7 +15303,7 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
                 )
             });
         departure_assert_program_complete(&runner, spell, 0, 0);
-        let cost = departure_runtime_replacement_epic_cost();
+        let cost = departure_nested_runtime_replacement_cost();
         let keywords = vec![
             Keyword::CumulativeUpkeep(cost.clone()),
             Keyword::Escalate(cost.clone()),
@@ -15260,7 +15331,7 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
             3 => AdditionalCost::Required(cost.clone()),
             _ => unreachable!(),
         };
-        let definition = departure_retained_epic_definition(0);
+        let definition = departure_retained_replacement_definition(0);
         let trigger = TriggerDefinition::new(TriggerMode::SpellCast).execute(definition.clone());
         let static_definition = StaticDefinition::new(StaticMode::Continuous).modifications(vec![
             ContinuousModification::GrantAbility {
@@ -15322,7 +15393,7 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
             base_statics: object.base_static_definitions.clone(),
             base_replacements: object.base_replacement_definitions.clone(),
         });
-        let mut values = departure_retained_epic_values(0);
+        let mut values = departure_retained_replacement_values(0);
         values.prepare_face = Some(Arc::new(prepare_face));
         values.keywords = keywords;
         runner
@@ -15372,7 +15443,8 @@ fn departure_public_cost_keyword_face_and_copiable_supplements_redact_nested_run
 }
 
 #[test]
-fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_epic_authority() {
+fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_private_result_authority(
+) {
     use engine::game::derived_views::ClientGameStateRef;
     use engine::game::scenario::P0;
     use engine::types::ability::*;
@@ -15398,7 +15470,7 @@ fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_epi
             member_pool: vec![spell],
             enters_with_modifications: PendingEntersModifications {
                 modifications: vec![ContinuousModification::GrantAbility {
-                    definition: Box::new(departure_retained_epic_definition(0)),
+                    definition: Box::new(departure_retained_replacement_definition(0)),
                 }],
                 cast_filter: None,
             },
@@ -15433,7 +15505,7 @@ fn departure_current_and_stored_free_cast_riders_keep_public_payload_without_epi
         assert_eq!(remaining_casts, Some(2));
         assert_eq!(remaining_mv_budget, Some(6));
         assert_eq!(enters_with_modifications.modifications.len(), 1);
-        assert!(wire.to_string().contains("EpicCopy"));
+        assert!(wire.to_string().contains("AddTargetReplacement"));
     }
     assert_eq!(serde_json::to_value(runner.state()).unwrap(), authoritative);
 }
@@ -15672,16 +15744,18 @@ fn departure_perpetual_grant_refuses_caller_import_before_install_and_activates_
         let recipient = scenario
             .add_artifact_from_oracle(P0, "Supplemental perpetual recipient", "")
             .id();
+        let mut retained_snapshot = None;
         let mut body = if imported {
             departure_gain_definition(7, P0)
         } else {
             let mut snapshot =
                 build_resolved_from_def(&departure_selected_local_body(true, false), recipient, P0);
             snapshot.return_result_process = Some(ReturnResultProcessId(901));
+            retained_snapshot = Some(snapshot);
             AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::EpicCopy {
-                    spell: Box::new(snapshot),
+                    epic: engine::types::identifiers::EpicEffectId(0),
                 },
             )
         };
@@ -15732,7 +15806,23 @@ fn departure_perpetual_grant_refuses_caller_import_before_install_and_activates_
             assert_eq!(serde_json::to_value(&state).unwrap(), before);
             assert!(events.is_empty());
         }
-        runner.cast(spell).resolve();
+        runner.cast(spell).commit();
+        if let Some(snapshot) = retained_snapshot {
+            runner
+                .state_mut()
+                .epic_effects
+                .push(engine::types::game_state::EpicEffect {
+                    controller: P0,
+                    prototype_id: recipient,
+                    spell: Box::new(snapshot),
+                });
+        }
+        for _ in 0..8 {
+            if runner.state().stack.is_empty() {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
         assert_eq!(runner.state().players[0].mana_pool.total(), 0);
         departure_assert_program_complete(&runner, spell, 0, 0);
         let object = &runner.state().objects[&recipient];
@@ -15755,7 +15845,11 @@ fn departure_perpetual_grant_refuses_caller_import_before_install_and_activates_
         assert_eq!(object.abilities[0], body);
         assert_eq!(object.base_abilities[0], body);
         let saved = serde_json::to_value(runner.state()).unwrap();
-        assert!(saved["objects"]
+        assert!(saved["objects"].to_string().contains("EpicCopy"));
+        assert!(!saved["objects"]
+            .to_string()
+            .contains("return_result_process"));
+        assert!(saved["epic_effects"]
             .to_string()
             .contains("\"return_result_process\":901"));
         *runner.state_mut() = serde_json::from_value(saved).unwrap();
@@ -15806,7 +15900,7 @@ fn departure_actual_emitted_mana_units_keep_grants_order_and_pips_while_all_view
                 .with_mana_cost(ManaCost::generic(2))
                 .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
                 .id();
-            let keyword = Keyword::CumulativeUpkeep(departure_independent_epic_cost(0));
+            let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(0));
             let filter = TargetFilter::Typed({
                 let mut typed = TypedFilter::default();
                 typed.properties.push(FilterProp::WithKeyword {
@@ -15830,7 +15924,7 @@ fn departure_actual_emitted_mana_units_keep_grants_order_and_pips_while_all_view
                 },
                 ManaSpellGrant::TriggerOnSpend {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
-                    ability: Box::new(departure_retained_epic_definition(0)),
+                    ability: Box::new(departure_retained_replacement_definition(0)),
                 },
             ];
             (
@@ -15926,7 +16020,7 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
     use engine::types::identifiers::ObjectId;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaCost, ManaType, ManaUnit};
-    let keyword = Keyword::CumulativeUpkeep(departure_independent_epic_cost(0));
+    let keyword = Keyword::CumulativeUpkeep(departure_independent_replacement_cost(0));
     let mut scenario = GameScenario::new();
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let public_source = scenario
@@ -16113,8 +16207,14 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
                 "lki_by_incarnation",
             ] {
                 assert_eq!(
-                    public[field].to_string().matches("EpicCopy").count(),
-                    authoritative[field].to_string().matches("EpicCopy").count(),
+                    public[field]
+                        .to_string()
+                        .matches("AddTargetReplacement")
+                        .count(),
+                    authoritative[field]
+                        .to_string()
+                        .matches("AddTargetReplacement")
+                        .count(),
                     "public record/keyword payload retained at {field}"
                 );
             }
@@ -16124,19 +16224,24 @@ fn departure_public_history_lki_and_chosen_keyword_custody_keeps_public_spine_wi
     departure_assert_program_complete(&runner, spell, -1, 0);
 }
 
-// Supplemental canonical payload constructors: no printed-card or Epic-payment claim.
-fn departure_opaque_epic_cost(mode: u8) -> engine::types::ability::AbilityCost {
+// Supplemental canonical payload constructors: no printed-card or replacement-payment claim.
+fn departure_opaque_replacement_cost(mode: u8) -> engine::types::ability::AbilityCost {
     use engine::types::ability::*;
     if mode != 4 {
-        return departure_independent_epic_cost(mode);
+        return departure_independent_replacement_cost(mode);
     }
     let mut body = departure_exile_definition(7);
     body.sub_ability = Some(Box::new(departure_gain_definition(7, PlayerId(0))));
     let mut snapshot = build_resolved_from_def(&body, ObjectId(0), PlayerId(0));
     snapshot.return_result_process = Some(engine::types::game_state::ReturnResultProcessId(901));
+    let mut replacement = engine::types::ability::ReplacementDefinition::new(
+        engine::types::replacements::ReplacementEvent::DamageDone,
+    );
+    replacement.runtime_execute = Some(Box::new(snapshot));
     AbilityCost::EffectCost {
-        effect: Box::new(Effect::EpicCopy {
-            spell: Box::new(snapshot),
+        effect: Box::new(Effect::AddTargetReplacement {
+            replacement: Box::new(replacement),
+            target: TargetFilter::None,
         }),
     }
 }
@@ -16160,6 +16265,7 @@ fn departure_opaque_token_spec() -> engine::types::proposed_event::TokenSpec {
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: ObjectId(0),
         controller: PlayerId(0),
@@ -16172,9 +16278,9 @@ fn departure_opaque_filter(mode: u8) -> engine::types::ability::TargetFilter {
     TargetFilter::Typed({
         let mut filter = TypedFilter::default();
         filter.properties.push(FilterProp::WithKeyword {
-            value: engine::types::keywords::Keyword::CumulativeUpkeep(departure_opaque_epic_cost(
-                mode,
-            )),
+            value: engine::types::keywords::Keyword::CumulativeUpkeep(
+                departure_opaque_replacement_cost(mode),
+            ),
         });
         filter
     })
@@ -16187,7 +16293,7 @@ fn departure_opaque_conditions(mode: u8) -> Vec<engine::types::ability::DelayedT
     let filter = departure_opaque_filter(mode);
     let mut matcher = TriggerDefinition::new(TriggerMode::SpellCast).valid_card(filter.clone());
     matcher.unless_pay = Some(UnlessPayModifier {
-        cost: departure_opaque_epic_cost(mode),
+        cost: departure_opaque_replacement_cost(mode),
         payer: filter.clone(),
     });
     vec![
@@ -16241,7 +16347,7 @@ fn departure_opaque_payloads(
     use engine::types::triggers::TriggerMode;
     use std::sync::Arc;
     let keyword =
-        engine::types::keywords::Keyword::CumulativeUpkeep(departure_opaque_epic_cost(mode));
+        engine::types::keywords::Keyword::CumulativeUpkeep(departure_opaque_replacement_cost(mode));
     let body = if mode == 4 {
         let mut body = departure_exile_definition(7);
         body.sub_ability = Some(Box::new(departure_gain_definition(7, PlayerId(0))));
@@ -16290,7 +16396,7 @@ fn departure_opaque_payloads(
         },
         ContinuousModification::CopyValues {
             values: Box::new({
-                let mut values = departure_retained_epic_values(2);
+                let mut values = departure_retained_replacement_values(2);
                 values.abilities = Arc::new(vec![]);
                 values.keywords = vec![keyword.clone()];
                 values
@@ -16323,7 +16429,7 @@ fn departure_opaque_payloads(
         }
     }
     for leaf in 0..3 {
-        let mut values = departure_retained_epic_values(2);
+        let mut values = departure_retained_replacement_values(2);
         values.abilities = Arc::new(vec![]);
         if leaf == 0 {
             values.keywords = vec![keyword.clone()];
@@ -16332,15 +16438,17 @@ fn departure_opaque_payloads(
             copied_face.abilities.clear();
             copied_face.keywords.clear();
             if leaf == 1 {
-                let AbilityCost::EffectCost { effect } = departure_opaque_epic_cost(mode) else {
+                let AbilityCost::EffectCost { effect } = departure_opaque_replacement_cost(mode)
+                else {
                     unreachable!()
                 };
                 copied_face
                     .abilities
                     .push(AbilityDefinition::new(AbilityKind::Activated, *effect));
             } else {
-                copied_face.additional_cost =
-                    Some(AdditionalCost::Required(departure_opaque_epic_cost(mode)));
+                copied_face.additional_cost = Some(AdditionalCost::Required(
+                    departure_opaque_replacement_cost(mode),
+                ));
             }
             values.prepare_face = Some(Arc::new(copied_face));
         }
@@ -16461,9 +16569,9 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                 let mut spec = departure_opaque_token_spec();
                 spec.characteristics
                     .keywords
-                    .push(Keyword::CumulativeUpkeep(departure_independent_epic_cost(
-                        0,
-                    )));
+                    .push(Keyword::CumulativeUpkeep(
+                        departure_independent_replacement_cost(0),
+                    ));
                 let trigger = TriggerDefinition::new(TriggerMode::SpellCast)
                     .valid_card(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)))
                     .execute(departure_selected_local_body(true, false));
@@ -16475,7 +16583,7 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                                 trigger: Box::new(trigger),
                             },
                             ContinuousModification::GrantAbility {
-                                definition: Box::new(departure_retained_epic_definition(0)),
+                                definition: Box::new(departure_retained_replacement_definition(0)),
                             },
                         ]),
                 );
@@ -16486,7 +16594,7 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                         let mut event = TriggerDefinition::new(TriggerMode::SpellCast)
                             .valid_card(departure_opaque_filter(0));
                         event.unless_pay = Some(UnlessPayModifier {
-                            cost: departure_independent_epic_cost(0),
+                            cost: departure_independent_replacement_cost(0),
                             payer: departure_opaque_filter(0),
                         });
                         event
@@ -16515,6 +16623,8 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                             owner: TargetFilter::Controller,
                             attach_to: None,
                             enters_attacking: false,
+                            attack_destination:
+                                engine::types::ability::TokenAttackDestination::ControllerChooses,
                             supertypes: vec![],
                             static_abilities: vec![],
                             enter_with_counters: vec![],
@@ -16572,10 +16682,10 @@ fn departure_both_replacement_token_specs_install_real_later_triggers_with_priva
                 let field = &view["pending_damage_replacements"];
                 assert_eq!(field.as_array().unwrap().len(), 1);
                 assert_eq!(
-                    field.to_string().matches("EpicCopy").count(),
+                    field.to_string().matches("AddTargetReplacement").count(),
                     authoritative["pending_damage_replacements"]
                         .to_string()
-                        .matches("EpicCopy")
+                        .matches("AddTargetReplacement")
                         .count()
                 );
                 let value = if ensure {
@@ -16674,30 +16784,34 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
     let mut face =
         engine::game::printed_cards::snapshot_object_face(&fixture.state().objects[&face_source]);
     face.layout_kind = Some(engine::types::card::LayoutKind::Prepare);
-    face.additional_cost = Some(AdditionalCost::Required(departure_independent_epic_cost(0)));
+    face.additional_cost = Some(AdditionalCost::Required(
+        departure_independent_replacement_cost(0),
+    ));
     let artifact_types = fixture.state().objects[&face_source].card_types.clone();
+    let mut retained_snapshot = None;
     let (mut runner, spell, subjects) =
         departure_public_program_runner(false, false, 2, |scenario| {
             let recipient = scenario
                 .add_artifact_from_oracle(P0, "Supplemental layered recipient", "")
                 .id();
             // Typed face setup; real resolution installs both leaves before layers apply the copy.
-            let mut values = departure_retained_epic_values(0);
+            let mut values = departure_retained_replacement_values(0);
             values.card_types = artifact_types.clone();
             values.prepare_face = Some(Arc::new(face.clone()));
             let mut snapshot =
                 build_resolved_from_def(&departure_selected_local_body(true, false), recipient, P0);
             snapshot.return_result_process =
                 Some(engine::types::game_state::ReturnResultProcessId(901));
+            retained_snapshot = Some(snapshot);
             values.abilities = Arc::new(vec![AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::EpicCopy {
-                    spell: Box::new(snapshot),
+                    epic: engine::types::identifiers::EpicEffectId(0),
                 },
             )]);
-            values.keywords = vec![Keyword::CumulativeUpkeep(departure_independent_epic_cost(
-                0,
-            ))];
+            values.keywords = vec![Keyword::CumulativeUpkeep(
+                departure_independent_replacement_cost(0),
+            )];
             // snapshot_object_face requires the real scenario object after build; supply it below using the existing setup callback instead.
             (
                 AbilityDefinition::new(
@@ -16722,6 +16836,14 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
                 vec![recipient],
             )
         });
+    runner
+        .state_mut()
+        .epic_effects
+        .push(engine::types::game_state::EpicEffect {
+            controller: P0,
+            prototype_id: subjects[0],
+            spell: Box::new(retained_snapshot.unwrap()),
+        });
     departure_assert_program_complete(&runner, spell, 0, 0);
     assert_eq!(runner.state().transient_continuous_effects.len(), 1);
     let recipient = subjects[0];
@@ -16731,6 +16853,16 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
         .copied_prepare_face
         .is_some());
     let saved = serde_json::to_value(runner.state()).unwrap();
+    assert_eq!(
+        saved["transient_continuous_effects"]
+            .to_string()
+            .matches("EpicCopy")
+            .count(),
+        1
+    );
+    assert!(saved["epic_effects"]
+        .to_string()
+        .contains("\"return_result_process\":901"));
     assert!(saved["transient_continuous_effects"]
         .to_string()
         .contains("\"return_result_process\":901"));
@@ -16760,11 +16892,11 @@ fn departure_layered_copy_retains_keywords_prepare_face_and_later_independent_ac
             assert_eq!(
                 view["transient_continuous_effects"]
                     .to_string()
-                    .matches("EpicCopy")
+                    .matches("AddTargetReplacement")
                     .count(),
                 saved["transient_continuous_effects"]
                     .to_string()
-                    .matches("EpicCopy")
+                    .matches("AddTargetReplacement")
                     .count()
             );
         }
@@ -16914,7 +17046,7 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
                     assert_eq!(
                         object["exile_from_stack_rider"]
                             .to_string()
-                            .matches("EpicCopy")
+                            .matches("AddTargetReplacement")
                             .count(),
                         1
                     );
@@ -16973,11 +17105,11 @@ fn departure_actual_delayed_conditions_and_return_timing_keep_local_snapshots_pr
                 assert_eq!(
                     view["delayed_triggers"]
                         .to_string()
-                        .matches("EpicCopy")
+                        .matches("AddTargetReplacement")
                         .count(),
                     authoritative["delayed_triggers"]
                         .to_string()
-                        .matches("EpicCopy")
+                        .matches("AddTargetReplacement")
                         .count()
                 );
                 assert_eq!(
@@ -17011,9 +17143,9 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
     scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
     let spell = scenario
         .add_spell_to_hand(P0, "Supplemental public countered spell", false)
-        .with_keyword(Keyword::CumulativeUpkeep(departure_independent_epic_cost(
-            0,
-        )))
+        .with_keyword(Keyword::CumulativeUpkeep(
+            departure_independent_replacement_cost(0),
+        ))
         .with_ability_definition(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp))
         .id();
     let watcher = scenario
@@ -17093,11 +17225,11 @@ fn departure_public_departed_spell_object_keeps_its_pending_cast_trigger_and_red
             assert_eq!(
                 view["departed_stack_spells"]
                     .to_string()
-                    .matches("EpicCopy")
+                    .matches("AddTargetReplacement")
                     .count(),
                 authoritative["departed_stack_spells"]
                     .to_string()
-                    .matches("EpicCopy")
+                    .matches("AddTargetReplacement")
                     .count()
             );
             assert!(view["departed_stack_spells"]
@@ -17139,6 +17271,7 @@ fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -17164,7 +17297,7 @@ fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_
     let aura = scenario.add_enchantment_from_oracle(P1, "Fylgja", "Enchant creature\nThis Aura enters with four healing counters on it.\nRemove a healing counter from this Aura: Prevent the next 1 damage that would be dealt to enchanted creature this turn.\n{2}{W}: Put a healing counter on this Aura.")
         .with_subtypes(vec!["Aura"])
         .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))))
-        .with_keyword(Keyword::CumulativeUpkeep(departure_independent_epic_cost(0))).id();
+        .with_keyword(Keyword::CumulativeUpkeep(departure_independent_replacement_cost(0))).id();
     let mut runner = scenario.build();
     runner
         .state_mut()
@@ -17242,11 +17375,11 @@ fn departure_actual_aura_host_pause_projects_the_parked_entrant_without_private_
             assert_eq!(
                 view["entering_aura_authority"]
                     .to_string()
-                    .matches("EpicCopy")
+                    .matches("AddTargetReplacement")
                     .count(),
                 authoritative["entering_aura_authority"]
                     .to_string()
-                    .matches("EpicCopy")
+                    .matches("AddTargetReplacement")
                     .count()
             );
         }
@@ -17821,6 +17954,7 @@ mod constructed {
 
     fn fractal_token() -> Effect {
         Effect::Token {
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             name: "Fractal".to_string(),
             power: PtValue::Fixed(1),
             toughness: PtValue::Fixed(1),

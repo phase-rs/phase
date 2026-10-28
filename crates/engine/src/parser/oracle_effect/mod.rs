@@ -104,43 +104,46 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    parse_anaphoric_target_ref, parse_definite_parent_reference, parse_event_context_ref,
-    parse_fight_target, parse_target, parse_target_with_ctx,
+    parse_anaphoric_target_ref, parse_definite_anaphor, parse_definite_parent_reference,
+    parse_event_context_ref, parse_fight_target, parse_target, parse_target_with_ctx,
     parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target, TargetSyntax,
+    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target,
+    unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass, DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
     contains_possessive, first_sentence, has_unconsumed_conditional, parse_count_expr,
     parse_count_slot, parse_creature_subtype, parse_equal_to_count, parse_mana_symbols,
     parse_number, split_around, starts_with_possessive, strip_after, CountSlot, TextPair,
 };
-use crate::game::triggers;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
-    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
-    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, DigSource,
-    Duration, Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp,
-    GameRestriction, GuardReading, GuessSubject, IntensityScope, IterationKindBinding,
-    KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission,
-    ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness,
-    ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    ThisWayCause, TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter,
-    TypedFilter, UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject,
-    WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    effect_owns_resolution_zone_choice, effect_parent_ref_slot_count, effect_refs_parent_target,
+    effect_requires_parent_target_object, extract_target_filter_from_effect,
+    instruction_object_reach, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
+    AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
+    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
+    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, DigSource, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject, IntensityScope,
+    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -188,6 +191,7 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry, ParseContext,
     PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
@@ -1310,7 +1314,7 @@ fn demote_unproven_reveal_this_way_gates(clauses: &mut [ClauseIr], repeats_a_pro
         let is_gate = clauses[index]
             .condition
             .as_ref()
-            .is_some_and(crate::game::effects::condition_has_reveal_until_matched_guard);
+            .is_some_and(crate::types::ability::condition_has_reveal_until_matched_guard);
         if !is_gate {
             continue;
         }
@@ -9798,6 +9802,7 @@ fn try_parse_for_each_copy_token_source(
     let (source_filter, body_effect) = parse_for_each_object_copy_parts(text, lower, ctx)?;
     let Effect::CopyTokenOf {
         enters_attacking,
+        attack_destination,
         tapped,
         count,
         extra_keywords,
@@ -9812,6 +9817,7 @@ fn try_parse_for_each_copy_token_source(
         owner: TargetFilter::Controller,
         source_filter: Some(source_filter),
         enters_attacking,
+        attack_destination,
         tapped,
         count,
         extra_keywords,
@@ -9890,6 +9896,7 @@ fn try_parse_for_each_target_copy_token(
         owner,
         source_filter: None,
         enters_attacking,
+        attack_destination,
         tapped,
         count,
         extra_keywords,
@@ -9904,6 +9911,7 @@ fn try_parse_for_each_target_copy_token(
         owner,
         source_filter: None,
         enters_attacking,
+        attack_destination,
         tapped,
         count,
         extra_keywords,
@@ -11627,15 +11635,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         .map(|(rest, subject)| {
             (
                 rest,
-                subject
-                    .unwrap_or_else(crate::game::effects::reveal_chosen_numbers::default_players),
+                subject.unwrap_or_else(crate::types::ability::default_players),
             )
         })
         .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
-            (
-                lower.as_str(),
-                crate::game::effects::reveal_chosen_numbers::default_players(),
-            )
+            (lower.as_str(), crate::types::ability::default_players())
         });
         // COMPLETE-CLAUSE consumption. A prefix match would lower the whole chunk
         // to a bare reveal and silently discard whatever followed — the swallow
@@ -20018,6 +20022,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 owner,
                 attach_to,
                 enters_attacking,
+                attack_destination,
                 supertypes,
                 static_abilities,
                 enter_with_counters,
@@ -20027,7 +20032,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 // binds to the player creating the token. Stamp ScopedPlayer
                 // so an "each player creates … for each … in their graveyard"
                 // iteration counts each player's OWN zone.
-                let scoped_count = token::scope_token_for_each_to_iterating_player(quantity);
+                let scoped_count =
+                    token::scope_token_for_each_to_iterating_player(quantity.clone());
                 // CR 608.2c + CR 400.7: this dispatcher builds the Token's
                 // base (name/P/T/types) from `base_tp` — the text BEFORE "for
                 // each" — so `try_parse_token`'s own "this way" dispatch never
@@ -20075,6 +20081,7 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                     owner,
                     attach_to,
                     enters_attacking,
+                    attack_destination,
                     supertypes,
                     static_abilities,
                     enter_with_counters,
@@ -20083,6 +20090,8 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
             }
             other => other,
         };
+        let mut effect = effect;
+        release_iteration_destination(&mut effect, &quantity);
         return Some(parsed_clause(effect));
     }
 
@@ -20944,7 +20953,7 @@ fn parse_exiled_cards_not_cast_cleanup(input: &str) -> Option<()> {
 /// resolver itself consumes.
 fn is_ownership_candidate(reading: GuardReading, clause: &ParsedEffectClause) -> bool {
     reading == GuardReading::Event
-        && crate::game::effects::cast_from_zone::graveyard_destination_rider(
+        && crate::types::ability::graveyard_destination_rider(
             &clause.effect,
             clause.condition.as_ref(),
         )
@@ -21744,8 +21753,7 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
     // imperative parser lowers "destroy X target ..." to the target filter but
     // the target count lives outside that filter, so recover it from the full
     // source sentence here.
-    if clause.multi_target.is_none()
-        && triggers::extract_target_filter_from_effect(&clause.effect).is_some()
+    if clause.multi_target.is_none() && extract_target_filter_from_effect(&clause.effect).is_some()
     {
         // The generalized optional-count fixup has ONE owner: the clause
         // junction `lower_clause_ast` (via `apply_optional_target_fixup`), so
@@ -22887,7 +22895,7 @@ fn try_split_targeted_compound_inner(
         ))
         .parse(sub_lower.as_str())
         .is_ok()
-        && triggers::extract_target_filter_from_effect(&primary_effect)
+        && extract_target_filter_from_effect(&primary_effect)
             .is_some_and(|filter| !is_player_scoped_filter(filter))
     {
         continuation_ctx.relative_player_scope = Some(ControllerRef::ParentTargetController);
@@ -27343,7 +27351,7 @@ fn has_explicit_player_target(effect: &Effect) -> bool {
 
 /// CR 115.1 + CR 108.3: a clause announces a player when it targets one or when the cards it acts on are scoped to a target player's zone ("target player's graveyard").
 fn clause_announces_player(effect: &Effect) -> bool {
-    use crate::game::ability_utils::{
+    use crate::types::ability::{
         effect_bound_filter_matches, filter_binds_target_player, PlayerBindingAxis,
     };
     has_explicit_player_target(effect)
@@ -27758,7 +27766,7 @@ fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
 /// attach operands, damage sources, companion player slots, …). `Ok(None)` for
 /// a node that announces nothing.
 fn single_declared_slot_filter(effect: &Effect) -> Result<Option<&TargetFilter>, ()> {
-    let Some(filter) = triggers::extract_target_filter_from_effect(effect) else {
+    let Some(filter) = extract_target_filter_from_effect(effect) else {
         return Ok(None);
     };
     let plain_single_slot = matches!(
@@ -27785,7 +27793,7 @@ fn single_declared_slot_filter(effect: &Effect) -> Result<Option<&TargetFilter>,
 /// CR 109.4 + CR 115.1: a `TargetPlayer` controller scope surfaces a companion
 /// player slot, which this walk does not number.
 fn filter_names_target_player(filter: &TargetFilter) -> bool {
-    crate::game::filter::filter_contains(filter, &|inner| {
+    crate::types::ability::filter_contains(filter, &|inner| {
         matches!(
             inner,
             TargetFilter::Typed(TypedFilter {
@@ -27877,7 +27885,7 @@ fn chain_declared_slot_registry(clauses: &[ClauseIr]) -> DeclaredSlotRegistry {
 /// CR 601.2c + CR 608.2c: resolve a demonstrative referent phrase ("that
 /// creature") at the start of `phrase_lower` to the declared slot it names, by
 /// a UNIQUE noun match over every announced slot of the earlier clauses
-/// (`oracle_target::parse_definite_parent_reference`). Binds only when the
+/// (`declared_slot_named_by`). Binds only when the
 /// unique match lies in the numbered prefix; zero or several matches, a match
 /// past the prefix, an `Indeterminate` registry, or a modal mode give `None`.
 /// Returns the slot and the unconsumed remainder of `phrase_lower`.
@@ -27888,22 +27896,34 @@ pub(super) fn resolve_declared_slot_anaphor<'a>(
     if ctx.body_scope == crate::parser::oracle_ir::context::BodyScope::ModalMode {
         return None;
     }
-    let DeclaredSlotRegistry::Known(entries) = &ctx.chain_declared_slots else {
+    let (rest, anaphor) = parse_definite_anaphor(phrase_lower).ok()?;
+    // A possessive continuation ("the creature's controller") is a distinct
+    // anaphor class (controller/owner of the slot), not a bare slot reference.
+    if tag::<_, _, OracleError<'_>>("'").parse(rest).is_ok() {
+        return None;
+    }
+    declared_slot_named_by(&anaphor, &ctx.chain_declared_slots).map(|slot| (slot, rest))
+}
+
+/// CR 601.2c + CR 608.2c: the declared-slot index the anaphor's noun phrase
+/// names in `registry` — a UNIQUE match over every announced slot
+/// (`unique_slot_for_anaphor`) that lies in the numbered prefix. `None` for an
+/// `Indeterminate` registry, zero or several matches, or a match past the
+/// prefix. A slot whose own legality depends on another declared slot is never
+/// an antecedent, so referents never chain.
+fn declared_slot_named_by(
+    anaphor: &DefiniteAnaphor,
+    registry: &DeclaredSlotRegistry,
+) -> Option<usize> {
+    let DeclaredSlotRegistry::Known(entries) = registry else {
         return None;
     };
     let filters: Vec<TargetFilter> = entries.iter().map(|entry| entry.filter.clone()).collect();
-    let (bound, rest) =
-        crate::parser::oracle_target::parse_definite_parent_reference(phrase_lower, &filters)?;
-    let TargetFilter::ParentTargetSlot { index } = bound else {
-        return None;
-    };
-    // A slot whose own legality depends on another declared slot is never an
-    // antecedent, so referents never chain.
+    let index = unique_slot_for_anaphor(anaphor, &filters)?;
     entries
         .get(index)
-        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))?
+        .filter(|entry| !crate::types::ability::filter_reads_declared_slot(&entry.filter))?
         .index
-        .map(|slot| (slot, rest))
 }
 
 /// CR 601.2c + CR 608.2c: the PRONOUN-ONLY sibling of
@@ -27945,7 +27965,7 @@ pub(super) fn resolve_pronoun_declared_slot_anaphor<'a>(
     // evidence either way.
     let eligible: Vec<&crate::parser::oracle_ir::context::DeclaredSlotEntry> = entries
         .iter()
-        .filter(|entry| !crate::game::filter::filter_reads_declared_slot(&entry.filter))
+        .filter(|entry| !crate::types::ability::filter_reads_declared_slot(&entry.filter))
         .collect();
     if eligible.is_empty() {
         return None;
@@ -27970,14 +27990,636 @@ pub(super) fn resolve_pronoun_declared_slot_anaphor<'a>(
 fn clause_announces_own_target(clause: &ClauseIr) -> bool {
     clause.multi_target.is_some()
         || clause.parsed.multi_target.is_some()
-        || triggers::extract_target_filter_from_effect(&clause.parsed.effect).is_some()
+        || extract_target_filter_from_effect(&clause.parsed.effect).is_some()
         || std::iter::successors(clause.parsed.sub_ability.as_deref(), |def| {
             def.sub_ability.as_deref()
         })
         .any(|def| {
-            def.multi_target.is_some()
-                || triggers::extract_target_filter_from_effect(&def.effect).is_some()
+            def.multi_target.is_some() || extract_target_filter_from_effect(&def.effect).is_some()
         })
+}
+
+/// The clause's head node followed by its compound `sub_ability` line, each with
+/// its assembled target-choice timing and its multi-target spec — the same node
+/// walk `chain_declared_slot_registry` numbers slots over.
+fn clause_nodes(
+    clause: &ClauseIr,
+) -> impl Iterator<Item = (&Effect, TargetChoiceTiming, Option<&MultiTargetSpec>)> + '_ {
+    let head = (
+        &clause.parsed.effect,
+        lower::target_choice_timing_for_clause(clause),
+        clause
+            .multi_target
+            .as_ref()
+            .or(clause.parsed.multi_target.as_ref()),
+    );
+    std::iter::once(head).chain(
+        std::iter::successors(clause.parsed.sub_ability.as_deref(), |def| {
+            def.sub_ability.as_deref()
+        })
+        .map(move |def| {
+            (
+                &*def.effect,
+                // CR 115.10a + CR 608.2d: the sub node's assembled timing.
+                lower::target_choice_timing_for_clause_sub(clause, def),
+                def.multi_target.as_ref(),
+            )
+        }),
+    )
+}
+
+/// A resolution-time object choice made by one clause of a chain: the filter its
+/// selection is drawn from, and the zone the selection ends in when the chain
+/// proves it (`None` = not proven).
+struct ResolutionChoice<'a> {
+    selection: &'a TargetFilter,
+    destination: Option<Zone>,
+}
+
+/// CR 115.10a + CR 608.2d + CR 701.23a: the resolution-time object choices
+/// clause `k` makes (objects chosen while an instruction is applied, which are
+/// not targets), in node order, each with the zone its selection ends in when
+/// proven. `reader` bounds the later clauses whose continuations may complete a
+/// library search.
+fn clause_resolution_choices(
+    clauses: &[ClauseIr],
+    k: usize,
+    reader: usize,
+) -> impl Iterator<Item = ResolutionChoice<'_>> + '_ {
+    clause_nodes(&clauses[k]).filter_map(move |(effect, timing, _)| {
+        node_resolution_choice(clauses, k, reader, effect, timing)
+    })
+}
+
+/// CR 115.10a + CR 608.2d + CR 701.23a: the resolution-time object choice one
+/// node of clause `k` makes, if it is a zone choice or a library search (see
+/// [`clause_resolution_choices`]).
+fn node_resolution_choice<'a>(
+    clauses: &'a [ClauseIr],
+    k: usize,
+    reader: usize,
+    effect: &'a Effect,
+    timing: TargetChoiceTiming,
+) -> Option<ResolutionChoice<'a>> {
+    match effect {
+        Effect::ChangeZone {
+            destination,
+            target,
+            ..
+        } if effect_owns_resolution_zone_choice(effect, timing) => Some(ResolutionChoice {
+            selection: target,
+            destination: Some(*destination),
+        }),
+        Effect::PutAtLibraryPosition { target, .. }
+            if effect_owns_resolution_zone_choice(effect, timing) =>
+        {
+            Some(ResolutionChoice {
+                selection: target,
+                destination: Some(Zone::Library),
+            })
+        }
+        // CR 701.23a + CR 115.10a: the found card is found while the search
+        // resolves (CR 701.23a); an object affected without the word "target"
+        // is not a target (CR 115.10a). Its destination is the
+        // `SearchDestination` continuation, from which assembly builds the
+        // delivering `ChangeZone`. That node does not exist yet at IR time.
+        Effect::SearchLibrary { filter, .. } => Some(ResolutionChoice {
+            selection: filter,
+            destination: search_result_destination(clauses, k, reader),
+        }),
+        _ => None,
+    }
+}
+
+/// CR 701.23a: the zone a library search clause `k` delivers its found card to,
+/// read from the `SearchDestination` continuation on the search clause itself
+/// (`intrinsic`) or on a later clause before `reader` (`followup`). `Some` only
+/// when at least one destination is printed and every one agrees. A search in
+/// the reader clause itself (`k == reader`) has no such later clause.
+fn search_result_destination(clauses: &[ClauseIr], k: usize, reader: usize) -> Option<Zone> {
+    let mut destinations = clauses[k]
+        .disposition
+        .intrinsic()
+        .into_iter()
+        .chain(
+            clauses
+                .iter()
+                .take(reader)
+                .skip(k + 1)
+                .filter_map(|clause| clause.disposition.followup()),
+        )
+        .filter_map(|continuation| match continuation {
+            ContinuationAst::SearchDestination { destination, .. } => Some(*destination),
+            _ => None,
+        });
+    let first = destinations.next()?;
+    destinations.all(|zone| zone == first).then_some(first)
+}
+
+/// CR 110.1 + CR 400.1 + CR 608.2c: whether the object a resolution-time choice
+/// selects could be what the anaphor's noun phrase names; "could be" makes the
+/// binder decline. An unproven destination could be anything. A "that card"
+/// anaphor could be any selection, and "that permanent" any selection put onto
+/// the battlefield. Any other noun is ruled out only by a proven axis: the
+/// selection's zone class differs from the anaphor's, or its filter explicitly
+/// excludes the noun (`selection_filter_excludes_anaphor_noun`).
+fn selection_could_be_anaphor(anaphor: &DefiniteAnaphor, choice: &ResolutionChoice<'_>) -> bool {
+    let Some(destination) = choice.destination else {
+        return true;
+    };
+    // CR 110.1 + CR 400.1: a selection put onto the battlefield is a permanent;
+    // anywhere else it is a card in that zone.
+    let selection_class = if destination == Zone::Battlefield {
+        AnaphorZoneClass::BattlefieldPermanent
+    } else {
+        AnaphorZoneClass::CardInNonBattlefieldZone
+    };
+    match &anaphor.noun {
+        AnaphorNoun::Type(TypeFilter::Card) => true,
+        AnaphorNoun::Type(TypeFilter::Permanent) => {
+            selection_class == AnaphorZoneClass::BattlefieldPermanent
+        }
+        noun => {
+            anaphor.zone_class == selection_class
+                && !selection_filter_excludes_anaphor_noun(noun, choice.selection)
+        }
+    }
+}
+
+/// CR 205.2b + CR 608.2c: whether a choice's selection filter explicitly excludes the
+/// anaphor's noun. An object with more than one card type satisfies criteria
+/// for any of them, so a filter that merely lacks the noun's type proves
+/// nothing: a `Permanent` or `Artifact` selection can be a creature. Only an
+/// explicit negation excludes — a `Non(<noun type or subtype>)` type filter, or
+/// for a "token" noun the `NonToken` property — on a typed filter, on any leg of
+/// a conjunction, or on every leg of a non-empty disjunction. Every other filter
+/// shape does not exclude the noun.
+/// A selection the text itself calls non-<noun> is not that noun's referent
+/// under the rules of English (CR 608.2c), even if the object later gains the type.
+fn selection_filter_excludes_anaphor_noun(noun: &AnaphorNoun, filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => match noun {
+            AnaphorNoun::Type(noun_type) => tf.type_filters.iter().any(|type_filter| {
+                let TypeFilter::Non(negated) = type_filter else {
+                    return false;
+                };
+                match (negated.as_ref(), noun_type) {
+                    (TypeFilter::Subtype(negated_sub), TypeFilter::Subtype(noun_sub)) => {
+                        negated_sub.eq_ignore_ascii_case(noun_sub)
+                    }
+                    (negated, noun_type) => negated == noun_type,
+                }
+            }),
+            // CR 111.1: a token is an object property, excluded by `NonToken`.
+            AnaphorNoun::Token => tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::NonToken)),
+        },
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|inner| selection_filter_excludes_anaphor_noun(noun, inner)),
+        TargetFilter::Or { filters } => {
+            !filters.is_empty()
+                && filters
+                    .iter()
+                    .all(|inner| selection_filter_excludes_anaphor_noun(noun, inner))
+        }
+        _ => false,
+    }
+}
+
+/// CR 608.2c: whether any node of the clause reads its parent's target
+/// (`ParentTarget`, `ParentTargetController`, `ParentTargetOwner`, …).
+fn clause_refs_parent_target(clause: &ClauseIr) -> bool {
+    clause_nodes(clause).any(|(effect, _, _)| effect_refs_parent_target(effect))
+}
+
+/// CR 115.1 + CR 608.2b: a target the choice clause itself announces besides
+/// its resolution-time selection.
+fn choice_clause_announces_other_target(clause: &ClauseIr) -> bool {
+    clause_nodes(clause).any(|(effect, timing, multi)| {
+        !effect_owns_resolution_zone_choice(effect, timing)
+            && (extract_target_filter_from_effect(effect).is_some() || multi.is_some())
+    })
+}
+
+/// The antecedent verdict for one reader clause of
+/// [`bind_anaphors_across_resolution_choices`].
+enum CrossChoiceAntecedent {
+    /// The clause is not a definite anaphor read across a resolution-time
+    /// choice whose noun excludes the choice's selection; it is left as is.
+    Unrelated,
+    /// The anaphor names an announced target, but the chain does not prove
+    /// which one; the reader fails closed.
+    Unproven,
+    /// The anaphor names the single target announced by this clause index.
+    Producer(usize),
+}
+
+/// The length of the declared-slot registry of `clauses`, or `None` when it is
+/// `Indeterminate`.
+fn known_declared_slot_count(clauses: &[ClauseIr]) -> Option<usize> {
+    match chain_declared_slot_registry(clauses) {
+        DeclaredSlotRegistry::Known(entries) => Some(entries.len()),
+        DeclaredSlotRegistry::Indeterminate => None,
+    }
+}
+
+/// CR 608.2c + CR 115.10a + CR 701.23a: the antecedent of clause `i`'s definite
+/// anaphor when a resolution-time choice lies between it and the chain's
+/// announced targets.
+fn cross_choice_antecedent(
+    clauses: &[ClauseIr],
+    i: usize,
+    body_scope: BodyScope,
+) -> CrossChoiceAntecedent {
+    let reader = &clauses[i];
+    if !matches!(reader.disposition, ClauseDisposition::Emit { .. })
+        || reader.reads_chosen_clause.is_some()
+        || !clause_refs_parent_target(reader)
+    {
+        return CrossChoiceAntecedent::Unrelated;
+    }
+    let Some(k) = (0..i)
+        .rev()
+        .find(|&k| clause_resolution_choices(clauses, k, i).next().is_some())
+    else {
+        return CrossChoiceAntecedent::Unrelated;
+    };
+    // Bare "its"/"their"/"that player" carry no noun and never match here.
+    let reader_lower = reader.source.fragment().unwrap_or_default().to_lowercase();
+    let Some(anaphor) =
+        nom_primitives::scan_at_word_boundaries(&reader_lower, parse_definite_anaphor)
+    else {
+        return CrossChoiceAntecedent::Unrelated;
+    };
+    if !reader_reads_parent_only_through_anaphor(reader, &reader_lower) {
+        return CrossChoiceAntecedent::Unrelated;
+    }
+    let verdict = announced_target_antecedent(clauses, i, k, &anaphor, body_scope);
+    // CR 110.1 + CR 608.2c: every instruction between the antecedent and the
+    // reader must provably hand the reader no object the noun could name; one
+    // that could may be the antecedent, so the binder declines. The producer's
+    // own clause is included past its head: a compound `sub_ability` joined to
+    // it by "and" can make a choice. Without a proven producer, every earlier
+    // node is checked.
+    let scan_start = match verdict {
+        CrossChoiceAntecedent::Unrelated => return verdict,
+        CrossChoiceAntecedent::Unproven => ScanStart::ChainStart,
+        CrossChoiceAntecedent::Producer(p) => ScanStart::AfterProducerHead(p),
+    };
+    if intervening_object_could_be_anaphor(clauses, scan_start, i, &anaphor) {
+        CrossChoiceAntecedent::Unrelated
+    } else {
+        verdict
+    }
+}
+
+/// CR 608.2c: whether the reader clause's only read of its parent's target is
+/// the one its noun anaphor makes. The chosen-group link re-stamps the targets
+/// of the whole reader clause, so a second read would be re-pointed at the
+/// announced target too. Fails closed:
+/// - exactly one node of the clause may read its parent's target, through
+///   exactly one target-filter slot (`types::ability::effect_parent_ref_slot_count`);
+/// - the clause's text may contain no bare object pronoun, possessive
+///   included ("return it", "its owner's hand", "it deals"), which can name the
+///   object the intervening selection handed the chain. This also covers a
+///   parent read the slot count does not reach (a control recipient, a damage
+///   source, a quantity's object scope), which the printed text expresses as a
+///   pronoun.
+fn reader_reads_parent_only_through_anaphor(reader: &ClauseIr, reader_lower: &str) -> bool {
+    let mut parent_reads = clause_nodes(reader)
+        .map(|(effect, _, _)| effect_parent_ref_slot_count(effect))
+        .filter(|&count| count > 0);
+    parent_reads.next() == Some(1)
+        && parent_reads.next().is_none()
+        && nom_primitives::scan_at_word_boundaries(reader_lower, parse_bare_object_pronoun)
+            .is_none()
+}
+
+/// A bare object pronoun at the start of lowercase `input`: an object-recipient
+/// pronoun (`nom_primitives::parse_object_recipient_pronoun`) or the possessive
+/// "its"/"their".
+fn parse_bare_object_pronoun(input: &str) -> OracleResult<'_, &str> {
+    alt((
+        nom_primitives::parse_object_recipient_pronoun,
+        terminated(alt((tag("its"), tag("their"))), tag(" ")),
+    ))
+    .parse(input)
+}
+
+/// Where [`intervening_object_could_be_anaphor`] starts its walk.
+#[derive(Clone, Copy)]
+enum ScanStart {
+    /// Every node of the chain: no producer is proven.
+    ChainStart,
+    /// The node after this clause's head: the head announces the producer's
+    /// target, the antecedent itself.
+    AfterProducerHead(usize),
+}
+
+/// CR 608.2c + CR 115.10a + CR 400.7: whether an instruction applied after the
+/// antecedent is announced and before `reader`'s anaphor is read could hand the
+/// reader an object the anaphor names. The walk covers every node from
+/// `scan_start` up to the reader clause's last node that reads its parent's
+/// target, and fails closed: a node answers "could not" only when it is
+/// - a zone choice or library search whose selection is proven not to be the
+///   noun (`selection_could_be_anaphor`), or
+/// - an instruction proven to hand the reader no such object
+///   (`node_hands_no_anaphor_object`, over the one classification
+///   `types::ability::instruction_object_reach`).
+fn intervening_object_could_be_anaphor(
+    clauses: &[ClauseIr],
+    scan_start: ScanStart,
+    reader: usize,
+    anaphor: &DefiniteAnaphor,
+) -> bool {
+    let (first_clause, skipped_nodes) = match scan_start {
+        ScanStart::ChainStart => (0, 0),
+        ScanStart::AfterProducerHead(producer) => (producer, 1),
+    };
+    let nodes: Vec<(usize, &Effect, TargetChoiceTiming)> = (first_clause..=reader)
+        .flat_map(|c| clause_nodes(&clauses[c]).map(move |(effect, timing, _)| (c, effect, timing)))
+        .collect();
+    let reader_node = nodes
+        .iter()
+        .rposition(|&(c, effect, _)| c == reader && effect_refs_parent_target(effect))
+        .unwrap_or(nodes.len());
+    let mut after_choice = false;
+    for &(c, effect, timing) in nodes.get(skipped_nodes..reader_node).unwrap_or_default() {
+        if let Some(choice) = node_resolution_choice(clauses, c, reader, effect, timing) {
+            if selection_could_be_anaphor(anaphor, &choice) {
+                return true;
+            }
+            after_choice = true;
+        } else if !node_hands_no_anaphor_object(effect, timing, after_choice, anaphor) {
+            return true;
+        }
+    }
+    false
+}
+
+/// CR 608.2c + CR 115.10a + CR 400.7: whether a node that makes no recognised
+/// zone choice or library search is proven to hand a later anaphor no object
+/// it could name. `after_choice` says a recognised choice ran earlier in the
+/// walk, so an object the chain hands this node may be that choice's selection.
+///
+/// An instruction that touches no object (`NoObject`) hands none. One that acts
+/// on its one slot (`Slot`) hands none when the slot is
+/// - a stack-declared target: the registry already counts every announced
+///   target (`announced_target_antecedent`);
+/// - a player (`filter_names_only_players`);
+/// - an object an earlier instruction handed the chain
+///   (`node_acts_on_chain_referent`), before any choice; after one, that
+///   object may be the selection and moving it changes what it is when the
+///   reader runs, so only a `ChangeZone` destination that rules the noun out
+///   proves it.
+///
+/// Every other slot, such as a described population ("sacrifice a creature",
+/// "put a +1/+1 counter on a creature you control") chosen while the
+/// instruction is applied, and every `Unclassified` instruction (a dig, a
+/// reveal, a token, a draw, …) could hand the reader its referent.
+fn node_hands_no_anaphor_object(
+    effect: &Effect,
+    timing: TargetChoiceTiming,
+    after_choice: bool,
+    anaphor: &DefiniteAnaphor,
+) -> bool {
+    use crate::types::ability::InstructionObjectReach;
+    let filter = match instruction_object_reach(effect) {
+        InstructionObjectReach::NoObject => return true,
+        InstructionObjectReach::Unclassified => return false,
+        InstructionObjectReach::Slot(filter) => filter,
+    };
+    if timing == TargetChoiceTiming::Stack && extract_target_filter_from_effect(effect).is_some() {
+        return true;
+    }
+    if filter_names_only_players(filter) {
+        return true;
+    }
+    if filter.names_enumerable_population() || !node_acts_on_chain_referent(effect) {
+        return false;
+    }
+    if !after_choice {
+        return true;
+    }
+    // CR 400.7 + CR 608.2c: the handed object may be the selection. A
+    // `ChangeZone` proves where it ends up; any other instruction on it leaves
+    // its zone unproven. Its own filter is not known here, so it excludes no
+    // noun (`TargetFilter::Any`).
+    let moved = ResolutionChoice {
+        selection: &TargetFilter::Any,
+        destination: match effect {
+            Effect::ChangeZone { destination, .. } => Some(*destination),
+            _ => None,
+        },
+    };
+    !selection_could_be_anaphor(anaphor, &moved)
+}
+
+/// CR 608.2c: whether a node acts on an object an earlier instruction of the
+/// chain handed it: its parent's object itself ("return it to the battlefield",
+/// `effect_requires_parent_target_object`) or the chain's tracked set ("those
+/// cards"). After a resolution-time choice, that object may be the selection.
+fn node_acts_on_chain_referent(effect: &Effect) -> bool {
+    effect_requires_parent_target_object(effect)
+        || matches!(
+            effect.target_filter(),
+            Some(TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. })
+        )
+}
+
+/// CR 102.1 + CR 109.1: whether a slot filter names only players, so the
+/// instruction acting on it touches no object (a player is not an object). A conjunction or disjunction
+/// qualifies only when every leg does; any filter not listed may name an
+/// object.
+fn filter_names_only_players(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            !filters.is_empty() && filters.iter().all(filter_names_only_players)
+        }
+        leaf => {
+            leaf.is_player_scope()
+                || leaf.denotes_player_target()
+                || leaf.chosen_player_index().is_some()
+                || matches!(
+                    leaf,
+                    TargetFilter::ScopedPlayer
+                        | TargetFilter::Opponent
+                        | TargetFilter::Owner
+                        | TargetFilter::SourceController
+                        | TargetFilter::OriginalController
+                        | TargetFilter::TriggeringPlayer
+                        | TargetFilter::TriggeringSpellController
+                        | TargetFilter::TriggeringSpellOwner
+                        | TargetFilter::TriggeringSourceController
+                        | TargetFilter::EventTargetController
+                        | TargetFilter::DeclaredPlayer { .. }
+                        | TargetFilter::SpecificPlayer { .. }
+                        | TargetFilter::ParentTargetController
+                        | TargetFilter::ParentTargetOwner
+                        | TargetFilter::SourceChosenPlayer
+                        | TargetFilter::PostReplacementSourceController
+                        | TargetFilter::PostReplacementDamageTargetOwner
+                        | TargetFilter::DefendingPlayer
+                        | TargetFilter::Neighbor { .. }
+                        | TargetFilter::PlayerWhoChoseLabel { .. }
+                )
+        }
+    }
+}
+
+/// CR 608.2c + CR 608.2b: the announced target clause `i`'s anaphor names,
+/// given `k`, the nearest earlier clause that makes a resolution-time choice.
+fn announced_target_antecedent(
+    clauses: &[ClauseIr],
+    i: usize,
+    k: usize,
+    anaphor: &DefiniteAnaphor,
+    body_scope: BodyScope,
+) -> CrossChoiceAntecedent {
+    // A nearer announced target the noun names is inherited at runtime.
+    if clauses[k + 1..i].iter().any(|clause| {
+        matches!(clause.disposition, ClauseDisposition::Emit { .. })
+            && matches!(
+                single_declared_slot_filter(&clause.parsed.effect),
+                Ok(Some(filter)) if anaphor.names_slot(filter)
+            )
+    }) {
+        return CrossChoiceAntecedent::Unrelated;
+    }
+    let registry = chain_declared_slot_registry(&clauses[..k]);
+    let DeclaredSlotRegistry::Known(entries) = &registry else {
+        return CrossChoiceAntecedent::Unrelated;
+    };
+    let matches = entries
+        .iter()
+        .filter(|entry| anaphor.names_slot(&entry.filter))
+        .count();
+    if matches == 0 {
+        return CrossChoiceAntecedent::Unrelated;
+    }
+    // CR 608.2b: the reader binds only when the producer's target is the sole
+    // target the chain announces, so an empty group never falls back to
+    // another object.
+    let Some(slot) = declared_slot_named_by(anaphor, &registry).filter(|_| {
+        matches == 1
+            && entries.len() == 1
+            && !choice_clause_announces_other_target(&clauses[k])
+            && !clauses[k + 1..].iter().any(clause_announces_own_target)
+            && body_scope != BodyScope::ModalMode
+    }) else {
+        return CrossChoiceAntecedent::Unproven;
+    };
+    (0..k)
+        .find(|&p| {
+            known_declared_slot_count(&clauses[..p]) == Some(slot)
+                && known_declared_slot_count(&clauses[..=p]) == Some(slot + 1)
+                && matches!(
+                    single_declared_slot_filter(&clauses[p].parsed.effect),
+                    Ok(Some(_))
+                )
+        })
+        .filter(|&p| clauses[p].declared_player_group.is_none())
+        .map_or(
+            CrossChoiceAntecedent::Unproven,
+            CrossChoiceAntecedent::Producer,
+        )
+}
+
+/// CR 608.2c + CR 115.10a + CR 701.23a: a later instruction's definite anaphor
+/// ("that creature", "that creature's controller") names the object an earlier
+/// instruction announced as its target. It does not name an object that a
+/// resolution-time choice selected in between: a zone choice or a library
+/// search is not a target, and its result cannot be what the noun names. Binds
+/// the reader to the producer's announced target through the chosen-group link,
+/// which `ability_utils::restamp_chosen_group_targets` stamps at announcement
+/// and re-stamps at resolution (CR 601.2c + CR 608.2b).
+fn bind_anaphors_across_resolution_choices(clauses: &mut [ClauseIr], body_scope: BodyScope) {
+    for i in 0..clauses.len() {
+        match cross_choice_antecedent(clauses, i, body_scope) {
+            CrossChoiceAntecedent::Unrelated => {}
+            CrossChoiceAntecedent::Unproven => {
+                clauses[i].replace_with_gap("anaphor_shadowed_by_resolution_choice");
+            }
+            CrossChoiceAntecedent::Producer(p) => {
+                let producer_id = clauses[p].id;
+                let group = *clauses[p].declares_chosen_clause.get_or_insert(producer_id);
+                clauses[i].reads_chosen_clause = Some(group);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cross_choice_compound_reader_tests {
+    use super::{bind_anaphors_across_resolution_choices, parse_effect_chain_ir};
+    use super::{search_result_destination, BodyScope, ParseContext};
+    use crate::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter};
+
+    /// Parser IR shape only (no resolution). CR 608.2c + CR 701.23a: a library
+    /// search joined into the reader clause ahead of its "that creature" read is
+    /// a resolution-time choice whose destination this chain never prints, so the
+    /// binder declines. Its follow-up scan covers no clause when the search sits
+    /// in the reader clause itself (`k == reader`).
+    ///
+    /// No Oracle text reaches this shape through `parse_oracle_text`: the chunk
+    /// splitter gives every "search your library …" instruction its own clause.
+    /// The reader clause is therefore built from parsed parts: the search becomes
+    /// its head and the original stun-counter read its `sub_ability`.
+    #[test]
+    fn search_inside_reader_clause_before_its_read_declines() {
+        let mut ir = parse_effect_chain_ir(
+            "Tap target creature. You may exile a card from your graveyard. If you do, put a stun counter on that creature.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let clauses = &mut ir.clauses;
+        assert_eq!(clauses.len(), 3, "{clauses:?}");
+        let (producer, reader) = (0, 2);
+        // Reach guard: unspliced, the binder links the reader to the producer.
+        let producer_id = clauses[producer].id;
+        assert_eq!(clauses[producer].declares_chosen_clause, Some(producer_id));
+        assert_eq!(clauses[reader].reads_chosen_clause, Some(producer_id));
+
+        let search = parse_effect_chain_ir(
+            "Search your library for a card.",
+            AbilityKind::Spell,
+            &mut ParseContext::default(),
+        )
+        .clauses
+        .remove(0)
+        .parsed
+        .effect;
+        assert!(matches!(search, Effect::SearchLibrary { .. }), "{search:?}");
+
+        clauses[producer].declares_chosen_clause = None;
+        clauses[reader].reads_chosen_clause = None;
+        let read = std::mem::replace(&mut clauses[reader].parsed.effect, search);
+        assert!(
+            matches!(
+                read,
+                Effect::PutCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{read:?}"
+        );
+        clauses[reader].parsed.sub_ability =
+            Some(Box::new(AbilityDefinition::new(AbilityKind::Spell, read)));
+
+        bind_anaphors_across_resolution_choices(clauses, BodyScope::WholeAbility);
+        assert!(
+            matches!(clauses[reader].parsed.effect, Effect::SearchLibrary { .. }),
+            "the reader clause is left as is: {:?}",
+            clauses[reader].parsed.effect
+        );
+        assert_eq!(clauses[reader].reads_chosen_clause, None);
+        assert_eq!(clauses[producer].declares_chosen_clause, None);
+        assert_eq!(search_result_destination(clauses, reader, reader), None);
+    }
 }
 
 /// CR 115.10a + CR 608.2d + CR 701.8a: "Destroy up to N <filter> attached to
@@ -28003,7 +28645,7 @@ fn lift_untargeted_declared_slot_destroy(
     else {
         return (clause, multi_target);
     };
-    if !crate::game::filter::filter_reads_declared_slot(target)
+    if !crate::types::ability::filter_reads_declared_slot(target)
         || nom_primitives::scan_contains(text_lower, "target ")
     {
         return (clause, multi_target);
@@ -28183,7 +28825,7 @@ fn chain_declared_object_target_clause(clauses: &[ClauseIr]) -> Option<(usize, &
             // announce as a target ("sacrifice a Blood token") declares no object
             // target, so it is no antecedent of a later anaphor.
             Some(TargetFilter::Typed(_))
-                if triggers::extract_target_filter_from_effect(&prev.parsed.effect).is_none() =>
+                if extract_target_filter_from_effect(&prev.parsed.effect).is_none() =>
             {
                 return None
             }
@@ -41613,7 +42255,7 @@ pub(crate) fn refuse_linked_paid_cast_in_activated_mana_ability(
 ) {
     if def.kind == AbilityKind::Activated
         && def.cost.is_some()
-        && crate::game::mana_abilities::could_be_activated_mana_ability(def)
+        && crate::types::ability::could_be_activated_mana_ability(def)
     {
         refuse_linked_paid_cast_in_mana_ability(def, source_text);
     }
@@ -43321,7 +43963,11 @@ pub(crate) fn parse_effect_chain_ir_after_player_choices(
     already_chosen: u8,
 ) -> EffectChainIr {
     let enclosing_chosen_objects = ctx.enclosing_chosen_objects.clone();
+    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
     let mut ir = parse_effect_chain_ir_body(text, kind, ctx, already_chosen);
+    // Nested delayed, reflexive, and continuation bodies may inherit an outer
+    // chain's tracked exile binding. Keep that context scoped to this call.
+    ctx.chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer;
     ctx.enclosing_chosen_objects = enclosing_chosen_objects;
     per_opponent_choice::enforce_per_opponent_choice_tail(&mut ir);
     ir
@@ -43862,6 +44508,7 @@ fn parse_effect_chain_ir_body(
     already_chosen_players: u8,
 ) -> EffectChainIr {
     let chain_source_text = text;
+    let enclosing_chain_has_prior_exile_producer = ctx.chain_has_prior_exile_producer;
     // CR 608.2c: the enclosing chain's player declaration, taken on entry so only
     // the one nested call that set it can read it.
     let enclosing_declared_player = ctx.enclosing_declared_player.take();
@@ -47040,6 +47687,13 @@ fn parse_effect_chain_ir_body(
                         &mut chain_declared_groups,
                     )
                 });
+        let chain_has_prior_exile_producer = enclosing_chain_has_prior_exile_producer
+            || builder.clauses().iter().any(clause_ir_is_exile_producer);
+        // Recursive chain parses below receive `ctx` rather than this freshly
+        // built per-chunk context. Publish the current chain-local binding for
+        // those nested delayed/reflexive/continuation parses; the public wrapper
+        // restores the caller's value on every return path.
+        ctx.chain_has_prior_exile_producer = chain_has_prior_exile_producer;
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
             // CR 608.2k: precedence for a bare object anaphor, nearest antecedent
@@ -47178,10 +47832,7 @@ fn parse_effect_chain_ir_body(
             // NOT skip absorbed (`ClauseDisposition::Continue`) clauses — see
             // `clause_ir_is_exile_producer` for why (Hideaway).
             chain_zone_result: builder.zone_result_antecedent(),
-            chain_has_prior_exile_producer: builder
-                .clauses()
-                .iter()
-                .any(clause_ir_is_exile_producer),
+            chain_has_prior_exile_producer,
             chain_prior_self_library_peek: builder
                 .clauses()
                 .iter()
@@ -49284,9 +49935,7 @@ fn parse_effect_chain_ir_body(
             // player-scope iteration is the printed controller, so such a choice
             // cannot be represented — honest gap.
             if (player_scope.is_some() || opponent_may_scope.is_some() || is_distributed_chunk)
-                && crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(
-                    &clause.effect,
-                )
+                && crate::types::ability::effect_parks_reveal_card_choice(&clause.effect)
             {
                 clause.effect =
                     Effect::unimplemented("non_controller_reveal_choice", normalized_text);
@@ -49792,6 +50441,10 @@ fn parse_effect_chain_ir_body(
     tag_player_declarations(&mut builder, &mut declarations, &mut chain_declared_groups);
     ctx.next_declared_player_group = chain_declared_groups;
 
+    // CR 608.2c: after player tagging, so a producer's player group is final and
+    // the object-group stamp cannot suppress it.
+    bind_anaphors_across_resolution_choices(builder.clauses_mut(), ctx.body_scope);
+
     // CR 608.2c + CR 603.7: resolve delayed-payload placement over the finished clause sequence.
     // Must stay ABOVE `builder.finish_with_context(ctx)`: `try_fold_loses_other_sibling` removes a clause and the
     // leading-host-lifetime pass rewrites every `parsed`, so a later position would fold a different
@@ -49925,10 +50578,69 @@ fn try_fold_token_repeat_into_count(effect: &mut Effect, qty: &QuantityExpr) -> 
     {
         if attach_to.is_none() && matches!(count, QuantityExpr::Fixed { value: 1 }) {
             *count = qty.clone();
+            rebind_iteration_destination(effect, qty);
             return true;
         }
     }
     false
+}
+
+/// CR 608.2c: a "for each <players>" iteration folded into one token batch
+/// makes "that player" each counted player in turn, so the token names one
+/// destination for each counted player.
+fn rebind_iteration_destination(effect: &mut Effect, qty: &QuantityExpr) {
+    let QuantityExpr::Ref {
+        qty: QuantityRef::PlayerCount { filter },
+    } = qty
+    else {
+        return;
+    };
+    if let Effect::Token {
+        attack_destination, ..
+    } = effect
+    {
+        if let TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope,
+        } = attack_destination
+        {
+            *attack_destination = TokenAttackDestination::EachPlayer {
+                filter: filter.clone(),
+                scope: *scope,
+            };
+        }
+    }
+}
+
+/// CR 608.2c: in a "for each <players>" iteration, "that player" is the
+/// iterated player rather than the defending player, so the
+/// defending-player reading is not kept.
+pub(super) fn release_iteration_destination(effect: &mut Effect, qty: &QuantityExpr) {
+    if !matches!(
+        qty,
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount { .. }
+        }
+    ) {
+        return;
+    }
+    if let Effect::Token {
+        attack_destination, ..
+    }
+    | Effect::CopyTokenOf {
+        attack_destination, ..
+    } = effect
+    {
+        if matches!(
+            attack_destination,
+            TokenAttackDestination::Player {
+                player: ControllerRef::DefendingPlayer,
+                ..
+            }
+        ) {
+            *attack_destination = TokenAttackDestination::ControllerChooses;
+        }
+    }
 }
 
 /// CR 608.2c + CR 614.6: Classify a "<...> this way" put-continuation anaphor by
@@ -50146,7 +50858,7 @@ fn try_parse_put_zone_change_parts(
                     if dynamic_descriptor
                         && (matches!(parsed, TargetFilter::Any)
                             || !remainder.trim().is_empty()
-                            || !crate::game::filter::filter_contains_filter_prop(
+                            || !crate::types::ability::filter_contains_filter_prop(
                                 &parsed,
                                 &|prop| matches!(prop, FilterProp::Cmc { .. }),
                             ))
@@ -55154,5 +55866,103 @@ mod coordinated_interior_duration_tests {
             }
         }
         assert!(life_lock && protection && exile);
+    }
+}
+
+/// CR 608.2c: folding a "for each <players>" iteration into a token batch
+/// rebinds a defending-player destination to the counted players, and only then.
+#[cfg(test)]
+mod iteration_destination_rebinding_tests {
+    use super::*;
+    use crate::types::ability::{NamedDefenderScope, PtValue};
+
+    fn token_naming(attack_destination: TokenAttackDestination) -> Effect {
+        Effect::Token {
+            name: "Goblin".to_string(),
+            power: PtValue::Fixed(1),
+            toughness: PtValue::Fixed(1),
+            types: vec!["Creature".to_string(), "Goblin".to_string()],
+            colors: vec![],
+            keywords: vec![],
+            tapped: true,
+            count: QuantityExpr::Fixed { value: 1 },
+            owner: TargetFilter::Controller,
+            attach_to: None,
+            enters_attacking: true,
+            attack_destination,
+            supertypes: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+        }
+    }
+
+    fn defending_player() -> TokenAttackDestination {
+        TokenAttackDestination::Player {
+            player: ControllerRef::DefendingPlayer,
+            scope: NamedDefenderScope::Player,
+        }
+    }
+
+    fn players_counted(filter: PlayerFilter) -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount { filter },
+        }
+    }
+
+    fn folded(destination: TokenAttackDestination, qty: &QuantityExpr) -> Effect {
+        let mut effect = token_naming(destination);
+        assert!(
+            try_fold_token_repeat_into_count(&mut effect, qty),
+            "reach guard: the iteration folded"
+        );
+        let Effect::Token { count, .. } = &effect else {
+            panic!("expected a Token effect");
+        };
+        assert_eq!(count, qty, "reach guard: the count is the iteration's");
+        effect
+    }
+
+    fn destination_of(effect: &Effect) -> &TokenAttackDestination {
+        let Effect::Token {
+            attack_destination, ..
+        } = effect
+        else {
+            panic!("expected a Token effect");
+        };
+        attack_destination
+    }
+
+    #[test]
+    fn a_counted_players_iteration_rebinds_the_defending_player_to_the_counted_players() {
+        let qty = players_counted(PlayerFilter::All);
+        assert_eq!(
+            destination_of(&folded(defending_player(), &qty)),
+            &TokenAttackDestination::EachPlayer {
+                filter: PlayerFilter::All,
+                scope: NamedDefenderScope::Player,
+            }
+        );
+    }
+
+    #[test]
+    fn an_iteration_that_does_not_count_players_keeps_the_defending_player() {
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        };
+        assert_eq!(
+            destination_of(&folded(defending_player(), &qty)),
+            &defending_player()
+        );
+    }
+
+    #[test]
+    fn an_unnamed_destination_stays_unnamed() {
+        let qty = players_counted(PlayerFilter::Opponent);
+        assert_eq!(
+            destination_of(&folded(TokenAttackDestination::ControllerChooses, &qty)),
+            &TokenAttackDestination::ControllerChooses
+        );
     }
 }

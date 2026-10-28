@@ -1,12 +1,13 @@
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
+    matches_target_filter, matches_target_filter_in_owner_zone, objects_have_common_quality_value,
+    FilterContext,
 };
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink,
-    TargetFilter, TargetRef,
+    ResolvedAbility, SearchOrderingHint, SearchSelectionConstraint, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -184,9 +185,20 @@ pub fn selection_satisfies_constraint(
 ) -> bool {
     match constraint {
         SearchSelectionConstraint::None => true,
-        SearchSelectionConstraint::DistinctQualities { qualities } => qualities
-            .iter()
-            .all(|quality| selection_has_distinct_quality(state, chosen, quality)),
+        SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation,
+        } => qualities.iter().all(|quality| match relation {
+            SharedQualityRelation::DoesNotShare => {
+                selection_has_distinct_quality(state, chosen, quality)
+            }
+            // CR 608.2d + CR 701.23a: "cards that share a <quality>" — the chosen
+            // set must have a value in common (CR 205.3i land types for Myriad
+            // Landscape); one or zero cards is a legal partial find (CR 701.23b).
+            SharedQualityRelation::Shares => {
+                objects_have_common_quality_value(state, chosen, quality)
+            }
+        }),
         SearchSelectionConstraint::TotalManaValue { comparator, value } => {
             let mut total = 0;
             for id in chosen {
@@ -2899,8 +2911,9 @@ mod tests {
         state.objects.get_mut(&bear).unwrap().power = Some(2);
         state.objects.get_mut(&hound).unwrap().power = Some(2);
         state.objects.get_mut(&drake).unwrap().power = Some(3);
-        let constraint = SearchSelectionConstraint::DistinctQualities {
+        let constraint = SearchSelectionConstraint::SharesQualities {
             qualities: vec![SharedQuality::Power],
+            relation: SharedQualityRelation::DoesNotShare,
         };
 
         assert!(selection_satisfies_constraint(
@@ -2940,13 +2953,14 @@ mod tests {
             obj.mana_cost = crate::types::mana::ManaCost::generic(3);
             obj.card_types.core_types = vec![CoreType::Sorcery];
         }
-        let constraint = SearchSelectionConstraint::DistinctQualities {
+        let constraint = SearchSelectionConstraint::SharesQualities {
             qualities: vec![
                 SharedQuality::ManaValue,
                 SharedQuality::Power,
                 SharedQuality::Toughness,
                 SharedQuality::CardType,
             ],
+            relation: SharedQualityRelation::DoesNotShare,
         };
 
         assert!(selection_satisfies_constraint(
@@ -2986,18 +3000,135 @@ mod tests {
             .unwrap()
             .card_types
             .core_types = vec![CoreType::Instant];
-        let constraint = SearchSelectionConstraint::DistinctQualities {
+        let constraint = SearchSelectionConstraint::SharesQualities {
             qualities: vec![
                 SharedQuality::Power,
                 SharedQuality::Toughness,
                 SharedQuality::CardType,
             ],
+            relation: SharedQualityRelation::DoesNotShare,
         };
 
         assert!(selection_satisfies_constraint(
             &state,
             &[creature, instant],
             &constraint
+        ));
+    }
+
+    /// Library land card named `name` carrying the given land subtypes.
+    fn add_typed_library_land(
+        state: &mut GameState,
+        card_id: u64,
+        name: &str,
+        subtypes: &[&str],
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes = subtypes.iter().map(|s| s.to_string()).collect();
+        id
+    }
+
+    /// CR 608.2d + CR 701.23a + CR 205.3i: `Shares` requires one value common to
+    /// the WHOLE chosen set; `DoesNotShare` (the control) is pairwise distinct.
+    #[test]
+    fn shares_qualities_requires_a_value_common_to_every_chosen_card() {
+        let mut state = GameState::new_two_player(42);
+        let forest_a = add_typed_library_land(&mut state, 1, "Forest", &["Forest"]);
+        let forest_b = add_typed_library_land(&mut state, 2, "Forest", &["Forest"]);
+        let island = add_typed_library_land(&mut state, 3, "Island", &["Island"]);
+        let forest_island =
+            add_typed_library_land(&mut state, 4, "Forest Island", &["Forest", "Island"]);
+        let island_swamp =
+            add_typed_library_land(&mut state, 5, "Island Swamp", &["Island", "Swamp"]);
+        let swamp_forest =
+            add_typed_library_land(&mut state, 6, "Swamp Forest", &["Swamp", "Forest"]);
+        let shares = |qualities: Vec<SharedQuality>| SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation: SharedQualityRelation::Shares,
+        };
+        let does_not_share =
+            |qualities: Vec<SharedQuality>| SearchSelectionConstraint::SharesQualities {
+                qualities,
+                relation: SharedQualityRelation::DoesNotShare,
+            };
+        let land_type = shares(vec![SharedQuality::LandType]);
+
+        // Positive reach guards: a shared land type is accepted.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_a, forest_b],
+            &land_type
+        ));
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_island, island],
+            &land_type
+        ));
+        // No land type in common.
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_a, island],
+            &land_type
+        ));
+        // Pairwise overlap is not enough: each pair of the three cards shares a
+        // land type, but no land type is common to all three.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_island, island_swamp],
+            &land_type
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_island, island_swamp, swamp_forest],
+            &land_type
+        ));
+        // Below two cards the restriction is vacuous (CR 701.23b partial find).
+        assert!(selection_satisfies_constraint(&state, &[], &land_type));
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[island],
+            &land_type
+        ));
+        // With two or more ids, a missing object fails the group.
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_a, ObjectId(9_999)],
+            &land_type
+        ));
+
+        // `DoesNotShare` control on the same objects gives the opposite answer
+        // where the two readings differ.
+        let distinct_land_type = does_not_share(vec![SharedQuality::LandType]);
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_a, island],
+            &distinct_land_type
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_a, forest_b],
+            &distinct_land_type
+        ));
+
+        // Two qualities: every listed quality needs its own common value.
+        let land_type_and_name = shares(vec![SharedQuality::LandType, SharedQuality::Name]);
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_a, forest_b],
+            &land_type_and_name
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_island, island_swamp],
+            &land_type_and_name
         ));
     }
 

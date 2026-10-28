@@ -40,7 +40,8 @@ use crate::types::ability::{
     TriggerProducerOrigin, TypedFilter,
 };
 use crate::types::ability_visit::{
-    each_granter_symbol, granter_symbols, granter_symbols_mut, DefinitionNode, DefinitionNodeMut,
+    each_granter_symbol, granter_symbols_mut, names_unbound_granter, own_fields_name_granter,
+    token_static_grants_to_itself, DefinitionNode, DefinitionNodeMut,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card_type::{
@@ -8385,13 +8386,7 @@ fn expand_granted_static_effects(
 fn references_granting_object(body: DefinitionNode<'_>) -> bool {
     let mut names = false;
     each_granter_symbol(body, &mut |symbol| {
-        names |= match symbol {
-            granter_symbols::Symbol::Filter(bound) => bound.is_none(),
-            granter_symbols::Symbol::Scope(scope) => {
-                matches!(scope, crate::types::ability::ObjectScope::GrantingObject)
-            }
-            granter_symbols::Symbol::Caster(_) => false,
-        };
+        names |= names_unbound_granter(&symbol);
     });
     names
 }
@@ -8454,11 +8449,29 @@ pub(crate) fn latch_grants(
     }
 }
 
-/// CR 201.5a: the stamping rule for a static installed on an object other than
-/// `granter` — a granted static or a created token's static.
+/// CR 201.5a: the stamping rule for a granted static and, through
+/// [`stamp_token_static_creator`], a token's `SelfRef` statics, installed on an object other
+/// than `granter`.
 pub(crate) fn stamp_static_granter(def: &mut StaticDefinition, granter: ObjectIncarnationRef) {
     if references_granting_object(DefinitionNode::Static(def)) {
         granter_symbols_mut::each_node(DefinitionNodeMut::Static(def), &mut stamp_granter(granter));
+    }
+}
+
+/// CR 201.5a + CR 111.3 + CR 400.7: the creator stamp for a created token's static. A
+/// static that grants to the token itself carries the token's own quoted abilities, so
+/// its whole tree names the creator. Any other static binds only its own fields; its
+/// nested definitions are grants to other objects, left unbound until the token applies
+/// them at layer 6 (CR 613.1f) and `stamp_grant` binds them to the token. The parser
+/// refuses a token body whose references would land in the other frame.
+pub(crate) fn stamp_token_static_creator(
+    def: &mut StaticDefinition,
+    creator: ObjectIncarnationRef,
+) {
+    if token_static_grants_to_itself(def) {
+        stamp_static_granter(def, creator);
+    } else if own_fields_name_granter(def) {
+        stamp_granter(creator)(DefinitionNodeMut::Static(def));
     }
 }
 

@@ -61,13 +61,15 @@ use crate::types::ability::{
     QuantityExpr, QuantityModification, QuantityRef, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope, RoundingMode, SourceExclusion, StaticCondition, StaticDefinition,
-    TapStateChange, TargetFilter, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    TapStateChange, TargetFilter, TokenAttackDestination, TriggerConstraint, TriggerDefinition,
+    TypeFilter, TypedFilter,
 };
 use crate::types::ability::{CardPlayMode, CastingPermission, PlayerScope};
 use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
+use crate::types::proposed_event::TokenAttackRequest;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::CastFrequency;
 use crate::types::triggers::TriggerMode;
@@ -2518,7 +2520,7 @@ fn parse_as_enters_pay(norm_lower: &str, original_text: &str) -> Option<Replacem
     let AbilityCost::PayLife { amount } = &cost else {
         return None;
     };
-    if !crate::game::effects::pay::is_pay_any_amount(amount) {
+    if !crate::types::ability::is_pay_any_amount(amount) {
         return None;
     }
     let execute = AbilityDefinition::new(
@@ -7399,7 +7401,7 @@ fn build_external_entry_replacement(
         }
     };
 
-    let reads_parity = crate::game::filter::filter_contains_filter_prop(&valid_card, &|prop| {
+    let reads_parity = crate::types::ability::filter_contains_filter_prop(&valid_card, &|prop| {
         matches!(prop, FilterProp::ManaValueParity { .. })
     });
     Some(
@@ -12397,6 +12399,7 @@ fn copy_token_of(target: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Ref {
             qty: QuantityRef::EventContextAmount,
@@ -13196,6 +13199,7 @@ fn token_description_to_spec(
         enter_with_counters: Vec::new(),
         tapped: token.tapped,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         // Placeholder: overwritten at apply time with the replacement source's identity.
         source_id: crate::types::identifiers::ObjectId(0),
@@ -21484,11 +21488,11 @@ mod tests {
             let def = cast_enters_install(trigger.execute.as_deref().expect("execute"));
             let rider_filter = def.valid_card.as_ref().expect("valid_card set");
             assert!(
-                crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                     filter,
                     TargetFilter::SpecificObject { id }
                         if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
-                )) && !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+                )) && !crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                     filter,
                     TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
                 )),
@@ -29301,7 +29305,7 @@ mod tests {
         // the recipient without imposing continued installer control.
         let rider_filter = replacement.valid_card.as_ref().expect("valid_card set");
         assert!(
-            crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+            crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                 filter,
                 TargetFilter::SpecificObject { id }
                     if *id == crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER
@@ -29309,7 +29313,7 @@ mod tests {
             "entry rider must identify the triggering spell: {rider_filter:?}"
         );
         assert!(
-            !crate::game::filter::filter_contains(rider_filter, &|filter| matches!(
+            !crate::types::ability::filter_contains(rider_filter, &|filter| matches!(
                 filter,
                 TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You)
             )),

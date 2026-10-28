@@ -36,9 +36,10 @@ pub enum ReplacementDeferred {
     SubstitutionContinuation { applied: u32 },
 }
 
-/// A life change whose final result the engine cannot represent: the final
-/// amount does not fit an `i32` delta, the life total or the per-turn
-/// gained/lost counter would overflow. Nothing was mutated.
+/// A player-resource change (life, a player counter, or energy) whose final
+/// result the engine cannot represent: the final amount does not fit an `i32`
+/// delta, or the life total, per-turn gained/lost counter, counter total or
+/// energy total would overflow. Nothing was mutated.
 ///
 /// Representability is an engine limit, not a game rule: how the change is
 /// then treated is chosen by the caller's [`UnrepresentablePolicy`].
@@ -53,7 +54,7 @@ impl LifeChangeUnrepresentable {
         tracing::warn!(
             player = self.player.0,
             site,
-            "engine-unrepresentable life change skipped by compatibility policy"
+            "engine-unrepresentable player-resource change skipped by compatibility policy"
         );
     }
 }
@@ -93,9 +94,9 @@ type LifeSettleFn = fn(
     &mut Vec<GameEvent>,
 ) -> Result<u32, LifeChangeUnrepresentable>;
 
-/// Runs `body` with a fresh action-ingress life window open and returns its
-/// result together with the window as it stood at close. Any life settlement
-/// inside `body` that proves unrepresentable is recorded in the window instead
+/// Runs `body` with a fresh action-ingress window open and returns its result
+/// together with the window as it stood at close. Any player-resource
+/// settlement (life, player counter, or energy) inside `body` that proves unrepresentable is recorded in the window instead
 /// of being skipped, so the ingress caller can reject the action. Windows nest:
 /// the prior window is restored untouched on close, so an inner window reports
 /// only to its own caller.
@@ -109,6 +110,27 @@ pub(crate) fn within_ingress_life_window<T>(
     let result = body(state);
     let window = std::mem::replace(&mut state.ingress_life_window, prior).unwrap_or_default();
     (result, window)
+}
+
+/// The action-ingress rule for any player-resource change (life, a player
+/// counter, or energy): runs `body` under `UnrepresentablePolicy::Reject`
+/// inside a fresh ingress window. The body's own unrepresentable error is
+/// reported first; otherwise a failure recorded in the window (a nested
+/// ordinary settlement) outranks the body's result, because the whole
+/// action is rejected and rolled back by the boundary. A park made inside
+/// the window is stamped `Reject`, so its resume is held to the same rule.
+/// An engine numeric limit, not a CR 101.3 impossibility.
+pub(crate) fn within_rejecting_ingress_window<T>(
+    state: &mut GameState,
+    body: impl FnOnce(&mut GameState, UnrepresentablePolicy) -> Result<T, LifeChangeUnrepresentable>,
+) -> Result<T, LifeChangeUnrepresentable> {
+    let (result, window) =
+        within_ingress_life_window(state, |state| body(state, UnrepresentablePolicy::Reject));
+    match (result, window.failed_player) {
+        (Err(own), _) => Err(own),
+        (Ok(_), Some(player)) => Err(LifeChangeUnrepresentable { player }),
+        (Ok(value), None) => Ok(value),
+    }
 }
 
 /// CR 119.3: Gain life — adjust the player's life total.
@@ -266,28 +288,26 @@ fn ordinary_life_outcome(result: Result<u32, LifeChangeError>) -> Result<u32, Re
 /// Runs an ingress life change under an open ingress window. A failure
 /// recorded anywhere inside the window (a substitute's or continuation's
 /// ordinary entry) outranks a deferral, because the whole action is rejected
-/// and rolled back by the boundary.
+/// and rolled back by the boundary. The window, policy and fold are the shared
+/// `within_rejecting_ingress_window`; a deferral rides through it as a success
+/// value.
 fn run_ingress_life_change(
     state: &mut GameState,
     proposed: ProposedEvent,
     settle: LifeSettleFn,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, LifeChangeError> {
-    let (result, window) = within_ingress_life_window(state, |state| {
-        apply_life_change_core(
-            state,
-            proposed,
-            settle,
-            UnrepresentablePolicy::Reject,
-            events,
-        )
+    let outcome = within_rejecting_ingress_window(state, |state, policy| {
+        match apply_life_change_core(state, proposed, settle, policy, events) {
+            Ok(applied) => Ok(Ok(applied)),
+            Err(LifeChangeError::Deferred(deferred)) => Ok(Err(deferred)),
+            Err(LifeChangeError::Unrepresentable(unrepresentable)) => Err(unrepresentable),
+        }
     });
-    match (result, window.failed_player) {
-        (Err(own @ LifeChangeError::Unrepresentable(_)), _) => Err(own),
-        (_, Some(player)) => Err(LifeChangeError::Unrepresentable(
-            LifeChangeUnrepresentable { player },
-        )),
-        (result, None) => result,
+    match outcome {
+        Ok(Ok(applied)) => Ok(applied),
+        Ok(Err(deferred)) => Err(LifeChangeError::Deferred(deferred)),
+        Err(unrepresentable) => Err(LifeChangeError::Unrepresentable(unrepresentable)),
     }
 }
 
@@ -517,33 +537,47 @@ fn settle_life_gain(
 }
 
 /// Applies the final signed life delta through the checked scalar authority.
-/// `ResourceOverflow` (life total or per-turn counter) is the only failure a
-/// well-formed final event can produce; every other error is an invariant
-/// violation of the caller.
 fn apply_final_life_edit(
     state: &mut GameState,
     player: PlayerId,
     delta: i32,
 ) -> Result<(), LifeChangeUnrepresentable> {
-    match state.resolve_and_apply_player_edit(player, ResolvedPlayerEdit::Life { delta }) {
+    apply_final_player_resource_edit(state, player, ResolvedPlayerEdit::Life { delta })
+}
+
+/// Applies a final player-resource gain or life change through the checked
+/// scalar authority (`GameState::resolve_and_apply_player_edit`): the one
+/// adapter that maps its overflow to `LifeChangeUnrepresentable`. Callers pass
+/// a nonzero life delta or a positive counter/energy delta, for which
+/// `ResourceOverflow` is the only failure a well-formed final event can
+/// produce; every other error is an invariant violation of the caller.
+pub(crate) fn apply_final_player_resource_edit(
+    state: &mut GameState,
+    player: PlayerId,
+    edit: ResolvedPlayerEdit,
+) -> Result<(), LifeChangeUnrepresentable> {
+    match state.resolve_and_apply_player_edit(player, edit) {
         Ok(()) => Ok(()),
         Err(ResolvedPlayerEditReplayInvariantError::ResourceOverflow) => {
             Err(LifeChangeUnrepresentable { player })
         }
         Err(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(_)) => {
-            unreachable!("post-replacement life change must target a live player")
+            unreachable!("post-replacement player-resource change must target a live player")
         }
         Err(
             ResolvedPlayerEditReplayInvariantError::ZeroDelta
             | ResolvedPlayerEditReplayInvariantError::ResourceUnderflow
             | ResolvedPlayerEditReplayInvariantError::SpeedPreconditionMismatch { .. },
-        ) => unreachable!("a nonzero life delta reports only ResourceOverflow"),
+        ) => unreachable!(
+            "a nonzero life delta or positive counter/energy delta reports only ResourceOverflow"
+        ),
     }
 }
 
 /// Whether an open ingress window has already recorded an unrepresentable
-/// settlement: the action will be rejected, so no further life edit applies.
-fn ingress_window_has_failed(state: &GameState) -> bool {
+/// settlement: the action will be rejected, so no further player-resource edit
+/// (life, player counter, or energy) applies.
+pub(crate) fn ingress_window_has_failed(state: &GameState) -> bool {
     state
         .ingress_life_window
         .is_some_and(|window| window.failed_player.is_some())
@@ -551,11 +585,12 @@ fn ingress_window_has_failed(state: &GameState) -> bool {
 
 /// The failure branch of a settle step, per policy. `Reject` hands the typed
 /// error to the caller. `IgnoreImpossible` reports `Ok(0)` for an
-/// engine-unrepresentable change. An open ingress window records the failure so
+/// engine-unrepresentable player-resource change (life, player counter, or
+/// energy). An open ingress window records the failure so
 /// its public action boundary rejects and restores; with no window, ordinary
 /// resolution and legacy parked records log and skip it for compatibility. This
 /// fallback is an engine-capacity policy, not CR 101.3 impossibility.
-fn settle_unrepresentable(
+pub(crate) fn settle_unrepresentable(
     state: &mut GameState,
     unrepresentable: LifeChangeUnrepresentable,
     policy: UnrepresentablePolicy,
@@ -578,16 +613,16 @@ fn settle_unrepresentable(
     }
 }
 
-/// Consumes a replacement-quantity overflow recorded while this life event was
-/// replaced. The overflowed result exceeds the engine's numeric range, so it
-/// takes the same failure branch as any other engine-unrepresentable life
-/// change: `Reject` returns the typed error; `IgnoreImpossible` returns `Ok(0)`
+/// Consumes a replacement-quantity overflow recorded while this life, player
+/// counter or energy event was replaced. The overflowed result exceeds the
+/// engine's numeric range, so it takes the same failure branch as any other
+/// engine-unrepresentable player-resource change: `Reject` returns the typed error; `IgnoreImpossible` returns `Ok(0)`
 /// and either records failure for an open ingress window to reject and restore,
 /// or logs and skips under the outside-boundary compatibility policy. This is
 /// a capacity limit, not a CR 101.3 impossibility. Taken first so the record is
 /// always cleared, even when an ingress window has already failed. `None` when
 /// nothing was recorded.
-fn settle_quantity_overflow(
+pub(crate) fn settle_quantity_overflow(
     state: &mut GameState,
     pid: PlayerId,
     policy: UnrepresentablePolicy,
@@ -642,13 +677,25 @@ pub(crate) fn settle_life_gain_after_choice(
 /// records ingress failure for the public owner to reject and restore, or uses
 /// the logged skip outside a boundary; the `Err` arm is defensive.
 fn ordinary_settled_amount(result: Result<u32, LifeChangeUnrepresentable>) -> u32 {
+    ordinary_settlement(result, 0, "ordinary life settle")
+}
+
+/// Compatibility-policy settle result for any player-resource settle step.
+/// `IgnoreImpossible` records ingress failure for the public owner to reject
+/// and restore, or uses the logged skip outside a boundary; the `Err` arm is
+/// defensive, and yields `skipped`.
+pub(crate) fn ordinary_settlement<T>(
+    result: Result<T, LifeChangeUnrepresentable>,
+    skipped: T,
+    site: &'static str,
+) -> T {
     result.unwrap_or_else(|unrepresentable| {
         debug_assert!(
             false,
             "compatibility settlement records ingress failure or skips outside a boundary"
         );
-        unrepresentable.log_discarded("ordinary life settle");
-        0
+        unrepresentable.log_discarded(site);
+        skipped
     })
 }
 

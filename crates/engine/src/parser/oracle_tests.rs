@@ -631,7 +631,7 @@ mod contextual_hand_publication {
             excess: None,
         })
         .description("~ deals 4 damage to target creature.".into());
-        let token = ability(Effect::Token { name: "Warrior".into(), power: PtValue::Fixed(1), toughness: PtValue::Fixed(1), types: vec!["Warrior".into()], colors: vec![ManaColor::White], keywords: vec![], tapped: false, count: QuantityExpr::Fixed { value: 2 }, owner: TargetFilter::Controller, attach_to: None, enters_attacking: false, supertypes: vec![], static_abilities: vec![], enter_with_counters: vec![] }).sub_ability(sibling(ability(Effect::GenericEffect { static_abilities: vec![StaticDefinition::continuous().affected(TargetFilter::ParentTarget).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::FirstStrike }])], duration: Some(Duration::UntilEndOfTurn), target: Some(TargetFilter::LastCreated), end_cost: None }).duration(Duration::UntilEndOfTurn))).description("Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into());
+        let token = ability(Effect::Token { name: "Warrior".into(), power: PtValue::Fixed(1), toughness: PtValue::Fixed(1), types: vec!["Warrior".into()], colors: vec![ManaColor::White], keywords: vec![], tapped: false, count: QuantityExpr::Fixed { value: 2 }, owner: TargetFilter::Controller, attach_to: None, enters_attacking: false, attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses, supertypes: vec![], static_abilities: vec![], enter_with_counters: vec![] }).sub_ability(sibling(ability(Effect::GenericEffect { static_abilities: vec![StaticDefinition::continuous().affected(TargetFilter::ParentTarget).modifications(vec![ContinuousModification::AddKeyword { keyword: Keyword::FirstStrike }])], duration: Some(Duration::UntilEndOfTurn), target: Some(TargetFilter::LastCreated), end_cost: None }).duration(Duration::UntilEndOfTurn))).description("Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into());
         let modal = ModalChoice { min_choices: 1, max_choices: 1, mode_count: 3, mode_descriptions: vec!["~ deals 4 damage to target creature.".into(), "Create two 1/1 white Warrior creature tokens. They gain first strike until end of turn.".into(), DURESS.into()], ..Default::default() };
         let records = [
             (
@@ -1595,6 +1595,7 @@ mod relative_population_publication {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             enter_with_counters: vec![],
             static_abilities: vec![StaticDefinition::continuous()
@@ -1980,6 +1981,7 @@ mod retained_spell_publication {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -2113,7 +2115,7 @@ mod retained_spell_publication {
             }
             "Council of Reeds" => {
                 statics.push(StaticDefinition::new(StaticMode::LegendRuleDoesntApply).affected(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))).description("The \"legend rule\" doesn't apply to creatures you control.".into()));
-                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a token that's a copy of ~.",Phase::BeginCombat,phase_condition(),expected_spell(Effect::CopyTokenOf { target:TargetFilter::SelfRef,owner:TargetFilter::Controller,source_filter:None,enters_attacking:false,tapped:false,count:QuantityExpr::Fixed { value:1 },extra_keywords:vec![],additional_modifications:vec![] }),true));
+                triggers.push(expected_phase("At the beginning of combat on your turn, if you've cast a noncreature spell this turn, create a token that's a copy of ~.",Phase::BeginCombat,phase_condition(),expected_spell(Effect::CopyTokenOf { target:TargetFilter::SelfRef,owner:TargetFilter::Controller,source_filter:None,enters_attacking:false, attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,tapped:false,count:QuantityExpr::Fixed { value:1 },extra_keywords:vec![],additional_modifications:vec![] }),true));
             }
             "Eshki Dragonclaw" | "Fae Offering" => {
                 let both = Some(TriggerCondition::And { conditions:vec![history(TypeFilter::Creature),history(TypeFilter::Non(Box::new(TypeFilter::Creature)))] });
@@ -2584,6 +2586,8 @@ mod retained_spell_publication {
                                 owner: TargetFilter::Controller,
                                 source_filter: None,
                                 enters_attacking: false,
+                                attack_destination:
+                                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                                 tapped: false,
                                 count: one.clone(),
                                 extra_keywords: vec![],
@@ -6318,7 +6322,7 @@ fn assert_ordinary_spirit_shape(parsed: &ParsedAbilities, target_count: usize) {
         chain
             .iter()
             .filter(
-                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+                |d| crate::types::ability::extract_target_filter_from_effect(&d.effect).is_some()
             )
             .count(),
         target_count
@@ -6747,7 +6751,7 @@ fn assert_white_sun_shape(parsed: &ParsedAbilities, draw: bool) {
         })
     );
     assert!(
-        matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::game::filter::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
+        matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::types::ability::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
     );
 }
 
@@ -6864,7 +6868,7 @@ fn target_defined_token_duration_public_document() {
         chain
             .iter()
             .filter(
-                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+                |d| crate::types::ability::extract_target_filter_from_effect(&d.effect).is_some()
             )
             .count(),
         2
@@ -8655,14 +8659,254 @@ fn role_scoped_step_window_stays_honest_unimplemented() {
     );
 }
 
-/// CR 602.1b: Grizzled Wolverine's instruction adds an unrepresentable leg
-/// ("only if at least one creature is blocking this creature"); the named-step
-/// gate must not consume the sentence and silently drop that leg.
+const GRIZZLED_WOLVERINE_ACTIVATED: &str = "{R}: This creature gets +2/+0 until end of turn. Activate only during the declare blockers step, only if at least one creature is blocking this creature, and only once each turn.";
+
+/// The restriction-condition authority's reading of a leaf, so the list tests
+/// pin the list grammar, not a hand-copied condition shape.
+fn restriction_condition(text: &str) -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(
+            parse_restriction_condition(text)
+                .unwrap_or_else(|| panic!("leaf {text:?} must parse as a restriction condition")),
+        ),
+    }
+}
+
+/// CR 509.1g: "at least one creature is blocking ~" — the blocking-source count.
+fn wolverine_blocking_condition() -> ActivationRestriction {
+    let condition = parse_restriction_condition("at least one creature is blocking ~")
+        .expect("blocking-source count leaf parses");
+    assert!(
+        matches!(
+            &condition,
+            ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter { properties, .. }),
+                    },
+                },
+                comparator: crate::types::ability::Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } if properties.as_slice() == [FilterProp::BlockingSource]
+        ),
+        "blocking-source count shape: {condition:?}"
+    );
+    ActivationRestriction::RequiresCondition {
+        condition: Some(condition),
+    }
+}
+
+fn declare_blockers_step_gate() -> ActivationRestriction {
+    ActivationRestriction::RequiresCondition {
+        condition: Some(ParsedCondition::CurrentPhaseIs {
+            phases: vec![Phase::DeclareBlockers],
+        }),
+    }
+}
+
+/// CR 602.1b + CR 602.5: the compound "Activate only <A> and only <B> …" list
+/// grammar. Every item must hold; the output is reverse text order (the
+/// right-to-left peel order). All-or-nothing: a single item, an unparsed
+/// condition leg, an unknown separator phrase, or an unknown timing item fails
+/// the whole list.
 #[test]
-fn named_step_gate_with_unparsed_only_if_leg_stays_red() {
-    const GRIZZLED_WOLVERINE: &str = "{R}: This creature gets +2/+0 until end of turn. Activate only during the declare blockers step, only if at least one creature is blocking this creature, and only once each turn.";
+fn activation_restriction_list_building_block() {
+    assert_eq!(
+        parse_activation_restriction_list("if you control no creatures and only during your turn"),
+        Some(vec![
+            ActivationRestriction::DuringYourTurn,
+            restriction_condition("you control no creatures"),
+        ])
+    );
+    assert!(
+        matches!(
+            restriction_condition("you control no creatures"),
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::Not { .. })
+            }
+        ),
+        "'you control no creatures' is the negated creature count"
+    );
+    assert_eq!(
+        parse_activation_restriction_list("once each turn and only during your turn."),
+        Some(vec![
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::OnlyOnceEachTurn,
+        ])
+    );
+    assert_eq!(
+        parse_activation_restriction_list("once and only during your turn"),
+        Some(vec![
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::OnlyOnce,
+        ])
+    );
+    assert_eq!(
+        parse_activation_restriction_list(
+            "during the declare blockers step, only if at least one creature is blocking ~, and only once each turn"
+        ),
+        Some(vec![
+            ActivationRestriction::OnlyOnceEachTurn,
+            wolverine_blocking_condition(),
+            declare_blockers_step_gate(),
+        ])
+    );
+    for hostile in [
+        // A single item belongs to the single-restriction authority.
+        "during your turn",
+        // Paradox Kraken: the zone-vs-zone leaf has no grammar.
+        "if there are more cards in your graveyard than your library and only as a sorcery",
+        // An item outside the restriction grammar.
+        "one spark ability per turn, and only as a sorcery",
+        // An unknown timing item.
+        "if you control no creatures and only during your frob",
+    ] {
+        assert_eq!(
+            parse_activation_restriction_list(hostile),
+            None,
+            "{hostile:?} must fail the whole list"
+        );
+    }
+}
+
+/// CR 602.5b: the cadence item grammar, and the "and only once [each turn]"
+/// rider that delegates to it.
+#[test]
+fn parse_activation_cadence_items() {
+    assert_eq!(
+        all_consuming(parse_activation_cadence)
+            .parse("once each turn")
+            .ok(),
+        Some(("", ActivationRestriction::OnlyOnceEachTurn))
+    );
+    assert_eq!(
+        all_consuming(parse_activation_cadence).parse("once").ok(),
+        Some(("", ActivationRestriction::OnlyOnce))
+    );
+    for hostile in ["once more", "twice"] {
+        assert!(
+            all_consuming(parse_activation_cadence)
+                .parse(hostile)
+                .is_err(),
+            "{hostile:?} is not a cadence"
+        );
+    }
+
+    let each_turn = "{w}{w}: create a 1/1 white soldier creature token. activate only if you control no creatures and only once each turn";
+    assert_eq!(
+        peel_only_once_rider(each_turn),
+        Some((
+            each_turn.len() - " and only once each turn".len(),
+            ActivationRestriction::OnlyOnceEachTurn
+        ))
+    );
+    let once = "{5}: destroy all nonland permanents. activate only during your turn and only once";
+    assert_eq!(
+        peel_only_once_rider(once),
+        Some((
+            once.len() - " and only once".len(),
+            ActivationRestriction::OnlyOnce
+        ))
+    );
+    // Not an activation instruction: an effect sentence ending "and only once".
+    assert_eq!(
+        peel_only_once_rider("{1}: you may do this and only once"),
+        None
+    );
+}
+
+/// Parity of the overall parse for already-supported two-item shapes, whichever
+/// path each row takes (the Loch Larent row is quote-preceded and so takes the
+/// peel path, not the list), so the card-data diff stays a clean regression probe.
+#[test]
+fn compound_restriction_order_parity() {
+    let cases: [(&str, &str, &[&str], Vec<ActivationRestriction>); 4] = [
+        (
+            "Sacrifice three other creatures: You may put a creature card from your hand onto the battlefield. Activate only as a sorcery and only once each turn.",
+            "Akul the Unrepentant",
+            &["Creature"],
+            vec![
+                ActivationRestriction::OnlyOnceEachTurn,
+                ActivationRestriction::AsSorcery,
+            ],
+        ),
+        (
+            "{W}{W}: Create a 1/1 white Soldier creature token. Activate only if you control no creatures and only once each turn.",
+            "Security Detail",
+            &["Enchantment"],
+            vec![
+                ActivationRestriction::OnlyOnceEachTurn,
+                restriction_condition("you control no creatures"),
+            ],
+        ),
+        (
+            "{1}{U}, {T}: Scry 3. Target opponent gets a one-time boon with \"When you cast a creature spell, that creature enters tapped and with a stun counter on it.\" Activate only during your turn and only once.",
+            "Loch Larent",
+            &["Land"],
+            vec![
+                ActivationRestriction::OnlyOnce,
+                ActivationRestriction::DuringYourTurn,
+            ],
+        ),
+        (
+            "{T}: Non-Wall creatures the active player controls attack this turn if able. At the beginning of the next end step, destroy each of those creatures that didn't attack this turn. Activate only during an opponent's turn and only before combat.",
+            "Maddening Imp",
+            &["Creature"],
+            vec![
+                ActivationRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::IsOpponentsTurn),
+                },
+                ActivationRestriction::BeforeAttackersDeclared,
+            ],
+        ),
+    ];
+    for (text, name, types, expected) in cases {
+        let r = parse(text, name, &[], types, &[]);
+        assert_eq!(r.abilities.len(), 1, "{name}: {:#?}", r.abilities);
+        let ability = &r.abilities[0];
+        assert!(
+            def_chain_unimplemented_descriptions(ability).is_empty(),
+            "{name}: effect parsed: {ability:#?}"
+        );
+        assert_eq!(ability.activation_restrictions, expected, "{name}");
+    }
+}
+
+/// CR 602.1b + CR 509.1g: Grizzled Wolverine's three-item instruction — step
+/// gate, blocking-source condition, cadence — is fully representable.
+#[test]
+fn grizzled_wolverine_restriction_list_parses() {
     let r = parse(
-        GRIZZLED_WOLVERINE,
+        GRIZZLED_WOLVERINE_ACTIVATED,
+        "Grizzled Wolverine",
+        &[],
+        &["Creature"],
+        &["Wolverine"],
+    );
+    assert_eq!(r.abilities.len(), 1, "got {:#?}", r.abilities);
+    let ability = &r.abilities[0];
+    assert!(matches!(ability.effect.as_ref(), Effect::Pump { .. }));
+    assert!(
+        def_chain_unimplemented_descriptions(ability).is_empty(),
+        "no leg may stay Unimplemented: {ability:#?}"
+    );
+    assert_eq!(
+        ability.activation_restrictions,
+        vec![
+            ActivationRestriction::OnlyOnceEachTurn,
+            wolverine_blocking_condition(),
+            declare_blockers_step_gate(),
+        ]
+    );
+}
+
+/// All-or-nothing on a three-item list (synthetic grammar fixture): an
+/// unparsed condition leg keeps the step gate from being committed and leaves
+/// the leg visible as Unimplemented.
+#[test]
+fn restriction_list_with_unparsed_leg_stays_red() {
+    let r = parse(
+        "{R}: This creature gets +2/+0 until end of turn. Activate only during the declare blockers step, only if at least one creature is frobbing this creature, and only once each turn.",
         "Grizzled Wolverine",
         &[],
         &["Creature"],
@@ -8672,15 +8916,106 @@ fn named_step_gate_with_unparsed_only_if_leg_stays_red() {
     let ability = &r.abilities[0];
     // Positive reach-guard: the pump effect parsed past the constraint loop.
     assert!(matches!(ability.effect.as_ref(), Effect::Pump { .. }));
-    assert_eq!(
-        ability.activation_restrictions,
-        vec![ActivationRestriction::OnlyOnceEachTurn]
+    assert!(
+        !restrictions_mention_current_phase(&ability.activation_restrictions),
+        "the step gate must not be committed without its condition leg: {:?}",
+        ability.activation_restrictions
     );
     assert!(
         def_chain_unimplemented_descriptions(ability)
             .iter()
-            .any(|d| d.contains("only if at least one creature is blocking")),
-        "the unrepresentable leg must stay visible: {ability:#?}"
+            .any(|d| d.contains("frobbing")),
+        "the unparsed leg must stay visible: {ability:#?}"
+    );
+}
+
+/// CR 602.5: Paradox Kraken's zone-vs-zone condition has no grammar, so its
+/// whole two-item instruction stays red — the sorcery item is not committed
+/// on its own.
+#[test]
+fn paradox_kraken_unparsed_leaf_keeps_whole_list_red() {
+    let r = parse(
+        "When this card is put into your graveyard from anywhere, conjure a card named Kraken Hatchling into your hand.\n{1}{U}: Return this card from your graveyard to the battlefield. Activate only if there are more cards in your graveyard than your library and only as a sorcery.",
+        "Paradox Kraken",
+        &[],
+        &["Creature"],
+        &["Kraken"],
+    );
+    let ability = r
+        .abilities
+        .iter()
+        .find(|a| {
+            matches!(
+                a.effect.as_ref(),
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("graveyard return ability: {:#?}", r.abilities));
+    assert!(
+        ability.activation_restrictions.is_empty(),
+        "no partial restriction may be committed: {:?}",
+        ability.activation_restrictions
+    );
+    assert!(
+        def_chain_unimplemented_descriptions(ability)
+            .iter()
+            .any(|d| d.contains("and only as a sorcery")),
+        "the whole instruction must stay visible: {ability:#?}"
+    );
+}
+
+/// CR 602.1b + CR 602.5: the list grammar on other ability heads — a mana
+/// ability (The Food Court) and a Vanguard activated ability (Ashling).
+#[test]
+fn food_court_and_ashling_restriction_lists() {
+    let food_court = parse(
+        "Artifacts are Foods in addition to their other types (They have \"{2}, {T}, Sacrifice this artifact: You gain 3 life.\")\nSacrifice three Foods: Add {W}{U}{B}{R}{G}. Activate only once each turn and only during your turn.\nChaos: You become the Monarch. If you are already the Monarch, draw a card.",
+        "The Food Court",
+        &[],
+        &["Plane"],
+        &[],
+    );
+    let mana = food_court
+        .abilities
+        .iter()
+        .find(|a| matches!(a.effect.as_ref(), Effect::Mana { .. }))
+        .unwrap_or_else(|| panic!("Food Court mana ability: {:#?}", food_court.abilities));
+    assert!(
+        def_chain_unimplemented_descriptions(mana).is_empty(),
+        "the restriction sentence must not stay Unimplemented: {mana:#?}"
+    );
+    assert_eq!(
+        mana.activation_restrictions,
+        vec![
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::OnlyOnceEachTurn,
+        ]
+    );
+
+    let ashling = parse(
+        "{5}: Destroy all nonland permanents. Activate only once and only during your turn.",
+        "Ashling, the Extinguisher Avatar",
+        &[],
+        &["Vanguard"],
+        &[],
+    );
+    assert_eq!(ashling.abilities.len(), 1, "got {:#?}", ashling.abilities);
+    let destroy = &ashling.abilities[0];
+    assert!(matches!(destroy.effect.as_ref(), Effect::DestroyAll { .. }));
+    assert!(
+        def_chain_unimplemented_descriptions(destroy).is_empty(),
+        "no Unimplemented: {destroy:#?}"
+    );
+    assert_eq!(
+        destroy.activation_restrictions,
+        vec![
+            ActivationRestriction::DuringYourTurn,
+            ActivationRestriction::OnlyOnce,
+        ]
     );
 }
 
@@ -12469,13 +12804,13 @@ fn chosen_creature_type_spell_cast_trigger_filters_are_retargeted() {
             .unwrap_or_else(|| panic!("{name} SpellCast trigger must retain its spell filter"));
 
         assert!(
-            crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+            crate::types::ability::filter_contains_filter_prop(valid_card, &|prop| {
                 matches!(prop, FilterProp::IsChosenCreatureType)
             }),
             "{name} trigger must match the persisted chosen creature type: {trigger:#?}"
         );
         assert!(
-            !crate::game::filter::filter_contains_filter_prop(valid_card, &|prop| {
+            !crate::types::ability::filter_contains_filter_prop(valid_card, &|prop| {
                 matches!(prop, FilterProp::IsChosenCardType)
             }),
             "{name} trigger must not retain a card-type discriminator: {trigger:#?}"
@@ -12847,6 +13182,77 @@ fn journey_of_discovery_modal_up_to_two_additional_lands() {
             panic!("expected GenericEffect additional-land grant as second mode, got {other:?}")
         }
     }
+}
+
+/// Test that Entwine with a non-mana cost (Solar Tide) is parsed correctly.
+/// Solar Tide: "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Sacrifice two lands."
+#[test]
+fn solar_tide_entwine_non_mana_cost() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Sacrifice two lands.",
+        "Solar Tide",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+
+    let modal = r.modal.expect("Solar Tide is a modal spell");
+    assert_eq!(modal.mode_count, 2, "Solar Tide must have exactly 2 modes");
+    // CR 702.42a: the em-dash cost is extracted as a non-mana Entwine keyword;
+    // `synthesize_entwine` later copies it onto the ModalChoice.
+    assert!(
+        r.extracted_keywords.iter().any(|k| matches!(
+            k,
+            Keyword::Entwine(crate::types::keywords::EntwineCost::NonMana(
+                AbilityCost::Sacrifice { .. }
+            ))
+        )),
+        "expected non-mana Entwine keyword, got {:?}",
+        r.extracted_keywords
+    );
+
+    assert_eq!(
+        r.abilities.len(),
+        2,
+        "one ability per mode: {:?}",
+        r.abilities
+    );
+}
+
+#[test]
+fn entwine_composite_cost_with_unimplemented_leg_is_rejected() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Pay 2 life, frobnicate a permanent.",
+        "Test Entwine",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Entwine(_))),
+        "composite Entwine cost with an unimplemented leg must not be accepted: {:?}",
+        r.extracted_keywords
+    );
+}
+
+#[test]
+fn entwine_rejects_unconsumed_trailing_condition() {
+    let r = parse(
+        "Choose one —\n• Destroy all creatures with power 2 or less.\n• Destroy all creatures with power 3 or greater.\nEntwine—Pay 2 life if you control an artifact.",
+        "Test Conditional Entwine",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        !r.extracted_keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Entwine(_))),
+        "Entwine line with unconsumed trailing condition must be rejected: {:?}",
+        r.extracted_keywords
+    );
 }
 
 #[test]
@@ -39633,6 +40039,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: vec![],
@@ -39871,6 +40278,7 @@ fn render_net_reaches_every_nested_description_carrier() {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![token_static],
         enter_with_counters: vec![],
@@ -39989,6 +40397,8 @@ fn guard_walk_reaches_every_continuous_modification_carrier() {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -49542,6 +49952,127 @@ pub(crate) mod defining_modifier_publication {
                 );
             }
         }
+    }
+}
+
+/// CR 607.2a + CR 406.6 + CR 603.3: Tidehollow Sculler / Mesmeric Fiend print two
+/// linked triggered abilities with no "until" wording, so the return is a real
+/// triggered ability (respondable, CR 603.3) and not a CR 610.3 duration. The ETB
+/// exile carries no duration, and the LTB moves the card linked to the source
+/// (`ExiledBySource`) out of exile into its owner's hand.
+#[test]
+fn tidehollow_sculler_ltb_returns_linked_exile_without_duration() {
+    let oracle = "When this creature enters, target opponent reveals their hand and you choose a nonland card from it. Exile that card.\n\
+                  When this creature leaves the battlefield, return the exiled card to its owner's hand.";
+    let result = parse(
+        oracle,
+        "Tidehollow Sculler",
+        &[],
+        &["Artifact", "Creature"],
+        &[],
+    );
+
+    let etb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
+        .expect("must have ETB trigger");
+    let mut cursor = etb.execute.as_deref();
+    while let Some(def) = cursor {
+        assert_eq!(
+            def.duration, None,
+            "two-trigger wording has no CR 610.3 duration"
+        );
+        cursor = def.sub_ability.as_deref();
+    }
+
+    let ltb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::LeavesBattlefield)
+        .expect("must have LTB trigger");
+    let execute = ltb.execute.as_deref().expect("LTB must have execute");
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Hand,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ),
+        "LTB must return the linked exiled card to hand, got {:?}",
+        execute.effect
+    );
+}
+
+/// CR 607.2a: an exiled card published by an outer instruction remains the
+/// antecedent when its hand-return consumer is parsed in a nested body.
+#[test]
+fn nested_exiled_card_returns_keep_the_enclosing_chain_binding() {
+    fn ability_contains_tracked_return(def: &crate::types::ability::AbilityDefinition) -> bool {
+        fn effect_contains_tracked_return(effect: &Effect) -> bool {
+            match effect {
+                Effect::ChangeZone {
+                    destination: Zone::Hand,
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+                | Effect::ChangeZoneAll {
+                    destination: Zone::Hand,
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                }
+                | Effect::Bounce {
+                    target:
+                        TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. },
+                    ..
+                } => true,
+                Effect::CreateDelayedTrigger { effect, .. } => {
+                    ability_contains_tracked_return(effect)
+                }
+                _ => false,
+            }
+        }
+
+        effect_contains_tracked_return(&def.effect)
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(ability_contains_tracked_return)
+    }
+
+    let cases = [
+        (
+            "delayed",
+            "When this creature enters, exile target creature. At the beginning of the next end step, return the exiled card to its owner's hand.",
+        ),
+        (
+            "reflexive",
+            "When this creature enters, exile target creature. When you do, return the exiled card to its owner's hand.",
+        ),
+        (
+            "continuation",
+            "When this creature enters, exile target creature. If you do, return the exiled card to its owner's hand.",
+        ),
+    ];
+
+    for (form, oracle) in cases {
+        let result = parse(oracle, "Nested Exile Return", &[], &["Creature"], &[]);
+        let has_tracked_return = result.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(ability_contains_tracked_return)
+        });
+        assert!(
+            has_tracked_return,
+            "{form} return must retain the enclosing TrackedSet binding; parsed: {:#?}",
+            result.triggers
+        );
     }
 }
 

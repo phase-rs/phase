@@ -14,6 +14,7 @@ import init, {
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
+  set_debug_hand_reveal,
   get_ai_action_proposal,
   get_ai_action_proposal_with_diagnostics,
   get_ai_tactical_action_proposal,
@@ -113,6 +114,7 @@ type EngineRequest =
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
+  | { type: "setDebugHandReveal"; id: number; enabled: boolean }
   | { type: "getLegalActions"; id: number; viewerId: number }
   | { type: "getSnapshot"; id: number; viewerId: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
@@ -530,6 +532,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, state);
+        break;
+      }
+
+      case "setDebugHandReveal": {
+        set_debug_hand_reveal(msg.enabled);
+        result(msg.id, null);
         break;
       }
 

@@ -1521,11 +1521,8 @@ fn def_tree_has_cast_graveyard_redirect_rider(def: &AbilityDefinition) -> bool {
 /// decline link ("If you don't, put it into your hand") is not a rider
 /// (CR 608.2c), so it suppresses nothing.
 fn def_is_graveyard_redirect_to_parent(def: &AbilityDefinition) -> bool {
-    crate::game::effects::cast_from_zone::graveyard_destination_rider(
-        &def.effect,
-        def.condition.as_ref(),
-    )
-    .is_some()
+    crate::types::ability::graveyard_destination_rider(&def.effect, def.condition.as_ref())
+        .is_some()
         || def
             .sub_ability
             .as_deref()
@@ -3601,7 +3598,7 @@ fn co_scoped_parent_target_consumer<'a>(
     pop: &PlayerFilter,
 ) -> Option<&'a AbilityDefinition> {
     if def.player_scope.as_ref() != Some(pop)
-        || !crate::game::effects::effect_introduces_per_iteration_referent(&def.effect)
+        || !crate::types::ability::effect_introduces_per_iteration_referent(&def.effect)
     {
         return None;
     }
@@ -4326,7 +4323,7 @@ fn def_is_delivered_gains_rider_carrier(
             // chain, so a rider stored under an unrelated instruction is not
             // delivered and must not exempt the sentence.
             let transparent = matches!(&*def.effect, Effect::AddPendingETBCounters { .. })
-                || crate::game::effects::cast_from_zone::graveyard_destination_rider(
+                || crate::types::ability::graveyard_destination_rider(
                     &def.effect,
                     def.condition.as_ref(),
                 )
@@ -14272,10 +14269,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(!any_ability_has_unimplemented(&parsed));
         let etb = parsed.triggers[0].execute.as_deref().expect("Valki ETB");
         assert_eq!(etb.player_scope, Some(PlayerFilter::Opponent));
-        assert!(!crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&etb.effect));
+        assert!(!crate::types::ability::effect_parks_reveal_card_choice(
+            &etb.effect
+        ));
         let choice = etb.sub_ability.as_deref().expect("choice step");
         assert_eq!(choice.player_scope, Some(PlayerFilter::Opponent));
-        assert!(crate::game::effects::reveal_hand::effect_parks_reveal_card_choice(&choice.effect));
+        assert!(crate::types::ability::effect_parks_reveal_card_choice(
+            &choice.effect
+        ));
         let sub = choice.sub_ability.as_deref().expect("exile consumer");
         assert_eq!(sub.player_scope, Some(PlayerFilter::Opponent));
         assert_eq!(

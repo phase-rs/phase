@@ -949,7 +949,7 @@ fn assert_outer_spirit_lowered(lowered: &ParsedAbilities, targets: usize) {
         chain
             .iter()
             .filter(
-                |d| crate::game::triggers::extract_target_filter_from_effect(&d.effect).is_some()
+                |d| crate::types::ability::extract_target_filter_from_effect(&d.effect).is_some()
             )
             .count(),
         targets
@@ -1400,7 +1400,7 @@ fn white_suns_twilight_outer_and_token_owners() {
             })
         );
         assert!(
-            matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::game::filter::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
+            matches!(destroy.effect.as_ref(), Effect::DestroyAll { target, .. } if crate::types::ability::filter_contains_filter_prop(target, &|prop| *prop == FilterProp::Another))
         );
     }
 }

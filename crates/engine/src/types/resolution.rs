@@ -5306,8 +5306,8 @@ impl ResolutionStack {
                         Some(ResolutionFrame::PostReplacement(drains)) => drains.resident(),
                         _ => None,
                     };
-                    !matches!((tail.context.token_creation_parent, drain),
-                        (Some(parent), Some(drain)) if drain.token_creation_parent == Some(parent)
+                    !matches!((tail.context.token_creation_parent.as_ref(), drain),
+                        (Some(parent), Some(drain)) if drain.token_creation_parent.as_ref() == Some(parent)
                             && matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
                             && drain.source == Some(*source_id) && drain.controller.unwrap_or(*player) == *player
                             && tail.source_id == *source_id && tail.controller == *player && tail.replacement_applied == drain.applied
@@ -5367,7 +5367,7 @@ impl ResolutionStack {
             if let ResolutionFrame::PostReplacement(drains) = frame {
                 if let Some(parent) = drains
                     .resident()
-                    .and_then(|drain| drain.token_creation_parent)
+                    .and_then(|drain| drain.token_creation_parent.as_ref())
                 {
                     if !token_creation_ids.contains(&parent.frame) {
                         return Err(ResolutionStackError::InvalidPayload {

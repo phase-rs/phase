@@ -2255,12 +2255,14 @@ fn add_self_sacrifice_mana_source(
 /// P0's only mana source is the self-sacrificing creature; P1 has an untapped
 /// Archangel of Tithes-style {1} attack tax (verified Oracle text,
 /// client/public/card-data.json 2026-05-10).
-fn self_sacrifice_mana_vs_attack_tax(competing_redirects: bool) -> (GameState, ObjectId) {
+fn self_sacrifice_mana_vs_attack_tax(
+    competing_redirects: bool,
+) -> (GameRunner, ObjectId, ObjectId) {
     use engine::parser::oracle_static::parse_static_line;
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
+    let source = add_self_sacrifice_mana_source(&mut scenario, P0, competing_redirects);
     let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
     let attack_tax = parse_static_line(
         "As long as this creature is untapped, creatures can't attack you or planeswalkers you \
@@ -2270,54 +2272,139 @@ fn self_sacrifice_mana_vs_attack_tax(competing_redirects: bool) -> (GameState, O
     scenario
         .add_creature(P1, "Tithe Collector", 3, 5)
         .with_static_definition(attack_tax);
-    let runner = scenario.build();
-    (runner.state().clone(), attacker)
+    (scenario.build(), attacker, source)
 }
 
-/// CR 508.1j + CR 605.3b + CR 616.1: a combat tax pays through a payment with no
-/// resumable root, so a mana source whose own cost would pause for a replacement
-/// choice cannot fund it. The AI's affordability probe must say so, or it
-/// completes a taxed attack whose accepted prompt the reducer then rejects.
+/// CR 508.1i-j + CR 605.3b + CR 616.1: a combat tax pays through the resumable
+/// declaration root, so a mana source whose own cost pauses for a replacement
+/// choice is payable. Accepting the tax surfaces that choice with the
+/// declaration still uncommitted; the answer completes the payment and commits
+/// the exact frozen proposal exactly once.
 #[test]
-fn paused_mana_source_cannot_fund_a_combat_tax() {
-    use engine::game::combat::{
-        attack_tax_is_affordable, complete_attacker_proposal, AttackTarget, CombatTaxPosture,
-    };
+fn paused_mana_source_funds_a_combat_tax_through_the_resumable_root() {
+    use engine::game::combat::{attack_tax_is_affordable, AttackTarget};
 
-    // Reach-guard: with no competing replacement the sacrifice never pauses,
-    // and auto-tap does fund the {1} tax from this very source.
-    let (unpaused, attacker) = self_sacrifice_mana_vs_attack_tax(false);
+    // Control: with no competing replacement the sacrifice never pauses, and
+    // auto-tap funds the {1} tax from this very source.
+    let (mut runner, attacker, _source) = self_sacrifice_mana_vs_attack_tax(false);
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     assert!(
-        attack_tax_is_affordable(&unpaused, &attacks),
+        attack_tax_is_affordable(runner.state(), &attacks),
         "premise: auto-tap reaches the self-sacrificing source when nothing pauses"
     );
-    let GameAction::DeclareAttackers {
-        attacks: funded, ..
-    } = complete_attacker_proposal(&unpaused, &attacks, &[], CombatTaxPosture::Accept)
-    else {
-        panic!("expected DeclareAttackers");
-    };
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attacks.clone(),
+            bands: vec![],
+        })
+        .expect("the affordable taxed proposal opens the combat-tax prompt");
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::CombatTaxPayment { player: P0, .. }
+        ),
+        "the taxed declaration must lock its price, got {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .expect("the unpaused source funds the accepted tax");
     assert_eq!(
-        funded, attacks,
-        "premise: the taxed proposal is legal and survives Accept when it can be funded"
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .map(|combat| combat.attackers.len()),
+        Some(1),
+        "premise: Accept commits the declaration when the source never pauses"
     );
 
-    let (paused, attacker) = self_sacrifice_mana_vs_attack_tax(true);
+    // Resumable contract: two competing redirects make the source's own
+    // sacrifice cost pause for a replacement choice.
+    let (mut runner, attacker, source) = self_sacrifice_mana_vs_attack_tax(true);
     let attacks = vec![(attacker, AttackTarget::Player(P1))];
     assert!(
-        !attack_tax_is_affordable(&paused, &attacks),
-        "a payment that would pause for a replacement choice cannot fund a combat tax"
+        attack_tax_is_affordable(runner.state(), &attacks),
+        "the resumable probe counts a source that will pause before producing mana"
     );
-    let GameAction::DeclareAttackers {
-        attacks: completed, ..
-    } = complete_attacker_proposal(&paused, &attacks, &[], CombatTaxPosture::Accept)
-    else {
-        panic!("expected DeclareAttackers");
-    };
+    runner.pass_both_players();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: attacks.clone(),
+            bands: vec![],
+        })
+        .expect("the resumable proposal opens the combat-tax prompt");
+
+    let accepted = runner
+        .act(GameAction::PayCombatTax { accept: true })
+        .expect("Accept starts the tax payment and reaches the source's replacement choice");
     assert!(
-        completed.is_empty(),
-        "Accept must fall back to the tax-free witness, got {completed:?}"
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the paused source owns the prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_none_or(|combat| combat.attackers.is_empty()),
+        "the declaration stays uncommitted while the tax payment is paused"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        0,
+        "no mana is produced before the replacement choice is answered"
+    );
+
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answering the replacement resumes the tax payment and declaration");
+
+    let state = runner.state();
+    let combat = state
+        .combat
+        .as_ref()
+        .expect("combat state exists once the tax is paid");
+    assert_eq!(combat.attackers.len(), 1, "the attack must commit");
+    assert_eq!(
+        combat.attackers[0].object_id, attacker,
+        "the frozen proposal is the one committed"
+    );
+    assert_ne!(
+        state.objects[&source].zone,
+        engine::types::zones::Zone::Battlefield,
+        "the source paid its own sacrifice cost"
+    );
+    assert_eq!(
+        state.players[P0.0 as usize]
+            .mana_pool
+            .count_color(engine::types::mana::ManaType::Green),
+        0,
+        "the produced {{G}} exactly pays the {{1}} tax"
+    );
+    assert!(
+        !state.withholds_priority(),
+        "no payment continuation survives the completed declaration"
+    );
+    assert_eq!(
+        accepted
+            .events
+            .iter()
+            .chain(resumed.events.iter())
+            .filter(|event| matches!(
+                event,
+                GameEvent::ManaAdded { source_id, .. } if *source_id == source
+            ))
+            .count(),
+        1,
+        "the resumed cost produces mana exactly once"
     );
 }
 

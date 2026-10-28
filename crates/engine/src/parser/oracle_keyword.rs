@@ -16,16 +16,17 @@ use super::oracle_quantity::parse_cda_quantity;
 use super::oracle_target::parse_type_phrase_folding;
 use super::oracle_util::{strip_reminder_text, strip_where_x_is_clause};
 use crate::types::ability::{
-    AbilityCost, ActivationRestriction, AdditionalCost, ControllerRef, CostObjectCount,
-    CostReduction, DiscardSelfScope, Effect, EffectScope, FilterProp, QuantityExpr,
-    SacrificeRequirement, TapStateChange, TargetFilter, TypeFilter, TypedFilter,
+    AbilityCost, ActivationRestriction, AdditionalCost, CostObjectCount, CostReduction,
+    DiscardSelfScope, Effect, EffectScope, QuantityExpr, SacrificeRequirement, TapStateChange,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::keywords::{
     normalize_bands_with_other_quality, BloodthirstValue, BuybackCost, CyclingCost, DisguiseCost,
-    EmbalmCost, EmergeCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword, WardCost,
+    EmbalmCost, EmergeCost, EntwineCost, EscapeCost, EternalizeCost, FlashbackCost, Keyword,
+    WardCost,
 };
 use crate::types::mana::{ManaCost, ManaCostShard};
-use crate::types::zones::Zone;
+use crate::types::text_grammar::craft_materials_from_typed_filter;
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -838,7 +839,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
-        let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
+        let cost = crate::types::mana::parse_mtgjson_mana_cost(rest.trim());
         return Some(WardCost::Waterbend(cost));
     }
 
@@ -867,7 +868,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     }
 
     // Fall back to mana cost parsing
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(lower.trim());
+    let cost = crate::types::mana::parse_mtgjson_mana_cost(lower.trim());
     Some(WardCost::Mana(cost))
 }
 
@@ -1044,6 +1045,32 @@ fn parse_blitz_cost(cost_text: &str) -> Option<crate::types::keywords::BlitzCost
     }
 }
 
+/// CR 702.37a + CR 702.37e: Parse a morph cost following the em-dash separator
+/// (e.g., "morph—return two islands you control to their owner's hand" on Fathom Seer).
+/// Mirrors `parse_echo_cost`: delegates to `parse_oracle_cost` so comma-separated
+/// parts compose into `AbilityCost::Composite`, and wraps the result in `MorphCost::Mana`
+/// when it's a pure mana cost or `MorphCost::NonMana` otherwise.
+fn parse_morph_cost(cost_text: &str) -> Option<crate::types::keywords::MorphCost> {
+    use crate::types::keywords::MorphCost;
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    if !crate::types::keywords::is_ability_cost_supported_for_morph(&cost) {
+        return None;
+    }
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(MorphCost::Mana(mana_cost)),
+        other => Some(MorphCost::NonMana(other)),
+    }
+}
+
 /// CR 702.30a: Parse an echo cost following the em-dash separator
 /// (e.g., "echo—discard a card" on Rakdos Headliner / Deepcavern Imp).
 /// Mirrors `parse_evoke_cost`: delegates to `parse_oracle_cost` so
@@ -1066,6 +1093,39 @@ fn parse_echo_cost(cost_text: &str) -> Option<crate::types::keywords::EchoCost> 
         AbilityCost::Mana { cost: mana_cost } => Some(EchoCost::Mana(mana_cost)),
         AbilityCost::Unimplemented { .. } => None,
         other => Some(EchoCost::NonMana(other)),
+    }
+}
+
+fn ability_cost_contains_one_of(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::OneOf { .. } => true,
+        AbilityCost::Composite { costs, .. } => costs.iter().any(ability_cost_contains_one_of),
+        _ => false,
+    }
+}
+
+/// CR 702.42a: Parse an Entwine em-dash cost ("entwine—sacrifice two lands" or
+/// "entwine {2}{G}"). Mirrors `parse_echo_cost`: reminder-strip, delegate to
+/// `parse_oracle_cost`, wrap a single `Mana` cost in `Mana`, anything
+/// composite/non-mana in `NonMana`, and reject `Unimplemented` and unsupported `OneOf` choices.
+fn parse_entwine_cost(cost_text: &str) -> Option<EntwineCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
+        .parse(trimmed)
+        .map(|(_, before)| before.unwrap_or(trimmed))
+        .unwrap_or(trimmed)
+        .trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let cost = super::oracle_cost::parse_oracle_cost(clean);
+    match cost {
+        AbilityCost::Mana { cost: mana_cost } => Some(EntwineCost::Mana(mana_cost)),
+        AbilityCost::Unimplemented { .. } => None,
+        other if ability_cost_is_fully_typed(&other) && !ability_cost_contains_one_of(&other) => {
+            Some(EntwineCost::NonMana(other))
+        }
+        _ => None,
     }
 }
 
@@ -1169,58 +1229,6 @@ fn parse_offering_keyword_line(line: &str) -> Option<Keyword> {
     Some(Keyword::Offering(capitalized))
 }
 
-/// CR 702.167b: Build the typed materials filter for a Craft ability. A bare
-/// type/subtype in the materials clause matches *either* a permanent on the
-/// battlefield you control *or* a card in your graveyard you own (an exception
-/// to CR 109.2). The result is a `TargetFilter::Or` of those two zone-scoped
-/// legs so the dual-zone eligibility helper and the runtime filter evaluator
-/// agree on what may be exiled. This is the single authority for the materials
-/// filter shape — `FromStr`, `keyword_from_tagged`, and the Oracle-line parser
-/// all route through it.
-pub fn craft_materials_filter(types: &[TypeFilter]) -> TargetFilter {
-    craft_materials_from_typed_filter(TypedFilter {
-        type_filters: types.to_vec(),
-        ..TypedFilter::default()
-    })
-}
-
-fn craft_materials_from_typed_filter(filter: TypedFilter) -> TargetFilter {
-    let with_types = |base: TypedFilter| -> TypedFilter {
-        filter
-            .type_filters
-            .iter()
-            .cloned()
-            .fold(base, |acc, tf| acc.with_type(tf))
-    };
-    TargetFilter::Or {
-        filters: vec![
-            // Battlefield leg: a permanent you control matching the printed materials class.
-            TargetFilter::Typed(
-                with_types(TypedFilter::permanent())
-                    .controller(ControllerRef::You)
-                    .properties({
-                        let mut props = filter.properties.clone();
-                        props.push(FilterProp::InZone {
-                            zone: Zone::Battlefield,
-                        });
-                        props
-                    }),
-            ),
-            // Graveyard leg: a card you own matching the printed materials class.
-            TargetFilter::Typed(with_types(TypedFilter::card()).properties({
-                let mut props = filter.properties.clone();
-                props.push(FilterProp::InZone {
-                    zone: Zone::Graveyard,
-                });
-                props.push(FilterProp::Owned {
-                    controller: ControllerRef::You,
-                });
-                props
-            })),
-        ],
-    }
-}
-
 fn craft_materials_from_filter(filter: TargetFilter) -> Option<TargetFilter> {
     match filter {
         TargetFilter::Typed(typed) => Some(craft_materials_from_typed_filter(typed)),
@@ -1238,12 +1246,6 @@ fn craft_materials_any() -> TargetFilter {
     craft_materials_from_typed_filter(TypedFilter::default())
 }
 
-/// CR 702.167b: Default materials class (creature) used when only the bare
-/// "Craft" keyword is available (no Oracle line to specify the materials).
-pub fn craft_materials_default() -> TargetFilter {
-    craft_materials_filter(&[TypeFilter::Creature])
-}
-
 /// CR 702.167a/b: Parse a "craft with [materials] [cost]" Oracle line into a
 /// `Keyword::Craft`. Craft owns the count prefix and the CR 702.167b dual-zone
 /// lowering; the material class itself delegates to the shared type-phrase
@@ -1254,7 +1256,7 @@ fn parse_craft_keyword_line(text: &str) -> Option<Keyword> {
         .parse(text)
         .ok()?;
     let (rest, (materials, count)) = parse_craft_materials(rest)?;
-    let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
+    let cost = crate::types::mana::parse_mtgjson_mana_cost(rest.trim());
     Some(Keyword::Craft {
         cost,
         materials,
@@ -1735,6 +1737,41 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         }
     }
 
+    // CR 702.42a: Entwine with em-dash cost — non-mana costs like
+    // "entwine—sacrifice two lands" (Solar Tide). Pure-mana entwine
+    // ("Entwine {2}{G}") is handled by the direct `FromStr` path above.
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("entwine\u{2014}").parse(text) {
+        if let Some(entwine_cost) = parse_entwine_cost(rest) {
+            let after_sentence = split_once_on(rest, ".").map_or("", |(_, (_, after))| after);
+            return Some((Keyword::Entwine(entwine_cost), after_sentence));
+        }
+    }
+
+    // CR 702.37a + CR 702.37e: Morph with em-dash cost — covers non-mana
+    // morph costs ("morph—return two islands you control to their owner's hand" on Fathom Seer,
+    // "morph—discard a card" on Gathan Raiders, "morph—pay 5 life" on Zombie Cutthroat,
+    // "morph—reveal a black card in your hand" on Ruthless Ripper).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("morph\u{2014}"),
+        tag("morph--"),
+        tag("morph — "),
+    ))
+    .parse(text)
+    {
+        if let Some(morph_cost) = parse_morph_cost(rest) {
+            let after_sentence = split_once_on(rest, ".").map_or("", |(_, (_, after))| after);
+            let unconsumed = match &morph_cost {
+                crate::types::keywords::MorphCost::NonMana(cost)
+                    if !ability_cost_is_fully_typed(cost) =>
+                {
+                    rest
+                }
+                _ => after_sentence,
+            };
+            return Some((Keyword::Morph(morph_cost), unconsumed));
+        }
+    }
+
     // CR 702.128a + CR 602.1a: Embalm with em-dash cost — composite mana +
     // non-mana ("embalm—{2}{W}{W}, discard a card"). Pure-mana embalm
     // ("Embalm {3}{W}") arrives via MTGJSON's keywords array (FromStr path).
@@ -1828,7 +1865,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("specialize ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((Keyword::Specialize(cost), mana_cost_remainder(cost_str)));
         }
     }
@@ -1837,7 +1874,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("level up ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((Keyword::LevelUp(cost), mana_cost_remainder(cost_str)));
         }
     }
@@ -1847,7 +1884,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more than meets the eye ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((
                 Keyword::MoreThanMeetsTheEye(cost),
                 mana_cost_remainder(cost_str),
@@ -1916,7 +1953,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         if !cost_str.is_empty() {
             // `parse_mtgjson_mana_cost` is lenient in the same way `FromStr` is: it
             // takes the symbols it knows and says nothing about the rest.
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
             return Some((
                 Keyword::CommanderNinjutsu(cost),
                 mana_cost_remainder(cost_str),
@@ -1937,7 +1974,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .unwrap_or(after_count)
                 .trim();
             if !cost_str.is_empty() {
-                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
                 return Some((
                     Keyword::Suspend { count, cost },
                     mana_cost_remainder(cost_str),
@@ -1956,7 +1993,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .unwrap_or(after_count)
                 .trim();
             if !cost_str.is_empty() {
-                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
                 return Some((
                     Keyword::Awaken { count, cost },
                     mana_cost_remainder(cost_str),
@@ -1977,7 +2014,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
                 .unwrap_or(after_count)
                 .trim();
             if !cost_str.is_empty() {
-                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str);
                 return Some((
                     Keyword::Reinforce { count, cost },
                     mana_cost_remainder(cost_str),
@@ -1995,7 +2032,7 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
         if let Ok((_, (cost_str, pt_str))) =
             split_once_on(rest, "\u{2014}").or_else(|_| split_once_on(rest, "--"))
         {
-            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str.trim());
+            let cost = crate::types::mana::parse_mtgjson_mana_cost(cost_str.trim());
             if let Ok((after_power, power)) = nom_primitives::parse_number.parse(pt_str.trim()) {
                 if let Ok((tough_str, _)) = tag::<_, _, OracleError<'_>>("/").parse(after_power) {
                     if let Ok((after_toughness, toughness)) =
@@ -2179,9 +2216,11 @@ pub(crate) fn parse_granted_keyword_fragment(text: &str) -> Option<Keyword> {
 /// than declining, because the line then renders as supported.
 fn ability_cost_is_fully_typed(cost: &AbilityCost) -> bool {
     match cost {
-        AbilityCost::Unimplemented { .. } => false,
-        // The only nesting variant; a composite is typed iff every part is.
-        AbilityCost::Composite { costs, .. } => costs.iter().all(ability_cost_is_fully_typed),
+        AbilityCost::Unimplemented { .. } | AbilityCost::EffectCost { .. } => false,
+        // Nesting variants (AND / OR composition); typed iff every part is.
+        AbilityCost::Composite { costs, .. } | AbilityCost::OneOf { costs } => {
+            costs.iter().all(ability_cost_is_fully_typed)
+        }
         _ => true,
     }
 }
@@ -3116,9 +3155,10 @@ pub(crate) fn keyword_candidate_ability_word_label(line: &str) -> Option<(&str, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{AbilityCost, Effect, SacrificeCost};
+    use crate::types::ability::{AbilityCost, ControllerRef, Effect, FilterProp, SacrificeCost};
     use crate::types::mana::ManaCost;
     use crate::types::player::PlayerCounterKind;
+    use crate::types::zones::Zone;
 
     // SHAPE: CR 702.5a: public full-card ingestion preserves each printed
     // Enchant restriction; unrelated sibling abilities are not claimed fixed.
@@ -3268,6 +3308,47 @@ mod tests {
             parse_router_keyword_line("Emerge from artifact {5} if you control an Island")
                 .is_none(),
             "a semantic suffix must remain unconsumed so the strict router declines the line"
+        );
+    }
+
+    #[test]
+    fn parse_router_keyword_line_entwine_rejects_unconsumed_condition() {
+        let res = parse_router_keyword_line("Entwine—Pay 2 life if you control an artifact");
+        assert!(
+            res.is_none(),
+            "entwine with unconsumed conditional text must be rejected, got: {res:?}"
+        );
+        assert!(
+            parse_router_keyword_line("Entwine—Sacrifice two lands. If you control an artifact")
+                .is_none(),
+            "entwine with trailing conditional text after period must be rejected"
+        );
+    }
+
+    #[test]
+    fn ability_cost_is_fully_typed_recurses_into_one_of() {
+        assert!(!ability_cost_is_fully_typed(&AbilityCost::OneOf {
+            costs: vec![AbilityCost::Composite {
+                costs: vec![AbilityCost::Unimplemented {
+                    description: "frobnicate".to_string()
+                }]
+            }],
+        }));
+    }
+
+    #[test]
+    fn parse_entwine_cost_rejects_composite_with_unimplemented_leg() {
+        assert!(
+            parse_entwine_cost("Pay 2 life, frobnicate a permanent").is_none(),
+            "composite entwine cost with unimplemented leg must return None"
+        );
+    }
+
+    #[test]
+    fn parse_entwine_cost_rejects_choice_cost() {
+        assert!(
+            parse_entwine_cost("Pay 2 life or sacrifice a creature").is_none(),
+            "entwine cost with OneOf choice must return None"
         );
     }
 
@@ -7034,6 +7115,82 @@ mod router_registry_tests {
             assert!(
                 parse_router_keyword_line(&hostile).is_none(),
                 "typecycling with unmodelled semantic text must be rejected: {hostile:?}"
+            );
+        }
+    }
+
+    /// CR 702.37a + CR 702.37e: Non-mana morph cost (Fathom Seer).
+    #[test]
+    fn parse_morph_non_mana_cost_fathom_seer() {
+        let line = "Morph—Return two Islands you control to their owner's hand. (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
+        let routed = parse_router_keyword_line(line).expect("must parse morph keyword line");
+        let kw = routed.keyword.expect("must produce keyword");
+        match kw {
+            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(
+                crate::types::ability::AbilityCost::ReturnToHand { count, filter, .. },
+            )) => {
+                assert_eq!(count, 2);
+                assert!(filter.is_some());
+            }
+            other => panic!("expected Morph(NonMana(ReturnToHand)), got {other:?}"),
+        }
+    }
+
+    /// CR 702.37a + CR 702.37e: Non-mana reveal morph cost (Dragon's Eye Savants).
+    #[test]
+    fn parse_morph_non_mana_cost_dragons_eye_savants() {
+        let line = "Morph—Reveal a blue card in your hand. (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
+        let routed = parse_router_keyword_line(line).expect("must parse morph keyword line");
+        let kw = routed.keyword.expect("must produce keyword");
+        match kw {
+            Keyword::Morph(crate::types::keywords::MorphCost::NonMana(
+                crate::types::ability::AbilityCost::Reveal { count, filter },
+            )) => {
+                assert_eq!(
+                    count,
+                    crate::types::ability::QuantityExpr::Fixed { value: 1 }
+                );
+                assert!(filter.is_some());
+            }
+            other => panic!("expected Morph(NonMana(Reveal)), got {other:?}"),
+        }
+    }
+
+    /// CR 702.37e: Reject partially parsed morph costs with unconsumed semantic text.
+    #[test]
+    fn parse_morph_cost_rejects_unconsumed_semantic_tail() {
+        let hostile1 = "Morph—Pay 5 life if you control an artifact";
+        assert!(
+            parse_router_keyword_line(hostile1).is_none(),
+            "partially parsed morph cost must be rejected: {hostile1:?}"
+        );
+
+        // CR 107.3d: variable non-mana morph costs are not supported yet.
+        let hostile_x = "Morph—Reveal X blue cards in your hand";
+        assert!(
+            parse_router_keyword_line(hostile_x).is_none(),
+            "symbolic-X morph reveal cost must be rejected: {hostile_x:?}"
+        );
+
+        let hostile2 = "Morph—Reveal a blue card in your hand if you control an artifact";
+        assert!(
+            parse_router_keyword_line(hostile2).is_none(),
+            "partially parsed morph reveal cost must be rejected: {hostile2:?}"
+        );
+    }
+
+    /// CR 107.3d: variable-count non-mana morph costs are not supported yet, so
+    /// the parser rejects them and they stay unsupported in coverage.
+    #[test]
+    fn parse_morph_cost_rejects_variable_counts() {
+        for line in [
+            "Morph—Pay X life",
+            "Morph—Discard X cards",
+            "Morph—Sacrifice X creatures",
+        ] {
+            assert!(
+                parse_router_keyword_line(line).is_none(),
+                "variable-count morph cost must be rejected: {line:?}"
             );
         }
     }

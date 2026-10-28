@@ -566,6 +566,416 @@ fn attachment_views_publish_the_whole_subtree_whatever_is_pickable() {
     );
 }
 
+/// Glacian, Powerstone Engineer's verbatim Oracle text (MTGJSON / Scryfall).
+const GLACIAN: &str = "{T}, Tap X untapped artifacts you control: Look at the top X cards of \
+                       your library. Put one of those cards into your hand and the rest into \
+                       your graveyard.\nPartner (You can have two commanders if both have \
+                       partner.)";
+/// Bonesplitter's verbatim Oracle text: an artifact Equipment (CR 301.5).
+const BONESPLITTER: &str = "Equipped creature gets +2/+0.\nEquip {1}";
+/// Spellbook's verbatim Oracle text: a plain artifact.
+const SPELLBOOK: &str = "You have no maximum hand size.";
+
+struct GlacianBoard {
+    glacian: ObjectId,
+    host: ObjectId,
+    bonesplitter: ObjectId,
+    spellbooks: Vec<ObjectId>,
+    top: ObjectId,
+    second: ObjectId,
+    deep: ObjectId,
+}
+
+/// Glacian on a board where Bonesplitter is attached to a creature and
+/// `plain_artifacts` unattached Spellbooks sit beside it, activated through
+/// production dispatch so the tap-X cost prompt is the live decision.
+fn glacian_board(plain_artifacts: usize) -> (engine::game::scenario::GameRunner, GlacianBoard) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let glacian = scenario
+        .add_creature_from_oracle(P0, "Glacian, Powerstone Engineer", 3, 6, GLACIAN)
+        .id();
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bonesplitter = scenario
+        .add_artifact_from_oracle(P0, "Bonesplitter", BONESPLITTER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spellbooks = (0..plain_artifacts)
+        .map(|_| {
+            scenario
+                .add_artifact_from_oracle(P0, "Spellbook", SPELLBOOK)
+                .id()
+        })
+        .collect::<Vec<_>>();
+    // Each call places its card on top, so the last call is the top card.
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let second = scenario.add_card_to_library_top(P0, "Second Card");
+    let top = scenario.add_card_to_library_top(P0, "Top Card");
+    let mut runner = scenario.build();
+    let library = &runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P0)
+        .expect("P0 exists")
+        .library;
+    assert_eq!(
+        library.iter().take(3).copied().collect::<Vec<_>>(),
+        vec![top, second, deep],
+        "fixture guard: P0's library begins top, second, deep"
+    );
+    attach_and_assert_linked(runner.state_mut(), bonesplitter, host);
+
+    let ability_index = runner.state().objects[&glacian]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach guard: Glacian's Oracle text parses to an activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: glacian,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating Glacian surfaces its tap-X cost prompt");
+    bind(runner.state_mut(), "glacian-tap-x");
+
+    (
+        runner,
+        GlacianBoard {
+            glacian,
+            host,
+            bonesplitter,
+            spellbooks,
+            top,
+            second,
+            deep,
+        },
+    )
+}
+
+/// Asserts the live decision is Glacian's tap-X prompt with the given bounds
+/// and that the host creature — not an artifact — is not offered.
+fn assert_glacian_tap_x_prompt(state: &GameState, board: &GlacianBoard, count: usize) {
+    let WaitingFor::PayCost {
+        player,
+        kind:
+            engine::types::game_state::PayCostKind::TapCreatures {
+                mode: engine::types::ability::TapCreaturesSelectionMode::VariableX,
+            },
+        choices,
+        count: published_count,
+        min_count,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "reach guard: expected Glacian's tap-X PayCost prompt, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        (*published_count, *min_count),
+        (count, 0),
+        "CR 107.3a: X ranges from zero to the number of eligible artifacts"
+    );
+    assert!(
+        choices.contains(&board.bonesplitter)
+            && board.spellbooks.iter().all(|id| choices.contains(id)),
+        "every untapped artifact, attached or not, is payable: {choices:?}"
+    );
+    assert!(
+        !choices.contains(&board.host),
+        "the equipped creature is not an artifact and is not payable"
+    );
+}
+
+/// The `Select` schema opportunity carrying the live decision.
+fn select_opportunity(
+    view: &engine::types::interaction::ViewerInteraction,
+) -> &engine::types::interaction::InteractionOpportunity {
+    view.opportunities
+        .iter()
+        .find(|opportunity| {
+            matches!(
+                opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Select { .. },
+                    ..
+                }
+            )
+        })
+        .expect("the decision publishes a Select schema")
+}
+
+fn chosen_x_on_stack(state: &GameState, source: ObjectId) -> Option<u32> {
+    state
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            engine::types::game_state::StackEntryKind::ActivatedAbility { source_id, ability }
+                if *source_id == source =>
+            {
+                Some(ability.chosen_x)
+            }
+            _ => None,
+        })
+        .expect("Glacian's ability is on the stack")
+}
+
+/// "Tap X untapped artifacts" lets the controller choose X (CR 107.3a), so the
+/// cost prompt is a multi-pick decision. An attached Equipment is one of its
+/// candidates; clicking it on the host's fan must not submit it as the whole
+/// answer. The engine therefore publishes no fan pick for it, and the
+/// Equipment is still payable alongside the other artifacts the player picks.
+#[test]
+fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surface() {
+    let (mut runner, board) = glacian_board(2);
+    assert_glacian_tap_x_prompt(runner.state(), &board, 3);
+
+    let view = priority_view(runner.state());
+    let opportunity = select_opportunity(&view);
+    assert!(
+        matches!(
+            opportunity.response,
+            InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Select {
+                    constraint: engine::types::interaction::SelectionConstraint::Count {
+                        min: 0,
+                        max: 3
+                    },
+                    ..
+                },
+                ..
+            }
+        ),
+        "reach guard: the prompt is a multi-pick count selection, got {:?}",
+        opportunity.response
+    );
+    let bonesplitter_choice = schema_choice_id_for_object(&view, board.bonesplitter);
+    let spellbook_choice = schema_choice_id_for_object(&view, board.spellbooks[0]);
+    let membership = view
+        .attachment_views
+        .get(&board.host.0)
+        .expect("reach guard: the host publishes its attachment membership");
+    let bonesplitter_card = membership
+        .cards
+        .iter()
+        .find(|card| card.object_id == board.bonesplitter.0)
+        .expect("reach guard: the attached Equipment is a member of the host's view");
+
+    assert!(
+        view.attachment_fans.is_empty(),
+        "a multi-pick decision publishes no one-step fan pick: {:?}",
+        view.attachment_fans
+    );
+    assert!(
+        bonesplitter_card.submission.is_none(),
+        "the attached Equipment carries no submission that would finalize X = 1: {:?}",
+        bonesplitter_card.submission
+    );
+
+    submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id: opportunity.interaction_id.clone(),
+            response: InteractionResponse::Select {
+                choice_ids: vec![bonesplitter_choice, spellbook_choice],
+            },
+        },
+    )
+    .expect("the attached Equipment is payable inside a multi-pick answer");
+    let state = runner.state();
+    assert!(
+        state.objects[&board.bonesplitter].tapped && state.objects[&board.spellbooks[0]].tapped,
+        "both chosen artifacts are tapped to pay the cost"
+    );
+    assert!(
+        !state.objects[&board.spellbooks[1]].tapped,
+        "the unchosen artifact stays untapped"
+    );
+    assert_eq!(
+        chosen_x_on_stack(state, board.glacian),
+        Some(2),
+        "CR 107.3a: X is the number of artifacts tapped"
+    );
+
+    runner.resolve_top();
+    let WaitingFor::DigChoice {
+        cards, keep_count, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "X = 2 looks at two cards and asks which to keep, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(cards, &vec![board.top, board.second]);
+    assert_eq!(*keep_count, 1);
+    assert!(
+        !cards.contains(&board.deep),
+        "a third card is not looked at"
+    );
+}
+
+/// When the attached Equipment is the only eligible artifact, the decision
+/// admits a single pick, so the host's fan still answers it in one step.
+#[test]
+fn glacian_with_only_the_attached_equipment_eligible_keeps_its_one_step_fan_pick() {
+    let (mut runner, board) = glacian_board(0);
+    assert_glacian_tap_x_prompt(runner.state(), &board, 1);
+
+    let view = priority_view(runner.state());
+    let fan = view
+        .attachment_fans
+        .get(&board.host.0)
+        .expect("a single-pick decision keeps its fan under the host");
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, board.bonesplitter.0);
+    let submission = fan.children[0].submission.clone();
+    assert_eq!(
+        submission.response,
+        InteractionResponse::Select {
+            choice_ids: vec![schema_choice_id_for_object(&view, board.bonesplitter)],
+        }
+    );
+
+    submit_interaction(runner.state_mut(), P0, submission)
+        .expect("the fan's one-step pick pays the cost");
+    assert!(runner.state().objects[&board.bonesplitter].tapped);
+    assert_eq!(
+        chosen_x_on_stack(runner.state(), board.glacian),
+        Some(1),
+        "CR 107.3a: X is the number of artifacts tapped"
+    );
+}
+
+/// The single-pick gate reads the decision's cardinality, not its family: an
+/// aggregate selection and a multi-target sequence publish no fan pick, while
+/// a sequence that admits exactly one target still does.
+#[test]
+fn aggregate_and_multi_target_decisions_publish_no_attachment_fan_pick() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Gate Host", 2, 2).id();
+    let attached = scenario.add_creature(P0, "Gate Attached", 1, 1).id();
+    let other = scenario.add_creature(P0, "Gate Other", 1, 1).id();
+    let vehicle = scenario.add_creature(P0, "Gate Vehicle", 3, 3).id();
+    let bonesplitter = scenario
+        .add_artifact_from_oracle(P0, "Bonesplitter", BONESPLITTER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let counter = CounterType::Generic("gate".to_string());
+    scenario.with_counter(bonesplitter, counter.clone(), 1);
+    scenario.with_counter(other, counter, 1);
+    let mut runner = scenario.build();
+    attach_and_assert_linked(runner.state_mut(), attached, host);
+    attach_and_assert_linked(runner.state_mut(), bonesplitter, other);
+
+    // CR 702.122a: crew taps any number of creatures whose total power meets
+    // the threshold, so its selection is an aggregate, never a single pick.
+    {
+        let state = runner.state_mut();
+        state.waiting_for = WaitingFor::CrewVehicle {
+            player: P0,
+            vehicle_id: vehicle,
+            crew_power: 2,
+            eligible_creatures: vec![attached, other],
+            contributions: vec![1, 1],
+        };
+        bind(state, "gate-crew");
+    }
+    let view = priority_view(runner.state());
+    assert!(
+        matches!(
+            select_opportunity(&view).response,
+            InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Select {
+                    constraint: engine::types::interaction::SelectionConstraint::Aggregate { .. },
+                    ..
+                },
+                ..
+            }
+        ),
+        "reach guard: crew publishes an aggregate selection"
+    );
+    schema_choice_id_for_object(&view, attached);
+    assert!(
+        view.attachment_fans.is_empty(),
+        "an aggregate selection publishes no fan pick: {:?}",
+        view.attachment_fans
+    );
+
+    let multi_target = |max_targets: usize| WaitingFor::MultiTargetSelection {
+        player: P0,
+        legal_targets: vec![attached, other],
+        min_targets: 0,
+        max_targets,
+        pending_ability: gain_life_effect(host),
+    };
+    {
+        let state = runner.state_mut();
+        state.waiting_for = multi_target(2);
+        bind(state, "gate-multi-target-two");
+    }
+    let view = priority_view(runner.state());
+    schema_choice_id_for_object(&view, attached);
+    assert!(
+        view.attachment_fans.is_empty(),
+        "a sequence admitting two targets publishes no fan pick: {:?}",
+        view.attachment_fans
+    );
+
+    {
+        let state = runner.state_mut();
+        state.waiting_for = multi_target(1);
+        bind(state, "gate-multi-target-one");
+    }
+    let view = priority_view(runner.state());
+    let fan = view
+        .attachment_fans
+        .get(&host.0)
+        .expect("a sequence admitting one target keeps its fan under the host");
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, attached.0);
+    assert_eq!(
+        fan.children[0].submission.response,
+        InteractionResponse::Sequence {
+            choice_ids: vec![schema_choice_id_for_object(&view, attached)],
+        }
+    );
+
+    // CR 701.34a: proliferate chooses any number of permanents and/or players
+    // that have a counter.
+    {
+        let state = runner.state_mut();
+        state.waiting_for = WaitingFor::ProliferateChoice {
+            player: P0,
+            eligible: vec![TargetRef::Object(bonesplitter), TargetRef::Object(other)],
+        };
+        bind(state, "gate-proliferate");
+    }
+    let view = priority_view(runner.state());
+    assert!(
+        view.opportunities.iter().any(|opportunity| matches!(
+            opportunity.response,
+            InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Sequence { max: 2, .. },
+                ..
+            }
+        )),
+        "reach guard: proliferate publishes a two-pick sequence"
+    );
+    schema_choice_id_for_object(&view, bonesplitter);
+    assert!(
+        view.attachment_fans.is_empty(),
+        "proliferate publishes no fan pick: {:?}",
+        view.attachment_fans
+    );
+}
+
 /// Membership answers a different question than the fan does, and must not
 /// inherit its authorization gate: an attached permanent is an object in play
 /// (CR 301.5 / CR 303.4), so it stays visible while another player holds the

@@ -87,14 +87,14 @@ use super::{
     parse_spells_cast_this_way_graveyard_replacement_rider, plural_library_shuffle_recall,
     publishes_aggregate_set_from_resolution, publishes_exiled_cause_at_resolution,
     publishes_tracked_set_from_resolution, rebind_tracked_aggregate_to_chain_set,
-    resolve_difference_anaphor_in_ability, retarget_counter_additional_cost_to_target,
-    rewrite_delayed_singular_recall_to_self, rewrite_grant_parent_to_filter,
-    rewrite_parent_targets_to_tracked_set, rewrite_plural_library_recall_to_tracked_set,
-    rewrite_rounding_mode, rewrite_singular_battlefield_recall_to_self,
-    rewrite_that_type_mana_instead, singular_battlefield_recall, stamp_delayed_returns,
-    starts_with_plural_subject_anaphor, starts_with_singular_subject_anaphor,
-    try_fold_token_repeat_into_count, wire_optional_cast_decline_fallback, PrintedColorCarrier,
-    PrintedColorCarrierScope,
+    release_iteration_destination, resolve_difference_anaphor_in_ability,
+    retarget_counter_additional_cost_to_target, rewrite_delayed_singular_recall_to_self,
+    rewrite_grant_parent_to_filter, rewrite_parent_targets_to_tracked_set,
+    rewrite_plural_library_recall_to_tracked_set, rewrite_rounding_mode,
+    rewrite_singular_battlefield_recall_to_self, rewrite_that_type_mana_instead,
+    singular_battlefield_recall, stamp_delayed_returns, starts_with_plural_subject_anaphor,
+    starts_with_singular_subject_anaphor, try_fold_token_repeat_into_count,
+    wire_optional_cast_decline_fallback, PrintedColorCarrier, PrintedColorCarrierScope,
 };
 
 /// CR 601.2c: True when the assembled head chose one or more players at
@@ -3566,7 +3566,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                     cost: AbilityCost::Mana { cost },
                     scale: None,
                     ..
-                } if crate::game::casting_costs::cost_has_x(cost)
+                } if cost.has_x()
             );
         // CR 116.2c: no longer the PRIMARY path for the mana-cost shape — that
         // clause is now absorbed into `Effect::GenericEffect.end_cost` by the
@@ -3745,6 +3745,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // attaches it after this point via `clause_sub`, so
                 // `def.sub_ability` is not yet populated here).
             } else {
+                release_iteration_destination(def.effect.as_mut(), qty);
                 def.repeat_for = Some(qty.clone());
             }
         }

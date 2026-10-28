@@ -268,8 +268,9 @@ pub(crate) fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair
 /// condition-vs-effect comma in an inverted `"As long as <cond>, <effect>"` line.
 ///
 /// Every alternative ends on a word boundary (trailing space or apostrophe) so
-/// `tag("it ")` does not accept `"its "`. The set is derived from the 134-row
-/// corpus of currently-affected cards in `client/public/card-data.json` and is
+/// `tag("it ")` does not accept arbitrary `"its "` tails. Possessive P/T
+/// subjects are admitted only with a complete power/toughness word. The set was
+/// derived from the 134-row corpus in `client/public/card-data.json` and is
 /// intentionally conservative: bare nouns/verbs that commonly appear inside
 /// condition clauses (e.g. `"creatures "`, `"lands "`, `"a "`) are omitted.
 pub(crate) fn parse_effect_subject_prefix(input: &str) -> OracleResult<'_, ()> {
@@ -287,6 +288,15 @@ pub(crate) fn parse_effect_subject_prefix(input: &str) -> OracleResult<'_, ()> {
                 tag("it deals "),
                 tag("it doesn't "),
             )),
+        ),
+        // Possessive self P/T subjects, without admitting condition-internal
+        // "its controller" or adjacent nouns such as "its powerful".
+        value(
+            (),
+            preceded(
+                tag("its "),
+                terminated(alt((tag("power"), tag("toughness"))), tag(" ")),
+            ),
         ),
         // Self-reference tilde token.
         value(

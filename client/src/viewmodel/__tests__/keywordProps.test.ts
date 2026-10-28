@@ -265,7 +265,7 @@ describe("keyword detail over the engine's keyword payload golden", () => {
   const manaBearing = samples.filter((kw) => manaCostsIn(payloadOf(kw)).length > 0);
 
   it("reaches every mana-cost-bearing Keyword variant", () => {
-    // 41 bare ManaCost + 9 Mana/NonMana wrappers + 9 structs with a cost field
+    // 40 bare ManaCost + 10 Mana/NonMana wrappers + 9 structs with a cost field
     // + Disguise + Ward + 2 AbilityCost keywords.
     expect(new Set(manaBearing.map(keyOf)).size).toBe(63);
   });
@@ -299,9 +299,66 @@ describe("keyword detail over the engine's keyword payload golden", () => {
     expect(detailOf("Ward", isType("Waterbend"))).toBe("Ward waterbend {4}");
     expect(detailOf("Blitz", isType("NonMana"))).toBe("Blitz Pay 3 life");
     expect(detailOf("Blitz", isType("Mana"))).toBe("Blitz {2}{R}");
+    expect(detailOf("Entwine", isType("NonMana"))).toBe("Entwine Pay 3 life");
+    expect(detailOf("Entwine", isType("Mana"))).toBe("Entwine {2}{R}");
+    expect(detailOf("Morph", isType("NonMana"))).toBe("Morph Pay 3 life");
+    expect(detailOf("Morph", isType("Mana"))).toBe("Morph {2}{R}");
     expect(detailOf("Foretell", isType("SelfManaCostReduced"))).toBe(
       "Foretell its mana cost reduced by {2}",
     );
+  });
+
+  it("renders a Sacrifice-based Entwine cost (Solar Tide: “Entwine—Sacrifice two lands.”)", () => {
+    expect(
+      getKeywordDisplayText({
+        Entwine: {
+          type: "NonMana",
+          data: {
+            type: "Sacrifice",
+            count: 2,
+            target: { type: "Typed", type_filters: ["Land"], controller: null, properties: [] },
+          },
+        },
+      }),
+    ).toBe("Entwine Sacrifice 2 lands");
+    expect(
+      getKeywordDisplayText({
+        Entwine: {
+          type: "NonMana",
+          data: { type: "Sacrifice", count: 1, target: { type: "Any" } },
+        },
+      }),
+    ).toBe("Entwine Sacrifice a permanent");
+  });
+
+  it("omits keyword detail when a sacrifice target has unrenderable subtype restrictions (Lava Dart, Walk the Aeons)", () => {
+    // Lava Dart: Flashback—Sacrifice a Mountain.
+    expect(
+      getKeywordDisplayText({
+        Flashback: {
+          type: "NonMana",
+          data: {
+            type: "Sacrifice",
+            count: 1,
+            target: { type: "Typed", type_filters: [{ Subtype: "Mountain" }] },
+          },
+        },
+      }),
+    ).toBe("Flashback");
+
+    // Walk the Aeons: Buyback—Sacrifice three Islands.
+    expect(
+      getKeywordDisplayText({
+        Buyback: {
+          type: "NonMana",
+          data: {
+            type: "Sacrifice",
+            count: 3,
+            target: { type: "Typed", type_filters: [{ Subtype: "Island" }] },
+          },
+        },
+      }),
+    ).toBe("Buyback");
   });
 
   it("omits compound Ward detail when a filtered sacrifice leg cannot render", () => {
@@ -383,6 +440,9 @@ describe("keyword AbilityCost detail", () => {
     expect(
       getKeywordDetail({ Blitz: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
     ).toBe("{1}{G}, Pay 3 life");
+    expect(
+      getKeywordDetail({ Morph: { type: "NonMana", data: { type: "Composite", costs: [mana, payLife] } } }),
+    ).toBe("{1}{G}, Pay 3 life");
   });
 
   it("shows no detail when any sub-cost cannot render", () => {
@@ -395,14 +455,24 @@ describe("keyword AbilityCost detail", () => {
     }).toEqual({ upkeep: null, flashback: null, bare: null });
   });
 
-  it("does not show a sacrifice cost without its required subject", () => {
+  it("shows a sacrifice cost with its subject", () => {
+    // A sacrifice cost now names what and how many permanents to sacrifice,
+    // so a composite/one-of containing it renders fully instead of dropping
+    // to null and hiding a mandatory cost (Solar Tide: "Entwine—Sacrifice
+    // two lands.").
     expect({
       bare: getKeywordDetail({ CumulativeUpkeep: sacrificeLand }),
       composite: getKeywordDetail(upkeep([mana, sacrificeLand])),
       flashback: getKeywordDetail({
         Flashback: { type: "NonMana", data: { type: "OneOf", costs: [mana, sacrificeLand] } },
       }),
-    }).toEqual({ bare: null, composite: null, flashback: null });
-    expect(getKeywordDisplayText({ CumulativeUpkeep: sacrificeLand })).toBe("Cumulative Upkeep");
+    }).toEqual({
+      bare: "Sacrifice a land",
+      composite: "{1}{G}, Sacrifice a land",
+      flashback: "{1}{G} or Sacrifice a land",
+    });
+    expect(getKeywordDisplayText({ CumulativeUpkeep: sacrificeLand })).toBe(
+      "Cumulative Upkeep Sacrifice a land",
+    );
   });
 });

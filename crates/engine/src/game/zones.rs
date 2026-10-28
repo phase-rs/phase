@@ -1879,6 +1879,15 @@ pub(crate) fn move_to_zone_with_entry_flags(
         zone_change_record.attachments.clone(),
     );
 
+    // CR 800.4a + CR 603.6c: the player-leaves-game procedure names how this
+    // object leaves its zone, so the record carries it before it is journaled.
+    if let Some(leaving) = state
+        .leaving_game_departure
+        .take_if(|leaving| leaving.object_id == object_id)
+    {
+        zone_change_record.departure = leaving.departure;
+    }
+
     // Command-zone routes select between the ordinary command container and
     // the owner-specific Attraction/Contraption containers. Stack routes have
     // their `StackEntry` insertion/removal owned by the casting and resolution

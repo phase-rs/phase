@@ -982,9 +982,13 @@ pub(crate) struct ClauseIr {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) declares_instruction_result: Option<ClauseId>,
     /// One choose instruction and its mutually exclusive instead branch share this id.
+    /// A single-object-target producer whose announced target a later anaphor names
+    /// across a resolution-time choice also declares it (`bind_anaphors_across_resolution_choices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) declares_chosen_clause: Option<ClauseId>,
-    /// The exact choose instruction named by this selected-group consumer.
+    /// The exact choose instruction named by this selected-group consumer, or the
+    /// single-object-target producer a definite anaphor names across a
+    /// resolution-time choice (`bind_anaphors_across_resolution_choices`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reads_chosen_clause: Option<ClauseId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3395,8 +3399,97 @@ mod departure_result_tests {
         }
     }
 
+    fn raw_payload_disposition(disposition: usize, effect: Effect) -> ClauseDisposition {
+        let body = Box::new(AbilityDefinition::new(AbilityKind::Spell, effect));
+        match disposition {
+            0 => ClauseDisposition::Absorb {
+                rider: body,
+                kind: AbsorbKind::DieExile,
+            },
+            1 => ClauseDisposition::BranchOtherwise {
+                else_def: body,
+                kind: OtherwiseKind::Bound,
+            },
+            2 => ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::DigAlt(body),
+            },
+            3 => ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::Instead(body),
+            },
+            4 => ClauseDisposition::ModifyPrior {
+                modifier: PriorModifier::AltCost(AbilityCost::Composite {
+                    costs: vec![AbilityCost::OneOf {
+                        costs: vec![AbilityCost::EffectCost {
+                            effect: body.effect,
+                        }],
+                    }],
+                }),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn raw_disposition_payload(disposition: &ClauseDisposition) -> &Effect {
+        match disposition {
+            ClauseDisposition::Absorb { rider, .. } => rider.effect.as_ref(),
+            ClauseDisposition::BranchOtherwise { else_def, .. } => else_def.effect.as_ref(),
+            ClauseDisposition::ReplaceMeaning {
+                kind: ReplaceMeaningKind::DigAlt(body) | ReplaceMeaningKind::Instead(body),
+            } => body.effect.as_ref(),
+            ClauseDisposition::ModifyPrior {
+                modifier: PriorModifier::AltCost(AbilityCost::Composite { costs }),
+            } => {
+                let AbilityCost::OneOf { costs } = &costs[0] else {
+                    unreachable!()
+                };
+                let AbilityCost::EffectCost { effect } = &costs[0] else {
+                    unreachable!()
+                };
+                effect
+            }
+            _ => unreachable!(),
+        }
+    }
+
     #[test]
-    fn departure_disposition_raw_epic_payloads_preserve_their_independent_namespace() {
+    fn departure_disposition_epic_handles_are_opaque_relocation_leaves() {
+        use crate::types::identifiers::EpicEffectId;
+        let base = parse_effect_chain_ir(PRINTED, AbilityKind::Spell, &mut Default::default());
+        for disposition in 0..5 {
+            // Deliberately collide with the original clause/result number. An
+            // Epic handle belongs to the state registry, not the clause namespace.
+            let original = Effect::EpicCopy {
+                epic: EpicEffectId(0),
+            };
+            let mut imported = base.clauses.clone();
+            let clause = imported.last_mut().unwrap();
+            clause.parsed.effect = Effect::NoOp;
+            clause.disposition = raw_payload_disposition(disposition, original.clone());
+            let mut builder = ClauseIrBuilder::new(PRINTED);
+            builder.absorb_clauses(base.clauses.clone());
+            builder.absorb_clauses(imported);
+            let relocated = builder.finish();
+            assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
+            let effect = raw_disposition_payload(&relocated.last().unwrap().disposition);
+            assert_eq!(
+                effect, &original,
+                "opaque handle in disposition {disposition}"
+            );
+            let mut reads = Vec::new();
+            effect.for_each_quantity_ref(&mut |reference| reads.push(reference.clone()));
+            assert!(reads.is_empty(), "a handle carries no inline result reads");
+            assert!(
+                validate_instruction_result_definition(&AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    effect.clone(),
+                ))
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn departure_disposition_raw_runtime_payloads_preserve_their_independent_namespace() {
         use crate::types::ability::*;
         use crate::types::identifiers::ObjectId;
         use crate::types::player::PlayerId;
@@ -3435,67 +3528,29 @@ mod departure_result_tests {
                     ObjectId(33),
                     PlayerId(0),
                 );
-                let effect = Effect::EpicCopy {
-                    spell: Box::new(snapshot.clone()),
+                let mut replacement = ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::DamageDone,
+                );
+                replacement.runtime_execute = Some(Box::new(snapshot.clone()));
+                let effect = Effect::AddTargetReplacement {
+                    replacement: Box::new(replacement),
+                    target: TargetFilter::None,
                 };
                 let mut imported = base.clauses.clone();
                 let clause = imported.last_mut().unwrap();
                 clause.parsed.effect = Effect::NoOp;
-                let body = Box::new(AbilityDefinition::new(AbilityKind::Spell, effect));
-                clause.disposition = match disposition {
-                    0 => ClauseDisposition::Absorb {
-                        rider: body,
-                        kind: AbsorbKind::DieExile,
-                    },
-                    1 => ClauseDisposition::BranchOtherwise {
-                        else_def: body,
-                        kind: OtherwiseKind::Bound,
-                    },
-                    2 => ClauseDisposition::ReplaceMeaning {
-                        kind: ReplaceMeaningKind::DigAlt(body),
-                    },
-                    3 => ClauseDisposition::ReplaceMeaning {
-                        kind: ReplaceMeaningKind::Instead(body),
-                    },
-                    4 => ClauseDisposition::ModifyPrior {
-                        modifier: PriorModifier::AltCost(AbilityCost::Composite {
-                            costs: vec![AbilityCost::OneOf {
-                                costs: vec![AbilityCost::EffectCost {
-                                    effect: body.effect,
-                                }],
-                            }],
-                        }),
-                    },
-                    _ => unreachable!(),
-                };
+                clause.disposition = raw_payload_disposition(disposition, effect);
                 let mut builder = ClauseIrBuilder::new(PRINTED);
                 builder.absorb_clauses(base.clauses.clone());
                 builder.absorb_clauses(imported);
                 let relocated = builder.finish();
-                let effect = match &relocated.last().unwrap().disposition {
-                    ClauseDisposition::Absorb { rider, .. } => rider.effect.as_ref(),
-                    ClauseDisposition::BranchOtherwise { else_def, .. } => else_def.effect.as_ref(),
-                    ClauseDisposition::ReplaceMeaning {
-                        kind: ReplaceMeaningKind::DigAlt(body) | ReplaceMeaningKind::Instead(body),
-                    } => body.effect.as_ref(),
-                    ClauseDisposition::ModifyPrior {
-                        modifier: PriorModifier::AltCost(AbilityCost::Composite { costs }),
-                    } => {
-                        let AbilityCost::OneOf { costs } = &costs[0] else {
-                            unreachable!()
-                        };
-                        let AbilityCost::EffectCost { effect } = &costs[0] else {
-                            unreachable!()
-                        };
-                        effect
-                    }
-                    _ => unreachable!(),
-                };
-                let Effect::EpicCopy { spell } = effect else {
+                assert_eq!(relocated[2].declares_instruction_result, Some(ClauseId(2)));
+                let effect = raw_disposition_payload(&relocated.last().unwrap().disposition);
+                let Effect::AddTargetReplacement { replacement, .. } = effect else {
                     unreachable!()
                 };
                 assert_eq!(
-                    spell.as_ref(),
+                    replacement.runtime_execute.as_deref().unwrap(),
                     &snapshot,
                     "raw independent namespace is never relocated by disposition {disposition}"
                 );
