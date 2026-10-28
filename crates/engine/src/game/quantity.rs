@@ -23320,7 +23320,7 @@ mod tests {
     /// R2b keep-pause twin: the departed member reads the same first
     /// selected target after a production capture and resume — natural 10
     /// + 5 = 15. Dropping the parked reference at the record-door boundary
-    /// excludes the departed member and emits 10.
+    ///   excludes the departed member and emits 10.
     #[test]
     fn parked_departed_shares_member_filter_reads_the_selected_target() {
         let (mut state, ability, filter) = r2b_departed_shares_fixture();
