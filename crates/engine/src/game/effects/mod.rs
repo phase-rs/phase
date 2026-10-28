@@ -3431,15 +3431,21 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             {
                 resume_resolution_frames(state, events);
             }
-            // CR 608.2c: the completed replacement child can also expose
-            // the interrupted zone instruction itself. Its remaining members
-            // must finish before priority or the instruction's reader.
+            // CR 608.2c: an ordinary continuation can expose another paused
+            // replacement root before the interrupted zone instruction. Resume
+            // that actual top owner before priority or the instruction's reader.
             if retired_paused_dispatch
                 && matches!(state.waiting_for, WaitingFor::Priority { .. })
-                && matches!(
+                && (matches!(
                     state.resolution_stack.last(),
                     Some(ResolutionFrame::ChangeZone(_) | ResolutionFrame::BatchDelivery(_))
-                )
+                ) || matches!(
+                    state.resolution_stack.last(),
+                    Some(ResolutionFrame::PostReplacement(drains)) if matches!(
+                        drains.resident().map(|drain| &drain.status),
+                        Some(crate::types::game_state::DrainStatus::Paused)
+                    )
+                ))
             {
                 resume_resolution_frames(state, events);
             }

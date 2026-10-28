@@ -5406,6 +5406,18 @@ fn departure_assert_retirement_preflight(
     let group_id = departure_retained_primary(state, original)
         .0
         .logical_group_id;
+    let intact_raw = serde_json::to_value(state).unwrap();
+    let intact_raw_restored: GameState = serde_json::from_value(intact_raw)
+        .expect("the intact paid prompt passes raw authority admission");
+    assert_eq!(intact_raw_restored.resolution_stack, state.resolution_stack);
+    let intact_wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+        .expect("the intact paid prompt writes a valid current envelope");
+    let intact_wire_restored: ResolutionStateWire = serde_json::from_value(intact_wire.clone())
+        .expect("the intact paid prompt passes current authority admission");
+    assert_eq!(
+        intact_wire_restored.game_state().resolution_stack,
+        state.resolution_stack
+    );
     let action = match state.waiting_for {
         WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
         WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 1 },
@@ -5509,13 +5521,23 @@ fn departure_assert_retirement_preflight(
         assert!(
             serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap()).is_err()
         );
-        // The current writer validates before serializing. Start the hostile
-        // read fixture from the valid envelope so both boundaries are tested.
-        assert!(
-            serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone())).is_err()
-        );
-        let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
-            .expect("the intact paid prompt writes a valid current envelope");
+        // The writer validates stack structure (recipient/delegation links).
+        // Full proof authority is admitted by the raw/current readers instead.
+        let written = serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone()));
+        match fault {
+            0 | 1 | 4 | 5 => assert!(written.is_err(), "structural fault {fault}"),
+            2 | 3 => {
+                let written = written.expect("proof faults retain valid stack structure");
+                assert_eq!(
+                    written["resolution_frames"],
+                    serde_json::to_value(&hostile.resolution_stack).unwrap(),
+                    "the writer preserves the actual malformed proof for reader admission"
+                );
+                assert!(serde_json::from_value::<ResolutionStateWire>(written).is_err());
+            }
+            _ => unreachable!(),
+        }
+        let mut wire = intact_wire.clone();
         wire["resolution_frames"] = serde_json::to_value(&hostile.resolution_stack).unwrap();
         assert!(serde_json::from_value::<ResolutionStateWire>(wire).is_err());
         let mut runner = GameRunner::from_state(hostile);
@@ -6104,7 +6126,9 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
     use engine::types::replacements::ReplacementEvent;
     use engine::types::resolution::ResolutionFrame;
     use engine::types::triggers::TriggerMode;
-    let mut scenario = GameScenario::new();
+    let mut scenario =
+        GameScenario::new_with_format(engine::types::format::FormatConfig::commander(), 2, 42);
+    scenario.with_life(P0, 20).with_life(P1, 20);
     scenario.at_phase(Phase::PreCombatMain);
     let survivor = scenario
         .add_creature(P0, "Merged selected survivor", 3, 3)
@@ -6182,7 +6206,6 @@ fn departure_merged_primary(independent: bool, movement: u8, restore: u8) {
         }
     }
     let mut runner = scenario.build();
-    runner.state_mut().format_config.command_zone = true;
     runner
         .state_mut()
         .objects
