@@ -14531,10 +14531,10 @@ fn collect_local_result_declarations(
     if let Some(id) = node.declaration() {
         let zones = match node.effect() {
             Effect::ChangeZone {
-                origin: Some(Zone::Graveyard),
-                destination: Zone::Exile,
+                origin: Some(origin),
+                destination,
                 ..
-            } => Some((Zone::Graveyard, Zone::Exile)),
+            } => Some((*origin, *destination)),
             Effect::ChangeZoneAll {
                 origin,
                 destination,
@@ -53197,7 +53197,14 @@ mod targeted_departure_declaration_tests {
 
     #[test]
     fn targeted_explicit_departure_program_and_mass_control_share_canonical_classifier() {
-        assert_admitted(&program(Some(Zone::Graveyard), Zone::Exile, false));
+        for (origin, destination) in [
+            (Zone::Battlefield, Zone::Exile),
+            (Zone::Graveyard, Zone::Exile),
+            (Zone::Graveyard, Zone::Battlefield),
+            (Zone::Exile, Zone::Hand),
+        ] {
+            assert_admitted(&program(Some(origin), destination, false));
+        }
         assert_admitted(&program(Some(Zone::Battlefield), Zone::Exile, true));
     }
 
@@ -53206,6 +53213,34 @@ mod targeted_departure_declaration_tests {
         let valid = program(Some(Zone::Graveyard), Zone::Exile, false);
         assert_admitted(&valid);
         let mut cases = vec![program(None, Zone::Exile, false)];
+        for (origin, destination) in [
+            (Zone::Battlefield, Zone::Exile),
+            (Zone::Graveyard, Zone::Battlefield),
+            (Zone::Exile, Zone::Hand),
+        ] {
+            let known = program(Some(origin), destination, false);
+            assert_admitted(&known);
+            // An unspecified targeted origin is not a battlefield default:
+            // its selected subjects may start in different zones.
+            let mut unknown = known.clone();
+            let Effect::ChangeZone {
+                origin: unknown_origin,
+                ..
+            } = unknown.effect.as_mut()
+            else {
+                unreachable!()
+            };
+            *unknown_origin = None;
+            cases.push(unknown);
+            for (from, to) in [(Zone::Command, destination), (origin, Zone::Command)] {
+                let mut mismatched = known.clone();
+                mismatched.sub_ability.as_mut().unwrap().effect = Box::new(Effect::Draw {
+                    count: max_mana_value(17, from, to),
+                    target: TargetFilter::Controller,
+                });
+                cases.push(mismatched);
+            }
+        }
         for (result, from, to) in [
             (17, Zone::Battlefield, Zone::Exile),
             (17, Zone::Graveyard, Zone::Hand),
