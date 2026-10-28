@@ -2,7 +2,9 @@ use crate::parser::oracle_nom::error::{oracle_err, OracleError, OracleResult};
 use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1};
-use nom::combinator::{all_consuming, eof, map, map_opt, not, opt, recognize, rest, value, verify};
+use nom::combinator::{
+    all_consuming, eof, map, map_opt, not, opt, peek, recognize, rest, value, verify,
+};
 use nom::multi::separated_list1;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
