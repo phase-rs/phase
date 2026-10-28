@@ -6085,7 +6085,7 @@ impl ResolutionStateWire {
                 let projected = project_frames_into_legacy_state(&state, &frames)?;
                 let mut projected = projected;
                 normalize_logical_zone_instruction_owners(&mut projected)?;
-                frames = projected.resolution_stack.clone();
+                frames = *projected.resolution_stack.clone();
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(
                     &mut projected,
                 )?;
