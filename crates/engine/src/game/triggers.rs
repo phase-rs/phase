@@ -12732,8 +12732,9 @@ fn latched_relative_matches(
     let doubler_lki = &doubler.source.lki;
     match property {
         LatchedRelativeProperty::Another => watcher_id != doubler_id,
-        // CR 613.7: the last chosen creature type, as `GameObject::chosen_creature_type`
-        // reads it on the live path.
+        // CR 603.2d + CR 603.10d: judge additional triggers using the captured
+        // creature-type choice. Read its last stored choice, matching
+        // `GameObject::chosen_creature_type` on the live path.
         LatchedRelativeProperty::ChosenCreatureType => doubler_lki
             .chosen_attributes
             .iter()

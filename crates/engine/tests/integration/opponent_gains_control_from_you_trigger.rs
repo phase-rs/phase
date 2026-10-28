@@ -2953,10 +2953,10 @@ fn the_doubling_seam_reads_the_latched_doublers_chosen_type() {
     );
 }
 
-/// CR 613.7: a re-chosen type supersedes the earlier one, as the live
-/// `IsChosenCreatureType` reads it (`GameObject::chosen_creature_type`, the
-/// last choice). A latched Throne that chose Human and then Elf doesn't double
-/// Zidane's (Human) trigger; one that chose Elf and then Human does.
+/// Regression: the latched reader uses the same last-stored-choice convention
+/// as the live accessor (`GameObject::chosen_creature_type`). A latched Throne
+/// that chose Human and then Elf doesn't double Zidane's (Human) trigger; one
+/// that chose Elf and then Human does.
 #[test]
 fn a_latched_doubler_reads_its_last_chosen_type() {
     assert_eq!(
