@@ -978,6 +978,9 @@ pub(crate) fn move_object_with_terminal(
             }
             return match replacement::replace_event(state, proposed, events) {
                 ReplacementResult::Execute(event) => {
+                    if !selected_zone_origin_is_current(state, member, from_zone) {
+                        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+                    }
                     let delivery_start = events.len();
                     match deliver_replaced_zone_change(
                         state,
@@ -1063,6 +1066,9 @@ pub(crate) fn move_object_with_terminal(
         }
         return match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
+                if !selected_zone_origin_is_current(state, member, from_zone) {
+                    return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+                }
                 let delivery_start = events.len();
                 match deliver_replaced_zone_change(
                     state,
@@ -1225,6 +1231,19 @@ pub(crate) fn move_object_with_terminal(
     )
 }
 
+/// CR 400.7: replacement evaluation may itself move the selected object.
+pub(crate) fn selected_zone_origin_is_current(
+    state: &GameState,
+    member: ObjectIncarnationRef,
+    origin: Zone,
+) -> bool {
+    member.is_current(state)
+        && state
+            .objects
+            .get(&member.object_id)
+            .is_some_and(|object| object.zone == origin)
+}
+
 /// Result of a batch zone-move (`move_objects_simultaneously`).
 pub(crate) enum BatchMoveResult {
     /// Every requested object and any inline completion tail were delivered.
@@ -1299,8 +1318,45 @@ pub(crate) fn move_objects_simultaneously_then(
     let event_start = events.len();
     let zone_change_record_start = state.zone_changes_this_turn.len();
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
-    let logical_zone_change_group =
+    let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
+    for request in &reqs {
+        if let Some((pin, zone)) = request.expected_origin {
+            if !selected_zone_origin_is_current(state, pin, zone) {
+                if let Some(deliveries) = logical_zone_change_group.instruction_deliveries.as_mut()
+                {
+                    deliveries.retain(|delivery| {
+                        delivery.binding.reference.object_id != request.object_id
+                    });
+                }
+                if let Some(index) = logical_zone_change_group
+                    .prospective_battlefield_members
+                    .iter()
+                    .position(|member| member.identity.object_id == request.object_id)
+                {
+                    logical_zone_change_group
+                        .prospective_battlefield_members
+                        .remove(index);
+                    logical_zone_change_group.terminal_outcomes.remove(index);
+                    logical_zone_change_group
+                        .post_event_member_contexts
+                        .remove(index);
+                }
+                continue;
+            }
+            if let Some(delivery) = logical_zone_change_group
+                .instruction_deliveries
+                .as_mut()
+                .and_then(|deliveries| {
+                    deliveries
+                        .iter_mut()
+                        .find(|delivery| delivery.binding.reference.object_id == request.object_id)
+                })
+            {
+                delivery.binding = crate::types::identifiers::ObjectIdentityBinding::new(pin, zone);
+            }
+        }
+    }
     let destination = reqs.first().map(|r| r.to);
     match deliver_batch(
         state,
@@ -1378,12 +1434,36 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
     if state.active_batch_delivery().is_none() {
         let zone_change_record_start = state.zone_changes_this_turn.len();
         let paused_current = state.pending_zone_change_delivery_from_replacement();
-        let announced_members = paused_current
-            .iter()
-            .map(|delivery| delivery.member.object_id)
-            .collect::<Vec<_>>();
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(state, &announced_members);
+        let mut logical_zone_change_group =
+            crate::game::triggers::allocate_logical_zone_change_group(state, &[]);
+        if let Some(paused) = paused_current.as_ref() {
+            if let ProposedEvent::ZoneChange { from, .. } = &paused.expected_event {
+                if *from == Zone::Battlefield {
+                    logical_zone_change_group
+                        .prospective_battlefield_members
+                        .push(
+                            crate::types::game_state::LogicalZoneChangeProspectiveMember {
+                                identity: paused.member,
+                            },
+                        );
+                    logical_zone_change_group
+                        .terminal_outcomes
+                        .push(crate::types::game_state::LogicalZoneChangeTerminalOutcome::Pending);
+                    logical_zone_change_group
+                        .post_event_member_contexts
+                        .push(None);
+                }
+                logical_zone_change_group.instruction_deliveries = Some(vec![
+                    crate::types::game_state::LogicalZoneChangeInstructionDelivery {
+                        binding: crate::types::identifiers::ObjectIdentityBinding::new(
+                            paused.member,
+                            *from,
+                        ),
+                        completion: None,
+                    },
+                ]);
+            }
+        }
         state.push_batch_delivery(PendingBatchDeliveries {
             logical_zone_change_group,
             paused_current,
@@ -1420,7 +1500,13 @@ fn deliver_batch(
 ) -> BatchDeliveryResult {
     let segment_start = events.len();
     let mut queue = reqs.into_iter();
-    while let Some(req) = queue.next() {
+    while let Some(mut req) = queue.next() {
+        if let Some(binding) = logical_zone_change_group.instruction_binding(req.object_id) {
+            req = req.expecting_origin(binding.reference, binding.expected_zone);
+        } else if logical_zone_change_group.instruction_deliveries.is_some() {
+            // An absent object had no valid announced identity to deliver.
+            continue;
+        }
         let destination = req.to;
         let face_down_in_exile = req.face_down_in_exile;
         let anticipated_pause = anticipated_zone_change_delivery(state, &req);
@@ -1438,20 +1524,21 @@ fn deliver_batch(
                 // stash the rest of the batch so no object strands. The paused
                 // object rides in `state.pending_replacement` and is delivered
                 // by the resume path.
-                let mut paused_current = state
-                    .pending_zone_change_delivery_from_replacement()
-                    .or_else(|| {
-                        anticipated_pause.map(|mut boundary| {
-                            boundary.append_delivery_events(&events[delivery_start..]);
-                            boundary
-                        })
-                    })
-                    .expect("parked batch zone change must retain an exact boundary");
+                let mut paused_current = crate::game::zone_pipeline::retain_zone_change_pause(
+                    state,
+                    anticipated_pause,
+                    &events[delivery_start..],
+                )
+                .expect("parked batch zone change must retain an exact boundary");
                 paused_current.face_down_in_exile = face_down_in_exile;
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
                     state,
                     &mut logical_zone_change_group,
-                    &events[segment_start..delivery_start],
+                    &events[segment_start..if paused_current.terminal_completion.is_none() {
+                        events.len()
+                    } else {
+                        delivery_start
+                    }],
                 )
                 .expect("paused batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -1610,6 +1697,25 @@ pub(crate) fn anticipated_zone_change_delivery(
         crate::types::identifiers::ObjectIncarnationRef::from_object(object),
         expected_event,
     ))
+}
+
+/// Preserve the original selected member even if a replacement child has
+/// already moved its storage id. Only post-delivery tails certify Moved here.
+pub(crate) fn retain_zone_change_pause(
+    state: &GameState,
+    anticipated: Option<PendingZoneChangeDelivery>,
+    events: &[GameEvent],
+) -> Option<PendingZoneChangeDelivery> {
+    let mut boundary = anticipated?;
+    if let Some(pending) = state.pending_replacement.as_ref().filter(|pending| {
+        matches!(pending.delivery_boundary_event(), ProposedEvent::ZoneChange { object_id, .. }
+            if *object_id == boundary.member.object_id)
+    }) {
+        boundary.expected_event = pending.delivery_boundary_event().clone();
+    } else {
+        boundary.append_delivery_events(events);
+    }
+    Some(boundary)
 }
 
 /// Materialize the ordinary uniform requests admitted by historical saves.
@@ -1838,7 +1944,7 @@ mod paused_search_audience_tests {
             },
         };
         let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[]);
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[first]);
         state.push_batch_delivery(PendingBatchDeliveries {
             logical_zone_change_group,
             paused_current: Some(paused),
@@ -4861,6 +4967,9 @@ fn execute_zone_move_with_applied_terminal(
     // `face_down_profile` is present.
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(mut event) => {
+            if !selected_zone_origin_is_current(state, member, from_zone) {
+                return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+            }
             let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
             // CR 303.4g: set when the unhosted entrant came from the stack and so
             // must be put into its owner's graveyard rather than remain. Acted on
@@ -7711,12 +7820,6 @@ mod sought_completion_order_tests {
     #[test]
     fn sought_terminal_records_exclude_no_move_and_unrelated_nested_occurrences() {
         let (runner, _, _) = crate::game::effects::seek::tests::sought_pause_fixture();
-        let mut group = runner
-            .state()
-            .active_batch_delivery()
-            .unwrap()
-            .logical_zone_change_group
-            .clone();
         let record = runner
             .state()
             .return_result_frames
@@ -7726,44 +7829,64 @@ mod sought_completion_order_tests {
             .find(|records| !records.is_empty())
             .unwrap()[0]
             .clone();
-        let event = crate::types::events::GameEvent::ZoneChanged {
+        let selected_binding = record.trigger_source_context().unwrap().identity;
+        let mut state = runner.state().clone();
+        let others = [99001, 99002, 99003].map(|n| {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(n),
+                PlayerId(0),
+                format!("isolation {n}"),
+                Zone::Library,
+            )
+        });
+        let bindings = others.map(|id| {
+            crate::types::identifiers::ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&state.objects[&id]),
+                Zone::Library,
+            )
+        });
+        let mut group =
+            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &others[..2]);
+        group.instruction_deliveries.as_mut().unwrap().insert(
+            0,
+            crate::types::game_state::LogicalZoneChangeInstructionDelivery {
+                binding: selected_binding,
+                completion: None,
+            },
+        );
+        let event = GameEvent::ZoneChanged {
             object_id: record.object_id,
             from: record.from_zone,
             to: record.to_zone,
             record: Box::new(record.clone()),
         };
-        let mut nested = record.clone();
-        nested.object_id = ObjectId(99999);
-        let nested_event = crate::types::events::GameEvent::ZoneChanged {
-            object_id: nested.object_id,
-            from: nested.from_zone,
-            to: nested.to_zone,
-            record: Box::new(nested),
-        };
-        // Typed settlement isolation: only the selected member's terminal move
-        // names occurrence0; an unrelated nested move must not enter the result.
-        group.all_origin_occurrences = vec![
-            crate::types::game_state::LogicalZoneChangeOccurrence { ordinal: 0, event },
-            crate::types::game_state::LogicalZoneChangeOccurrence {
-                ordinal: 1,
-                event: nested_event,
-            },
-        ];
-        group.terminal_outcomes = vec![
-            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Moved {
-                occurrence_ordinal: 0,
-            },
-            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented,
-            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Remained,
-        ];
+        let mut child_events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, others[2], Zone::Exile, &mut child_events);
+        assert!(child_events.iter().any(|event| matches!(event, GameEvent::ZoneChanged { record, .. }
+            if record.trigger_source_context().is_some_and(|context| context.identity == bindings[2]))),
+            "reach: the unrelated child has its own genuine event-time identity");
+        group.append_delivery_events(&[event]).unwrap();
+        group.append_delivery_events(&child_events).unwrap();
+        group
+            .record_delivery_completion(record.object_id, ZoneMoveCompletion::Moved)
+            .unwrap();
+        group
+            .record_delivery_completion(others[0], ZoneMoveCompletion::Prevented)
+            .unwrap();
+        group
+            .record_delivery_completion(others[1], ZoneMoveCompletion::Remained)
+            .unwrap();
+        assert!(group.prospective_battlefield_members.is_empty());
+        assert!(group.terminal_outcomes.is_empty());
         assert_eq!(
             crate::types::game_state::settled_logical_zone_change_records(&group),
             vec![record]
         );
-        group.terminal_outcomes = vec![
-            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Prevented,
-            crate::types::game_state::LogicalZoneChangeTerminalOutcome::Remained,
-        ];
-        assert!(crate::types::game_state::settled_logical_zone_change_records(&group).is_empty());
+        let mut no_moves = group.clone();
+        no_moves.instruction_deliveries.as_mut().unwrap().remove(0);
+        assert!(
+            crate::types::game_state::settled_logical_zone_change_records(&no_moves).is_empty()
+        );
     }
 }

@@ -1138,7 +1138,7 @@ pub(crate) fn settle_forwarded_zone_result(
             LogicalZoneChangeTerminalOutcome::Moved { .. } => warp_exile_result(
                 state,
                 member,
-                &crate::types::game_state::settled_logical_zone_change_records(group),
+                &crate::types::game_state::settled_battlefield_zone_change_records(group),
             ),
             LogicalZoneChangeTerminalOutcome::Prevented
             | LogicalZoneChangeTerminalOutcome::Remained
@@ -1150,13 +1150,18 @@ pub(crate) fn settle_forwarded_zone_result(
         bind_completed_forwarded_zone_result(state, result);
         return;
     }
+    let records = crate::types::game_state::settled_logical_zone_change_records(group);
     let result = forwarded_zone_result_from_events(
         state,
         marker.selected.as_deref(),
         group
             .all_origin_occurrences
             .iter()
-            .map(|occurrence| &occurrence.event),
+            .map(|occurrence| &occurrence.event)
+            .filter(|event| {
+                matches!(event, GameEvent::ZoneChanged { record, .. }
+                if records.iter().any(|primary| primary == record.as_ref()))
+            }),
     );
     bind_completed_forwarded_zone_result(state, result);
 }
@@ -3899,6 +3904,16 @@ fn drain_pending_change_zone_iteration_in_occurrence(
         // against the partly-moved board.
         for (i, member) in remaining.iter().enumerate() {
             let obj_id = &member.object_id;
+            // CR 400.7: a replacement child cannot substitute a same-ID successor.
+            if !logical_zone_change_group.instruction_member_is_current(state, *obj_id) {
+                logical_zone_change_group
+                    .record_delivery_completion(
+                        *obj_id,
+                        crate::types::game_state::ZoneMoveCompletion::Remained,
+                    )
+                    .expect("stale selected primary completes without a move");
+                continue;
+            }
             let ctx = crate::game::effects::change_zone::ChangeZoneIterationCtx {
                 source_id,
                 controller,
@@ -4018,16 +4033,21 @@ fn drain_pending_change_zone_iteration_in_occurrence(
                         state.waiting_for,
                         WaitingFor::EntryAttackTargetChoice { .. }
                     );
+                    if entry_target_choice {
+                        logical_zone_change_group
+                            .record_delivery_completion(
+                                *obj_id,
+                                crate::types::game_state::ZoneMoveCompletion::Moved,
+                            )
+                            .expect("post-entry target pause follows completed primary delivery");
+                    }
                     let paused_current = (!entry_target_choice).then(|| {
-                        state
-                            .pending_zone_change_delivery_from_replacement()
-                            .or_else(|| {
-                                anticipated_pause.map(|mut boundary| {
-                                    boundary.append_delivery_events(&events[delivery_start..]);
-                                    boundary
-                                })
-                            })
-                            .expect("replacement pause must retain its exact boundary")
+                        crate::game::zone_pipeline::retain_zone_change_pause(
+                            state,
+                            anticipated_pause,
+                            &events[delivery_start..],
+                        )
+                        .expect("replacement pause must retain its exact boundary")
                     });
                     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
                         .iter()

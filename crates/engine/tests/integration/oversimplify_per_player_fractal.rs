@@ -4368,6 +4368,702 @@ fn oversimplify_result_publishes_once_after_complete_replacement_pauses_and_igno
 
 #[test]
 fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remaining_members() {
+    for restore in 0..3 {
+        departure_mass_return_after_aura_pauses(restore);
+    }
+}
+
+#[test]
+fn departure_mass_selected_future_member_child_moves_do_not_rebind_primary() {
+    for origin in [Zone::Battlefield, Zone::Graveyard] {
+        for child_moves in 0..3 {
+            for restore in 0..3 {
+                departure_mass_child_member(origin, false, child_moves, false, restore, false);
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_mass_current_primary_child_moves_do_not_rebind_primary() {
+    for origin in [Zone::Battlefield, Zone::Graveyard] {
+        for child_moves in 0..3 {
+            for prevents in [false, true] {
+                for restore in 0..3 {
+                    departure_mass_child_member(
+                        origin,
+                        true,
+                        child_moves,
+                        prevents,
+                        restore,
+                        false,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn departure_mass_legacy_battlefield_publisher_recovers_first_pause_and_coherent_prefix() {
+    for restore in 1..3 {
+        departure_mass_child_member(Zone::Battlefield, false, 0, false, restore, true);
+    }
+}
+
+#[test]
+fn departure_mass_legacy_single_graveyard_request_recovers_its_exact_paused_identity() {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef,
+        ReplacementDefinition, ReplacementMode, ReturnResultId, TargetFilter,
+    };
+    use engine::types::game_state::InstructionResult;
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionStateWire;
+    for restore in 0..3 {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let selected = scenario
+            .add_creature_to_graveyard(P0, "Supplemental exact GY primary", 3, 3)
+            .id();
+        let mut root = departure_exile_definition(7);
+        let Effect::ChangeZoneAll {
+            origin,
+            destination,
+            target,
+            ..
+        } = root.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        *origin = Some(Zone::Graveyard);
+        *destination = Zone::Battlefield;
+        *target = TargetFilter::SpecificObject { id: selected };
+        let mut reader = departure_gain_definition(7, P0);
+        let Effect::GainLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate { from, to, .. },
+                },
+            ..
+        } = reader.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        *from = Some(Zone::Graveyard);
+        *to = Some(Zone::Battlefield);
+        let mut branch = departure_branch_reader();
+        let Effect::ChooseOneOf { branches, .. } = branch.effect.as_mut() else {
+            unreachable!()
+        };
+        branches[1] = reader;
+        root.sub_ability = Some(Box::new(branch));
+        let spell = scenario
+            .add_spell_to_hand(P0, "Supplemental exact GY legacy publisher", false)
+            .with_ability_definition(root)
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            })
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+        );
+        for player in [P0, P1] {
+            for _ in 0..8 {
+                scenario.add_card_to_library_top(player, "Library witness");
+            }
+        }
+        let mut runner = scenario.build();
+        let original = ObjectIncarnationRef::from_object(&runner.state().objects[&selected]);
+        let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .mode(ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+                decline: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::NoOp,
+                ))),
+            });
+        let object = runner.state_mut().objects.get_mut(&selected).unwrap();
+        object.replacement_definitions.push(replacement.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+        runner.cast(spell).commit();
+        for _ in 0..8 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("the real GY primary must pause");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        let pending = runner
+            .state()
+            .active_change_zone_frame()
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap();
+        assert!(pending.remaining.is_empty());
+        assert_eq!(pending.paused_current.as_ref().unwrap().member, original);
+        if restore == 0 {
+            runner
+                .state_mut()
+                .active_change_zone_frame_mut()
+                .unwrap()
+                .pending
+                .as_mut()
+                .unwrap()
+                .logical_zone_change_group
+                .instruction_deliveries = None;
+            // Public actions do not perform save migration. A missing active
+            // owner is refused before mutation, and restoring supplies it.
+            let before = serde_json::to_value(runner.state()).unwrap();
+            assert!(runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .is_err());
+            assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+            *runner.state_mut() = serde_json::from_value(before)
+                .expect("exact paused non-BF evidence normalizes on raw admission");
+        } else {
+            let mut saved = if restore == 1 {
+                serde_json::to_value(runner.state()).unwrap()
+            } else {
+                serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .unwrap()
+            };
+            assert!(departure_remove_instruction_deliveries(&mut saved) > 0);
+            *runner.state_mut() = if restore == 1 {
+                serde_json::from_value(saved)
+                    .expect("the paused member is an exact non-BF original witness")
+            } else {
+                serde_json::from_value::<ResolutionStateWire>(saved)
+                    .expect("current wire admits exact non-BF paused evidence")
+                    .into_game_state()
+            };
+        }
+        let deliveries = runner
+            .state()
+            .active_change_zone_frame()
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap()
+            .logical_zone_change_group
+            .instruction_deliveries
+            .as_ref()
+            .unwrap();
+        assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].binding.reference, original);
+        assert_eq!(deliveries[0].binding.expected_zone, Zone::Graveyard);
+        assert_eq!(deliveries[0].completion, None);
+        runner
+            .act(GameAction::ChooseReplacement { index: 1 })
+            .unwrap();
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Battlefield);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+        let frame = runner.state().return_result_frames.values().next().unwrap();
+        let InstructionResult::ZoneChanges(records) = &frame.results[&ReturnResultId(7)] else {
+            unreachable!()
+        };
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].object_id, selected);
+        assert_eq!(records[0].from_zone, Some(Zone::Graveyard));
+        assert_eq!(records[0].to_zone, Zone::Battlefield);
+        runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+        departure_assert_program_complete(&runner, spell, 3, 0);
+    }
+}
+
+fn departure_mass_child_member(
+    origin: Zone,
+    current_primary: bool,
+    child_moves: u8,
+    prevents: bool,
+    restore: u8,
+    legacy: bool,
+) {
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityModification,
+        QuantityRef, ReplacementDefinition, ReplacementMode, ReturnResultId, TargetFilter,
+        TriggerDefinition,
+    };
+    use engine::types::game_state::{InstructionResult, ZoneMoveCompletion};
+    use engine::types::identifiers::{ObjectIdentityBinding, ObjectIncarnationRef};
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::resolution::ResolutionStateWire;
+    use engine::types::triggers::TriggerMode;
+
+    // Supplemental typed instruction/replacement composition. No printed card
+    // is being assigned these abilities. CR 400.7: even a return to the same
+    // selected zone cannot turn a successor into the originally selected member.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let selected = [
+        scenario
+            .add_creature(P0, "Supplemental primary A", 3, 3)
+            .id(),
+        scenario
+            .add_creature(P0, "Supplemental future B", 2, 2)
+            .id(),
+        scenario
+            .add_creature(P1, "Supplemental normal peer C", 2, 2)
+            .id(),
+    ];
+    let invalidated = selected[usize::from(!current_primary)];
+    let observer = scenario
+        .add_enchantment_from_oracle(P0, "Supplemental departure observer", "")
+        .with_trigger_definition(
+            TriggerDefinition::new(TriggerMode::ChangesZone)
+                .origin(Zone::Battlefield)
+                .destination(Zone::Hand)
+                .valid_card(TargetFilter::SpecificObject { id: invalidated })
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+        )
+        .id();
+    let mut root = departure_exile_definition(7);
+    let Effect::ChangeZoneAll {
+        origin: from,
+        target,
+        ..
+    } = root.effect.as_mut()
+    else {
+        unreachable!()
+    };
+    *from = Some(origin);
+    *target = TargetFilter::Or {
+        filters: selected
+            .iter()
+            .map(|id| TargetFilter::SpecificObject { id: *id })
+            .collect(),
+    };
+    let mut branch = departure_branch_reader();
+    let Effect::ChooseOneOf { branches, .. } = branch.effect.as_mut() else {
+        unreachable!()
+    };
+    {
+        let gain = &mut branches[1];
+        let Effect::GainLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate { from, .. },
+                },
+            ..
+        } = gain.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        *from = Some(origin);
+        let second = gain.sub_ability.as_deref_mut().unwrap();
+        let Effect::GainLife {
+            amount:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate { from, .. },
+                },
+            ..
+        } = second.effect.as_mut()
+        else {
+            unreachable!()
+        };
+        *from = Some(origin);
+    }
+    root.sub_ability = Some(Box::new(branch));
+    let spell = scenario
+        .add_spell_to_hand(P0, "Supplemental selected primary identity", false)
+        .with_ability_definition(root)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    for player in [P0, P1] {
+        for _ in 0..8 {
+            scenario.add_card_to_library_top(player, "Library witness");
+        }
+    }
+    let mut runner = scenario.build();
+    let mut setup = vec![];
+    if origin == Zone::Graveyard {
+        for id in selected {
+            move_to_zone(runner.state_mut(), id, origin, &mut setup);
+        }
+    }
+    let original: Vec<_> = selected
+        .iter()
+        .map(|id| {
+            ObjectIdentityBinding::new(
+                ObjectIncarnationRef::from_object(&runner.state().objects[id]),
+                origin,
+            )
+        })
+        .collect();
+    let zone_move = |from: Zone, to: Zone| {
+        let mut effect: Effect = serde_json::from_value(serde_json::json!({
+            "type":"ChangeZone", "origin":from, "destination":to,
+        }))
+        .unwrap();
+        let Effect::ChangeZone { target, .. } = &mut effect else {
+            unreachable!()
+        };
+        *target = TargetFilter::SpecificObject { id: invalidated };
+        AbilityDefinition::new(AbilityKind::Spell, effect)
+    };
+    let mut child = if child_moves == 0 {
+        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)
+    } else {
+        zone_move(origin, Zone::Hand)
+    };
+    if child_moves == 2 {
+        child.sub_ability = Some(Box::new(zone_move(Zone::Hand, origin)));
+    }
+    let cost = AbilityCost::PayLife {
+        amount: QuantityExpr::Fixed { value: 1 },
+    };
+    if current_primary {
+        // Paying the outer replacement's life cost runs this existing life-loss
+        // continuation before the parked zone proposal can physically deliver.
+        // The two branches exercise a modified life event and a fully replaced
+        // life event; both must preserve the same original zone identity.
+        let replacement =
+            ReplacementDefinition::new(ReplacementEvent::LoseLife).execute(child.clone());
+        let replacement = if prevents {
+            replacement
+        } else {
+            replacement.quantity_modification(QuantityModification::Plus { value: 0 })
+        };
+        let object = runner.state_mut().objects.get_mut(&observer).unwrap();
+        object.replacement_definitions.push(replacement.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+    }
+    let replacement = ReplacementDefinition::new(ReplacementEvent::Moved)
+        .active_zones(vec![origin])
+        .valid_card(TargetFilter::SelfRef)
+        .destination_zone(Zone::Exile)
+        .mode(ReplacementMode::MayCost {
+            cost: cost.clone(),
+            decline: (!current_primary).then(|| Box::new(child.clone())),
+        });
+    for (id, replacement) in [
+        (selected[0], replacement),
+        (
+            selected[2],
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .active_zones(vec![origin])
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Exile)
+                .mode(ReplacementMode::MayCost {
+                    cost,
+                    decline: None,
+                }),
+        ),
+    ] {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.replacement_definitions.push(replacement.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(replacement);
+    }
+    runner.cast(spell).commit();
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            break;
+        }
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    for pause in 0..2 {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("the actual selected primary and the normal peer must each request a public replacement response");
+        };
+        assert_eq!(*player, if pause == 0 { P0 } else { P1 });
+        assert_eq!(candidates.len(), 2);
+        let pending = runner
+            .state()
+            .active_change_zone_frame()
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap();
+        let group = &pending.logical_zone_change_group;
+        assert_eq!(
+            group
+                .instruction_deliveries
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|entry| entry.binding)
+                .collect::<Vec<_>>(),
+            original
+        );
+        let (occurrence, result) = pending.pending_return_result_producer.unwrap();
+        assert!(!runner.state().return_result_frames[&occurrence]
+            .results
+            .contains_key(&result));
+        if pause == 1 {
+            let receipt = group
+                .instruction_deliveries
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|entry| entry.binding.reference.object_id == invalidated)
+                .unwrap();
+            assert_eq!(
+                receipt.completion,
+                Some(if child_moves == 0 {
+                    ZoneMoveCompletion::Moved
+                } else {
+                    ZoneMoveCompletion::Remained
+                })
+            );
+            if child_moves != 0 {
+                assert_eq!(
+                    runner.state().objects[&invalidated].zone,
+                    if child_moves == 2 { origin } else { Zone::Hand }
+                );
+                assert_eq!(
+                    runner.state().objects[&invalidated].incarnation,
+                    original[usize::from(!current_primary)]
+                        .reference
+                        .incarnation
+                        + u64::from(child_moves)
+                );
+                let child_records: Vec<_> = runner
+                    .state()
+                    .zone_changes_this_turn
+                    .iter()
+                    .filter(|record| {
+                        record.object_id == invalidated && record.to_zone == Zone::Hand
+                    })
+                    .collect();
+                assert_eq!(
+                    child_records.len(),
+                    1,
+                    "the child really delivered the selected object away"
+                );
+                if child_moves == 2 {
+                    assert_eq!(
+                        runner
+                            .state()
+                            .zone_changes_this_turn
+                            .iter()
+                            .filter(|record| record.object_id == invalidated
+                                && record.from_zone == Some(Zone::Hand)
+                                && record.to_zone == origin)
+                            .count(),
+                        1,
+                        "the child really returned the same storage ID as a new incarnation"
+                    );
+                }
+                if origin == Zone::Battlefield {
+                    let slot = group
+                        .prospective_battlefield_members
+                        .iter()
+                        .position(|member| {
+                            member.identity == original[usize::from(!current_primary)].reference
+                        })
+                        .unwrap();
+                    assert!(
+                        matches!(
+                            group.terminal_outcomes[slot],
+                            engine::types::game_state::LogicalZoneChangeTerminalOutcome::Moved { .. }
+                        ),
+                        "a primary no-move must retain the child's real BF observer departure"
+                    );
+                }
+            }
+        }
+        departure_assert_private_result_views(runner.state());
+        if legacy {
+            let mut saved = if restore == 1 {
+                serde_json::to_value(runner.state()).unwrap()
+            } else {
+                serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone()))
+                    .unwrap()
+            };
+            assert!(departure_remove_instruction_deliveries(&mut saved) > 0);
+            *runner.state_mut() = if restore == 1 {
+                serde_json::from_value(saved)
+                    .expect("BF original membership recovers at both public pauses")
+            } else {
+                serde_json::from_value::<ResolutionStateWire>(saved)
+                    .expect(
+                        "wire normalizes actual retained BF frames before projection comparison",
+                    )
+                    .into_game_state()
+            };
+            assert_eq!(
+                runner
+                    .state()
+                    .active_change_zone_frame()
+                    .unwrap()
+                    .pending
+                    .as_ref()
+                    .unwrap()
+                    .logical_zone_change_group
+                    .instruction_deliveries
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|entry| entry.binding)
+                    .collect::<Vec<_>>(),
+                original
+            );
+        } else {
+            *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+        }
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: if pause == 0 && current_primary { 0 } else { 1 },
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        runner.state().objects[&selected[2]].zone,
+        Zone::Exile,
+        "the unaffected selected peer really delivers"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseOneOfBranch { .. }
+    ));
+    let frame = runner.state().return_result_frames.values().next().unwrap();
+    let InstructionResult::ZoneChanges(records) = &frame.results[&ReturnResultId(7)] else {
+        unreachable!()
+    };
+    let excluded = child_moves != 0;
+    assert_eq!(records.len(), if excluded { 2 } else { 3 });
+    assert_eq!(
+        records.iter().any(|record| record.object_id == invalidated),
+        !excluded
+    );
+    assert!(records.iter().any(|record| record.object_id == selected[2]
+        && record.from_zone == Some(origin)
+        && record.to_zone == Zone::Exile));
+    assert!(
+        records.iter().all(|record| record
+            .trigger_source_context
+            .as_ref()
+            .is_some_and(|context| original.contains(&context.identity))),
+        "only genuine primary records retain the original selected identities"
+    );
+    if excluded {
+        let object = &runner.state().objects[&invalidated];
+        assert_eq!(
+            object.zone,
+            if child_moves == 2 || child_moves == 0 {
+                origin
+            } else {
+                Zone::Hand
+            }
+        );
+        assert_eq!(
+            object.incarnation,
+            original[usize::from(!current_primary)]
+                .reference
+                .incarnation
+                + u64::from(child_moves),
+            "finishing the genuine peer cannot move the same-ID successor"
+        );
+    }
+    runner.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+    // CR 603.10: the child's BF departure remains observable independently of
+    // whether that object's primary instruction delivered an event.
+    for _ in 0..12 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    let primary_gain = if excluded {
+        if current_primary {
+            2
+        } else {
+            3
+        }
+    } else {
+        5
+    };
+    let observer_gain = i32::from(origin == Zone::Battlefield && child_moves != 0);
+    assert_eq!(runner.state().objects[&observer].zone, Zone::Battlefield);
+    departure_assert_program_complete(
+        &runner,
+        spell,
+        primary_gain + observer_gain - i32::from(current_primary && !prevents),
+        2,
+    );
+}
+
+fn departure_restore_mass_owner(state: &GameState, restore: u8) -> GameState {
+    use engine::types::resolution::ResolutionStateWire;
+    match restore {
+        0 => state.clone(),
+        1 => serde_json::from_value(serde_json::to_value(state).unwrap())
+            .expect("raw state retains the exact original instruction population"),
+        2 => serde_json::from_value::<ResolutionStateWire>(
+            serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+        )
+        .expect("current wire retains the exact original instruction population")
+        .into_game_state(),
+        _ => unreachable!(),
+    }
+}
+
+fn departure_remove_instruction_deliveries(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Object(fields) => {
+            let removed = usize::from(fields.remove("instruction_deliveries").is_some());
+            removed
+                + fields
+                    .values_mut()
+                    .map(departure_remove_instruction_deliveries)
+                    .sum::<usize>()
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .map(departure_remove_instruction_deliveries)
+            .sum(),
+        _ => 0,
+    }
+}
+
+fn departure_mass_return_after_aura_pauses(restore: u8) {
     use engine::game::scenario::{GameScenario, P0, P1};
     use engine::types::ability::{
         Effect, QuantityExpr, QuantityRef, ReturnResultId, TargetFilter, TargetRef, TypedFilter,
@@ -4483,6 +5179,17 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
     for aura in &auras {
         engine::game::zones::move_to_zone(runner.state_mut(), *aura, Zone::Graveyard, &mut setup);
     }
+    let original: Vec<_> = all
+        .iter()
+        .map(|id| {
+            engine::types::identifiers::ObjectIdentityBinding::new(
+                engine::types::identifiers::ObjectIncarnationRef::from_object(
+                    &runner.state().objects[id],
+                ),
+                Zone::Graveyard,
+            )
+        })
+        .collect();
     runner.cast(spell).commit();
     for _ in 0..8 {
         if matches!(
@@ -4495,6 +5202,7 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
     }
     for aura in &auras[..2] {
         let WaitingFor::ReturnAsAuraTarget {
+            player,
             returned_id,
             legal_targets,
             ..
@@ -4502,6 +5210,7 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
         else {
             panic!("each actual Aura pauses the mass return before the remaining members");
         };
+        assert_eq!(*player, P0);
         assert_eq!(*returned_id, *aura);
         assert!(legal_targets.contains(&TargetRef::Object(hosts[1])));
         let pending = runner
@@ -4512,6 +5221,17 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
             .as_ref()
             .unwrap();
         let (occurrence, result) = pending.pending_return_result_producer.unwrap();
+        let group = &pending.logical_zone_change_group;
+        let deliveries = group.instruction_deliveries.as_ref().unwrap();
+        let group_id = group.logical_group_id;
+        assert_eq!(deliveries.len(), 5);
+        assert_eq!(
+            deliveries
+                .iter()
+                .map(|delivery| delivery.binding)
+                .collect::<Vec<_>>(),
+            original
+        );
         assert_eq!(result, ReturnResultId(7));
         assert!(pending.return_result_process.is_some());
         assert_eq!(
@@ -4563,8 +5283,123 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
             "public Aura host choice: {error}"
         );
         assert_eq!(serde_json::to_value(hostile.state()).unwrap(), before);
-        let saved = serde_json::to_value(runner.state()).unwrap();
-        *runner.state_mut() = serde_json::from_value(saved).expect("both Aura host pauses retain the exact unfinished producer independently of the latched host prompt");
+        for fault in 0..6 {
+            let mut hostile = runner.state().clone();
+            let foreign_binding = engine::types::identifiers::ObjectIdentityBinding::new(
+                engine::types::identifiers::ObjectIncarnationRef::from_object(
+                    &hostile.objects[&hosts[0]],
+                ),
+                Zone::Battlefield,
+            );
+            let group = &mut hostile
+                .active_change_zone_frame_mut()
+                .unwrap()
+                .pending
+                .as_mut()
+                .unwrap()
+                .logical_zone_change_group;
+            let deliveries = group.instruction_deliveries.as_mut().unwrap();
+            let current = deliveries
+                .iter()
+                .position(|delivery| delivery.binding.reference.object_id == *aura)
+                .unwrap();
+            match fault {
+                0 => deliveries.push(deliveries[0].clone()),
+                1 => {
+                    deliveries.remove(current);
+                }
+                2 => deliveries[current].binding.expected_zone = Zone::Exile,
+                3 => {
+                    deliveries[current].completion =
+                        Some(engine::types::game_state::ZoneMoveCompletion::Moved)
+                }
+                4 => deliveries[current].binding = foreign_binding,
+                5 => deliveries[current].binding.reference.incarnation += 1,
+                _ => unreachable!(),
+            }
+            assert!(
+                serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap())
+                    .is_err()
+            );
+            assert!(
+                serde_json::from_value::<engine::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        engine::types::resolution::ResolutionStateWire::from_game_state(
+                            hostile.clone()
+                        )
+                    )
+                    .unwrap()
+                )
+                .is_err()
+            );
+            let mut hostile = GameRunner::from_state(hostile);
+            let before = serde_json::to_value(hostile.state()).unwrap();
+            let error = hostile
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(hosts[1])),
+                })
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("logical") || error.contains("instruction"),
+                "corrupt primary receipt {fault}: {error}"
+            );
+            assert_eq!(
+                serde_json::to_value(hostile.state()).unwrap(),
+                before,
+                "preflight refuses before attaching an Aura or advancing its primary tail"
+            );
+        }
+        // A GY tail of bare IDs cannot establish its original incarnations.
+        // Compatibility must reject this active publisher rather than guess.
+        let mut legacy = serde_json::to_value(runner.state()).unwrap();
+        assert_eq!(departure_remove_instruction_deliveries(&mut legacy), 1);
+        let unchanged = legacy.clone();
+        let error = serde_json::from_value::<GameState>(legacy.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("lacks original identity/primary completion authority"),
+            "ambiguous GY publisher: {error}"
+        );
+        assert!(error.contains(&format!("{group_id:?}")));
+        assert_eq!(legacy, unchanged);
+        let mut legacy_wire = serde_json::to_value(
+            engine::types::resolution::ResolutionStateWire::from_game_state(runner.state().clone()),
+        )
+        .unwrap();
+        assert!(departure_remove_instruction_deliveries(&mut legacy_wire) > 0);
+        let unchanged_wire = legacy_wire.clone();
+        let error = serde_json::from_value::<engine::types::resolution::ResolutionStateWire>(
+            legacy_wire.clone(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("lacks original identity/primary completion authority")
+                && error.contains(&format!("{group_id:?}")),
+            "ambiguous wire GY publisher: {error}"
+        );
+        assert_eq!(legacy_wire, unchanged_wire);
+        departure_assert_private_result_views(runner.state());
+        *runner.state_mut() = departure_restore_mass_owner(runner.state(), restore);
+        assert_eq!(
+            runner
+                .state()
+                .active_change_zone_frame()
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .logical_zone_change_group
+                .instruction_deliveries
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|delivery| delivery.binding)
+                .collect::<Vec<_>>(),
+            original
+        );
         runner
             .act(GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(hosts[1])),
@@ -4577,8 +5412,8 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
             Some(hosts[1])
         );
     }
-    for card in all {
-        assert_eq!(runner.state().objects[&card].zone, Zone::Battlefield);
+    for card in &all {
+        assert_eq!(runner.state().objects[card].zone, Zone::Battlefield);
     }
     assert!(runner.state().active_change_zone_frame().is_none());
     let frame = runner.state().return_result_frames.values().next().unwrap();
@@ -4586,6 +5421,18 @@ fn departure_mass_return_publishes_only_after_both_aura_host_pauses_and_remainin
         unreachable!()
     };
     assert_eq!(records.len(), 5);
+    assert!(
+        records.iter().all(|record| record
+            .trigger_source_context
+            .as_ref()
+            .is_some_and(|context| original.contains(&context.identity))),
+        "every return record certifies its original graveyard incarnation"
+    );
+    let mut recorded: Vec<_> = records.iter().map(|record| record.object_id).collect();
+    let mut expected = all;
+    recorded.sort();
+    expected.sort();
+    assert_eq!(recorded, expected);
     assert!(records
         .iter()
         .all(|record| record.from_zone == Some(Zone::Graveyard)

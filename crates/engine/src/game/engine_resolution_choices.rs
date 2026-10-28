@@ -7296,6 +7296,17 @@ fn handle_resolution_choice_in_occurrence(
                     let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
                         let card_id = &member.object_id;
+                        // CR 400.7: a replacement child cannot substitute a same-ID successor.
+                        if !logical_zone_change_group.instruction_member_is_current(state, *card_id)
+                        {
+                            logical_zone_change_group
+                                .record_delivery_completion(
+                                    *card_id,
+                                    crate::types::game_state::ZoneMoveCompletion::Remained,
+                                )
+                                .expect("stale selected primary completes without a move");
+                            continue;
+                        }
                         let origin = state
                             .objects
                             .get(card_id)
@@ -7450,16 +7461,7 @@ fn handle_resolution_choice_in_occurrence(
                                         pending_return_result_producer,
                                         logical_zone_change_group,
                                         paused_current: Some(
-                                            state
-                                                .pending_zone_change_delivery_from_replacement()
-                                                .or_else(|| {
-                                                    anticipated_pause.map(|mut boundary| {
-                                                        boundary.append_delivery_events(
-                                                            &events[delivery_start..],
-                                                        );
-                                                        boundary
-                                                    })
-                                                })
+                                            crate::game::zone_pipeline::retain_zone_change_pause(state, anticipated_pause, &events[delivery_start..])
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
                                         remaining: members[i + 1..].to_vec(),
@@ -7854,6 +7856,17 @@ fn handle_resolution_choice_in_occurrence(
                     let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
                         let card_id = &member.object_id;
+                        // CR 400.7: a replacement child cannot substitute a same-ID successor.
+                        if !logical_zone_change_group.instruction_member_is_current(state, *card_id)
+                        {
+                            logical_zone_change_group
+                                .record_delivery_completion(
+                                    *card_id,
+                                    crate::types::game_state::ZoneMoveCompletion::Remained,
+                                )
+                                .expect("stale selected primary completes without a move");
+                            continue;
+                        }
                         let anticipated_pause =
                             effects::change_zone::anticipated_zone_change_delivery(
                                 state,
@@ -7936,16 +7949,7 @@ fn handle_resolution_choice_in_occurrence(
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
                                         paused_current: Some(
-                                            state
-                                                .pending_zone_change_delivery_from_replacement()
-                                                .or_else(|| {
-                                                    anticipated_pause.map(|mut boundary| {
-                                                        boundary.append_delivery_events(
-                                                            &events[delivery_start..],
-                                                        );
-                                                        boundary
-                                                    })
-                                                })
+                                            crate::game::zone_pipeline::retain_zone_change_pause(state, anticipated_pause, &events[delivery_start..])
                                                 .expect("zone-change pause must retain its exact boundary"),
                                         ),
                                         remaining: members[i + 1..].to_vec(),

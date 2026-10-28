@@ -4274,12 +4274,12 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     group: &mut LogicalZoneChangeGroup,
     events: &[GameEvent],
 ) -> Result<(), String> {
-    let zone_change_events: Vec<_> = events
+    let occurrence_start = group.all_origin_occurrences.len();
+    group.append_delivery_events(events)?;
+    let zone_change_events: Vec<_> = group.all_origin_occurrences[occurrence_start..]
         .iter()
-        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
-        .cloned()
+        .map(|occurrence| occurrence.event.clone())
         .collect();
-    group.append_delivery_events(&zone_change_events)?;
     let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
     resolve_and_apply_trigger_collection(
         state,
@@ -4302,6 +4302,7 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     final_events: &mut [GameEvent],
 ) -> Result<(), String> {
     append_and_collect_logical_zone_trigger_segment(state, group, final_events)?;
+    group.finalize_instruction_observer_outcomes()?;
     latch_logical_zone_change_group_immediately_after(state, group);
 
     let post_event_members: Vec<_> = group

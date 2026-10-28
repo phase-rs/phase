@@ -6016,6 +6016,7 @@ impl ResolutionStateWire {
                     }
                 }
                 normalize_legacy_completed_resolution_carrier(&mut legacy);
+                normalize_logical_zone_instruction_owners(&mut legacy)?;
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(&mut legacy)?;
                 let frames = canonicalize_legacy_resolution_state(&legacy)?;
                 frames
@@ -6083,6 +6084,8 @@ impl ResolutionStateWire {
                     .map_err(|error| error.to_string())?;
                 let projected = project_frames_into_legacy_state(&state, &frames)?;
                 let mut projected = projected;
+                normalize_logical_zone_instruction_owners(&mut projected)?;
+                frames = projected.resolution_stack.clone();
                 crate::types::game_state::normalize_resolution_cast_offer_allocator(
                     &mut projected,
                 )?;
@@ -6108,6 +6111,100 @@ impl ResolutionStateWire {
             }
         }
     }
+}
+
+/// Normalize missing primary-request membership only for retained publishers.
+pub(crate) fn normalize_logical_zone_instruction_owners(
+    state: &mut GameState,
+) -> Result<(), String> {
+    let selections = state
+        .resolution_stack
+        .iter()
+        .filter_map(|frame| {
+            let group = match frame {
+                ResolutionFrame::ChangeZone(frame) => frame
+                    .pending
+                    .as_ref()
+                    .map(|pending| pending.logical_zone_change_group.logical_group_id),
+                ResolutionFrame::BatchDelivery(batch) => {
+                    Some(batch.logical_zone_change_group.logical_group_id)
+                }
+                _ => None,
+            }?;
+            crate::types::game_state::retained_forwarded_zone_selection(state, group)
+                .map(|selection| (group, selection))
+        })
+        .collect::<Vec<_>>();
+    for frame in state.resolution_stack.frames.iter_mut() {
+        match frame {
+            ResolutionFrame::ChangeZone(frame) => {
+                if let Some(pending) = frame.pending.as_mut() {
+                    let selected = selections
+                        .iter()
+                        .find(|(id, _)| *id == pending.logical_zone_change_group.logical_group_id);
+                    if pending.pending_return_result_producer.is_some() || selected.is_some() {
+                        let tail = pending
+                            .remaining
+                            .iter()
+                            .map(|member| (member.object_id, None))
+                            .collect::<Vec<_>>();
+                        pending
+                            .logical_zone_change_group
+                            .recover_instruction_deliveries(
+                                &tail,
+                                pending.paused_current.as_ref(),
+                                pending.origin,
+                                selected.and_then(|(_, selected)| selected.as_deref()),
+                                None,
+                            )?;
+                    }
+                }
+            }
+            ResolutionFrame::BatchDelivery(batch) => {
+                let selected = selections
+                    .iter()
+                    .find(|(id, _)| *id == batch.logical_zone_change_group.logical_group_id);
+                if matches!(
+                    batch.completion,
+                    Some(
+                        crate::types::game_state::BatchCompletion::RecordInstructionZoneResult { .. }
+                    )
+                ) || selected.is_some()
+                {
+                    let tail = batch
+                        .remaining
+                        .iter()
+                        .map(|id| {
+                            (
+                                *id,
+                                batch
+                                    .requests
+                                    .iter()
+                                    .find(|request| request.object_id == *id)
+                                    .and_then(|request| request.expected_origin)
+                                    .map(|(pin, zone)| {
+                                        crate::types::identifiers::ObjectIdentityBinding::new(
+                                            pin, zone,
+                                        )
+                                    }),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    batch
+                        .logical_zone_change_group
+                        .recover_instruction_deliveries(
+                            &tail,
+                            batch.paused_current.as_ref(),
+                            None,
+                            selected.and_then(|(_, selected)| selected.as_deref()),
+                            (!batch.attempted.is_empty()).then_some(batch.attempted.as_slice()),
+                        )?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// CR 608.1: a spell or ability resolves once all players have passed in
@@ -9401,6 +9498,49 @@ mod tests {
         ));
         assert!(counter_additions.active_counter_additions().is_none());
         assert_reserializes_current_only(counter_additions);
+    }
+
+    #[test]
+    fn logical_instruction_missing_inactive_membership_restores_raw_current_and_v1() {
+        let mut state = GameState::new_two_player(119);
+        let ResolutionFrame::BatchDelivery(mut batch) = batch_delivery_frame(119) else {
+            unreachable!()
+        };
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(119),
+            PlayerId(0),
+            "historical observer".into(),
+            Zone::Graveyard,
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, object, Zone::Hand, &mut events);
+        batch
+            .logical_zone_change_group
+            .append_delivery_events(&events)
+            .unwrap();
+        batch.logical_zone_change_group.instruction_deliveries = None;
+        let expected = batch.logical_zone_change_group.clone();
+        state.push_batch_delivery((*batch).clone());
+        let raw = serde_json::to_value(&state).unwrap();
+        let restored_raw: GameState = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            restored_raw
+                .active_batch_delivery()
+                .unwrap()
+                .logical_zone_change_group,
+            expected
+        );
+        let mut v1 = v1_wire_value(state.clone());
+        v1["pending_batch_deliveries"] = serde_json::to_value(batch).unwrap();
+        let current = serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+        for value in [v1, current] {
+            let restored = serde_json::from_value::<ResolutionStateWire>(value)
+                .unwrap()
+                .into_game_state();
+            assert_eq!(restored.active_batch_delivery().unwrap().logical_zone_change_group, expected,
+                "inactive historical observer authority does not acquire an invented empty instruction");
+        }
     }
 
     #[test]

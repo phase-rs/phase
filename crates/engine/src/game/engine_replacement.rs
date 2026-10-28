@@ -401,12 +401,34 @@ fn handle_replacement_choice_inner(
     // A replacement-paused zone move belongs to its logical owner by both the
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
-    let parked_zone_change_delivery = effects::warp_zone_delivery_from_replacement(state);
+    let mut parked_zone_change_delivery = effects::warp_zone_delivery_from_replacement(state);
     if let Some(delivery) = parked_zone_change_delivery.as_ref() {
         effects::normalize_warp_zone_delivery_tail(state, delivery);
     }
     let parked_aggregate_opportunity = super::replacement::pending_damage_has_opportunity(state);
-    let result = super::replacement::continue_replacement(state, index, events);
+    let mut result = super::replacement::continue_replacement(state, index, events);
+    // CR 400.7: a replacement child may have moved the pending original away
+    // and back. Already-delivered entry/counter tails retain their completion.
+    if matches!(
+        result,
+        super::replacement::ReplacementResult::Execute(ProposedEvent::ZoneChange { .. })
+    ) {
+        if let Some(paused) = parked_zone_change_delivery.as_mut() {
+            if let ProposedEvent::ZoneChange { from, .. } = &paused.expected_event {
+                if paused.terminal_completion.is_none()
+                    && !crate::game::zone_pipeline::selected_zone_origin_is_current(
+                        state,
+                        paused.member,
+                        *from,
+                    )
+                {
+                    paused.terminal_completion =
+                        Some(crate::types::game_state::ZoneMoveCompletion::Remained);
+                    result = super::replacement::ReplacementResult::Prevented;
+                }
+            }
+        }
+    }
     // CR 614.12a: an optional `MayCost` accept whose payment surfaced an
     // interactive sub-choice (e.g. Mox Diamond's "discard a land card" with
     // multiple eligible lands) re-parked the pending replacement with

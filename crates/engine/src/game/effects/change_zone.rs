@@ -1483,6 +1483,16 @@ pub fn resolve(
     let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
+        // CR 400.7: a replacement child cannot substitute a same-ID successor.
+        if !logical_zone_change_group.instruction_member_is_current(state, *obj_id) {
+            logical_zone_change_group
+                .record_delivery_completion(
+                    *obj_id,
+                    crate::types::game_state::ZoneMoveCompletion::Remained,
+                )
+                .expect("stale selected primary completes without a move");
+            continue;
+        }
         if dest_zone == Zone::Exile {
             let acting_player = state
                 .objects
@@ -1601,15 +1611,12 @@ pub fn resolve(
                         pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: Some(
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("zone-change pause must retain its exact boundary"),
+                            crate::game::zone_pipeline::retain_zone_change_pause(
+                                state,
+                                anticipated_pause,
+                                &events[delivery_start..],
+                            )
+                            .expect("zone-change pause must retain its exact boundary"),
                         ),
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
@@ -3160,6 +3167,15 @@ pub fn resolve_all(
     let logical_group_event_start = events.len();
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
+        if !logical_zone_change_group.instruction_member_is_current(state, obj_id) {
+            logical_zone_change_group
+                .record_delivery_completion(
+                    obj_id,
+                    crate::types::game_state::ZoneMoveCompletion::Remained,
+                )
+                .expect("stale mass primary completes without a move");
+            continue;
+        }
         // CR 400.3: Each object's actual current zone is the source zone for the
         // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
         // callers (e.g. "search graveyard, hand, and library") let each object's
@@ -3228,6 +3244,14 @@ pub fn resolve_all(
                     state.waiting_for,
                     crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
                 );
+                if entry_target_choice {
+                    logical_zone_change_group
+                        .record_delivery_completion(
+                            obj_id,
+                            crate::types::game_state::ZoneMoveCompletion::Moved,
+                        )
+                        .expect("post-entry target pause follows completed primary delivery");
+                }
                 // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
                 // own `EffectZoneChoice` (or a counter-pause replacement choice).
                 // Stash the unprocessed co-entering members so
@@ -3254,15 +3278,12 @@ pub fn resolve_all(
                         pending_return_result_producer,
                         logical_zone_change_group,
                         paused_current: (!entry_target_choice).then(|| {
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("replacement pause must retain its exact boundary")
+                            crate::game::zone_pipeline::retain_zone_change_pause(
+                                state,
+                                anticipated_pause,
+                                &events[delivery_start..],
+                            )
+                            .expect("replacement pause must retain its exact boundary")
                         }),
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
@@ -3279,7 +3300,10 @@ pub fn resolve_all(
                             .collect(),
                         source_id: ability.source_id,
                         controller: ability.controller,
-                        origin: None,
+                        origin: origin_zones
+                            .first()
+                            .copied()
+                            .filter(|_| origin_zones.len() == 1),
                         destination: dest_zone,
                         enter_transformed: false,
                         enters_under_player,
@@ -3343,7 +3367,10 @@ pub fn resolve_all(
                             .collect(),
                         source_id: ability.source_id,
                         controller: ability.controller,
-                        origin: None,
+                        origin: origin_zones
+                            .first()
+                            .copied()
+                            .filter(|_| origin_zones.len() == 1),
                         destination: dest_zone,
                         enter_transformed: false,
                         enters_under_player,
