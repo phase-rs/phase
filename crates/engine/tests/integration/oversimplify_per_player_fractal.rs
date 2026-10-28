@@ -5423,11 +5423,16 @@ fn departure_assert_retirement_preflight(
         WaitingFor::ReplacementChoice { .. } => GameAction::ChooseReplacement { index: 1 },
         _ => panic!("hostile fixtures start from an actual public prompt"),
     };
-    let faults: Vec<_> = (0..6)
+    let queued_component = state.resolution_stack.iter().any(|frame| {
+        matches!(frame, ResolutionFrame::BatchDelivery(batch)
+            if batch.delegated_primary.is_some() && !batch.requests.is_empty())
+    });
+    let faults: Vec<_> = (0..8)
         .filter(|fault| match fault {
             0 | 1 => !delegation,
             2 | 3 => proof,
             4 | 5 => delegation,
+            6 | 7 => delegation && queued_component,
             _ => unreachable!(),
         })
         .collect();
@@ -5474,8 +5479,18 @@ fn departure_assert_retirement_preflight(
                         if fault == 4 {
                             delegated.delivery.owner_group =
                                 Some(LogicalZoneChangeGroupId(u64::MAX - 1));
-                        } else {
+                        } else if fault == 5 {
                             delegated.components.push(delegated.components[0]);
+                        } else {
+                            let (pin, zone) = batch.requests[0].expected_origin.as_mut().unwrap();
+                            if fault == 6 {
+                                *zone = Zone::Library;
+                            } else {
+                                *pin = engine::types::identifiers::ObjectIncarnationRef::of(
+                                    pin.object_id,
+                                    pin.incarnation + 1,
+                                );
+                            }
                         }
                         changed = true;
                     }
@@ -5525,7 +5540,7 @@ fn departure_assert_retirement_preflight(
         // Full proof authority is admitted by the raw/current readers instead.
         let written = serde_json::to_value(ResolutionStateWire::from_game_state(hostile.clone()));
         match fault {
-            0 | 1 | 4 | 5 => assert!(written.is_err(), "structural fault {fault}"),
+            0 | 1 | 4 | 5 | 6 | 7 => assert!(written.is_err(), "structural fault {fault}"),
             2 | 3 => {
                 let written = written.expect("proof faults retain valid stack structure");
                 assert_eq!(
@@ -6094,6 +6109,167 @@ fn departure_later_branch_retirement(batch: bool, movement: u8, deep: bool, rest
         if movement == 0 { 5 } else { 6 } - i32::from(deep),
         2,
     );
+}
+
+#[test]
+fn departure_revealed_library_queue_keeps_exact_origin_admission() {
+    use engine::types::identifiers::ObjectIncarnationRef;
+    use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+    use engine::types::resolution::{ResolutionFrame, ResolutionStateWire};
+
+    // Synthetic reveal/entry consumer, with the pinned Adaptive Automaton text.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cards = [P0, P1].map(|owner| {
+        scenario.add_creature_to_hand_from_oracle(owner, "Adaptive Automaton", 2, 2,
+            "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nOther creatures you control of the chosen type get +1/+1.").id()
+    });
+    let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic exact reveal", true,
+        "Each player reveals the top card of their library. If all cards revealed this way are creature cards, put those cards onto the battlefield under their owners' control. You gain 7 life.")
+        .with_mana_cost(ManaCost::Cost { generic: 1, shards: vec![] }).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![])],
+    );
+    let mut runner = scenario.build();
+    for card in cards {
+        move_to_zone(runner.state_mut(), card, Zone::Library, &mut Vec::new());
+        let owner = runner.state().objects[&card].owner;
+        let library = runner.state_mut().library_of_mut(owner);
+        library.retain(|id| *id != card);
+        library.push_front(card);
+    }
+    runner.cast(spell).resolve();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::NamedChoice { player: P0, .. }
+    ));
+    assert_eq!(runner.life(P0), 20);
+    let queued = runner
+        .state()
+        .resolution_stack
+        .iter()
+        .find_map(|frame| {
+            let ResolutionFrame::BatchDelivery(batch) = frame else {
+                return None;
+            };
+            (batch.requests.len() == 1).then_some(batch)
+        })
+        .expect("the declared reveal reader parks its real Library-origin tail");
+    let pin = ObjectIncarnationRef::from_object(&runner.state().objects[&cards[1]]);
+    assert_eq!(queued.requests[0].object_id, cards[1]);
+    assert_eq!(
+        queued.requests[0].expected_origin,
+        Some((pin, Zone::Library))
+    );
+    assert_eq!(
+        queued
+            .logical_zone_change_group
+            .instruction_deliveries
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|delivery| delivery.binding.reference == pin)
+            .unwrap()
+            .binding
+            .expected_zone,
+        Zone::Library
+    );
+    assert!(runner
+        .state()
+        .return_result_frames
+        .values()
+        .flat_map(|frame| frame.results.values())
+        .any(|result| result
+            .revealed_cards()
+            .is_some_and(|members| members.contains(&pin))));
+
+    let raw = serde_json::to_value(runner.state()).unwrap();
+    let wire =
+        serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap();
+    let raw_loaded: GameState =
+        serde_json::from_value(raw.clone()).expect("intact Library queue passes raw admission");
+    let wire_loaded: ResolutionStateWire = serde_json::from_value(wire.clone())
+        .expect("intact Library queue passes current admission");
+    assert_eq!(raw_loaded.resolution_stack, runner.state().resolution_stack);
+    assert_eq!(
+        wire_loaded.game_state().resolution_stack,
+        runner.state().resolution_stack
+    );
+    for (saved, carrier) in [(&raw, "resolution_stack"), (&wire, "resolution_frames")] {
+        for fault in 0..3 {
+            let mut hostile = saved.clone();
+            let batch = hostile[carrier]["frames"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|frame| frame["type"] == "BatchDelivery")
+                .unwrap();
+            let origin = &mut batch["data"]["requests"][0]["expected_origin"];
+            match fault {
+                0 => origin[1] = serde_json::json!("Hand"),
+                1 => {
+                    origin[0] = serde_json::to_value(ObjectIncarnationRef::of(
+                        pin.object_id,
+                        pin.incarnation + 1,
+                    ))
+                    .unwrap()
+                }
+                2 => {
+                    origin[0] =
+                        serde_json::to_value(ObjectIncarnationRef::of(spell, pin.incarnation))
+                            .unwrap()
+                }
+                _ => unreachable!(),
+            }
+            if carrier == "resolution_stack" {
+                assert!(
+                    serde_json::from_value::<GameState>(hostile).is_err(),
+                    "raw Library authority fault {fault}"
+                );
+            } else {
+                assert!(
+                    serde_json::from_value::<ResolutionStateWire>(hostile).is_err(),
+                    "current Library authority fault {fault}"
+                );
+            }
+        }
+    }
+    for restore in 0..3 {
+        let mut loaded =
+            GameRunner::from_state(departure_restore_mass_owner(runner.state(), restore));
+        for (owner, kind) in [(P0, "Goblin"), (P1, "Elf")] {
+            assert!(
+                matches!(loaded.state().waiting_for, WaitingFor::NamedChoice { player, .. } if player == owner)
+            );
+            let action = GameAction::ChooseOption {
+                choice: kind.into(),
+            };
+            assert!(engine::ai_support::legal_actions(loaded.state()).contains(&action));
+            loaded.act(action).unwrap();
+            if owner == P0 {
+                assert_eq!(
+                    loaded.life(P0),
+                    20,
+                    "the real second entry still blocks the tail"
+                );
+                *loaded.state_mut() = departure_restore_mass_owner(loaded.state(), restore);
+            }
+        }
+        for _ in 0..24 {
+            if loaded.state().stack.is_empty()
+                && matches!(loaded.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            loaded.act(GameAction::PassPriority).unwrap();
+        }
+        for (owner, card) in [(P0, cards[0]), (P1, cards[1])] {
+            assert_eq!(loaded.state().objects[&card].zone, Zone::Battlefield);
+            assert_eq!(loaded.state().objects[&card].controller, owner);
+        }
+        departure_assert_program_complete(&loaded, spell, 7, 0);
+    }
 }
 
 #[test]

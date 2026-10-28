@@ -2641,7 +2641,7 @@ mod retained_spell_publication {
                     }
                     "Lockjaw, Slobbering Teleporter" => {
                         assert_eq!(*execute.effect, counter(1));
-                        assert!(face.keywords.contains(&Keyword::Vigilance));
+                        assert!(face.keywords.contains(&Keyword::Vigilance)); // allow-raw-authority: parser publication fixture checks Lockjaw's printed CardFace Vigilance keyword
                     }
                     "Mister Fantastic" => assert_eq!(
                         *execute.effect,
@@ -2688,7 +2688,7 @@ mod retained_spell_publication {
                             rhs: QuantityExpr::Fixed { value: 2 }
                         })
                     );
-                    assert!(face.keywords.contains(&Keyword::Prowess));
+                    assert!(face.keywords.contains(&Keyword::Prowess)); // allow-raw-authority: parser publication fixture checks Lyse Hext's printed CardFace Prowess keyword
                 }
                 "Gaddock Teeg" => {
                     assert_eq!(face.static_abilities.len(), 2);
@@ -2775,7 +2775,7 @@ mod retained_spell_publication {
                 }
                 "H.E.R.B.I.E., Lovable Robot" => {
                     assert_eq!(face.abilities.len(), 2);
-                    assert!(face.keywords.contains(&Keyword::Flying));
+                    assert!(face.keywords.contains(&Keyword::Flying)); // allow-raw-authority: parser publication fixture checks H.E.R.B.I.E.'s printed CardFace Flying keyword
                 }
                 "Mister Fantastic" => {
                     assert_eq!(face.abilities.len(), 1);
@@ -2789,9 +2789,9 @@ mod retained_spell_publication {
                     );
                 }
                 "Traxos, Academy Guardian" => {
-                    assert!(face.keywords.contains(&Keyword::Flying));
-                    assert!(face.keywords.contains(&Keyword::Vigilance));
-                    assert!(face.keywords.contains(&Keyword::Prowess));
+                    assert!(face.keywords.contains(&Keyword::Flying)); // allow-raw-authority: parser publication fixture checks Traxos's printed CardFace Flying keyword
+                    assert!(face.keywords.contains(&Keyword::Vigilance)); // allow-raw-authority: parser publication fixture checks Traxos's printed CardFace Vigilance keyword
+                    assert!(face.keywords.contains(&Keyword::Prowess)); // allow-raw-authority: parser publication fixture checks Traxos's printed CardFace Prowess keyword
                 }
                 "Capsizing Wave" => {
                     assert_eq!(face.abilities.len(), 1);
@@ -3627,7 +3627,7 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
                     face.abilities[0],
                     serde_json::from_value::<AbilityDefinition>(loot.clone()).unwrap()
                 );
-                assert!(face.keywords.contains(&Keyword::Flying));
+                assert!(face.keywords.contains(&Keyword::Flying)); // allow-raw-authority: parser publication fixture checks Likeness Looter's printed CardFace Flying keyword
             }
         }
         if let Some(emblem) = expected.get("emblem") {
@@ -3656,8 +3656,8 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
             // This finite ownership test does not certify the known Library gap.
         }
         if card.name == "M.O.D.O.K." {
-            assert!(face.keywords.contains(&Keyword::Flying));
-            assert!(face.keywords.contains(&Keyword::Lifelink));
+            assert!(face.keywords.contains(&Keyword::Flying)); // allow-raw-authority: parser publication fixture checks M.O.D.O.K.'s printed CardFace Flying keyword
+            assert!(face.keywords.contains(&Keyword::Lifelink)); // allow-raw-authority: parser publication fixture checks M.O.D.O.K.'s printed CardFace Lifelink keyword
             assert_eq!(face.abilities.len(), 1);
             assert_eq!(
                 face.abilities[0].cost,

@@ -15843,14 +15843,16 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             _ => {}
         }
     }
-    let revealed_authority = state
-        .return_result_frames
-        .values()
-        .flat_map(|frame| frame.results.values())
-        .any(|result| result.revealed_cards().is_some());
     for frame in state.resolution_stack.iter() {
         if let ResolutionFrame::BatchDelivery(batch) = frame {
-            let exact = revealed_authority
+            // The queue's own instruction/component bindings validate its origin
+            // in validate_retained_zone_result_owners. A revealed result in a
+            // different occurrence does not make this a Library-origin queue.
+            let exact = batch
+                .logical_zone_change_group
+                .instruction_deliveries
+                .is_some()
+                || batch.delegated_primary.is_some()
                 || batch
                     .requests
                     .iter()
@@ -15863,13 +15865,14 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                         .zip(&batch.requests)
                         .any(|(id, request)| *id != request.object_id))
             {
-                return Err("revealed-result batch is missing exact queued requests".into());
+                return Err("zone-delivery batch is missing exact queued requests".into());
             }
             for request in &batch.requests {
-                if request.expected_origin.is_some_and(|(pin, zone)| {
-                    pin.object_id != request.object_id || zone != Zone::Library
-                }) {
-                    return Err("revealed-result queued request has incompatible origin".into());
+                if request
+                    .expected_origin
+                    .is_some_and(|(pin, _)| pin.object_id != request.object_id)
+                {
+                    return Err("zone-delivery queued request has incompatible identity".into());
                 }
             }
         }
