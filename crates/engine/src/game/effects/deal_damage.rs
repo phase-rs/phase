@@ -7700,8 +7700,8 @@ mod tests {
             .core_types
             .push(CoreType::Creature);
 
-        // Single-use Optional DamageDone replacement — the first damage event
-        // surfaces a ReplacementChoice prompt.
+        // This recurring Optional DamageDone replacement offers a choice for
+        // each recipient, including the resumed second damage event.
         install_optional_damage_replacement(&mut state);
 
         state.priority_player = PlayerId(0);
@@ -7739,26 +7739,60 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
 
-        // Accept the replacement — the drain resolves the chain and emits DamageAll.
-        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
-            .expect("accept DamageAll replacement");
-        let damage_all_events = result
-            .events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
+        let mut completion_events = Vec::new();
+        let mut prompts = 0;
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            assert!(
+                prompts < 4,
+                "bounded repeated damage choices: {:?}",
+                state.waiting_for
+            );
+            assert_eq!(
+                completion_events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::DamageAll,
+                            ..
+                        }
+                    ))
+                    .count(),
+                0,
+                "DamageAll cannot complete at any interim replacement pause"
+            );
+            let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept each recurring damage replacement");
+            completion_events.extend(result.events);
+            prompts += 1;
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                    )
+                    .unwrap(),
+                )
+                .expect("repeated damage pause preserves the parent's completion obligation")
+                .into_game_state();
+            }
+        }
+        assert_eq!(
+            prompts, 2,
+            "both recipients offer the recurring optional replacement"
+        );
+        assert_eq!(
+            completion_events
+                .iter()
+                .filter(|event| matches!(
+                    event,
                     GameEvent::EffectResolved {
                         kind: EffectKind::DamageAll,
                         ..
                     }
-                )
-            })
-            .count();
-        assert_eq!(
-            damage_all_events, 1,
-            "DamageAll parent event must fire exactly once on pause-and-resume; got events = {:#?}",
-            result.events,
+                ))
+                .count(),
+            1,
+            "DamageAll parent completes exactly once at terminal; events={completion_events:?}"
         );
         assert!(
             state.active_ability_continuation().is_none(),
@@ -7815,25 +7849,52 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
 
-        let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
-            .expect("accept DamageEachPlayer replacement");
-        let each_player_events = result
-            .events
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    GameEvent::EffectResolved {
-                        kind: EffectKind::DamageEachPlayer,
-                        ..
-                    }
+        let mut completion_events = Vec::new();
+        let mut prompts = 0;
+        while matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+            assert!(
+                prompts < 4,
+                "bounded repeated damage choices: {:?}",
+                state.waiting_for
+            );
+            assert_eq!(
+                completion_events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::DamageEachPlayer,
+                            ..
+                        }
+                    ))
+                    .count(),
+                0,
+                "DamageEachPlayer cannot complete at any interim replacement pause"
+            );
+            let result = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept each recurring damage replacement");
+            completion_events.extend(result.events);
+            prompts += 1;
+            if matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(state),
+                    )
+                    .unwrap(),
                 )
-            })
-            .count();
+                .expect("repeated damage pause preserves the parent's completion obligation")
+                .into_game_state();
+            }
+        }
         assert_eq!(
-            each_player_events, 1,
-            "DamageEachPlayer parent event must fire exactly once on pause-and-resume; got events = {:#?}",
-            result.events,
+            prompts, 2,
+            "both recipients offer the recurring optional replacement"
+        );
+        assert_eq!(
+            completion_events.iter().filter(|event| matches!(event,
+                GameEvent::EffectResolved { kind: EffectKind::DamageEachPlayer, .. })).count(),
+            1,
+            "DamageEachPlayer parent completes exactly once at terminal; events={completion_events:?}"
         );
         assert!(
             state.active_ability_continuation().is_none(),

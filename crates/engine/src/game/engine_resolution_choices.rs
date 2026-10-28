@@ -15760,7 +15760,10 @@ mod token_materialization_completion_tests {
             assert_eq!(state.players[0].life, life + 2);
             for id in births {
                 assert_eq!(state.objects[&id].zone, Zone::Battlefield);
-                assert!(state.objects[&id].tapped);
+                assert!(state.objects[&id].tapped,
+                    "persistent row={pause:?}, birth={:?}, name={}; wait={:?}; frames={:?}; events={events:?}",
+                    crate::types::identifiers::ObjectIncarnationRef::from_object(&state.objects[&id]),
+                    state.objects[&id].name, state.waiting_for, state.resolution_stack);
             }
         }
     }
@@ -15998,12 +16001,13 @@ mod random_result_resolution_context_tests {
                 provenance: None,
             },
         });
+        let mut initial_events = vec![];
         match boundary {
             Boundary::Coin => {
-                effects::flip_coin::resolve(&mut state, &ability, &mut vec![]).unwrap()
+                effects::flip_coin::resolve(&mut state, &ability, &mut initial_events).unwrap()
             }
             Boundary::DieKeep | Boundary::DieDrain => {
-                effects::roll_die::resolve(&mut state, &ability, &mut vec![]).unwrap()
+                effects::roll_die::resolve(&mut state, &ability, &mut initial_events).unwrap()
             }
         }
         match boundary {
@@ -16026,7 +16030,8 @@ mod random_result_resolution_context_tests {
                         state.waiting_for,
                         WaitingFor::DiscardChoice { player: P0, .. }
                     )
-                });
+                }, "nested fixture boundary={boundary:?}, coin_child={coin_child}; producer={ability:?}; wait={:?}; frames={:?}; events={initial_events:?}; replacements={:?}",
+                    state.waiting_for, state.resolution_stack, state.objects.values().filter(|object| object.name == "Krark's Thumb").map(|object| &object.replacement_definitions).collect::<Vec<_>>());
                 if coin_child {
                     let child = state.take_active_coin_flip_frame().unwrap().unwrap();
                     assert_eq!(

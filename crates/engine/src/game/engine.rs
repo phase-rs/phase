@@ -23990,7 +23990,8 @@ mod stage2_injector_tests {
         assert_eq!(
             single.len(),
             4,
-            "reach-guard: the shipped board qualifies exactly four sources"
+            "reach-guard: the shipped board qualifies exactly four sources; actual points={single:?}; wait={:?}; stack sources={:?}",
+            state.waiting_for, state.stack.iter().map(|entry| (entry.id, entry.source_id)).collect::<Vec<_>>()
         );
         assert_eq!(
             single

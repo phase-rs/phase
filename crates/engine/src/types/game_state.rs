@@ -3227,8 +3227,10 @@ pub struct PendingContinuation {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) player_scope_tail: Option<PendingPlayerScopeTail>,
-    /// Private queue terminator for generated player-scope continuations. The
-    /// placeholder `chain` is never resolved when this is set.
+    /// Private queue terminator for generated continuations, including an outer
+    /// parent completion retained while its replacement child pauses again.
+    /// The placeholder `chain` is never resolved when this is set. The wire
+    /// name retains the original player-scope producer's representation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) player_scope_queue_end: bool,
     /// CR 107.3f + CR 107.3i + CR 608.2c: names the value a paused resolution-time

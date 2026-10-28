@@ -2803,6 +2803,13 @@ fn complete_modification_clause(
         let body_lower = body.to_lowercase();
         let body = nom_tag_lower(body, &body_lower, "an additional ").unwrap_or(body);
         let body_lower = body.to_lowercase();
+        if all_consuming(parse_variable_pt_pattern)
+            .parse(body_lower.as_str())
+            .is_ok()
+        {
+            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
+                .map(|modifications| (modifications, verb));
+        };
         if let Ok((rest, (power, toughness))) = parse_pt_mod_with_remainder(body) {
             if rest.trim().is_empty() {
                 return Some((
@@ -2830,13 +2837,6 @@ fn complete_modification_clause(
                 }
             }
         }
-        if all_consuming(parse_variable_pt_pattern)
-            .parse(body_lower.as_str())
-            .is_ok()
-        {
-            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
-                .map(|modifications| (modifications, verb));
-        };
     }
     // CR 613.4b: setting only one base stat preserves the other axis. The
     // shared numeric owner must consume the whole value before publication.

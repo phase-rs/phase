@@ -2024,6 +2024,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 object_incarnations: Vec::new(),
             }));
         }
+        let child_boundary = state.resolution_stack.capture_child_boundary();
         let mut chain_progress = None;
         if !player_scope_queue_end {
             if bound_result_is_empty(&chain)
@@ -2093,11 +2094,44 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
             super::triggers::restore_trigger_event_context(state, snapshot);
         }
         if let Some(kind) = parent_kind {
-            events.push(GameEvent::EffectResolved {
-                kind,
-                source_id,
-                subject: None,
-            });
+            if matches!(
+                chain_progress,
+                Some(ResolutionProgress::Waiting | ResolutionProgress::Queued)
+            ) {
+                // CR 608.2c + CR 120.4b: a new replacement pause has not
+                // completed the parent's damage instruction. Preserve its
+                // completion outside the WHOLE newly raised child stack; a
+                // nested child may own a distinct parent-kind completion.
+                let mut completion =
+                    ResolvedAbility::new(Effect::NoOp, Vec::new(), source_id, chain.controller);
+                completion.context = chain.context.clone();
+                completion.return_result_process = chain.return_result_process;
+                completion.trigger_source = chain.trigger_source.clone();
+                let mut pending =
+                    PendingContinuation::player_scope_queue_end(Box::new(completion), state);
+                pending.parent_kind = Some(kind);
+                pending.return_result_occurrence = return_result_occurrence;
+                pending.trigger_context = trigger_context;
+                pending.trigger_firing = trigger_firing;
+                // The actual newly parked chain owns the per-player tail.
+                pending.player_scope_tail = None;
+                if state.resolution_stack.capture_child_boundary() > child_boundary {
+                    state
+                        .insert_ability_continuation_parent_at_child_boundary(
+                            pending,
+                            child_boundary,
+                        )
+                        .expect("parent completion stays outside its complete replacement child");
+                } else {
+                    state.park_ability_continuation(pending);
+                }
+            } else {
+                events.push(GameEvent::EffectResolved {
+                    kind,
+                    source_id,
+                    subject: None,
+                });
+            }
         }
         state.active_return_result_occurrence = prior_occurrence;
         retire_unreferenced_return_result_frames(state);
@@ -30401,9 +30435,10 @@ mod tests {
             let retained = warp_zone_delivery_from_replacement(runner.state()).unwrap();
             assert_eq!(retained.member, original.member);
             assert!(retained.terminal_completion.is_none(), "typed ungrouped key selects the still-pending original; it invents no terminal proof after child movement");
-            runner
-                .act(GameAction::ChooseReplacement { index: 1 })
-                .unwrap();
+            let declined = runner.act(GameAction::ChooseReplacement { index: 1 });
+            assert!(declined.is_ok(), "Warp parent decline grouped={grouped}: result={declined:?}; wait={:?}; frames={:?}; retained={:?}; ledger={:?}",
+                runner.state().waiting_for, runner.state().resolution_stack,
+                warp_zone_delivery_from_replacement(runner.state()), runner.state().zone_changes_this_turn);
             runner.advance_until_stack_empty();
             assert!(
                 !runner.state().objects[&source]
@@ -30555,7 +30590,8 @@ mod tests {
             }
             let mut forms = vec![
                 state.clone(),
-                serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),
+                serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap())
+                    .unwrap_or_else(|error| panic!("Warp terminal={terminal:?} current restore: {error}; wait={:?}; frames={:?}; resolving={:?}", state.waiting_for, state.resolution_stack, state.resolving_stack_entry)),
                 crate::types::game_state::PersistedGameState::capture(state.clone())
                     .into_game_state()
                     .unwrap(),

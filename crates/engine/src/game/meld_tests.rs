@@ -1169,7 +1169,8 @@ fn merged_commander_library_component_replacement_skips_arrival_shuffle_and_obse
                 ..
             }
         )),
-        "without a Library arrival, the delivery tail cannot shuffle"
+        "without a Library arrival, the delivery tail cannot shuffle; events={:?}; frames={:?}; departures={:?}",
+        accepted.events, runner.state().resolution_stack, runner.state().zone_changes_this_turn
     );
     assert!(
         !runner

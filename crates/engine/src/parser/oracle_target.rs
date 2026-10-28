@@ -4490,6 +4490,15 @@ fn parse_type_phrase_folding_core<'a>(
         }
     }
 
+    // CR 608.2c: a relative property may follow the noun's locative zone
+    // (a creature card in your graveyard that has an Adventure).
+    if let Some((relative_properties, consumed)) =
+        parse_that_clause_suffix(&lower[pos..], Some(ctx))
+    {
+        properties.extend(relative_properties);
+        pos += consumed;
+    }
+
     // CR 202.3 + CR 608.2c + CR 115.2: a mana-value clause may TRAIL a zone clause
     // ("target creature card in your graveyard with mana value X/4 or less/less than
     // or equal to the number of permanent cards in your graveyard" — Lazav the

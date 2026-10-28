@@ -1272,8 +1272,7 @@ fn terminal_action_reflexive(line: &str) -> bool {
         tag("when "),
         take_until(" this way"),
         tag(" this way"),
-        opt(tag(",")),
-        nom::combinator::eof,
+        nom::combinator::rest,
     )
         .parse(sentence.trim());
     parsed.is_ok()
@@ -5839,9 +5838,6 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                         ContinuousModification::SetColor {
                             colors: vec![ManaColor::Green]
                         },
-                        ContinuousModification::AddType {
-                            core_type: CoreType::Creature
-                        },
                         ContinuousModification::RemoveAllSubtypes {
                             set: SubtypeSet::Creature
                         },
@@ -5849,7 +5845,7 @@ When The Ruinous Wrecking Crew enters, choose up to X —\n\
                             subtype: "Dinosaur".to_string()
                         },
                     ],
-                    "the exact v0.35.2 animation payload must be restored"
+                    "the complete subtype-only animation preserves existing card types"
                 );
             }
             other => panic!("mode 2 second sentence must be GenericEffect, got {other:?}"),

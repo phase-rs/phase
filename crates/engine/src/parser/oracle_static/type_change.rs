@@ -669,6 +669,34 @@ pub(crate) fn parse_additive_type_clause_modifications(
         }
     }
 
+    // CR 105.3: retaining types does not retain colors. Only the explicit
+    // colors qualifier makes these color additions additive.
+    if !super::oracle_effect::animation::has_in_addition_to_other_colors(text) {
+        let colors = modifications
+            .iter()
+            .filter_map(|modification| match modification {
+                ContinuousModification::AddColor { color } => Some(*color),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !colors.is_empty() {
+            let mut emitted = false;
+            modifications = modifications
+                .into_iter()
+                .filter_map(|modification| match modification {
+                    ContinuousModification::AddColor { .. } if !emitted => {
+                        emitted = true;
+                        Some(ContinuousModification::SetColor {
+                            colors: colors.clone(),
+                        })
+                    }
+                    ContinuousModification::AddColor { .. } => None,
+                    other => Some(other),
+                })
+                .collect();
+        }
+    }
+
     // CR 613.4b (Layer 7b) + CR 613.1f (Layer 6): then recover the base P/T and
     // the pre-marker keyword tail, which word-classification silently swallows.
     // Additive only — a span with no leading `N/M` contributes nothing here and
@@ -1436,10 +1464,10 @@ pub(crate) fn parse_enchanted_is_type(
 
         // 2. Color
         // CR 105.3 + CR 613.1e (Layer 5): a new color replaces all previous
-        // colors unless the effect is "in addition"; additive "in addition to
-        // its other types" appends via AddColor.
+        // colors unless the effect explicitly retains its other colors.
+        // Retaining other types alone does not make the color additive.
         if !colors.is_empty() {
-            if is_additive {
+            if super::oracle_effect::animation::has_in_addition_to_other_colors(description) {
                 modifications.extend(
                     colors
                         .iter()
@@ -3001,16 +3029,7 @@ pub(crate) fn parse_compound_all_subjects_type_replacement(
     )?;
     let modifications =
         super::oracle_effect::animation::animation_modifications_with_replacement(&spec, false);
-    if modifications.is_empty()
-        || !modifications.iter().any(|modification| {
-            matches!(
-                modification,
-                ContinuousModification::AddType {
-                    core_type: CoreType::Creature
-                }
-            )
-        })
-    {
+    if modifications.is_empty() || !spec.explicit_core_types.contains(&CoreType::Creature) {
         return None;
     }
 

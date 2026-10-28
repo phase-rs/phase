@@ -4697,6 +4697,15 @@ mod tests {
             assert_eq!(options, &[ManaType::Red, ManaType::Green]);
             assert_eq!(ability.source_id, source);
             let process = ability.return_result_process.unwrap();
+            assert!(
+                runner.state().return_result_frames.contains_key(occurrence),
+                "paid mana count={expected_count}: prompt owner={occurrence:?}/{process:?}; live={:?}; validation={:?}; frames={:?}; selected={:?}",
+                crate::types::game_state::live_return_result_occurrences(runner.state()),
+                validate_mana_choice_response(runner.state(), ability,
+                    &ManaChoicePrompt::SingleColor { options: options.clone() }, Some(*occurrence)),
+                runner.state().return_result_frames,
+                runner.state().active_return_result_occurrence
+            );
             assert_eq!(
                 runner.state().return_result_frames[occurrence].process,
                 Some(process)

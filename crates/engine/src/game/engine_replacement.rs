@@ -6517,7 +6517,8 @@ mod tests {
         );
         assert!(
             state.post_replacement_token_choice_applied.is_none(),
-            "replacement-choice applied seed must be cleared after the chosen branch resolves"
+            "replacement-choice applied seed must be cleared after the chosen branch resolves; wait={:?}; frames={:?}; seed={:?}",
+            state.waiting_for, state.resolution_stack, state.post_replacement_token_choice_applied
         );
     }
 
@@ -6969,7 +6970,8 @@ mod tests {
         );
         assert!(
             state.post_replacement_token_choice_applied.is_none(),
-            "replacement-choice applied seed must clear after the tail continuation drains"
+            "replacement-choice applied seed must clear after the tail continuation drains; wait={:?}; frames={:?}; seed={:?}",
+            state.waiting_for, state.resolution_stack, state.post_replacement_token_choice_applied
         );
     }
 
@@ -7310,7 +7312,8 @@ mod tests {
         );
         assert!(
             state.post_replacement_token_choice_applied.is_none(),
-            "originating token-choice seed must clear at full-drain, after the stashed sub-ability"
+            "originating token-choice seed must clear at full-drain, after the stashed sub-ability; wait={:?}; frames={:?}; seed={:?}",
+            state.waiting_for, state.resolution_stack, state.post_replacement_token_choice_applied
         );
     }
 
@@ -9223,7 +9226,9 @@ mod tests {
             state.objects[&copy_ench]
                 .counters
                 .get(&crate::types::counter::CounterType::Time),
-            Some(&2)
+            Some(&2),
+            "the copied entry counter applies its replacement once; wait={:?}; pending={:?}; frames={:?}; entry={:?}",
+            state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&copy_ench]
         );
         assert_eq!(
             state.objects[&copy_ench].attached_to,

@@ -1456,7 +1456,9 @@ fn dragonstorm_globe_counters_created_dragon_token() {
             .copied()
             .unwrap_or_default(),
         1,
-        "Dragonstorm Globe must add one +1/+1 counter to the created Dragon token"
+        "Dragonstorm Globe must add one +1/+1 counter to the created Dragon token; birth={:?}; wait={:?}; pending={:?}; frames={:?}; definition={:?}",
+        crate::types::identifiers::ObjectIncarnationRef::from_object(dragon),
+        state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&globe].replacement_definitions
     );
 }
 

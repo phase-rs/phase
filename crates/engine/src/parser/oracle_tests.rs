@@ -5808,7 +5808,8 @@ fn u13_full_immard_exact_instruction_modal_roundtrip_and_coverage() {
         &["Human".into(), "Soldier".into()],
     );
     assert!(parsed.parse_warnings.is_empty(), "{parsed:#?}");
-    assert_eq!(parsed.triggers.len(), 2);
+    assert_eq!(parsed.triggers.len(), 1);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::EntersOrAttacks);
     for trigger in &parsed.triggers {
         let parent = trigger.execute.as_deref().unwrap();
         assert!(
@@ -43049,7 +43050,8 @@ fn mandatory_counter_adjustment_parent_and_legacy_axes_shape() {
         &["Creature".into()],
         &[],
     );
-    assert_eq!(parsed.triggers.len(), 2);
+    assert_eq!(parsed.triggers.len(), 1);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::EntersOrAttacks);
     for trigger in &parsed.triggers {
         let def = trigger.execute.as_deref().expect("mandatory parent");
         assert!(
@@ -43083,14 +43085,15 @@ fn u13_paragraph_and_trigger_boundaries_cannot_supply_an_earlier_producer() {
         &["Creature".into()],
         &[],
     );
-    assert_eq!(parsed.triggers.len(), 3);
-    assert!(parsed.triggers[..2].iter().all(|trigger| trigger
+    assert_eq!(parsed.triggers.len(), 2);
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::EntersOrAttacks);
+    assert!(parsed.triggers[..1].iter().all(|trigger| trigger
         .execute
         .as_deref()
         .unwrap()
         .declares_return_result
         .is_some()));
-    let separate = parsed.triggers[2].execute.as_deref().unwrap();
+    let separate = parsed.triggers[1].execute.as_deref().unwrap();
     assert!(matches!(separate.effect.as_ref(), Effect::GainLife { .. }));
     assert!(separate.declares_return_result.is_none());
     for split in [

@@ -8821,12 +8821,13 @@ mod tests {
                 &state, viewer,
             ))
             .unwrap();
-            for public in [&plain, &wire] {
+            for (envelope, public) in [("plain", &plain), ("client", &wire)] {
                 assert!(!public.to_string().contains("return_result_process"));
                 assert!(public.to_string().contains("Public keyword option"));
                 assert_eq!(
                     public.to_string().matches("EpicCopy").count(),
-                    authoritative.to_string().matches("EpicCopy").count()
+                    authoritative.to_string().matches("EpicCopy").count(),
+                    "viewer={viewer:?}, envelope={envelope}; projected program={public}"
                 );
             }
         }
@@ -16350,6 +16351,63 @@ mod tests {
     #[test]
     fn copy_source_trusted_roundtrip_keeps_authority_and_resumes() {
         let (state, chosen) = produced_current_copy_source_prompt();
+        let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            purpose:
+                crate::types::ability::CopyTargetPurpose::CopyTokenSource {
+                    continuation: Some(tail),
+                },
+            ..
+        } = &state.waiting_for
+        else {
+            unreachable!()
+        };
+        let parent = tail.context.token_creation_parent.as_ref().unwrap();
+        let crate::types::resolution::ResolutionFrame::PostReplacement(drains) = state
+            .resolution_stack
+            .last()
+            .expect("copy prompt retains its resident frame")
+        else {
+            panic!("copy prompt top frame: {:?}", state.resolution_stack);
+        };
+        let drain = drains
+            .resident()
+            .expect("copy prompt retains a resident drain");
+        assert_eq!(
+            drain.token_creation_parent.as_ref(),
+            Some(parent),
+            "copy source parent custody"
+        );
+        assert!(
+            matches!(drain.status, crate::types::game_state::DrainStatus::Paused),
+            "copy drain status={:?}",
+            drain.status
+        );
+        assert_eq!(drain.source, Some(*source_id), "copy source drain identity");
+        assert_eq!(
+            drain.controller.unwrap_or(*player),
+            *player,
+            "copy source drain controller"
+        );
+        assert_eq!(
+            (tail.source_id, tail.controller),
+            (*source_id, *player),
+            "copy source tail identity"
+        );
+        assert_eq!(
+            tail.replacement_applied, drain.applied,
+            "copy source applied replacements"
+        );
+        assert_eq!(
+            state
+                .resolution_stack
+                .token_creation(parent.frame)
+                .unwrap()
+                .pending,
+            Some(crate::types::game_state::TokenCreationPending::Substitution),
+            "copy source creation stage"
+        );
         for loaded in [
             state.clone(),
             serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),

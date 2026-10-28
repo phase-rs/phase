@@ -9909,30 +9909,44 @@ mod tests {
     /// pool.
     #[test]
     fn parse_total_power_of_cards_exiled_this_way_is_tracked_set_aggregate() {
-        use crate::types::ability::TrackedAnaphorSource;
-
         for phrase in [
             "the total power of the cards exiled this way",
             "the total power of cards exiled this way",
             "the total power of the card exiled this way",
             "the total power of card exiled this way",
         ] {
-            let (rest, q) = parse_quantity_ref(phrase)
-                .unwrap_or_else(|e| panic!("tracked-set phrase {phrase:?} should parse: {e:?}"));
-            assert_eq!(rest, "", "tracked-set phrase {phrase:?} must fully consume");
+            assert!(
+                parse_quantity_ref(phrase).is_err(),
+                "no producer may be guessed"
+            );
+            let chain = crate::parser::oracle_effect::parse_effect_chain_ir(
+                "Exile target card from your graveyard.",
+                crate::types::ability::AbilityKind::Spell,
+                &mut ParseContext::default(),
+            );
+            let producer = &chain.clauses[0];
+            let (from, to) = producer
+                .zone_result_producer()
+                .expect("real supported exile producer");
+            let mut context = ParseContext::default();
+            context.chain_zone_result = Some((producer.id, from, to));
+            let q = crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                phrase,
+                &mut context,
+            )
+            .expect("owned aggregate");
             assert_eq!(
                 q,
-                QuantityRef::PropertyAggregate(
-                    crate::types::ability::PropertyAggregate::new(
-                        AggregateFunction::Sum,
-                        ObjectProperty::Power,
-                        crate::types::ability::CardTypeSetSource::TrackedSet {
-                            set: TrackedAnaphorSource::ChainSet,
-                            caused_by: None
-                        }
-                    )
-                    .expect("statically valid property aggregate")
-                ),
+                QuantityRef::ZoneChangeAggregate {
+                    source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                        result: crate::types::ability::ReturnResultId(producer.id.0)
+                    },
+                    from: Some(Zone::Graveyard),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Typed(TypedFilter::card()),
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
                 "phrase {phrase:?}"
             );
         }
@@ -15982,23 +15996,57 @@ mod tests {
     fn tracked_set_anaphor_participle_axis_binds() {
         // Ill-Timed Explosion (discarded), Sword of the Ages / Reign of the
         // Pit (sacrificed), and the pre-existing exile forms.
-        for (phrase, function, property) in [
+        for (phrase, function, property, requires_instruction) in [
             (
                 "the greatest mana value among cards discarded this way",
                 AggregateFunction::Max,
                 ObjectProperty::ManaValue,
+                false,
             ),
             (
                 "the total power of the creatures sacrificed this way",
                 AggregateFunction::Sum,
                 ObjectProperty::Power,
+                false,
             ),
             (
                 "the total power of the cards exiled this way",
                 AggregateFunction::Sum,
                 ObjectProperty::Power,
+                true,
             ),
         ] {
+            // The exile population carries an independently retained instruction
+            // result; other participles retain their existing tracked-set contract.
+            if requires_instruction {
+                assert!(parse_quantity_ref(phrase).is_err());
+                let chain = crate::parser::oracle_effect::parse_effect_chain_ir(
+                    "Exile target card from your graveyard.",
+                    crate::types::ability::AbilityKind::Spell,
+                    &mut ParseContext::default(),
+                );
+                let producer = &chain.clauses[0];
+                let (from, to) = producer.zone_result_producer().unwrap();
+                let mut context = ParseContext::default();
+                context.chain_zone_result = Some((producer.id, from, to));
+                assert_eq!(
+                    crate::parser::oracle_quantity::parse_quantity_ref_with_context(
+                        phrase,
+                        &mut context
+                    ),
+                    Some(QuantityRef::ZoneChangeAggregate {
+                        source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                            result: crate::types::ability::ReturnResultId(producer.id.0)
+                        },
+                        from: Some(from),
+                        to: Some(to),
+                        filter: TargetFilter::Typed(TypedFilter::card()),
+                        function,
+                        property,
+                    })
+                );
+                continue;
+            }
             let (rest, q) = parse_quantity_ref(phrase)
                 .unwrap_or_else(|e| panic!("{phrase:?} must bind: {e:?}"));
             assert_eq!(rest, "", "{phrase:?} must fully consume");

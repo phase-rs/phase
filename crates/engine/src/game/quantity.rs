@@ -10825,23 +10825,42 @@ mod tests {
                     }
                 }
                 for ability in &parsed.abilities {
-                    match ability.effect.as_ref() {
-                        Effect::DealDamage { amount, .. } => quantities.push(amount.clone()),
-                        Effect::Token {
-                            enter_with_counters,
-                            ..
-                        } => quantities.extend(enter_with_counters.iter().map(|(_, q)| q.clone())),
-                        Effect::GenericEffect {
-                            static_abilities, ..
-                        } => {
-                            for definition in static_abilities {
-                                for modification in &definition.modifications {
-                                    if let crate::types::ability::ContinuousModification::SetPowerDynamic { value } | crate::types::ability::ContinuousModification::SetToughnessDynamic { value } = modification { quantities.push(value.clone()); }
+                    let _ = crate::types::ability_visit::visit_ability_def_scoped(
+                        ability,
+                        crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+                        &mut |effect| {
+                            match effect {
+                                Effect::DealDamage { amount, .. } => {
+                                    quantities.push(amount.clone())
                                 }
+                                Effect::Token {
+                                    enter_with_counters,
+                                    ..
+                                } => quantities
+                                    .extend(enter_with_counters.iter().map(|(_, q)| q.clone())),
+                                // Serpentine Curve puts its counters on the completed
+                                // 0/0 token; these are not entry counters.
+                                Effect::PutCounter {
+                                    count,
+                                    target: TargetFilter::LastCreated,
+                                    ..
+                                } => {
+                                    quantities.push(count.clone());
+                                }
+                                Effect::GenericEffect {
+                                    static_abilities, ..
+                                } => {
+                                    for definition in static_abilities {
+                                        for modification in &definition.modifications {
+                                            if let crate::types::ability::ContinuousModification::SetPowerDynamic { value } | crate::types::ability::ContinuousModification::SetToughnessDynamic { value } = modification { quantities.push(value.clone()); }
+                                        }
+                                    }
+                                }
+                                _ => {}
                             }
-                        }
-                        _ => {}
-                    }
+                            std::ops::ControlFlow::Continue(())
+                        },
+                    );
                 }
                 assert_eq!(
                     quantities.len(),

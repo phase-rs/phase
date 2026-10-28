@@ -1891,6 +1891,34 @@ impl ClauseIrBuilder {
         self.zone_result_antecedent_before(self.clauses.len())
     }
 
+    /// CR 608.2c: the immediately preceding token is the owner of a counter
+    /// followup, not an intervening unrelated instruction. Its quantity parser
+    /// may inspect only the sealed producer preceding that token.
+    pub(crate) fn token_counter_zone_result_antecedent(&self) -> Option<(ClauseId, Zone, Zone)> {
+        self.token_counter_zone_result_antecedent_before(self.clauses.len())
+    }
+
+    fn token_counter_zone_result_antecedent_before(
+        &self,
+        end: usize,
+    ) -> Option<(ClauseId, Zone, Zone)> {
+        let index = end.checked_sub(1)?;
+        let token = &self.clauses[index];
+        if !matches!(token.parsed.effect, Effect::Token { .. }) {
+            return None;
+        }
+        let mut shell = token.clone();
+        shell.player_scope = None;
+        if !shell.sought_result_shell_is_empty()
+            || token.repeat_for.is_some()
+            || token.where_x_expression.is_some()
+            || token.reads_return_result.is_some()
+        {
+            return None;
+        }
+        self.zone_result_antecedent_before(index)
+    }
+
     fn zone_result_antecedent_before(&self, end: usize) -> Option<(ClauseId, Zone, Zone)> {
         if self.repeats_a_process() {
             return None;
@@ -1976,11 +2004,22 @@ impl ClauseIrBuilder {
             return;
         }
         let index = self.clauses.len() - 1;
+        let counter_followup_owner = matches!(
+            self.clauses[index].disposition,
+            ClauseDisposition::Continue {
+                continuation: Some(
+                    ContinuationAst::PutCountersOnLastCreated { .. }
+                        | ContinuationAst::TokenEntersWithCounters { .. }
+                )
+            }
+        )
+        .then(|| self.token_counter_zone_result_antecedent_before(index))
+        .flatten();
         let valid = selected.iter().all(|(owner, from, to)| {
             let producers: Vec<_> = self.clauses.iter().enumerate().filter(|(_, clause)| clause.id == *owner).collect();
             matches!(producers.as_slice(), [(producer_index, producer)] if *producer_index < index
                 && producer.zone_result_producer().is_some_and(|(origin, destination)| *from == Some(origin) && *to == Some(destination))
-                && self.clauses[*producer_index+1..index].iter().all(|clause|
+                && self.clauses[*producer_index+1..if counter_followup_owner.is_some_and(|(id, origin, destination)| id == *owner && *from == Some(origin) && *to == Some(destination)) { index - 1 } else { index }].iter().all(|clause|
                     clause.zone_result_producer().is_some() || clause.is_transparent_zone_result_corridor()))
         });
         if !valid {
@@ -2867,10 +2906,14 @@ mod departure_result_tests {
         else {
             unreachable!()
         };
-        assert_eq!(enter_with_counters.len(), 1);
-        assert_eq!(
-            enter_with_counters[0].1.instruction_result_ids(),
-            vec![ReturnResultId(producer.id.0)]
+        assert!(enter_with_counters.is_empty(), "printed puts is post-entry");
+        let counters = token
+            .sub_ability
+            .as_deref()
+            .expect("post-entry counter instruction");
+        assert!(
+            matches!(counters.effect.as_ref(), Effect::PutCounter { target: TargetFilter::LastCreated, count, .. }
+            if count.instruction_result_ids() == vec![ReturnResultId(producer.id.0)])
         );
         assert!(
             !std::iter::successors(Some(&output), |node| node.sub_ability.as_deref())

@@ -1840,6 +1840,8 @@ mod tests {
         for to in [Zone::Stack, Zone::Battlefield] {
             let old_birth = state.objects[&paid].incarnation;
             let journal_start = state.resolved_rules_journal.entries().len();
+            let departure_start = state.zone_changes_this_turn.len();
+            let replay_departure_start = replay.zone_changes_this_turn.len();
             crate::game::zones::move_to_zone(&mut state, paid, to, &mut Vec::new());
             let moves: Vec<_> = state
                 .resolved_rules_journal
@@ -1851,8 +1853,28 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(moves.len(), 1);
-            crate::game::zones::apply_resolved_zone_change(&mut replay, &moves[0]).unwrap();
+            assert!(
+                moves.is_empty(),
+                "special Stack containers do not emit an ordinary zone command"
+            );
+            // Stack insertion/removal belongs to casting/resolution, while this
+            // low-level fixture exercises the special-zone mutator directly.
+            // This is mutator parity; the separate ordinary-zone test above
+            // retains actual resolved-command replay coverage.
+            crate::game::zones::move_to_zone(&mut replay, paid, to, &mut Vec::new());
+            assert_eq!(state.zone_changes_this_turn.len(), departure_start + 1);
+            assert_eq!(
+                replay.zone_changes_this_turn.len(),
+                replay_departure_start + 1
+            );
+            assert_eq!(
+                state.zone_changes_this_turn[departure_start..],
+                replay.zone_changes_this_turn[replay_departure_start..]
+            );
+            assert_eq!(
+                state.transient_continuous_effects,
+                replay.transient_continuous_effects
+            );
             for candidate in [&state, &replay] {
                 assert_eq!(candidate.objects[&paid].zone, to);
                 assert_ne!(candidate.objects[&paid].incarnation, old_birth);

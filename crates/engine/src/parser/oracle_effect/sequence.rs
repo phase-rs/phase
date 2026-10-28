@@ -9075,7 +9075,11 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination<'a>(
     previous_is_search_destination_exile: bool,
 ) -> Result<Option<ContinuationAst>, OracleError<'a>> {
     let mut trial = ctx.clone();
-    let ast = if let Effect::RevealHand { .. } = previous_effect {
+    let ast = if let Effect::RevealHand { target, .. } = previous_effect {
+        // CR 608.2c: this caller already supplies the lexical reveal owner.
+        // Direct continuation clients must carry the same authority as the
+        // full chain, without inventing a hand for another reveal domain.
+        trial.chain_prior_hand_reveal_target = Some(target.clone());
         match super::parse_hand_choice_filter(text, &mut trial)? {
             Some(card_filter) => Some(ContinuationAst::RevealHandFilter {
                 card_filter,
@@ -10279,17 +10283,37 @@ mod departure_counter_context_tests {
         let mut ctx = ParseContext::default();
         ctx.chain_zone_result = Some((ClauseId(7), Zone::Battlefield, Zone::Exile));
         let historical = "the total power of creatures you controlled that were exiled this way";
-        for text in [
-            format!("the token enters with x +1/+1 counters on it, where x is {historical}"),
-            format!("it enters with a number of +1/+1 counters on it equal to {historical}"),
-            format!("put x +1/+1 counters on it, where x is {historical}"),
-            format!("puts a number of +1/+1 counters on it equal to {historical}"),
+        for (text, enters_with) in [
+            (
+                format!("the token enters with x +1/+1 counters on it, where x is {historical}"),
+                true,
+            ),
+            (
+                format!("it enters with a number of +1/+1 counters on it equal to {historical}"),
+                true,
+            ),
+            (
+                format!("put x +1/+1 counters on it, where x is {historical}"),
+                false,
+            ),
+            (
+                format!("puts a number of +1/+1 counters on it equal to {historical}"),
+                false,
+            ),
         ] {
             let parsed = try_parse_token_enters_with_counters_with_context(&text, &mut ctx)
                 .or_else(|| try_parse_put_counters_on_token_followup_with_context(&text, &mut ctx))
                 .expect("same-body absorption retains producer authority");
-            let ContinuationAst::TokenEntersWithCounters { count, .. } = parsed else {
-                panic!("counter continuation")
+            let count = match parsed {
+                ContinuationAst::TokenEntersWithCounters { count, .. } => {
+                    assert!(enters_with, "entry replacement fixture");
+                    count
+                }
+                ContinuationAst::PutCountersOnLastCreated { count, .. } => {
+                    assert!(!enters_with, "post-entry fixture");
+                    count
+                }
+                other => panic!("counter continuation: {other:?}"),
             };
             assert_eq!(count.instruction_result_ids(), vec![ReturnResultId(7)]);
             assert!(try_parse_token_enters_with_counters(&text).is_none());
@@ -16521,8 +16545,21 @@ mod tests {
             TypedFilter,
         };
 
-        let result = try_parse_put_counters_on_token_followup(
+        let producer_ir = crate::parser::oracle_effect::parse_effect_chain_ir(
+            "Exile all creatures.",
+            crate::types::ability::AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let producer = &producer_ir.clauses[0];
+        let (from, to) = producer
+            .zone_result_producer()
+            .expect("real exile producer");
+        let mut context = ParseContext::default();
+        context.chain_zone_result = Some((producer.id, from, to));
+        context.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+        let result = try_parse_put_counters_on_token_followup_with_context(
             "puts a number of +1/+1 counters on it equal to the total power of creatures they controlled that were exiled this way",
+            &mut context,
         )
         .expect("third-person dynamic followup must parse");
         let ContinuationAst::PutCountersOnLastCreated {
@@ -16534,23 +16571,23 @@ mod tests {
         };
         assert_eq!(counter_type, CounterType::Plus1Plus1);
         let expected_qty = QuantityExpr::Ref {
-            qty: QuantityRef::PropertyAggregate(
-                crate::types::ability::PropertyAggregate::new(
-                    AggregateFunction::Sum,
-                    ObjectProperty::Power,
-                    crate::types::ability::CardTypeSetSource::Objects {
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::Typed(
-                                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
-                                ),
-                                TargetFilter::ExiledBySource,
-                            ],
-                        },
-                    },
-                )
-                .expect("statically valid property aggregate"),
-            ),
+            qty: QuantityRef::ZoneChangeAggregate {
+                source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                    result: crate::types::ability::ReturnResultId(producer.id.0),
+                },
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Exile),
+                filter: TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        TargetFilter::Typed(
+                            TypedFilter::default().controller(ControllerRef::ScopedPlayer),
+                        ),
+                    ],
+                },
+                function: AggregateFunction::Sum,
+                property: ObjectProperty::Power,
+            },
         };
         assert_eq!(count, expected_qty);
     }

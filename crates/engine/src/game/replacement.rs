@@ -13252,9 +13252,9 @@ enum ReplacementStep {
 }
 
 /// CR 616.1g + CR 701.7b: the event `def` modifies when it is a candidate for
-/// `proposed`. `change_zone_matcher` is the only registry matcher besides
-/// `create_token_matcher` that accepts a `CreateToken`; what a `ChangeZone`
-/// definition reaches there is the tokens' entry (Grumgully's counters, an
+/// `proposed`. `change_zone_matcher` and the narrowly admitted external entry
+/// tap modifiers accept a `CreateToken`; what those definitions reach there
+/// is the tokens' entry (Grumgully's counters, an
 /// enters-tapped, Mystic Reflection's "enter as copies"), while
 /// `ReplacementEvent::CreateToken` definitions modify the creation itself. Virtual
 /// candidates carry no definition and none applies to a `CreateToken`, so
@@ -13267,7 +13267,8 @@ fn replacement_event_layer(
     // the event of creating a token, so its replacements are chosen after the
     // creation's.
     if matches!(proposed, ProposedEvent::CreateToken { .. })
-        && def.event == ReplacementEvent::ChangeZone
+        && (def.event == ReplacementEvent::ChangeZone
+            || is_external_battlefield_entry_tap_modifier(def))
     {
         ReplacementEventLayer::ContainedEntry
     } else {
@@ -15024,6 +15025,99 @@ mod tests {
 
     fn make_repl(event: ReplacementEvent) -> ReplacementDefinition {
         ReplacementDefinition::new(event)
+    }
+
+    /// CR 616.1g: token creation finishes its outer replacements before the
+    /// affected player orders both opposing contained entry replacements.
+    #[test]
+    fn public_token_creation_orders_moved_and_change_zone_entry_tap_effects_together() {
+        use crate::game::scenario::{GameScenario, P0};
+        for first_tap in [false, true] {
+            let parsed = crate::parser::parse_oracle_text(
+                "Creatures enter untapped.",
+                "Synthetic external untap",
+                &[],
+                &["Enchantment".into()],
+                &[],
+            );
+            let mut tap = parsed.replacements[0].clone();
+            tap.event = ReplacementEvent::Moved;
+            tap.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+            )));
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let untap_source = scenario
+                .add_enchantment_from_oracle(
+                    P0,
+                    "Synthetic external untap",
+                    "Creatures enter untapped.",
+                )
+                .id();
+            let tap_source = scenario
+                .add_enchantment_from_oracle(P0, "Synthetic external tap", "")
+                .with_replacement_definition(tap)
+                .id();
+            scenario.add_enchantment_from_oracle(P0, "Anointed Procession",
+                "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.");
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(
+                    P0,
+                    "Synthetic Soldier creation",
+                    false,
+                    "Create a 1/1 white Soldier creature token.",
+                )
+                .with_mana_cost(crate::types::mana::ManaCost::generic(0))
+                .id();
+            let mut runner = scenario.build();
+            runner.cast(spell).resolve();
+            let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for
+            else {
+                panic!(
+                    "both contained entry effects must remain orderable: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert_eq!(candidates.len(), 2);
+            let first = if first_tap { tap_source } else { untap_source };
+            let index = candidates
+                .iter()
+                .position(|candidate| candidate.source_id == first)
+                .unwrap();
+            runner.act(GameAction::ChooseReplacement { index }).unwrap();
+            runner.advance_until_stack_empty();
+            let tokens = runner
+                .state()
+                .battlefield
+                .iter()
+                .filter_map(|id| {
+                    runner
+                        .state()
+                        .objects
+                        .get(id)
+                        .filter(|object| object.is_token)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                tokens.len(),
+                2,
+                "the creation-class doubler already applied"
+            );
+            assert!(
+                tokens.iter().all(|token| token.tapped != first_tap),
+                "the entry replacement chosen last controls both tokens: {tokens:?}"
+            );
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
     }
 
     #[test]

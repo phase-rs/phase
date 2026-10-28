@@ -5,7 +5,7 @@ use nom::bytes::complete::{tag, tag_no_case, take, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{eof, opt, peek, recognize, value};
 use nom::multi::separated_list1;
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -344,6 +344,10 @@ pub(crate) fn animation_modifications_with_replacement(
         && spec.explicit_core_types.contains(&CoreType::Creature);
     let mut replaced_core_types = false;
     let mut removed_sets: Vec<SubtypeSet> = Vec::new();
+    let basic_land_replacement = spec
+        .types
+        .iter()
+        .find_map(|name| crate::types::ability::BasicLandType::from_str(name).ok());
     for modification in base {
         if matches!(modification, ContinuousModification::AddType { .. }) && !artifact_creature {
             if !replaced_core_types {
@@ -359,9 +363,27 @@ pub(crate) fn animation_modifications_with_replacement(
         if let ContinuousModification::AddSubtype { subtype } = &modification {
             let set = noncreature_subtype_set(subtype).unwrap_or(SubtypeSet::Creature);
             if !removed_sets.contains(&set) {
-                out.push(ContinuousModification::RemoveAllSubtypes { set });
-                removed_sets.push(set);
+                // CR 305.7: setting a basic land type also removes printed
+                // abilities; subtype replacement alone cannot implement it.
+                if set == SubtypeSet::Land {
+                    if let Some(land_type) = basic_land_replacement {
+                        out.push(ContinuousModification::SetBasicLandType { land_type });
+                        removed_sets.push(set);
+                        if subtype == land_type.as_subtype_str() {
+                            continue;
+                        }
+                    }
+                }
+                if !removed_sets.contains(&set) {
+                    out.push(ContinuousModification::RemoveAllSubtypes { set });
+                    removed_sets.push(set);
+                }
             }
+        }
+        if matches!(&modification, ContinuousModification::AddSubtype { subtype }
+            if basic_land_replacement.is_some_and(|land| subtype == land.as_subtype_str()))
+        {
+            continue;
         }
         out.push(modification);
     }
@@ -649,8 +671,19 @@ fn parse_animation_type_token(input: &str) -> OracleResult<'_, AnimationTypeToke
 
 /// Parse a whitespace-separated sequence of type tokens, halting at the first
 /// non-type token. Used by [`parse_animation_type_parts`] as the grammar root.
+fn parse_animation_type_separator(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            multispace1,
+            opt(terminated(tag_no_case("and"), multispace1)),
+        ),
+    )
+    .parse(input)
+}
+
 fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationTypeToken>> {
-    separated_list1(multispace1, parse_animation_type_token).parse(input)
+    separated_list1(parse_animation_type_separator, parse_animation_type_token).parse(input)
 }
 
 /// CR 205.3: Canonical, case-insensitive subtype grammar shared with the
@@ -686,7 +719,11 @@ fn parse_animation_type_token_loose(input: &str) -> OracleResult<'_, AnimationTy
 }
 
 fn parse_animation_type_sequence_loose(input: &str) -> OracleResult<'_, Vec<AnimationTypeToken>> {
-    separated_list1(multispace1, parse_animation_type_token_loose).parse(input)
+    separated_list1(
+        parse_animation_type_separator,
+        parse_animation_type_token_loose,
+    )
+    .parse(input)
 }
 
 /// Run the strict (CR 205.3 capitalized) type-sequence parser; fall back to the
@@ -946,7 +983,7 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
 
     // See parse_becomes_type_modifications for the same forward-parse pattern.
     // oracle_nom/PATTERNS.md ("Optional trailing clause after a token sequence").
-    let tokens = match try_parse_type_sequence_with_suffix(descriptor) {
+    let tokens = match parse_complete_animation_types(descriptor) {
         Some(tokens) => tokens,
         None => return (Vec::new(), Vec::new()),
     };
@@ -1145,6 +1182,119 @@ pub(crate) fn parse_animation_conjunct_keywords(tail: &str) -> Option<Vec<Keywor
 mod test_den_bugbear {
     use super::*;
     use crate::types::ContinuousModification;
+
+    #[test]
+    fn complete_animation_basic_land_types_reach_layers_with_all_intrinsic_mana() {
+        use crate::game::layers::evaluate_layers;
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, ManaProduction, StaticDefinition, TargetFilter,
+            TypedFilter,
+        };
+        use crate::types::game_state::GameState;
+        use crate::types::identifiers::CardId;
+        use crate::types::player::PlayerId;
+        use crate::types::zones::Zone;
+        use std::sync::Arc;
+
+        for (suffix, retains_printed) in [("", false), (" in addition to its other types", true)] {
+            // Deliberately synthetic composition: the P/T prevents the dedicated
+            // bare-land setter from owning the descriptor before animation.
+            let predicate = format!("becomes a 1/1 Plains Island land creature{suffix}");
+            let modifications =
+                crate::parser::oracle_static::parse_complete_continuous_modifications(&predicate)
+                    .expect("complete animation plus both basic land types");
+            assert_eq!(
+                modifications
+                    .iter()
+                    .filter(|modification| matches!(
+                        modification,
+                        ContinuousModification::SetBasicLandType { .. }
+                    ))
+                    .count(),
+                usize::from(!retains_printed)
+            );
+            let mut state = GameState::new_two_player(42);
+            let land = create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Synthetic land".into(),
+                Zone::Battlefield,
+            );
+            {
+                let timestamp = state.next_timestamp();
+                let object = state.objects.get_mut(&land).unwrap();
+                object.card_types.core_types = vec![CoreType::Land];
+                object.card_types.subtypes = vec!["Desert".into()];
+                object.base_card_types = object.card_types.clone();
+                object.timestamp = timestamp;
+                Arc::make_mut(&mut object.base_abilities).push(AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: TargetFilter::Controller,
+                    },
+                ));
+                object.abilities = object.base_abilities.clone();
+            }
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Synthetic animation".into(),
+                Zone::Battlefield,
+            );
+            {
+                let timestamp = state.next_timestamp();
+                let object = state.objects.get_mut(&source).unwrap();
+                object.card_types.core_types = vec![CoreType::Enchantment];
+                object.base_card_types = object.card_types.clone();
+                object.timestamp = timestamp;
+                object.static_definitions.push(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::Typed(TypedFilter::land()))
+                        .modifications(modifications),
+                );
+            }
+            evaluate_layers(&mut state);
+            let object = state.objects.get(&land).unwrap();
+            assert_eq!(
+                object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|name| name == "Desert"),
+                retains_printed
+            );
+            assert_eq!(
+                object
+                    .abilities
+                    .iter()
+                    .any(|ability| matches!(ability.effect.as_ref(), Effect::GainLife { .. })),
+                retains_printed,
+                "only a replacing basic-land-type effect suppresses the printed ability"
+            );
+            for (name, color) in [("Plains", ManaColor::White), ("Island", ManaColor::Blue)] {
+                assert!(object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|subtype| subtype == name));
+                assert_eq!(object.abilities.iter().filter(|ability| matches!(ability.effect.as_ref(),
+                    Effect::Mana { produced: ManaProduction::Fixed { colors, .. }, .. } if colors == &vec![color])).count(), 1,
+                    "every new basic land type supplies its intrinsic mana ability");
+            }
+            assert_eq!(object.power, Some(1));
+            assert_eq!(object.toughness, Some(1));
+        }
+        assert!(
+            crate::parser::oracle_static::parse_complete_continuous_modifications(
+                "becomes a 1/1 Plains Island land creature unexplained"
+            )
+            .is_none()
+        );
+    }
 
     /// #2917 (CR 305.7 / 613.1d): a trailing "that's still a land" rider must
     /// not truncate the keyword list. Nissa, Who Shakes the World grants the

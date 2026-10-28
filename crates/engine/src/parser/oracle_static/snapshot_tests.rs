@@ -844,11 +844,10 @@ fn accepts_each_noncreature_enchantment_synthetic() {
     assert!(
         mods.iter().any(|m| matches!(
             m,
-            ContinuousModification::AddType {
-                core_type: CoreType::Creature
-            }
+            ContinuousModification::SetCardTypes { core_types }
+                if core_types == &vec![CoreType::Enchantment, CoreType::Creature]
         )),
-        "expected AddType(Creature); got {:?}",
+        "expected exact Enchantment/Creature replacement; got {:?}",
         mods
     );
     let expected_mv = QuantityExpr::Ref {

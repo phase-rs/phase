@@ -38925,12 +38925,15 @@ fn rewrite_delayed_singular_recall_to_self(effect: &mut Effect, expected: Zone) 
         return;
     };
     if let Effect::ChangeZone {
-        target: target @ TargetFilter::ParentTarget,
+        target,
         destination: Zone::Battlefield,
         origin: origin @ None,
         ..
     } = &mut *payload.effect
     {
+        if !matches!(target, TargetFilter::ParentTarget | TargetFilter::SelfRef) {
+            return;
+        }
         // CR 400.7j + CR 603.7c: "it" after a self-move is the moved card; the origin guard keeps a card that already left that zone.
         *target = TargetFilter::SelfRef;
         *origin = Some(expected);
@@ -47162,6 +47165,32 @@ fn parse_effect_chain_ir_body(
                 strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
             (without_where_x.original.to_string(), where_x_expression)
         };
+        // CR 107.3c: a stripped definition still belongs to the complete
+        // action. Do not turn an unknown earthbend count or unless-cost into
+        // a bare X (or the keyword's numeric zero fallback).
+        if local_where_x_expression
+            .as_deref()
+            .is_some_and(|expression| {
+                lower::parse_where_x_quantity_expression(expression).is_none()
+            })
+            && nom_on_lower(&text, &text.to_lowercase(), |input| {
+                alt((
+                    value((), preceded(opt(tag("you ")), tag("earthbend "))),
+                    value((), tag("counter ")),
+                ))
+                .parse(input)
+            })
+            .is_some()
+        {
+            unimplemented_clause(
+                &mut builder,
+                "where_x_binding",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
+
         // CR 608.2c + CR 202.3: "where X is the mana value of that card" binds
         // the demonstrative referent only when a producer that is PROVEN to
         // publish exactly one "that card" snapshot precedes it — a single-hit
@@ -49746,12 +49775,41 @@ fn parse_effect_chain_ir_body(
                 break 'source_clause;
             }
             let nearest_followup = match effective_prev_effect.as_ref() {
-                Some(effect) => sequence::parse_followup_continuation_ast_with_search_destination(
-                    normalized_text,
-                    effect,
-                    ctx,
-                    effective_prev_is_search_destination_exile,
-                ),
+                Some(effect) => (|| {
+                    let ordinary =
+                        sequence::parse_followup_continuation_ast_with_search_destination(
+                            normalized_text,
+                            effect,
+                            ctx,
+                            effective_prev_is_search_destination_exile,
+                        )?;
+                    if ordinary.is_some() {
+                        Ok(ordinary)
+                    } else if matches!(effect, Effect::Token { .. }) {
+                        let mut tentative = ctx.clone();
+                        tentative.chain_zone_result =
+                            builder.token_counter_zone_result_antecedent();
+                        let candidate =
+                            sequence::parse_followup_continuation_ast_with_search_destination(
+                                normalized_text,
+                                effect,
+                                &mut tentative,
+                                false,
+                            )?;
+                        match candidate {
+                            Some(
+                                counter @ (ContinuationAst::PutCountersOnLastCreated { .. }
+                                | ContinuationAst::TokenEntersWithCounters { .. }),
+                            ) => {
+                                *ctx = tentative;
+                                Ok(Some(counter))
+                            }
+                            _ => Ok(None),
+                        }
+                    } else {
+                        Ok(None)
+                    }
+                })(),
                 None => Ok(None),
             };
             let nearest_followup = match nearest_followup {

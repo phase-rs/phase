@@ -8102,11 +8102,21 @@ mod sought_completion_order_tests {
     #[test]
     fn sought_batch_result_is_unpublished_through_repeated_and_final_pause() {
         let (mut runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
-        for pause in 0..2 {
-            let batch = runner
-                .state()
-                .active_batch_delivery()
-                .expect("parked batch");
+        let mut observed_remaining = Vec::new();
+        for pause in 0..16 {
+            if !matches!(
+                runner.state().waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            let batch = runner.state().active_batch_delivery().unwrap_or_else(|| {
+                panic!(
+                    "parked named batch pause={pause}; wait={:?}; frames={:?}",
+                    runner.state().waiting_for,
+                    runner.state().resolution_stack
+                )
+            });
             let Some(BatchCompletion::RecordInstructionZoneResult {
                 occurrence_id,
                 return_result_process,
@@ -8124,12 +8134,24 @@ mod sought_completion_order_tests {
             assert!(!runner.state().return_result_frames[occurrence_id]
                 .results
                 .contains_key(result_id));
-            assert_eq!(
-                batch.remaining.len(),
-                1 - pause,
-                "final member still has a completion owner"
+            let remaining = batch.remaining.len();
+            assert!(
+                remaining <= 1,
+                "only the two selected members belong to this batch"
             );
+            if let Some(previous) = observed_remaining.last() {
+                assert!(
+                    remaining <= *previous,
+                    "repeated replacements cannot replenish the batch"
+                );
+            }
+            observed_remaining.push(remaining);
             assert!(batch.paused_current.is_some());
+            assert_eq!(
+                runner.state().players[0].life,
+                20,
+                "independent life tail waits at EVERY replacement pause"
+            );
             let action = crate::ai_support::legal_actions(runner.state())
                 .into_iter()
                 .find(|action| {
@@ -8141,6 +8163,18 @@ mod sought_completion_order_tests {
                 .unwrap();
             runner.act(action).unwrap();
         }
+        assert!(
+            observed_remaining.contains(&1) && observed_remaining.contains(&0),
+            "both first and final member pauses were reached: {observed_remaining:?}"
+        );
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                crate::types::game_state::WaitingFor::ReplacementChoice { .. }
+            ),
+            "bounded replacement driver completed: {:?}",
+            runner.state().waiting_for
+        );
         for _ in 0..20 {
             if runner.state().stack.is_empty()
                 && matches!(
@@ -8158,6 +8192,11 @@ mod sought_completion_order_tests {
             assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
             assert_eq!(runner.state().objects[&card].perpetual_mods.len(), 1);
         }
+        assert_eq!(
+            runner.state().players[0].life,
+            27,
+            "independent tail executes once after the batch"
+        );
         assert!(runner.state().active_batch_delivery().is_none());
         assert!(
             runner.state().return_result_frames.is_empty(),

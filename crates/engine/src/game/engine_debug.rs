@@ -3214,7 +3214,9 @@ mod tests {
                 let paused = !matches!(pause, CreationPauseCase::Synchronous);
                 assert_eq!(
                     matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
-                    paused
+                    paused,
+                    "debug materialization copy={copy}, row={pause:?}; wait={:?}; pending={:?}; frames={:?}; events={events:?}",
+                    state.waiting_for, state.pending_replacement, state.resolution_stack
                 );
                 if matches!(
                     pause,

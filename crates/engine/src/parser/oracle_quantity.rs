@@ -45,11 +45,8 @@ mod retained_spell_history_tests {
             ),
             (
                 "the number of cards in your graveyard",
-                QuantityRef::ZoneCardCount {
-                    zone: crate::types::ability::ZoneRef::Graveyard,
-                    scope: CountScope::Controller,
-                    card_types: vec![],
-                    filter: None,
+                QuantityRef::GraveyardSize {
+                    player: PlayerScope::Controller,
                 },
             ),
         ] {
@@ -8656,27 +8653,40 @@ mod tests {
     /// were exiled this way" shape must parse through this exact path.
     #[test]
     fn total_power_of_creatures_they_controlled_exiled_this_way() {
-        let qty = parse_quantity_ref(
-            "the total power of creatures they controlled that were exiled this way",
-        )
-        .expect("composite quantity must parse");
-        let expected = QuantityRef::PropertyAggregate(
-            crate::types::ability::PropertyAggregate::new(
-                AggregateFunction::Sum,
-                ObjectProperty::Power,
-                crate::types::ability::CardTypeSetSource::Objects {
-                    filter: TargetFilter::And {
-                        filters: vec![
-                            TargetFilter::Typed(
-                                TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
-                            ),
-                            TargetFilter::ExiledBySource,
-                        ],
-                    },
-                },
-            )
-            .expect("statically valid property aggregate"),
+        let phrase = "the total power of creatures they controlled that were exiled this way";
+        assert!(
+            parse_quantity_ref(phrase).is_none(),
+            "context-free history cannot guess a producer"
         );
+        let chain = crate::parser::oracle_effect::parse_effect_chain_ir(
+            "Exile all creatures.",
+            crate::types::ability::AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let producer = &chain.clauses[0];
+        let (from, to) = producer.zone_result_producer().unwrap();
+        let mut context = ParseContext::default();
+        context.chain_zone_result = Some((producer.id, from, to));
+        context.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+        let qty = parse_quantity_ref_with_context(phrase, &mut context)
+            .expect("bound complete historical quantity");
+        let expected = QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                result: crate::types::ability::ReturnResultId(producer.id.0),
+            },
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Exile),
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ScopedPlayer),
+                    ),
+                ],
+            },
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Power,
+        };
         assert_eq!(qty, expected);
     }
 
@@ -9087,27 +9097,38 @@ mod tests {
 
     #[test]
     fn total_toughness_of_creatures_you_controlled_exiled_this_way() {
-        let qty = parse_quantity_ref(
-            "the total toughness of creatures you controlled that were exiled this way",
-        )
-        .expect("composite quantity must parse");
-        let expected = QuantityRef::PropertyAggregate(
-            crate::types::ability::PropertyAggregate::new(
-                AggregateFunction::Sum,
-                ObjectProperty::Toughness,
-                crate::types::ability::CardTypeSetSource::Objects {
-                    filter: TargetFilter::And {
-                        filters: vec![
-                            TargetFilter::Typed(
-                                TypedFilter::creature().controller(ControllerRef::You),
-                            ),
-                            TargetFilter::ExiledBySource,
-                        ],
-                    },
-                },
-            )
-            .expect("statically valid property aggregate"),
+        let phrase = "the total toughness of creatures you controlled that were exiled this way";
+        assert!(
+            parse_quantity_ref(phrase).is_none(),
+            "context-free history cannot guess a producer"
         );
+        let chain = crate::parser::oracle_effect::parse_effect_chain_ir(
+            "Exile all creatures.",
+            crate::types::ability::AbilityKind::Spell,
+            &mut ParseContext::default(),
+        );
+        let producer = &chain.clauses[0];
+        let (from, to) = producer.zone_result_producer().unwrap();
+        let mut context = ParseContext::default();
+        context.chain_zone_result = Some((producer.id, from, to));
+        context.relative_player_scope = Some(ControllerRef::You);
+        let qty = parse_quantity_ref_with_context(phrase, &mut context)
+            .expect("bound complete historical quantity");
+        let expected = QuantityRef::ZoneChangeAggregate {
+            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult {
+                result: crate::types::ability::ReturnResultId(producer.id.0),
+            },
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Exile),
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You)),
+                ],
+            },
+            function: AggregateFunction::Sum,
+            property: ObjectProperty::Toughness,
+        };
         assert_eq!(qty, expected);
     }
 

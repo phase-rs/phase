@@ -43968,9 +43968,18 @@ fn frodo_source_condition_preserves_lifelink_grant() {
     let modifications = &static_abilities[0].modifications;
     assert!(modifications.contains(&ContinuousModification::SetPower { value: 2 }));
     assert!(modifications.contains(&ContinuousModification::SetToughness { value: 3 }));
-    assert!(modifications.contains(&ContinuousModification::AddType {
-        core_type: CoreType::Creature,
-    }));
+    assert!(
+        !modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddType { .. } | ContinuousModification::SetCardTypes { .. }
+        )),
+        "subtype replacement preserves the source's existing card types"
+    );
+    assert!(
+        modifications.contains(&ContinuousModification::RemoveAllSubtypes {
+            set: crate::types::card_type::SubtypeSet::Creature,
+        })
+    );
     assert!(modifications.contains(&ContinuousModification::AddSubtype {
         subtype: "Halfling".to_string(),
     }));

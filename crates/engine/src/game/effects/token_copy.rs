@@ -7839,7 +7839,19 @@ pub(crate) mod tests {
                         {
                             break;
                         }
-                        runner.act(GameAction::PassPriority).unwrap();
+                        // CR 508.1 + CR 509.1: combat declarations are turn-based
+                        // actions, so passing priority cannot answer them.
+                        let action = match runner.state().waiting_for {
+                            WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                                attacks: vec![],
+                                bands: vec![],
+                            },
+                            WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                                assignments: vec![],
+                            },
+                            _ => GameAction::PassPriority,
+                        };
+                        runner.act(action).unwrap();
                     }
                     assert!(!runner.state().stack.is_empty());
                     runner.advance_until_stack_empty();
@@ -8500,17 +8512,19 @@ pub(crate) mod tests {
         .unwrap()
         .into_game_state();
 
-        apply_as_current(
+        let copied_entry = apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target_id)),
             },
         )
         .expect("copy target choice should resolve");
+        events.extend(copied_entry.events);
         assert!(matches!(
             state.waiting_for,
             WaitingFor::ReplacementChoice { .. }
-        ));
+        ), "liminal copied entry must reach counters: wait={:?}; pending={:?}; frames={:?}; events={events:?}",
+            state.waiting_for, state.pending_replacement, state.resolution_stack);
         assert!(state.delayed_triggers.is_empty());
         for _ in 0..30 {
             if state.resolution_stack.is_empty() {
@@ -8646,7 +8660,7 @@ pub(crate) mod tests {
                     .events,
             );
         }
-        assert!(prompts >= 6);
+        assert!(prompts >= 6, "ordered Divine/counter pauses={prompts}; wait={:?}; pending={:?}; frames={:?}; events={events:?}", state.waiting_for, state.pending_replacement, state.resolution_stack);
         assert!(state.resolution_stack.is_empty());
         let births = state.delayed_triggers[0]
             .ability
@@ -8689,7 +8703,19 @@ pub(crate) mod tests {
             if !runner.state().stack.is_empty() {
                 break;
             }
-            runner.act(GameAction::PassPriority).unwrap();
+            // CR 508.1 + CR 509.1: answer the actual combat action while
+            // advancing to the independently asserted delayed trigger.
+            let action = match runner.state().waiting_for {
+                WaitingFor::DeclareAttackers { .. } => GameAction::DeclareAttackers {
+                    attacks: vec![],
+                    bands: vec![],
+                },
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: vec![],
+                },
+                _ => GameAction::PassPriority,
+            };
+            runner.act(action).unwrap();
         }
         assert!(!runner.state().stack.is_empty());
         runner.advance_until_stack_empty();
@@ -8797,9 +8823,39 @@ pub(crate) mod tests {
             state.resolution_stack.is_empty(),
             "the exact compound creation owner and its rider both completed"
         );
+        let delayed = state
+            .delayed_triggers
+            .iter()
+            .find(|trigger| trigger.source_id == assembler)
+            .expect("the compound Cogwork instruction registered its next-end exile");
+        assert_eq!(
+            delayed.condition,
+            crate::types::ability::DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+            "Cogwork's exact next-end condition: {delayed:?}"
+        );
+        assert!(delayed.one_shot);
+        assert_eq!(
+            delayed.ability.target_incarnations,
+            [copy, squirrel]
+                .map(|id| ObjectIncarnationRef::from_object(&state.objects[&id]))
+                .to_vec(),
+            "the delayed exile retains every exact created birth: {delayed:?}"
+        );
 
         // CR 603.7c: the delayed "Exile it" affects both tokens.
-        finish_at_end_step(&mut runner);
+        runner.advance_to_end_step();
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareAttackers { .. }
+        ) {
+            runner.declare_attackers(&[]).unwrap();
+            runner.advance_to_end_step();
+        }
+        assert_eq!(runner.state().phase, Phase::End);
+        assert!(runner.state().stack.iter().any(|entry| entry.source_id == assembler),
+            "the registered Cogwork delayed trigger reached the stack: stack={:?}; delayed={:?}; wait={:?}",
+            runner.state().stack, runner.state().delayed_triggers, runner.state().waiting_for);
+        runner.advance_until_stack_empty();
         let state = runner.state();
         assert!(!state.battlefield.contains(&copy), "the copy is exiled");
         assert!(

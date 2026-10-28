@@ -6020,7 +6020,8 @@ mod tests {
             runner.act(GameAction::PassPriority).unwrap();
             runner.activate(pilgrim, 0).resolve();
             let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
-                panic!("the printed paid sacrifice reaches the actual source prompt");
+                panic!("the printed paid sacrifice reaches the actual source prompt: rider={rider_choice}; wait={:?}; source={:?}; frames={:?}; stack={:?}",
+                    runner.state().waiting_for, runner.state().objects[&pilgrim], runner.state().resolution_stack, runner.state().stack);
             };
             let reference = options
                 .iter()

@@ -808,10 +808,29 @@ mod tests {
                 if state.resolution_stack.is_empty() {
                     break;
                 }
+                let crate::types::game_state::WaitingFor::ReplacementChoice { candidates, .. } =
+                    &state.waiting_for
+                else {
+                    panic!(
+                        "amass counter ordering: {:?}; frames={:?}",
+                        state.waiting_for, state.resolution_stack
+                    );
+                };
+                // CR 616.1: choose doubling before the additive replacement on
+                // BOTH the entry counter and the subsequent amass counters.
+                let index = candidates
+                    .iter()
+                    .position(|candidate| {
+                        state
+                            .objects
+                            .get(&candidate.source_id)
+                            .is_some_and(|source| source.name == "Double counters")
+                    })
+                    .unwrap_or(0);
                 events.extend(
                     crate::game::apply_as_current(
                         &mut state,
-                        crate::types::actions::GameAction::ChooseReplacement { index: 0 },
+                        crate::types::actions::GameAction::ChooseReplacement { index },
                     )
                     .unwrap()
                     .events,

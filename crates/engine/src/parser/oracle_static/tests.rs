@@ -5886,8 +5886,8 @@ fn compound_subject_animation_replacement_predicate() {
         CM::RemoveAllSubtypes {
             set: SubtypeSet::Creature,
         },
-        CM::AddType {
-            core_type: CoreType::Creature,
+        CM::SetCardTypes {
+            core_types: vec![CoreType::Creature],
         },
         CM::AddSubtype {
             subtype: "Zombie".to_string(),
@@ -6230,21 +6230,61 @@ fn bello_compound_negated_type_subject_animation_with_granted_abilities() {
     );
 }
 
-// CR 205.1a vs CR 205.1b: `parse_each_compound_subject_type_change` applies
-// strictly ADDITIVE semantics, so it must decline a compound predicate lacking
-// the "in addition to its/their other types" marker — a bare replacement
-// compound is a different (unhandled here) semantics, not a gap in this
-// handler. Mirrors the same additive-marker gate the "all X and all Y" family
-// uses (`compound_subject_animation_replacement_predicate`).
+// CR 205.1a/b + CR 205.3d + CR 611.3a: the additive-specific owner declines
+// this replacement, while the general complete owner retains both qualified
+// subjects and applies the complete replacement predicate once.
 #[test]
 fn compound_negated_type_subject_animation_declines_non_additive_predicate() {
+    use crate::types::card_type::{CoreType, SubtypeSet};
+    let line = "each non-Equipment artifact and non-Aura enchantment you control with mana value \
+                4 or greater is a 4/4 Elemental creature.";
+    let lower = line.to_lowercase();
+    let tp = crate::parser::oracle_util::TextPair::new(line, &lower);
+    assert!(super::type_change::parse_each_compound_subject_type_change(&tp, line).is_none());
+    let defs = parse_static_line_multi(line);
+    assert_eq!(defs.len(), 1, "one complete replacement: {defs:?}");
+    let def = &defs[0];
+    assert_eq!(def.mode, StaticMode::Continuous);
+    assert_eq!(def.condition, None);
+    let Some(TargetFilter::Or { filters }) = &def.affected else {
+        panic!("both qualified subjects must survive: {def:?}");
+    };
+    assert_eq!(filters.len(), 2);
+    for (core_type, excluded_subtype) in [
+        (TypeFilter::Artifact, "Equipment"),
+        (TypeFilter::Enchantment, "Aura"),
+    ] {
+        assert!(filters.iter().any(|filter| matches!(filter, TargetFilter::Typed(typed)
+            if typed.type_filters.len() == 2
+                && typed.type_filters.contains(&core_type)
+                && typed.type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(excluded_subtype.to_string()))))
+                && typed.controller == Some(ControllerRef::You)
+                && typed.properties == vec![FilterProp::Cmc {
+                    comparator: Comparator::GE,
+                    value: QuantityExpr::Fixed { value: 4 },
+                }]
+        )), "qualified {core_type:?} subject lost: {filters:?}");
+    }
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetPower { value: 4 },
+            ContinuousModification::SetToughness { value: 4 },
+            ContinuousModification::SetCardTypes {
+                core_types: vec![CoreType::Creature]
+            },
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Elemental".to_string()
+            },
+        ]
+    );
+    let hostile = format!("{} unexplained.", line.trim_end_matches('.'));
     assert!(
-        parse_static_line_multi(
-            "each non-Equipment artifact and non-Aura enchantment you control with mana value \
-             4 or greater is a 4/4 Elemental creature."
-        )
-        .is_empty(),
-        "non-additive compound must not be additive-claimed"
+        parse_static_line_multi(&hostile).is_empty(),
+        "unknown predicate tail must decline"
     );
 }
 
@@ -6685,10 +6725,8 @@ fn static_hearth_elemental_cost_reduction_includes_adventures() {
         filter,
         &TargetFilter::Or {
             filters: vec![
-                TargetFilter::Typed(TypedFilter::new(TypeFilter::AnyOf(vec![
-                    TypeFilter::Instant,
-                    TypeFilter::Sorcery
-                ]))),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                 TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasAdventure])),
             ]
         }
@@ -22587,16 +22625,13 @@ fn futurist_operative_subtype_animation_preserves_card_types_shape() {
         ContinuousModification::AddSubtype {
             subtype: "Citizen".to_string(),
         },
-        ContinuousModification::AddType {
-            core_type: CoreType::Creature,
-        },
     ] {
         assert!(animation.modifications.contains(&modification));
     }
-    assert!(!animation
-        .modifications
-        .iter()
-        .any(|modification| matches!(modification, ContinuousModification::SetCardTypes { .. })));
+    assert!(!animation.modifications.iter().any(|modification| matches!(
+        modification,
+        ContinuousModification::SetCardTypes { .. } | ContinuousModification::AddType { .. }
+    )));
 }
 
 // SHAPE: CR 205.1a / CR 205.1b: mixed animation modifications do not imply
@@ -25845,16 +25880,23 @@ fn static_all_creatures_are_color_composes_trailing_modifications() {
         }]
     );
 
-    // "red dragons" is not a color predicate — the color path must decline so the
-    // line is never mis-claimed as a color static.
-    let def = parse_static_line("All creatures are red dragons.");
-    assert!(
-        def.as_ref().is_none_or(|d| !d
-            .modifications
-            .iter()
-            .any(|m| matches!(m, ContinuousModification::SetColor { .. }))),
-        "'are red dragons' must not parse as a color static, got {def:?}"
+    // CR 105.3 + CR 205.1a: a complete color/subtype predicate changes both.
+    let def = parse_static_line("All creatures are red dragons.").unwrap();
+    assert_eq!(
+        def.modifications,
+        vec![
+            ContinuousModification::SetColor {
+                colors: vec![ManaColor::Red]
+            },
+            ContinuousModification::RemoveAllSubtypes {
+                set: crate::types::card_type::SubtypeSet::Creature
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Dragon".to_string()
+            },
+        ]
     );
+    assert!(parse_static_line("All creatures are red dragons unexplained.").is_none());
 }
 
 /// CR 205.4b + CR 613.1d (Layer 4): "[subject] is/are [no longer] [supertype]"
