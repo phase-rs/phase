@@ -33745,23 +33745,34 @@ pub(crate) fn normalize_saved_liminal_copy_authority(state: &mut GameState) -> R
     {
         return Err("replacement candidate identity count mismatch".into());
     }
-    if let WaitingFor::CopyTargetChoice {
-        player,
-        source_id,
-        purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation: None },
-        ..
-    } = &state.waiting_for
-    {
-        if state.viewer_projection.is_none() {
-            let selected = crate::game::engine_replacement::recover_selected_copy_continuation(
-                state, *source_id, *player,
-            )?;
-            if let WaitingFor::CopyTargetChoice {
-                purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation },
-                ..
-            } = &mut state.waiting_for
-            {
-                *continuation = selected;
+    if state.viewer_projection.is_none() {
+        if let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation },
+            ..
+        } = state.waiting_for.clone()
+        {
+            let missing_source = state
+                .active_post_replacement_drains()
+                .and_then(|drains| drains.resident())
+                .is_some_and(|drain| drain.source.is_none());
+            if continuation.is_none() || missing_source {
+                let selected = crate::game::engine_replacement::recover_selected_copy_continuation(
+                    state,
+                    source_id,
+                    player,
+                    continuation.as_deref(),
+                )?;
+                if let WaitingFor::CopyTargetChoice {
+                    purpose: crate::types::ability::CopyTargetPurpose::BecomeCopy { continuation },
+                    ..
+                } = &mut state.waiting_for
+                {
+                    if continuation.is_none() {
+                        *continuation = selected;
+                    }
+                }
             }
         }
     }

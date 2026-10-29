@@ -1810,7 +1810,7 @@ fn replacement_choice_player(
     }
 }
 
-fn replacement_mode_decline(mode: &ReplacementMode) -> Option<&AbilityDefinition> {
+pub(crate) fn replacement_mode_decline(mode: &ReplacementMode) -> Option<&AbilityDefinition> {
     match mode {
         ReplacementMode::Optional { decline } | ReplacementMode::MayCost { decline, .. } => {
             decline.as_deref()
