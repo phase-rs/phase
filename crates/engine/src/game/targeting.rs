@@ -260,7 +260,7 @@ fn find_legal_targets_with_context(
     // documents on the legality side.
     //
     // Membership is delegated to that same single authority
-    // (`filter::player_matches_target_filter_in_state`), which already answers
+    // (`filter::player_matches_target_filter_with_context`), which already answers
     // `PlayerMatching` and recurses through `And`/`Or`, so the enumerating side
     // and the CR 608.2b re-check side cannot drift. Seat eligibility stays with
     // `player_is_legal_target` (CR 800.4 existence + CR 702.11c/702.18a/702.16b
@@ -270,12 +270,8 @@ fn find_legal_targets_with_context(
             if !player_is_legal_target(state, player.id, source_id, source_controller) {
                 continue;
             }
-            if super::filter::player_matches_target_filter_in_state(
-                state,
-                filter,
-                player.id,
-                Some(source_controller),
-                Some(source_id),
+            if super::filter::player_matches_target_filter_with_context(
+                state, filter, player.id, target_ctx,
             ) {
                 targets.push(TargetRef::Player(player.id));
             }
@@ -4160,6 +4156,11 @@ mod tests {
                 }),
             }),
         };
+        assert_eq!(
+            super::find_legal_targets_for_ability(&state, &role, &ability),
+            vec![TargetRef::Player(P1)]
+        );
+        assert!(super::has_legal_target_for_ability(&state, &role, &ability));
         assert!(super::target_ref_matches_resolved_filter_with_context(
             &state,
             &role,
@@ -4176,6 +4177,10 @@ mod tests {
             "the source owner is not the controller-relative opponent"
         );
         ability.chosen_x = Some(0);
+        assert!(super::find_legal_targets_for_ability(&state, &role, &ability).is_empty());
+        assert!(!super::has_legal_target_for_ability(
+            &state, &role, &ability
+        ));
         assert!(!super::target_ref_matches_resolved_filter_with_context(
             &state,
             &role,
@@ -4183,6 +4188,8 @@ mod tests {
             &FilterContext::from_ability(&ability)
         ));
         ability.chosen_x = Some(1);
+        assert!(super::find_legal_targets(&state, &role, P0, source).is_empty());
+        assert!(!super::has_legal_target(&state, &role, P0, source));
         assert!(
             !super::target_ref_matches_resolved_filter_with_context(
                 &state,

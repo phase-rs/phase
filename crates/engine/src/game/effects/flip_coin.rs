@@ -1039,6 +1039,31 @@ fn matches_direct_die_branch_owner(
         .is_ok()
 }
 
+/// Admit the actual attached owner before transferring its frame to the caller.
+pub(crate) fn take_admitted_coin_flip(
+    state: &mut GameState,
+) -> Result<
+    (
+        PendingCoinFlip,
+        Option<(
+            ResolvedAbility,
+            crate::types::ability::ResultProducerEnvironment,
+        )>,
+    ),
+    EffectError,
+> {
+    let pending = state
+        .active_coin_flip_frame()
+        .ok_or_else(|| EffectError::InvalidParam("No active coin-flip frame to resume".into()))?;
+    validate_pending_coin_flip(state, pending)?;
+    let owner = pending_flip_result_owner(state, pending)?;
+    let pending = state
+        .take_active_coin_flip_frame()
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?
+        .ok_or_else(|| EffectError::InvalidParam("No active coin-flip frame to resume".into()))?;
+    Ok((pending, owner))
+}
+
 pub fn resume_after_keep(
     state: &mut GameState,
     pending: PendingCoinFlip,
@@ -1047,6 +1072,32 @@ pub fn resume_after_keep(
 ) -> Result<Option<WaitingFor>, EffectError> {
     validate_pending_coin_flip(state, &pending)?;
     let owner = pending_flip_result_owner(state, &pending)?;
+    resume_after_keep_with_owner(state, pending, owner, kept, events)
+}
+
+pub(crate) fn resume_admitted_after_keep(
+    state: &mut GameState,
+    pending: PendingCoinFlip,
+    owner: Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    kept: Vec<bool>,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EffectError> {
+    resume_after_keep_with_owner(state, pending, owner, kept, events)
+}
+
+fn resume_after_keep_with_owner(
+    state: &mut GameState,
+    pending: PendingCoinFlip,
+    owner: Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    kept: Vec<bool>,
+    events: &mut Vec<GameEvent>,
+) -> Result<Option<WaitingFor>, EffectError> {
     let occurrence = pending.return_result_occurrence;
     super::with_inherited_return_result_occurrence(state, occurrence, |state| {
         retained_flip_occurrence(
@@ -1258,9 +1309,27 @@ mod admitted_branch_public_tests {
                 assert_eq!(installed.sub_ability.as_ref().unwrap().ability_index, None);
                 let pending = paused.active_coin_flip_frame().unwrap();
                 assert_eq!(pending.branch_context.coin_branch_target_abilities.len(), 2);
+                assert_eq!(
+                    pending
+                        .branch_context
+                        .damage_source_choice
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .identity
+                        .reference,
+                    selected
+                );
                 for (_, body) in &pending.branch_context.coin_branch_target_abilities {
                     assert_eq!(body.chosen_x, Some(x));
                     assert_eq!(body.ability_index, Some(0));
+                    assert!(body.context.damage_source_choice.is_none());
+                    assert_eq!(
+                        body.noted_mana_payment.as_ref().unwrap().types.len(),
+                        (x + 1) as usize
+                    );
                 }
                 if through_die {
                     let die = paused
@@ -1412,7 +1481,26 @@ mod admitted_branch_public_tests {
                 vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
             );
             let mut runner = scenario.build();
-            runner.activate(source, 0).resolve();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::CoinFlipKeepChoice { .. }
+                ) {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
             assert!(
                 matches!(runner.state().waiting_for, WaitingFor::CoinFlipKeepChoice { player: P0, keep_count: 1, ref results } if results.len() == 2)
             );
@@ -1431,12 +1519,85 @@ mod admitted_branch_public_tests {
             };
             let mut hostile = paused.clone();
             hostile.active_coin_flip_frame_mut().unwrap().source_id = ObjectId(999_999);
-            let before = hostile.clone();
+            let before = serde_json::to_value(&hostile).unwrap();
+            let rng_before = hostile.rng.get_word_pos();
             assert!(crate::game::engine::apply(&mut hostile, P0, action.clone()).is_err());
             assert_eq!(
-                hostile, before,
+                serde_json::to_value(&hostile).unwrap(),
+                before,
                 "foreign source refuses before consuming the keep"
             );
+            assert_eq!(hostile.rng.get_word_pos(), rng_before);
+            for fault in 0..5 {
+                let mut hostile = paused.clone();
+                match fault {
+                    0 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .admitted_program
+                            .as_mut()
+                            .unwrap()
+                            .source_id = ObjectId(999_999)
+                    }
+                    1 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .admitted_program = None
+                    }
+                    2 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .declarations = None
+                    }
+                    3 => {
+                        hostile
+                            .active_coin_flip_frame_mut()
+                            .unwrap()
+                            .expected_return_result_process = None
+                    }
+                    4 => {
+                        hostile.take_active_coin_flip_frame().unwrap().unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                let before = serde_json::to_value(&hostile).unwrap();
+                let rng_before = hostile.rng.get_word_pos();
+                assert!(
+                    crate::game::engine::apply(&mut hostile, P0, action.clone()).is_err(),
+                    "owner fault {fault}"
+                );
+                assert_eq!(
+                    serde_json::to_value(&hostile).unwrap(),
+                    before,
+                    "owner fault {fault}"
+                );
+                assert_eq!(
+                    hostile.rng.get_word_pos(),
+                    rng_before,
+                    "owner fault {fault}"
+                );
+            }
+            for (actor, keep_indices) in
+                [(P1, vec![1]), (P0, vec![]), (P0, vec![2]), (P0, vec![0, 0])]
+            {
+                let mut hostile = paused.clone();
+                let before = serde_json::to_value(&hostile).unwrap();
+                let rng_before = hostile.rng.get_word_pos();
+                assert!(crate::game::engine::apply(
+                    &mut hostile,
+                    actor,
+                    GameAction::SelectCoinFlips { keep_indices }
+                )
+                .is_err());
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+                assert_eq!(hostile.rng.get_word_pos(), rng_before);
+            }
             for restore_kind in 0..3 {
                 let restored = if restore_kind == 1 {
                     serde_json::from_value::<TrustedGameStateEnvelope>(
@@ -1460,7 +1621,19 @@ mod admitted_branch_public_tests {
                     serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
                 };
                 let mut resumed = GameRunner::from_state(restored);
-                resumed.act(action.clone()).unwrap();
+                let rng_before = resumed.state().rng.get_word_pos();
+                let result = resumed.act(action.clone()).unwrap();
+                // CR 614.6 + CR 705.2: ignore one replacement result without
+                // another draw, publishing only the surviving logical flip.
+                assert_eq!(resumed.state().rng.get_word_pos(), rng_before);
+                assert_eq!(
+                    result
+                        .events
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::CoinFlipped { .. }))
+                        .count(),
+                    1
+                );
                 resumed.advance_until_stack_empty();
                 assert_eq!(
                     resumed.life(P0),

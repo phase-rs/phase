@@ -2595,16 +2595,8 @@ fn handle_resolution_choice_in_occurrence(
                 }
             }
             let kept: Vec<bool> = keep_indices.iter().map(|&index| results[index]).collect();
-            if let Some(pending) = state.active_coin_flip_frame() {
-                effects::flip_coin::validate_pending_coin_flip(state, pending)
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-            }
-            let pending = state
-                .take_active_coin_flip_frame()
-                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
-                .ok_or_else(|| {
-                    EngineError::InvalidAction("No active coin-flip frame to resume".to_string())
-                })?;
+            let (pending, owner) = effects::flip_coin::take_admitted_coin_flip(state)
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
             let entry_die = state.die_result_this_resolution;
             // CR 608.2c + CR 400.7e: replay this owner's scope, including an
             // explicit empty scope, throughout its branch and continuation drain.
@@ -2612,8 +2604,9 @@ fn handle_resolution_choice_in_occurrence(
                 crate::game::triggers::push_resolving_trigger_context(state, context)
             });
             let events_before_resume = events.len();
-            let next =
-                crate::game::effects::flip_coin::resume_after_keep(state, pending, kept, events);
+            let next = crate::game::effects::flip_coin::resume_admitted_after_keep(
+                state, pending, owner, kept, events,
+            );
             // CR 608.2c: resume the parent only after the coin run completes.
             let result = next.map(|next| match next {
                 Some(wf) => wf,

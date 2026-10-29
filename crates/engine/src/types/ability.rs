@@ -47060,15 +47060,15 @@ impl ResolvedAbility {
                 self.context.chosen_group_targets.push((group, targets));
             }
         }
-        for (_, child) in &mut self.coin_branch_target_abilities {
-            child.inherit_coin_target_inputs(input);
-        }
         if let Some(child) = self.sub_ability.as_deref_mut() {
             child.inherit_coin_target_inputs(input);
         }
         if let Some(child) = self.else_ability.as_deref_mut() {
             child.inherit_coin_target_inputs(input);
         }
+        // Executable edges retain complete inputs; target-only children use
+        // the same announcement projection as every other custody writer.
+        self.refresh_coin_target_inputs();
     }
 
     pub(crate) fn refresh_coin_target_inputs(&mut self) {
@@ -49148,6 +49148,129 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn complete_coin_input_inheritance_projects_only_target_captures() {
+        use crate::game::ability_utils::{build_resolved_from_def, validate_coin_target_authority};
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::game_state::ChosenDamageSource;
+        use crate::types::mana::ManaType;
+
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Supplemental input source", 2, 2)
+            .id();
+        let selected = scenario
+            .add_creature(P1, "Supplemental selected source", 3, 3)
+            .id();
+        let state = scenario.build().state().clone();
+        let choice = Box::new(ChosenDamageSource {
+            source: Some(crate::game::triggers::trigger_source_context_for_latch(
+                &state,
+                &state.objects[&selected],
+            )),
+            candidate_filter: TargetFilter::Any,
+        });
+        let mut input = ResolvedAbility::new(Effect::NoOp, Vec::new(), source, P0);
+        input.context.damage_source_choice = Some(choice.clone());
+        input.source_incarnation = Some(state.objects[&source].incarnation);
+        input.announced_source_incarnation = input.source_incarnation;
+        // CR 107.3a: the announced X and payment stay with the selected body.
+        input.chosen_x = Some(3);
+        input.ability_index = Some(0);
+        input.noted_mana_payment = Some(NotedManaPayment {
+            types: vec![ManaType::Black; 4],
+            source_incarnation: state.objects[&source].incarnation,
+        });
+        input.context.additional_cost_paid = true;
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Player,
+            },
+        );
+        let inner = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(gain.clone())),
+                lose_effect: Some(Box::new(gain)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let outer = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
+                win_effect: Some(Box::new(inner.clone())),
+                lose_effect: Some(Box::new(inner)),
+                flipper: TargetFilter::Controller,
+            },
+        );
+        let mut definition =
+            AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).sub_ability(outer);
+        definition.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::NoOp,
+        )));
+        let mut executable = build_resolved_from_def(&definition, source, P0);
+        for (_, branch) in &mut executable
+            .sub_ability
+            .as_mut()
+            .unwrap()
+            .coin_branch_target_abilities
+        {
+            for (_, leaf) in &mut branch.coin_branch_target_abilities {
+                leaf.push_target(TargetRef::Player(P1));
+            }
+        }
+        executable.inherit_coin_target_inputs(&input);
+        assert_eq!(
+            executable.context.damage_source_choice,
+            Some(choice.clone())
+        );
+        assert_eq!(
+            executable
+                .else_ability
+                .as_ref()
+                .unwrap()
+                .context
+                .damage_source_choice,
+            Some(choice.clone())
+        );
+        let coin = executable.sub_ability.as_ref().unwrap();
+        assert_eq!(coin.context.damage_source_choice, Some(choice.clone()));
+        let projection = coin.coin_target_input_projection();
+        for (_, branch) in &coin.coin_branch_target_abilities {
+            assert_eq!(branch.context, projection.context);
+            for (_, leaf) in &branch.coin_branch_target_abilities {
+                assert_eq!(leaf.context, projection.context);
+                assert_eq!(leaf.source_id, source);
+                assert_eq!(leaf.source_incarnation, input.source_incarnation);
+                assert_eq!(
+                    leaf.announced_source_incarnation,
+                    input.announced_source_incarnation
+                );
+                assert_eq!(leaf.chosen_x, Some(3));
+                assert_eq!(leaf.ability_index, Some(0));
+                assert_eq!(leaf.noted_mana_payment, input.noted_mana_payment);
+                assert_eq!(leaf.targets, vec![TargetRef::Player(P1)]);
+            }
+        }
+        validate_coin_target_authority(&executable).unwrap();
+        executable
+            .sub_ability
+            .as_mut()
+            .unwrap()
+            .coin_branch_target_abilities[0]
+            .1
+            .context
+            .damage_source_choice = Some(choice);
+        assert!(validate_coin_target_authority(&executable)
+            .unwrap_err()
+            .contains("produced resolution context"));
+    }
 
     #[test]
     fn u14_parity_current_and_legacy_tags() {
