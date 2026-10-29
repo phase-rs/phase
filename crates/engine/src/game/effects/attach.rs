@@ -4129,17 +4129,19 @@ mod tests {
                 payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
-        for _ in 0..8 {
+        for step in 0..8 {
             if matches!(
                 runner.state().waiting_for,
                 WaitingFor::EffectZoneChoice { .. }
             ) {
                 break;
             }
-            assert!(matches!(
-                runner.state().waiting_for,
-                WaitingFor::Priority { .. }
-            ));
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "attachment reach step={step}; wait={:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}",
+                runner.state().waiting_for, runner.state().stack, runner.state().resolution_stack,
+                runner.state().resolving_stack_entry, runner.state().return_result_frames
+            );
             runner.act(GameAction::PassPriority).unwrap();
         }
         let WaitingFor::EffectZoneChoice {

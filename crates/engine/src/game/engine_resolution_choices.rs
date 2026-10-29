@@ -1972,6 +1972,9 @@ fn append_vote_ballot_and_advance(
                 .collect(),
         });
         let candidate_object_ids: Vec<ObjectId> = candidate_objects.iter().copied().collect();
+        // Retire the answered ballot before tallying: a tally may open a new
+        // row choice that must retain custody of the remaining ballots.
+        set_priority(state, controller);
         let _ = effects::vote::resolve_tally_owned(
             state,
             source_id,
@@ -1991,7 +1994,9 @@ fn append_vote_ballot_and_advance(
                 .map(|(program, declarations)| (program, declarations)),
             retained_input.as_deref(),
         );
-        ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
+        super::engine::resume_pending_continuation_if_priority(state, events)
+            .expect("a settled vote must resume its continuation");
+        ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
     }
 }
 
@@ -15753,12 +15758,19 @@ mod token_materialization_completion_tests {
             .unwrap()
             .events;
             if !matches!(pause, CreationPauseCase::Synchronous) {
-                assert!(matches!(
-                    state.waiting_for,
-                    WaitingFor::ReplacementChoice { .. }
-                ));
+                assert!(
+                    matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
+                    "persistent row={pause:?}; wait={:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}",
+                    state.waiting_for, state.stack, state.resolution_stack,
+                    state.resolving_stack_entry, state.return_result_frames
+                );
                 assert_eq!(state.phase, phase);
-                assert_eq!(state.players[0].life, life + 2);
+                assert_eq!(state.players[0].life, life + 2,
+                    "persistent row={pause:?}; wait={:?}; life_observed={}; counter_observed={}; resolution={:?}",
+                    state.waiting_for,
+                    crate::analysis::resource::life_growth_is_observed(&state),
+                    crate::analysis::resource::counter_growth_is_observed(&state),
+                    state.resolution_stack);
             }
             if matches!(
                 pause,
@@ -15773,14 +15785,19 @@ mod token_materialization_completion_tests {
                 .unwrap()
                 .into_game_state();
             }
-            for _ in 0..60 {
+            for step in 0..60 {
                 let action = match state.waiting_for {
                     WaitingFor::ReplacementChoice { .. } => {
                         GameAction::ChooseReplacement { index: 0 }
                     }
                     WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
                     WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
-                    ref other => panic!("persistent token completion: {other:?}"),
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    ref other => panic!(
+                        "persistent row={pause:?}, step={step}; wait={other:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}",
+                        state.stack, state.resolution_stack, state.resolving_stack_entry,
+                        state.return_result_frames
+                    ),
                 };
                 events.extend(
                     crate::game::apply_as_current(&mut state, action)

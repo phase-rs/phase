@@ -259,7 +259,9 @@ pub(crate) mod tests {
         use crate::types::game_state::WaitingFor;
         let life = runner.state().players[0].life;
         let mut prompts = 0;
-        for _ in 0..50 {
+        let mut queued_priority_reached = false;
+        let mut completed = false;
+        for step in 0..50 {
             let action = match runner.state().waiting_for {
                 WaitingFor::ReplacementChoice { .. } => {
                     prompts += 1;
@@ -272,12 +274,35 @@ pub(crate) mod tests {
                         .find(|action| matches!(action, GameAction::ChooseReplacement { index: 0 }))
                         .unwrap()
                 }
-                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-                WaitingFor::Priority { .. } => GameAction::PassPriority,
-                ref other => panic!("{other:?}"),
+                WaitingFor::Priority { .. }
+                    if runner.state().stack.is_empty()
+                        && runner.state().resolution_stack.is_empty() =>
+                {
+                    completed = true;
+                    break;
+                }
+                WaitingFor::Priority { .. } => {
+                    queued_priority_reached |= runner.state().stack.is_empty()
+                        && !runner.state().resolution_stack.is_empty();
+                    GameAction::PassPriority
+                }
+                ref other => panic!(
+                    "sought completion step={step}; wait={other:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}",
+                    runner.state().stack, runner.state().resolution_stack,
+                    runner.state().resolving_stack_entry, runner.state().return_result_frames
+                ),
             };
             runner.act(action).unwrap();
         }
+        assert!(completed,
+            "sought completion exhausted 50 actions; wait={:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}; active={:?}; pending={:?}",
+            runner.state().waiting_for, runner.state().stack, runner.state().resolution_stack,
+            runner.state().resolving_stack_entry, runner.state().return_result_frames,
+            runner.state().active_return_result_occurrence, runner.state().pending_resolution_completion);
+        assert!(
+            queued_priority_reached,
+            "actual queued Priority boundary was reached"
+        );
         assert!(prompts >= 1);
         assert_eq!(runner.state().players[0].life, life + 7);
         for card in cards {
@@ -285,6 +310,11 @@ pub(crate) mod tests {
             assert_eq!(runner.state().objects[card].perpetual_mods.len(), 1);
         }
         assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().return_result_frames.is_empty());
+        assert!(runner.state().active_return_result_occurrence.is_none());
+        assert!(runner.state().resolving_stack_entry.is_none());
+        assert!(runner.state().pending_resolution_completion.is_none());
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
