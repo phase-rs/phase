@@ -25731,7 +25731,7 @@ fn bind_recipient_without_recipient_slot(
 /// Everything else is `None` — see the fail-closed contract on
 /// `bind_recipient_without_recipient_slot`.
 fn distribution_recipient_player_scope(filter: &TargetFilter) -> Option<PlayerFilter> {
-    player_scope_from_parent_target_subject(filter).or_else(|| match filter {
+    player_scope_from_parent_target_subject(filter).or(match filter {
         // CR 608.2d: "that player" already rebound by `try_parse_compound_subject_each`
         // to the opponent a preceding "Choose an opponent." picked (the Offering
         // cycle) — a resolution-scoped single player, not a player class.
