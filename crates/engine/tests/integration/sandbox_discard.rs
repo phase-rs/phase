@@ -90,8 +90,26 @@ fn is_priority(runner: &GameRunner) -> bool {
     matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
 }
 
+/// What a rejected action must leave exactly as it was: every zone's contents,
+/// life totals, the prompt, the stack and the state revision. The whole
+/// `GameState` is not compared, because the action boundary also records the
+/// rejected attempt itself (the same rollback-set approach as `engine_debug`'s
+/// rejection tests).
 fn digest(runner: &GameRunner) -> serde_json::Value {
-    serde_json::to_value(runner.state()).expect("game state serializes")
+    let state = runner.state();
+    let players: Vec<_> = state
+        .players
+        .iter()
+        .map(|p| (p.life, &p.hand, &p.library, &p.graveyard))
+        .collect();
+    serde_json::json!({
+        "players": players,
+        "battlefield": &state.battlefield,
+        "exile": &state.exile,
+        "stack_len": state.stack.len(),
+        "waiting_for": &state.waiting_for,
+        "state_revision": state.state_revision,
+    })
 }
 
 fn count_named_on_battlefield(runner: &GameRunner, player: PlayerId, name: &str) -> usize {
