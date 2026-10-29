@@ -11425,17 +11425,8 @@ fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
             while let Ok((_, (prefix, tail))) = nom_primitives::split_once_on(remaining, ",") {
                 let end = clause.len() - remaining.len() + prefix.len();
                 let candidate = clause.slice(0, end).trim_end();
-                let tail = tail.trim_start();
-                let (instruction, _) =
-                    opt(alt((tag::<_, _, OracleError<'_>>("and "), tag("then "))))
-                        .parse(tail)
-                        .expect("optional connector");
                 if nom_quantity::parse_coordinated_card_population(candidate.lower).is_ok()
-                    && crate::parser::oracle_target::parse_relative_card_continuation_head(
-                        instruction,
-                    )
-                    .is_err()
-                    && super::sequence::starts_clause_text_or_conjugated(instruction)
+                    && super::sequence::parse_independent_where_x_continuation(tail).is_ok()
                 {
                     return candidate;
                 }
@@ -11459,33 +11450,22 @@ fn structurally_bound_where_x_clause<'a>(clause: TextPair<'a>) -> TextPair<'a> {
             return clause;
         }
     }
-    let mut has_comma = false;
-    let mut best_end = None;
-
-    for (idx, _) in clause.lower.match_indices(',') {
-        has_comma = true;
-        let candidate = clause.slice(0, idx).trim_end();
-        if !candidate.is_empty() && parse_where_x_quantity_expression(candidate.original).is_some()
+    // CR 107.3c + CR 608.2c: a parseable prefix alone cannot establish the
+    // extent of X. Keep unread relative legs, including through arithmetic
+    // wrappers and single-zone nouns, for the complete quantity owner to refuse.
+    let mut remaining = clause.lower;
+    while let Ok((_, (prefix, tail))) = nom_primitives::split_once_on(remaining, ",") {
+        let end = clause.len() - remaining.len() + prefix.len();
+        let candidate = clause.slice(0, end).trim_end();
+        if !candidate.is_empty()
+            && parse_where_x_quantity_expression(candidate.original).is_some()
+            && super::sequence::parse_independent_where_x_continuation(tail).is_ok()
         {
-            best_end = Some(candidate.len());
+            return candidate;
         }
+        remaining = tail;
     }
-
-    if let Some(expr) = parse_where_x_quantity_expression(clause.original) {
-        let is_constraint = matches!(
-            expr,
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable { ref name },
-            } if name == "X"
-        );
-        if !is_constraint || best_end.is_none() || !has_comma {
-            best_end = Some(clause.len());
-        }
-    }
-
-    best_end
-        .map(|end| clause.slice(0, end).trim_end())
-        .unwrap_or(clause)
+    clause
 }
 
 pub(super) fn strip_leading_sequence_connector(text: &str) -> &str {
@@ -15670,38 +15650,62 @@ mod tests {
 
     #[test]
     fn coordinated_where_x_operand_is_complete() {
-        for introduction in ["", "the number of ", "the total number of "] {
-            let head = format!("{introduction}cards you own in exile and in your graveyard");
-            for tail in [
+        for (noun, introductions) in [
+            (
+                "cards you own in exile and in your graveyard",
+                &[
+                    "",
+                    "the number of ",
+                    "the total number of ",
+                    "one plus the total number of ",
+                    "twice the number of ",
+                ][..],
+            ),
+            (
+                "cards in your graveyard",
+                &[
+                    "the number of ",
+                    "the total number of ",
+                    "one plus the total number of ",
+                    "twice the number of ",
+                ][..],
+            ),
+        ] {
+            for introduction in introductions {
+                let head = format!("{introduction}{noun}");
+                for tail in [
                 "that are instant cards, are sorcery cards, and/or have an Adventure",
                 "that are instant cards, are squirrels wearing hats",
                 "that are instant cards, are sorcery cards, and/or have an unknown adventure",
                 "that are instant cards, are sorcery cards, and/or have an Adventure, are squirrels wearing hats",
                 "that are instant cards, are sorcery cards, and/or",
                 "that are instant cards, are sorcery cards, and/or have an Adventure,",
+                "that are instant cards, are sorcery cards, and/or have an Adventure, have",
             ] {
                 let operand = format!("{head} {tail}");
                 let text = format!("draw X cards, where X is {operand}.");
                 let lower = text.to_lowercase();
-                assert_eq!(strip_trailing_where_x(TextPair::new(&text, &lower)).1.as_deref(), Some(operand.as_str()));
+                assert_eq!(strip_trailing_where_x(TextPair::new(&text, &lower)).1.as_deref(), Some(operand.as_str()), "{text}");
             }
-            let operand = format!(
-                "{head} that are instant cards, are sorcery cards, and/or have an Adventure"
-            );
-            for following in [
-                ", draw a card.",
-                ", and draw a card.",
-                ", then draw a card.",
-                ". Draw a card.",
-            ] {
-                let text = format!("draw X cards, where X is {operand}{following}");
-                let lower = text.to_lowercase();
-                assert_eq!(
-                    strip_trailing_where_x(TextPair::new(&text, &lower))
-                        .1
-                        .as_deref(),
-                    Some(operand.as_str())
+                let operand = format!(
+                    "{head} that are instant cards, are sorcery cards, and/or have an Adventure"
                 );
+                for following in [
+                    ", draw a card.",
+                    ", and draw a card.",
+                    ", then draw a card.",
+                    ". Draw a card.",
+                ] {
+                    let text = format!("draw X cards, where X is {operand}{following}");
+                    let lower = text.to_lowercase();
+                    assert_eq!(
+                        strip_trailing_where_x(TextPair::new(&text, &lower))
+                            .1
+                            .as_deref(),
+                        Some(operand.as_str()),
+                        "{text}"
+                    );
+                }
             }
         }
     }
