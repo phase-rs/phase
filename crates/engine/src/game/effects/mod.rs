@@ -2397,7 +2397,7 @@ pub(crate) type AdmittedInstructionResult<'a> = (
 
 /// Capture only the source inputs needed by this invocation's rolling
 /// instructions, before its immutable program is admitted.
-fn prepare_fresh_die_source_input(state: &GameState, ability: &mut ResolvedAbility) {
+pub(crate) fn prepare_fresh_die_source_input(state: &GameState, ability: &mut ResolvedAbility) {
     fn own_children(ability: &ResolvedAbility) -> impl Iterator<Item = &ResolvedAbility> {
         [
             ability
@@ -3452,6 +3452,18 @@ pub(crate) fn instruction_result_owned_program_projects_to(
     program: &ResolvedAbility,
     current: &ResolvedAbility,
 ) -> bool {
+    instruction_result_execution_program_projects_to(state, occurrence, program, current)
+        || instruction_result_zone_program_projects_to(state, occurrence, program, current)
+}
+
+/// Projection leaves shared by ordinary cache authentication and independent
+/// origin eligibility. This part never consults the cached admitted program.
+fn instruction_result_execution_program_projects_to(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
     instruction_result_program_projects_to(program, current)
         || instruction_result_opponent_target_split_projects_to(state, occurrence, program, current)
         || visit_instruction_result_program_projections_for_cursor(
@@ -3466,7 +3478,6 @@ pub(crate) fn instruction_result_owned_program_projects_to(
                     .is_some_and(|branch| instruction_result_program_projects_to(&branch, current))
             },
         )
-        || instruction_result_zone_program_projects_to(state, occurrence, program, current)
         || instruction_result_coin_program_projects_to(state, occurrence, program, current)
         || instruction_result_damage_program_projects_to(program, current)
         || visit_instruction_result_program_projections_for_cursor(
@@ -3619,13 +3630,43 @@ fn instruction_result_zone_program_projects_to(
         occurrence,
         current.return_result_process,
     );
-    completed_zone_result_projects_to(program, current, frame, &pending)
+    completed_zone_result_projects_to(program, current, frame, &declarations, &pending)
+}
+
+/// Authenticate an independently constructed origin against actual operative
+/// custody and completed records, before comparing it to any cached snapshot.
+pub(crate) fn instruction_result_origin_program_projects_to(
+    state: &GameState,
+    occurrence: ReturnResultOccurrenceId,
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+    frame: &crate::types::game_state::ReturnResultFrame,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
+) -> bool {
+    if program.return_result_process != frame.process
+        || current.return_result_process != frame.process
+    {
+        return false;
+    }
+    instruction_result_execution_program_projects_to(state, Some(occurrence), program, current)
+        || completed_zone_result_projects_to(
+            program,
+            current,
+            frame,
+            declarations,
+            &crate::types::game_state::pending_instruction_results(
+                state,
+                Some(occurrence),
+                frame.process,
+            ),
+        )
 }
 
 fn completed_zone_result_projects_to(
     program: &ResolvedAbility,
     current: &ResolvedAbility,
     frame: &crate::types::game_state::ReturnResultFrame,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
     pending: &HashSet<crate::types::ability::ReturnResultId>,
 ) -> bool {
     visit_instruction_result_program_projections_for_cursor(program, current, &mut |producer| {
@@ -3655,13 +3696,11 @@ fn completed_zone_result_projects_to(
         else {
             return false;
         };
-        if frame.declarations.as_ref().is_none_or(|declarations| {
-            declarations.get(&result).is_none_or(|zones| {
-                zones.is_some_and(|(origin, _)| {
-                    records
-                        .iter()
-                        .any(|record| record.from_zone != Some(origin))
-                })
+        if declarations.get(&result).is_none_or(|zones| {
+            zones.is_some_and(|(origin, _)| {
+                records
+                    .iter()
+                    .any(|record| record.from_zone != Some(origin))
             })
         }) {
             return false;
@@ -3675,7 +3714,7 @@ fn completed_zone_result_projects_to(
         // not become a newly executable cursor or modify the admitted root.
         visit_instruction_result_child_projections(&parent, &mut |child| {
             instruction_result_program_projects_to(child, current)
-                || completed_zone_result_projects_to(child, current, frame, pending)
+                || completed_zone_result_projects_to(child, current, frame, declarations, pending)
         })
     })
 }
