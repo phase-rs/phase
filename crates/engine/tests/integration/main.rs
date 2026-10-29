@@ -267,6 +267,7 @@ mod cr733_resolved_trigger_collection;
 mod cr733_resolved_trigger_removal;
 mod cr733_resolved_zone_change;
 mod cr_annotations;
+mod crabomination_etb_exile_list;
 mod crackle_with_power;
 mod craft_tithing_blade_transform;
 mod created_token_counter_sequence;

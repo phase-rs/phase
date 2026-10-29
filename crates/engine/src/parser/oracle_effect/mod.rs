@@ -64,8 +64,8 @@ use lower::{
     strip_optional_effect_prefix, strip_player_scope_subject, strip_redundant_flip_win_quantifier,
     strip_repeat_count_suffix, strip_return_destination_ext,
     strip_return_destination_ext_with_remainder, strip_temporal_prefix, strip_temporal_suffix,
-    trim_dangling_target_word, try_parse_damage, try_parse_damage_with_remainder,
-    try_parse_distribute_counters, try_parse_distribute_damage,
+    strip_terminal_where_x, trim_dangling_target_word, try_parse_damage,
+    try_parse_damage_with_remainder, try_parse_distribute_counters, try_parse_distribute_damage,
 };
 
 pub(crate) use self::token::parse_token_description;
@@ -101,7 +101,7 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_nom::target::{controller_phrase_among, ControllerPhrase, ControllerSubject};
 use super::oracle_quantity::{
-    parse_event_context_quantity, parse_for_each_clause, parse_for_each_clause_expr_with_context,
+    parse_for_each_clause, parse_for_each_clause_expr_with_context,
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
@@ -29184,26 +29184,24 @@ fn lower_subject_predicate_ast_body(
                 return parsed_clause(imperative::lower_zone_counter_ast(ast));
             }
             // CR 701.13a: "<player> exiles the top [N] card(s) of their library"
-            if alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles ")))
-                .parse(pred_lower.as_str())
-                .is_ok()
-                && scan_contains_phrase(&pred_lower, "top")
-                && scan_contains_phrase(&pred_lower, "library")
+            // and the object-list form "<player> exiles A, B, and C". The strict
+            // grammar claims the predicate only when the verb and a first
+            // library object parse; an unconsumed tail is a recorded gap, never
+            // dropped.
             {
-                let count = parse_subject_exile_top_count(&pred_lower);
-                // CR 406.3: a trailing "face down" marks a hidden-information
-                // exile (Outrageous Robbery: "exiles the top X cards of their
-                // library face down"). The resolver propagates this to the
-                // moved object's `face_down` flag so `visibility.rs` redacts it.
-                let face_down = scan_contains_phrase(&pred_lower, "face down");
-                return parsed_clause(Effect::ExileTop {
-                    player: affected,
-                    count,
-                    position: crate::types::ability::LibraryPosition::Top,
-                    face_down,
-                    // CR 608.2c: the subject exiles from their own library.
-                    actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
-                });
+                let pred_tp = TextPair::new(text.as_str(), pred_lower.as_str());
+                // The sentence-level where-X binder owns X.
+                let head = strip_terminal_where_x(pred_tp).map_or(pred_tp, |(head, _)| head);
+                if let Ok((rem, objects)) = imperative::parse_subject_exile_object_list(head.lower)
+                {
+                    if !imperative::terminal_punctuation_only(rem) {
+                        return parsed_clause(Effect::unimplemented(
+                            "subject_exile_object_list",
+                            &text,
+                        ));
+                    }
+                    return lower_subject_exile_objects(objects, &affected, &subject, &text);
+                }
             }
             // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
             // their library" — Reality Shift's "its controller manifests the top
@@ -31084,43 +31082,145 @@ fn wrap_target_subject_damage(
     })
 }
 
-fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
-    if let Ok((_, qty_text)) = preceded(
-        alt((tag::<_, _, OracleError<'_>>("exile "), tag("exiles "))),
-        take_until(" from the top"),
-    )
-    .parse(pred_lower)
-    {
-        if let Some(expr) = parse_event_context_quantity(qty_text.trim()) {
-            return expr;
+/// CR 701.13a + CR 608.2f: lower the objects of a third-person "<player>
+/// exiles …" instruction.
+///
+/// A single library object is the base `Effect::ExileTop`. Two or more objects
+/// are one simultaneous exile action (CR 608.2f): non-moving selection legs
+/// gather each object into the chain's tracked set, then one `ChangeZoneAll`
+/// exiles them all, under a `TargetOnly` root that carries the subject player
+/// target. A form this lowering can't express is a recorded gap.
+fn lower_subject_exile_objects(
+    objects: Vec<SubjectExileObjectAst>,
+    affected: &TargetFilter,
+    subject: &SubjectPhraseAst,
+    text: &str,
+) -> ParsedEffectClause {
+    match objects.as_slice() {
+        [] => parsed_clause(Effect::unimplemented("subject_exile_object_list", text)),
+        [SubjectExileObjectAst::LibraryTop {
+            count,
+            face_down,
+            possessive: _,
+        }] => parsed_clause(Effect::ExileTop {
+            player: affected.clone(),
+            count: count.clone(),
+            position: crate::types::ability::LibraryPosition::Top,
+            // CR 406.3: a trailing "face down" marks a hidden-information
+            // exile (Outrageous Robbery: "exiles the top X cards of their
+            // library face down"). The resolver propagates this to the
+            // moved object's `face_down` flag so `visibility.rs` redacts it.
+            face_down: *face_down,
+            // CR 608.2c: the subject exiles from their own library.
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
+        }),
+        [SubjectExileObjectAst::AtRandomFromZone { .. }] => {
+            parsed_clause(Effect::unimplemented("subject_exile_object_list", text))
         }
-    }
-
-    if let Some(after_top) = strip_after(pred_lower, "top ") {
-        // CR 107.1a: "half of their library, rounded up/down" composes over
-        // `TargetZoneCardCount` via the shared quantity combinator.
-        if let Ok((_, expr)) = super::oracle_nom::quantity::parse_half_rounded(after_top) {
-            expr
-        } else if let Ok((_, n)) = nom_primitives::parse_number.parse(after_top) {
-            QuantityExpr::Fixed { value: n as i32 }
-        } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("x").parse(after_top) {
-            // CR 107.3: X placeholder — "exiles the top X cards" (Outrageous
-            // Robbery) binds to the spell's chosen X, resolved at effect time by
-            // `resolve_quantity_with_targets`. Word-boundary guard after the nom
-            // `tag` accepted so a longer identifier does not slice to a bare X.
-            match rest.chars().next() {
-                None | Some(' ') => QuantityExpr::Ref {
-                    qty: crate::types::ability::QuantityRef::Variable {
-                        name: "X".to_string(),
-                    },
-                },
-                _ => QuantityExpr::Fixed { value: 1 },
+        [_, _, ..] => {
+            // CR 115.1d + CR 608.2c: "their" names the targeted subject player.
+            let Some(owner_target) = subject
+                .target
+                .as_ref()
+                .filter(|t| target_filter_can_target_player(t))
+            else {
+                return parsed_clause(Effect::unimplemented(
+                    "subject_exile_object_list_owner",
+                    text,
+                ));
+            };
+            let zone_owner = ZoneOwner::TargetedPlayer;
+            let choose = |count: u32, zone: Zone, candidate_source: ZoneChoiceCandidateSource| {
+                Effect::ChooseFromZone {
+                    count,
+                    zone,
+                    additional_zones: vec![],
+                    zone_owner,
+                    filter: None,
+                    chooser: Chooser::Controller.into(),
+                    candidate_source,
+                    reciprocal_role: None,
+                    up_to: false,
+                    selection: crate::types::ability::CardSelectionMode::Random,
+                    constraint: None,
+                }
+            };
+            let mut legs = Vec::with_capacity(objects.len());
+            for object in &objects {
+                let leg = match object {
+                    SubjectExileObjectAst::LibraryTop {
+                        count,
+                        face_down,
+                        possessive,
+                    } => {
+                        match possessive {
+                            Some(ControllerSubject::Anaphoric(nom_target::PlayerAnaphor::They)) => {
+                            }
+                            // CR 109.5: "your" names the controller, not the
+                            // subject whose zones the list reads.
+                            Some(ControllerSubject::Anaphoric(
+                                nom_target::PlayerAnaphor::ThatPlayer
+                                | nom_target::PlayerAnaphor::ItsController,
+                            ))
+                            | Some(ControllerSubject::Direct(_))
+                            | None => {
+                                return parsed_clause(Effect::unimplemented(
+                                    "subject_exile_object_list",
+                                    text,
+                                ));
+                            }
+                        }
+                        match (count, face_down) {
+                            (QuantityExpr::Fixed { value: n }, false) if *n >= 1 => choose(
+                                *n as u32,
+                                Zone::Library,
+                                ZoneChoiceCandidateSource::LibraryTop,
+                            ),
+                            _ => {
+                                return parsed_clause(Effect::unimplemented(
+                                    "subject_exile_object_list",
+                                    text,
+                                ));
+                            }
+                        }
+                    }
+                    SubjectExileObjectAst::AtRandomFromZone { zone } => {
+                        choose(1, *zone, ZoneChoiceCandidateSource::Direct)
+                    }
+                };
+                legs.push(leg);
             }
-        } else {
-            QuantityExpr::Fixed { value: 1 }
+            // CR 608.2f: the listed objects are exiled by one simultaneous action.
+            let exile_all = Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                enter_with_counters: vec![],
+                face_down_profile: None,
+                library_position: None,
+                library_shuffle: Default::default(),
+                random_order: false,
+            };
+            // Chain the legs in printed order, ending in the single exile.
+            let chain = legs.into_iter().rev().fold(
+                AbilityDefinition::new(AbilityKind::Spell, exile_all),
+                |tail, leg| {
+                    let mut def = AbilityDefinition::new(AbilityKind::Spell, leg);
+                    def.sub_ability = Some(Box::new(tail));
+                    def
+                },
+            );
+            let mut clause = parsed_clause(Effect::TargetOnly {
+                target: owner_target.clone(),
+            });
+            clause.sub_ability = Some(Box::new(chain));
+            clause
         }
-    } else {
-        QuantityExpr::Fixed { value: 1 }
     }
 }
 

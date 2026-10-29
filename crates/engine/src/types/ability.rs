@@ -204,6 +204,11 @@ pub enum ZoneChoiceCandidateSource {
     /// tracked set an earlier clause published. A member of the batch that has
     /// since left the zone (cast from exile onto the stack) is not offered.
     ParentTargets,
+    /// CR 401.2: read only the top `count` cards of the owner's library, top
+    /// first. The library's order identifies them, so no player looks at or
+    /// chooses them; the declared `zone` must be `Library`, with no
+    /// `additional_zones`, no `filter` and `selection: Random`.
+    LibraryTop,
 }
 
 impl ZoneChoiceCandidateSource {

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ZoneChoiceCandidateSource gains LibraryTop (CR 401.2), serialized in card definitions inside GameState; an older peer cannot decode the variant, so it must be refused before it receives the new state"
+}

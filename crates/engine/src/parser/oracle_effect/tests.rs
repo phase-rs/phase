@@ -33049,6 +33049,229 @@ fn target_opponent_exiles_top_half_library() {
     }
 }
 
+/// A definition's effect chain, root first.
+fn subject_exile_chain(def: &AbilityDefinition) -> Vec<&Effect> {
+    std::iter::successors(Some(def), |d| d.sub_ability.as_deref())
+        .map(|d| &*d.effect)
+        .collect()
+}
+
+fn subject_exile_has_no_gap(def: &AbilityDefinition) -> bool {
+    subject_exile_chain(def)
+        .iter()
+        .all(|effect| !matches!(effect, Effect::Unimplemented { .. }))
+}
+
+/// The root of `text`'s chain is the subject-exile object-list gap named `name`.
+fn assert_subject_exile_gap(text: &str, name: &str) {
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(&*def.effect, Effect::Unimplemented { name: gap, .. } if gap == name),
+        "expected Unimplemented({name}) for {text:?}, got {:?}",
+        def.effect
+    );
+}
+
+/// `text` parses to a gap-free single `Effect::ExileTop`.
+fn assert_subject_exile_top(text: &str) -> AbilityDefinition {
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(&*def.effect, Effect::ExileTop { .. }),
+        "expected ExileTop for {text:?}, got {:?}",
+        def.effect
+    );
+    assert!(subject_exile_has_no_gap(&def), "{:?}", def);
+    def
+}
+
+/// A random, unfiltered, single-zone `ChooseFromZone` over the targeted
+/// subject player's `zone`, from `source`.
+fn is_subject_exile_leg(effect: &Effect, zone: Zone, source: ZoneChoiceCandidateSource) -> bool {
+    matches!(
+        effect,
+        Effect::ChooseFromZone {
+            count: 1,
+            zone: leg_zone,
+            additional_zones,
+            zone_owner: ZoneOwner::TargetedPlayer,
+            filter: None,
+            candidate_source,
+            selection: CardSelectionMode::Random,
+            up_to: false,
+            ..
+        } if *leg_zone == zone && additional_zones.is_empty() && *candidate_source == source
+    )
+}
+
+/// SHAPE (R9): Crabomination's verbatim trigger body lowers to one exile
+/// instruction (CR 608.2f): a `TargetOnly` root for the targeted opponent, the
+/// library-top, graveyard and hand selection legs, one `ChangeZoneAll` over the
+/// gathered set, then the free cast from among the cards exiled this way.
+#[test]
+fn subject_exile_object_list_lowers_crabomination_chain() {
+    let def = parse_effect_chain(
+        "target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.",
+        AbilityKind::Spell,
+    );
+    assert!(subject_exile_has_no_gap(&def), "{def:?}");
+    let chain = subject_exile_chain(&def);
+    assert_eq!(chain.len(), 6, "{chain:?}");
+    assert!(
+        matches!(chain[0], Effect::TargetOnly { target: TargetFilter::Typed(tf) }
+            if tf.controller == Some(ControllerRef::Opponent)),
+        "root: {:?}",
+        chain[0]
+    );
+    assert!(is_subject_exile_leg(
+        chain[1],
+        Zone::Library,
+        ZoneChoiceCandidateSource::LibraryTop
+    ));
+    assert!(is_subject_exile_leg(
+        chain[2],
+        Zone::Graveyard,
+        ZoneChoiceCandidateSource::Direct
+    ));
+    assert!(is_subject_exile_leg(
+        chain[3],
+        Zone::Hand,
+        ZoneChoiceCandidateSource::Direct
+    ));
+    assert!(
+        matches!(
+            chain[4],
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ),
+        "exile: {:?}",
+        chain[4]
+    );
+    assert!(
+        matches!(
+            chain[5],
+            Effect::CastFromZone {
+                target: TargetFilter::ExiledBySource,
+                without_paying_mana_cost: true,
+                mode: Cast,
+                driver: CastFromZoneDriver::ResolutionWindow { .. },
+                ..
+            }
+        ),
+        "cast: {:?}",
+        chain[5]
+    );
+}
+
+/// R9: an object the list grammar doesn't model is an honest gap, never dropped.
+#[test]
+fn subject_exile_object_list_unconsumed_tail_is_unimplemented() {
+    // Reach-guard: the same prefix without the tail is the base ExileTop arm.
+    assert_subject_exile_top("target opponent exiles the top card of their library");
+    assert_subject_exile_gap(
+        "target opponent exiles the top card of their library and a creature card from their graveyard",
+        "subject_exile_object_list",
+    );
+}
+
+/// R9: a list whose subject names no declared player target can't bind
+/// "their" zones, so it is a gap.
+#[test]
+fn subject_exile_object_list_unmapped_owner_is_unimplemented() {
+    // Reach-guard: the single-object form still lowers through the base arm.
+    assert_subject_exile_top("that player exiles the top card of their library");
+    assert_subject_exile_gap(
+        "that player exiles the top card of their library and a card at random from their hand",
+        "subject_exile_object_list_owner",
+    );
+}
+
+/// R9 (B1). CR 109.5: in a list, "your library" names the controller rather
+/// than the subject whose zones the other objects read, so it is a gap.
+#[test]
+fn subject_exile_object_list_non_their_library_possessive_is_unimplemented() {
+    // Reach-guard: the "their" sibling lowers to the gather chain.
+    let def = parse_effect_chain(
+        "target opponent exiles the top card of their library and a card at random from their hand",
+        AbilityKind::Spell,
+    );
+    assert!(subject_exile_has_no_gap(&def), "{def:?}");
+    let chain = subject_exile_chain(&def);
+    assert!(matches!(chain[0], Effect::TargetOnly { .. }), "{chain:?}");
+    assert!(is_subject_exile_leg(
+        chain[1],
+        Zone::Library,
+        ZoneChoiceCandidateSource::LibraryTop
+    ));
+    assert!(is_subject_exile_leg(
+        chain[2],
+        Zone::Hand,
+        ZoneChoiceCandidateSource::Direct
+    ));
+    assert_subject_exile_gap(
+        "target opponent exiles the top card of your library and a card at random from their hand",
+        "subject_exile_object_list",
+    );
+}
+
+/// R12 (Dragon's Smile): "that many cards from the top of their library" stays
+/// the base single-object ExileTop with the event-context count.
+#[test]
+fn subject_exile_that_many_cards_from_the_top_is_exile_top() {
+    let def = assert_subject_exile_top(
+        "that player exiles that many cards from the top of their library",
+    );
+    let Effect::ExileTop { count, .. } = &*def.effect else {
+        unreachable!("asserted ExileTop above");
+    };
+    assert!(
+        !matches!(count, QuantityExpr::Fixed { .. }),
+        "\"that many\" must not fall back to a fixed count, got {count:?}"
+    );
+}
+
+/// R12 (Diminishing Returns): a single object read from "your library" stays
+/// the base ExileTop.
+#[test]
+fn subject_exile_top_ten_of_your_library_is_exile_top() {
+    let def = assert_subject_exile_top("You exile the top ten cards of your library.");
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ExileTop {
+                count: QuantityExpr::Fixed { value: 10 },
+                face_down: false,
+                ..
+            }
+        ),
+        "{:?}",
+        def.effect
+    );
+}
+
+/// R12 (Ashiok, Wicked Manipulator). CR 107.3: a terminal where-X definition is
+/// owned by the sentence binder; the object grammar reads the head.
+#[test]
+fn subject_exile_top_x_where_x_is_exile_top() {
+    let def = assert_subject_exile_top(
+        "Target player exiles the top X cards of their library, where X is the total mana value of cards you own in exile.",
+    );
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::ExileTop {
+                face_down: false,
+                ..
+            }
+        ),
+        "{:?}",
+        def.effect
+    );
+}
+
 /// CR 107.1a class-level regression — "Target opponent loses half their
 /// life, rounded up." The `try_parse_half_life_amount` path must now
 /// produce a typed DivideRounded `amount` on `LoseLife`, not `Fixed { 1 }`.

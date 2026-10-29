@@ -5,9 +5,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::game::topology;
 use crate::types::ability::{
-    ChooseFromZoneConstraint, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ParentTargetMissingReason, PerPlayerScope, ReciprocalZoneChoiceRole, ResolvedAbility,
-    TargetFilter, TargetRef, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    CardSelectionMode, ChooseFromZoneConstraint, Effect, EffectError, EffectKind,
+    ForEachCategoryAction, ParentTargetMissingReason, PerPlayerScope, ReciprocalZoneChoiceRole,
+    ResolvedAbility, TargetFilter, TargetRef, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -781,15 +782,18 @@ pub(crate) fn resolve_random_in_chain(
     // iteration accumulates them, for the `ChangeZoneAll { TrackedSet }` after
     // it.
     if let ZoneOwner::Each(scope) = zone_owner {
-        let spec = PerPlayerSpec::of(ability).expect("matched ChooseFromZone above");
         let mut picked = Vec::new();
-        for player in per_player_iteration_population(state, ability, scope) {
-            let pool = spec.pool(state, ability, player);
-            let clamped = count.min(pool.len());
-            picked.extend(
-                pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
-                    .copied(),
-            );
+        // A refused shape (`library_top_shape`) fails closed: every pool counts
+        // as empty, the same outcome as this branch's all-pools-empty case.
+        if let Ok(spec) = PerPlayerSpec::of(ability) {
+            for player in per_player_iteration_population(state, ability, scope) {
+                let pool = spec.pool(state, ability, player);
+                let clamped = count.min(pool.len());
+                picked.extend(
+                    pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
+                        .copied(),
+                );
+            }
         }
         super::publish_fresh_tracked_set(state, picked.clone());
         ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
@@ -831,6 +835,14 @@ pub(crate) fn resolve_random_in_chain(
         .copied()
         .collect();
     ability.set_unpinned_targets(picked.iter().map(|&id| TargetRef::Object(id)).collect());
+    // CR 608.2c: a zone-read pick that the following text gathers is added to the set it reads.
+    if matches!(
+        candidate_source,
+        ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::LibraryTop
+    ) && super::resolution_next_needs_tracked_set(state, ability)
+    {
+        super::publish_tracked_set(state, picked.clone());
+    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
@@ -864,17 +876,23 @@ impl PerPlayerSpec {
                 up_to,
                 constraint,
                 candidate_source,
+                selection,
                 ..
-            } => Ok(Self {
-                count: *count as usize,
-                zone: *zone,
-                additional_zones: additional_zones.clone(),
-                filter: filter.clone(),
-                chooser: *chooser,
-                up_to: *up_to,
-                constraint: constraint.clone(),
-                candidate_source: *candidate_source,
-            }),
+            } => {
+                if *candidate_source == ZoneChoiceCandidateSource::LibraryTop {
+                    library_top_shape(*zone, additional_zones, filter.as_ref(), *selection)?;
+                }
+                Ok(Self {
+                    count: *count as usize,
+                    zone: *zone,
+                    additional_zones: additional_zones.clone(),
+                    filter: filter.clone(),
+                    chooser: *chooser,
+                    up_to: *up_to,
+                    constraint: constraint.clone(),
+                    candidate_source: *candidate_source,
+                })
+            }
             _ => Err(EffectError::MissingParam("ChooseFromZone".to_string())),
         }
     }
@@ -882,6 +900,9 @@ impl PerPlayerSpec {
     fn pool(&self, state: &GameState, ability: &ResolvedAbility, owner: PlayerId) -> Vec<ObjectId> {
         if self.count == 0 {
             return Vec::new();
+        }
+        if self.candidate_source == ZoneChoiceCandidateSource::LibraryTop {
+            return library_top_candidates(state, owner, self.count);
         }
         let cards = collect_player_zone_cards(
             state,
@@ -1601,6 +1622,19 @@ fn resolve_candidate_cards(
                 filter,
             );
         }
+        ZoneChoiceCandidateSource::LibraryTop => {
+            let Effect::ChooseFromZone {
+                count, selection, ..
+            } = &ability.effect
+            else {
+                return Err(EffectError::MissingParam(
+                    "ChooseFromZone LibraryTop count".to_string(),
+                ));
+            };
+            library_top_shape(zone, additional_zones, filter, *selection)?;
+            let owner = resolve_zone_owner(state, ability, zone_owner)?;
+            return Ok(library_top_candidates(state, owner, *count as usize));
+        }
         ZoneChoiceCandidateSource::Tracked
         | ZoneChoiceCandidateSource::CostPaidObjects
         | ZoneChoiceCandidateSource::ParentTargets => {
@@ -1657,7 +1691,9 @@ fn source_bound_candidates(
     candidate_source: ZoneChoiceCandidateSource,
 ) -> Option<Vec<ObjectId>> {
     match candidate_source {
-        ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::Legacy => None,
+        ZoneChoiceCandidateSource::Direct
+        | ZoneChoiceCandidateSource::Legacy
+        | ZoneChoiceCandidateSource::LibraryTop => None,
         ZoneChoiceCandidateSource::Tracked => Some(retain_matching_candidates(
             state,
             ability,
@@ -1775,6 +1811,38 @@ fn retain_matching_candidates(
 fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
     let chain_id = state.chain_tracked_set_id?;
     state.tracked_object_sets.get(&chain_id).cloned()
+}
+
+/// The shape a [`ZoneChoiceCandidateSource::LibraryTop`] pool requires: the
+/// declared zone is the library, with no `additional_zones`, no `filter`, and a
+/// random selection.
+// CR 401.2: players can't look at cards in a library, so the top-of-library pool is identified by order alone and never offered to a chooser.
+fn library_top_shape(
+    zone: Zone,
+    additional_zones: &[Zone],
+    filter: Option<&TargetFilter>,
+    selection: CardSelectionMode,
+) -> Result<(), EffectError> {
+    if zone == Zone::Library
+        && additional_zones.is_empty()
+        && filter.is_none()
+        && selection.is_random()
+    {
+        Ok(())
+    } else {
+        Err(EffectError::MissingParam(
+            "ChooseFromZone LibraryTop requires a random, unfiltered library-only pool".to_string(),
+        ))
+    }
+}
+
+/// CR 401.2: the top `count` cards of `owner`'s library, top first. The
+/// library's order identifies them; nobody looks at them.
+fn library_top_candidates(state: &GameState, owner: PlayerId, count: usize) -> Vec<ObjectId> {
+    object_ids_in_player_zone(state, owner, Zone::Library)
+        .into_iter()
+        .take(count)
+        .collect()
 }
 
 fn collect_direct_zone_cards(
@@ -1921,14 +1989,13 @@ fn resolve_zone_owner(
         // hands") and Tariff ("the creature they control") — both of which
         // currently misparse to `zone: Exile` and so observe nothing here.
         ZoneOwner::Controller => Ok(ability.original_controller.unwrap_or(ability.controller)),
-        ZoneOwner::TargetedPlayer => ability
-            .targets
-            .iter()
-            .find_map(|target| match target {
-                TargetRef::Player(player) => Some(*player),
-                _ => None,
-            })
-            .ok_or_else(|| EffectError::MissingParam("ChooseFromZone targeted player".to_string())),
+        // CR 115.1 + CR 608.2c: the ability's declared player target, read from the resolving root after an intervening object hand-off; CR 608.2b: an illegal player target names no one.
+        ZoneOwner::TargetedPlayer => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
+                .ok_or_else(|| {
+                    EffectError::MissingParam("ChooseFromZone targeted player".to_string())
+                })
+        }
         ZoneOwner::Opponent => players::opponents(state, ability.controller)
             .into_iter()
             .next()
@@ -3648,6 +3715,353 @@ mod tests {
             &mut ability,
             &mut events
         ));
+    }
+
+    /// A `count`-card random `LibraryTop` pick over `zone_owner`'s library.
+    fn library_top_choice(count: u32, zone_owner: ZoneOwner) -> Effect {
+        Effect::ChooseFromZone {
+            count,
+            zone: Zone::Library,
+            additional_zones: Vec::new(),
+            zone_owner,
+            filter: None,
+            chooser: Chooser::Controller.into(),
+            candidate_source: ZoneChoiceCandidateSource::LibraryTop,
+            reciprocal_role: None,
+            up_to: false,
+            constraint: None,
+            selection: CardSelectionMode::Random,
+        }
+    }
+
+    /// Library cards for `owner`, created in order; the first is on top.
+    fn library_cards(state: &mut GameState, owner: PlayerId, names: &[&str]) -> Vec<ObjectId> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                create_object(
+                    state,
+                    CardId(200 + owner.0 as u64 * 10 + i as u64),
+                    owner,
+                    name.to_string(),
+                    Zone::Library,
+                )
+            })
+            .collect()
+    }
+
+    /// `resolve_candidate_cards` for `ability`'s own `ChooseFromZone` fields.
+    fn candidates_of(
+        state: &GameState,
+        ability: &ResolvedAbility,
+    ) -> Result<Vec<ObjectId>, EffectError> {
+        let Effect::ChooseFromZone {
+            zone,
+            additional_zones,
+            zone_owner,
+            filter,
+            candidate_source,
+            ..
+        } = &ability.effect
+        else {
+            panic!("expected ChooseFromZone, got {:?}", ability.effect);
+        };
+        resolve_candidate_cards(
+            state,
+            ability,
+            *zone,
+            additional_zones,
+            *zone_owner,
+            filter.as_ref(),
+            *candidate_source,
+        )
+    }
+
+    /// R10b. CR 401.2: the `LibraryTop` pool is the top `count` cards of the
+    /// owner's library, top first, on both the single-pool and the per-player
+    /// path.
+    #[test]
+    fn library_top_pool_is_the_top_count_cards() {
+        let mut state = GameState::new_two_player(42);
+        let lib = library_cards(&mut state, PlayerId(1), &["A", "B", "C"]);
+        assert_eq!(
+            state
+                .library_of(PlayerId(1))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            lib,
+            "fixture: the first created card is on top"
+        );
+
+        let single = ResolvedAbility::new(
+            library_top_choice(2, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(
+            candidates_of(&state, &single).unwrap(),
+            vec![lib[0], lib[1]]
+        );
+
+        let each = ResolvedAbility::new(
+            library_top_choice(2, ZoneOwner::Each(PerPlayerScope::AllPlayers)),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let spec = PerPlayerSpec::of(&each).expect("valid LibraryTop shape");
+        assert_eq!(spec.pool(&state, &each, PlayerId(1)), vec![lib[0], lib[1]]);
+    }
+
+    /// R10b. CR 401.2: `LibraryTop` refuses any pool other than a random,
+    /// unfiltered, library-only one, on both paths.
+    #[test]
+    fn library_top_rejects_invalid_shape() {
+        let mut state = GameState::new_two_player(42);
+        library_cards(&mut state, PlayerId(1), &["A", "B"]);
+        let ability = |effect: Effect, zone_owner_is_each: bool| {
+            let targets = if zone_owner_is_each {
+                vec![]
+            } else {
+                vec![TargetRef::Player(PlayerId(1))]
+            };
+            ResolvedAbility::new(effect, targets, ObjectId(100), PlayerId(0))
+        };
+        let mutate = |zone_owner: ZoneOwner, edit: &dyn Fn(&mut Effect)| {
+            let mut effect = library_top_choice(1, zone_owner);
+            edit(&mut effect);
+            effect
+        };
+        let invalid: [&dyn Fn(&mut Effect); 4] = [
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { filter, .. } = e {
+                    *filter = Some(TargetFilter::Any);
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone {
+                    additional_zones, ..
+                } = e
+                {
+                    additional_zones.push(Zone::Graveyard);
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { zone, .. } = e {
+                    *zone = Zone::Graveyard;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { selection, .. } = e {
+                    *selection = CardSelectionMode::Chosen;
+                }
+            },
+        ];
+
+        // Reach-guard: the valid shape is accepted on both paths.
+        let valid = ability(library_top_choice(1, ZoneOwner::TargetedPlayer), false);
+        assert!(!candidates_of(&state, &valid).unwrap().is_empty());
+        let valid_each = ability(
+            library_top_choice(1, ZoneOwner::Each(PerPlayerScope::AllPlayers)),
+            true,
+        );
+        assert!(PerPlayerSpec::of(&valid_each).is_ok());
+
+        for edit in invalid {
+            let single = ability(mutate(ZoneOwner::TargetedPlayer, edit), false);
+            assert!(
+                candidates_of(&state, &single).is_err(),
+                "single-pool shape must be refused: {:?}",
+                single.effect
+            );
+            let each = ability(
+                mutate(ZoneOwner::Each(PerPlayerScope::AllPlayers), edit),
+                true,
+            );
+            assert!(
+                PerPlayerSpec::of(&each).is_err(),
+                "per-player shape must be refused: {:?}",
+                each.effect
+            );
+        }
+    }
+
+    /// R10b. A refused per-player `LibraryTop` shape fails closed through the
+    /// random chain step: no panic, nothing picked, an empty fresh tracked set.
+    #[test]
+    fn random_each_library_top_invalid_shape_picks_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let p0 = library_cards(&mut state, PlayerId(0), &["P0 Top", "P0 Below"]);
+        let p1 = library_cards(&mut state, PlayerId(1), &["P1 Top", "P1 Below"]);
+        let each = |filter: Option<TargetFilter>| {
+            let mut effect = library_top_choice(1, ZoneOwner::Each(PerPlayerScope::AllPlayers));
+            if let Effect::ChooseFromZone { filter: f, .. } = &mut effect {
+                *f = filter;
+            }
+            ResolvedAbility::new(effect, vec![], ObjectId(100), PlayerId(0))
+        };
+
+        // Reach-guard: the valid shape picks each player's top card through
+        // the same branch.
+        let mut valid = each(None);
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(&mut state, &mut valid, &mut events));
+        let mut picked: Vec<ObjectId> = valid
+            .targets
+            .iter()
+            .filter_map(|t| match t {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+        picked.sort();
+        let mut tops = vec![p0[0], p1[0]];
+        tops.sort();
+        assert_eq!(picked, tops);
+
+        let mut invalid = each(Some(TargetFilter::Any));
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut invalid,
+            &mut events
+        ));
+        assert!(invalid.targets.is_empty());
+        let fresh = state
+            .chain_tracked_set_id
+            .expect("a fresh set is published");
+        assert_eq!(state.tracked_object_sets.get(&fresh), Some(&Vec::new()));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChooseFromZone,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+    }
+
+    /// A random single-pool graveyard pick from the controller's graveyard,
+    /// followed by `sub`.
+    fn random_graveyard_pick_then(sub: Effect) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Graveyard,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller.into(),
+                candidate_source: ZoneChoiceCandidateSource::Direct,
+                reciprocal_role: None,
+                up_to: false,
+                constraint: None,
+                selection: CardSelectionMode::Random,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            sub,
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        ability
+    }
+
+    /// Chain set `[x]` already published by an earlier leg, plus one graveyard
+    /// card for the pick.
+    fn chain_set_with_graveyard_card(state: &mut GameState) -> (ObjectId, ObjectId) {
+        let x = create_object(
+            state,
+            CardId(300),
+            PlayerId(1),
+            "Earlier Leg".to_string(),
+            Zone::Library,
+        );
+        let g = create_object(
+            state,
+            CardId(301),
+            PlayerId(0),
+            "Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![x]);
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+        state.next_tracked_set_id = 2;
+        (x, g)
+    }
+
+    /// R11 (U4). CR 608.2c: a zone-read random pick whose following text reads
+    /// the tracked set is added to the chain's set.
+    #[test]
+    fn random_direct_pick_extends_chain_set_when_consumed() {
+        let mut state = GameState::new_two_player(42);
+        let (x, g) = chain_set_with_graveyard_card(&mut state);
+        let mut ability = random_graveyard_pick_then(Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        });
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        assert_eq!(ability.targets, vec![TargetRef::Object(g)]);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![x, g]);
+    }
+
+    /// R11 (U4): with no tracked-set consumer after it, the pick is handed on
+    /// as targets only and the chain set is unchanged.
+    #[test]
+    fn random_direct_pick_does_not_publish_without_consumer() {
+        let mut state = GameState::new_two_player(42);
+        let (x, g) = chain_set_with_graveyard_card(&mut state);
+        let mut ability = random_graveyard_pick_then(Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        });
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        assert_eq!(ability.targets, vec![TargetRef::Object(g)]);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![x]);
     }
 
     /// A random per-opponent graveyard pick of one card from `source`, run

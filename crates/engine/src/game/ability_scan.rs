@@ -511,7 +511,9 @@ fn scan_zone_choice_candidate_source(
     zone: crate::types::zones::Zone,
 ) -> Axes {
     match candidate_source {
-        ZoneChoiceCandidateSource::Direct => {
+        // `LibraryTop` is `Direct` narrowed to the library's top edge (CR 401.2):
+        // a read of a non-battlefield zone.
+        ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::LibraryTop => {
             if zone == crate::types::zones::Zone::Battlefield {
                 Axes {
                     event: true,

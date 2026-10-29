@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::parser::oracle_nom::enters_under::ControlClausePossessor;
-use crate::parser::oracle_nom::target::PlayerAnaphor;
+use crate::parser::oracle_nom::target::{ControllerSubject, PlayerAnaphor};
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, AttachSelection,
@@ -2202,6 +2202,25 @@ pub(crate) enum ZoneCounterImperativeAst {
         target: TargetFilter,
         per_kind_count: crate::types::ability::EventCounterReproductionCount,
     },
+}
+
+/// CR 701.13a + CR 608.2f: one object of a "<player> exiles A, B, and C" instruction.
+///
+/// Not `Serialize` (unlike its neighbours): the typed possessive reuses
+/// [`ControllerSubject`], which is parser-internal and never serialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubjectExileObjectAst {
+    /// CR 401.2 + CR 701.13a: the top N cards of `possessive`'s library.
+    /// `possessive` is "their" (`Anaphoric(PlayerAnaphor::They)`) or "your"
+    /// (`Direct(ControllerRef::You)`, CR 109.5); `None` when a fractional
+    /// count ("half of their library") reads the possessive itself.
+    LibraryTop {
+        count: QuantityExpr,
+        face_down: bool,
+        possessive: Option<ControllerSubject>,
+    },
+    /// CR 701.13a: one card selected at random from the subject's graveyard or hand.
+    AtRandomFromZone { zone: Zone },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
