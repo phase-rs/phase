@@ -48309,22 +48309,14 @@ pub(crate) mod defining_modifier_publication {
                     player: PlayerScope::Controller,
                 };
                 let mut bodies = if name == "Rowan Kenrith" {
-                    let window = Duration::UntilEndOfNextTurnOf {
-                        player: PlayerScope::Target,
-                    };
-                    let mut attack = spell(Effect::GenericEffect {
-                        static_abilities: vec![StaticDefinition::new(StaticMode::MustAttack)
-                            .affected(TargetFilter::Typed(
-                                TypedFilter::creature().controller(ControllerRef::TargetPlayer),
-                            ))
-                            .modifications(vec![ContinuousModification::AddStaticMode {
-                                mode: StaticMode::MustAttack,
-                            }])],
-                        duration: Some(window.clone()),
-                        target: None,
-                        end_cost: None,
-                    });
-                    attack.duration = Some(window);
+                    let mut attack = spell(Effect::unimplemented(
+                        "unrecognized_clause_head",
+                        "During target player's next turn",
+                    ));
+                    attack.sub_ability = Some(Box::new(spell(Effect::unimplemented(
+                        "unparsed_verb_arguments",
+                        "attack if able",
+                    ))));
                     vec![
                         attack,
                         spell(Effect::DamageAll {
