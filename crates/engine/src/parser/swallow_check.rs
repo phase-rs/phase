@@ -15167,7 +15167,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             {
                 let properties = represented_scope
                     .map(|scope| FilterProp::CombatRelation {
-                        relation: CombatRelation::BlockedBySubject { scope },
+                        relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
                         subject: CombatRelationSubject::Source,
                     })
                     .into_iter()
@@ -15192,7 +15192,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                         FilterProp::CombatRelation {
                             relation: CombatRelation::BlockedBySubject { scope: found },
                             subject: CombatRelationSubject::Source,
-                        } if Some(*found) == represented_scope
+                        } if *found == represented_scope
                     )),
                     represented_scope.is_some(),
                     "reach guard: typed evidence retains the supplied exact scope"
