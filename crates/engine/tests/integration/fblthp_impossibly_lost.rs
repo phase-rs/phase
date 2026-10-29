@@ -16,8 +16,8 @@
 //! > will still cause you to lose the game.
 //!
 //! Production entry points: the combat-damage step emits the damage event that
-//! the trigger head matches (CR 510.2), and `advance_until_stack_empty()` drives
-//! the resulting trigger to completion. Every negative row pairs a reach guard
+//! the trigger head matches (CR 510.2), and `combat_damage()` drives the
+//! resulting trigger to completion. Every negative row pairs a reach guard
 //! proving its input got past the upstream short-circuit the negation relies on.
 
 use engine::game::combat::AttackTarget;
@@ -52,15 +52,6 @@ fn library_len(runner: &GameRunner, player: PlayerId) -> usize {
         .expect("player must exist")
 }
 
-fn source_stack_count(runner: &GameRunner, source: ObjectId) -> usize {
-    runner
-        .state()
-        .stack
-        .iter()
-        .filter(|e| e.source_id == source)
-        .count()
-}
-
 fn drive_to_declare_attackers(runner: &mut GameRunner) {
     for _ in 0..64 {
         match runner.state().waiting_for {
@@ -76,61 +67,23 @@ fn drive_to_declare_attackers(runner: &mut GameRunner) {
     panic!("did not reach declare attackers");
 }
 
-/// The single combat driver for every row that expects the trigger: the
-/// four-step drive (declare attackers → priority into the declare-blockers step
-/// → no blockers → pass priority until the combat-damage step stacks the
-/// trigger). CR 508.2: the active player gets priority after attackers are
-/// declared, so the pass into the declare-blockers step is part of the same
-/// drive. CR 802.4: when more than one player is being attacked, each defending
-/// player declares blockers in APNAP order, so the loop answers one
-/// `DeclareBlockers` prompt per defender. Returns the number of entries for
-/// `source` at the FIRST moment any appears — CR 603.3b puts same-controller
-/// triggers on the stack together, so a duplicate-per-recipient defect is
-/// observable here as 2. The caller finishes with `advance_until_stack_empty()`.
-fn drive_to_trigger(
-    runner: &mut GameRunner,
-    attacks: &[(ObjectId, AttackTarget)],
-    source: ObjectId,
-) -> usize {
+/// Drive the declared attackers through combat damage to the end of combat.
+///
+/// CR 508.2: the active player gets priority after attackers are declared.
+/// CR 509.1a: a defending player with no creatures has nothing to declare, so
+/// the engine auto-declares no blockers and never surfaces a `DeclareBlockers`
+/// prompt. The production `combat_damage()` driver passes priority through the
+/// declare-blockers and combat-damage steps (CR 510.2) and drains the ordering
+/// prompt for the damage triggers it creates (CR 603.3b). A single batching
+/// trigger needs no ordering prompt, so it resolves inside this drive; the rows
+/// assert its outcome (draw count, shuffle destination, win) rather than a
+/// transient stack entry.
+fn drive_combat_damage(runner: &mut GameRunner, attacks: &[(ObjectId, AttackTarget)]) {
     drive_to_declare_attackers(runner);
     runner
         .declare_attackers(attacks)
         .expect("attackers should be legal");
-    for _ in 0..16 {
-        if runner.waiting_for_kind() == "DeclareBlockers" {
-            break;
-        }
-        runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority into the declare-blockers step");
-    }
-    for _ in 0..128 {
-        let n = source_stack_count(runner, source);
-        if n > 0 {
-            return n;
-        }
-        match &runner.state().waiting_for {
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            WaitingFor::DeclareBlockers { .. } => {
-                runner
-                    .act(GameAction::DeclareBlockers {
-                        assignments: vec![],
-                    })
-                    .expect("defender declares no blockers");
-            }
-            WaitingFor::OrderTriggers { triggers, .. } => {
-                runner
-                    .act(GameAction::OrderTriggers {
-                        order: (0..triggers.len()).collect(),
-                    })
-                    .expect("trigger order");
-            }
-            other => panic!("unexpected waiting state: {other:?}"),
-        }
-    }
-    panic!("Fblthp trigger never reached the stack");
+    let _ = runner.combat_damage();
 }
 
 /// CR 603.2c + CR 120.4b + CR 510.2: combat damage to two opponents is one trigger
@@ -151,16 +104,13 @@ fn combat_damage_to_two_opponents_is_one_trigger() {
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
 
-    let stacked = drive_to_trigger(
+    drive_combat_damage(
         &mut runner,
         &[
             (a1, AttackTarget::Player(P1)),
             (a2, AttackTarget::Player(P2)),
         ],
-        fblthp,
     );
-    assert_eq!(stacked, 1, "CR 603.2c: one trigger event → one trigger");
-    runner.advance_until_stack_empty();
 
     assert_eq!(runner.life(P1), 19, "reach guard: P1 took combat damage");
     assert_eq!(runner.life(P2), 19, "reach guard: P2 took combat damage");
@@ -202,15 +152,6 @@ fn combat_damage_outside_the_controllers_turn_does_not_fire() {
     runner
         .declare_attackers(&[(attacker, AttackTarget::Player(P2))])
         .expect("P1 attacks P2");
-    for _ in 0..8 {
-        if runner.waiting_for_kind() == "DeclareBlockers" {
-            break;
-        }
-        runner
-            .act(GameAction::PassPriority)
-            .expect("pass to declare blockers");
-    }
-    runner.declare_blockers(&[]).expect("no blockers");
     let hand_before = hand_len(&runner, P0);
 
     // Negative row: `advance_until_stack_empty` returns immediately on an empty
@@ -242,16 +183,12 @@ fn win_after_the_draw_empties_the_library() {
     for name in ["L1", "L2"] {
         scenario.add_card_to_library_top(P0, name);
     }
-    let fblthp = scenario
-        .add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
-        .id();
+    scenario.add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE);
     let attacker = scenario.add_creature(P0, "Attacker", 1, 1).id();
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
 
-    let stacked = drive_to_trigger(&mut runner, &[(attacker, AttackTarget::Player(P1))], fblthp);
-    assert_eq!(stacked, 1, "reach guard: the trigger fired");
-    runner.advance_until_stack_empty();
+    drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
 
     assert_eq!(
         runner.life(P1),
@@ -292,15 +229,11 @@ fn win_survives_a_draw_from_an_empty_library() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
     // No library cards at all: the Draw 2 is an empty-library draw.
-    let fblthp = scenario
-        .add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE)
-        .id();
+    scenario.add_creature_from_oracle(P0, "Fblthp, Impossibly Lost", 1, 1, ORACLE);
     let attacker = scenario.add_creature(P0, "Attacker", 1, 1).id();
     let mut runner = scenario.build();
 
-    let stacked = drive_to_trigger(&mut runner, &[(attacker, AttackTarget::Player(P1))], fblthp);
-    assert_eq!(stacked, 1, "reach guard: the trigger fired");
-    runner.advance_until_stack_empty();
+    drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
 
     assert_eq!(
         runner.life(P1),
