@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 const ABILITY_KEYS: &[&str] = &[
     "kind",
     "effect",
+    "instruction_actor",
     "cost",
     "sub_ability",
     "else_ability",
@@ -234,4 +235,63 @@ pub fn omit_definition_descriptions_at(
     walk(value, pointer, &mut omitted);
     omitted.sort();
     omitted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, TargetFilter,
+    };
+
+    fn ability_with_actor(actor: ControllerRef) -> AbilityDefinition {
+        let mut definition = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Controller,
+            },
+        );
+        definition.instruction_actor = Some(actor.into());
+        definition.description = Some("Gain 3 life.".to_string());
+        definition
+    }
+
+    #[test]
+    fn instruction_actor_preserves_ability_projection_and_distinguishes_actors() {
+        let projections: Vec<_> = [ControllerRef::You, ControllerRef::Opponent]
+            .into_iter()
+            .map(|actor| {
+                let definition = ability_with_actor(actor);
+                let mut value = serde_json::to_value(&definition).unwrap();
+                let expected_actor = value["instruction_actor"].clone();
+                let expected_effect = value["effect"].clone();
+
+                let omitted = omit_definition_descriptions(&mut value);
+                assert_eq!(omitted.len(), 1);
+                assert_eq!(omitted[0].carrier, "AbilityDefinition");
+                assert_eq!(omitted[0].json_pointer, "/description");
+                assert_eq!(omitted[0].value, "Gain 3 life.");
+                assert!(value.get("description").is_none());
+                assert_eq!(value["instruction_actor"], expected_actor);
+                assert_eq!(value["effect"], expected_effect);
+                value
+            })
+            .collect();
+
+        assert_ne!(projections[0], projections[1]);
+    }
+
+    #[test]
+    fn instruction_actor_does_not_admit_unknown_ability_schema_keys() {
+        let mut value = serde_json::to_value(ability_with_actor(ControllerRef::You)).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unknown_semantic_field".to_string(), Value::Bool(true));
+        let original = value.clone();
+
+        assert!(omit_definition_descriptions(&mut value).is_empty());
+        assert_eq!(value, original);
+    }
 }
