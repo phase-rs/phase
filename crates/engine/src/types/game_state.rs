@@ -17206,6 +17206,9 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         {
             return Err("counter-removal ticket disagrees with its resolving owner".into());
         }
+        Ok(())
+    };
+    let validate_reader = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
         if !state
             .resolution_stack
             .ability_continuations()
@@ -17217,6 +17220,20 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             return Err("counter-removal ticket has no exact owned reader continuation".into());
         }
         Ok(())
+    };
+    let readerless_producer = |binding: &CounterRemovalResultBinding| {
+        crate::game::effects::readerless_generated_counter_producer(state, binding)
+            .map_err(|error| error.to_string())
+    };
+    let readerless_queue = |queue: &PendingCounterRemovalQueue,
+                            binding: &CounterRemovalResultBinding| {
+        if queue.result_binding.as_ref() == Some(binding)
+            && queue.source_ability_id == binding.source.reference.object_id
+        {
+            readerless_producer(binding)
+        } else {
+            Ok(None)
+        }
     };
     if let Some(pending) = &state.pending_replacement {
         if !crate::game::replacement::damage_source_context_coherent(
@@ -17234,6 +17251,19 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         } = &pending.proposed
         {
             validate_binding(binding)?;
+            let producer = if let Some(queue) = state.active_counter_removals().filter(|queue| {
+                queue.in_flight.as_ref().is_some_and(|flight| {
+                    flight.removal.object_id == *object_id
+                        && flight.removal.counter_type == *counter_type
+                })
+            }) {
+                readerless_queue(queue, binding)?
+            } else {
+                None
+            };
+            if producer.is_none() {
+                validate_reader(binding)?;
+            }
             if !binding
                 .recipient
                 .is_some_and(|pin| pin.object_id == *object_id)
@@ -17267,6 +17297,15 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
     {
         if let Some(binding) = &context.counter_removal_result {
             validate_binding(binding)?;
+            if readerless_producer(binding)?.is_some() {
+                crate::game::effects::choose_one_of::validate_waiting_result_owner(
+                    state,
+                    &state.waiting_for,
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                validate_reader(binding)?;
+            }
             if binding.source.reference.object_id != *source_id
                 || !matches!(parent_occurrences.occurrences().as_slice(), [(TargetRef::Object(id), Some(pin))]
                     if Some(*pin) == binding.recipient && *id == pin.object_id)
@@ -17290,6 +17329,9 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             ResolutionFrame::CounterRemovals(queue) => {
                 if let Some(binding) = &queue.result_binding {
                     validate_binding(binding)?;
+                    if readerless_queue(queue, binding)?.is_none() {
+                        validate_reader(binding)?;
+                    }
                 } else if counter_reader_waits_for(queue.source_ability_id) {
                     // The owned reader requires its producer's authority even
                     // when both optional transport copies were omitted.
@@ -17299,6 +17341,14 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             ResolutionFrame::ChooseOneOf(pending) => {
                 if let Some(binding) = &pending.context.counter_removal_result {
                     validate_binding(binding)?;
+                    if readerless_producer(binding)?.is_some() {
+                        crate::game::effects::choose_one_of::validate_pending_result_owner(
+                            state, pending,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    } else {
+                        validate_reader(binding)?;
+                    }
                 }
             }
             _ => {}
