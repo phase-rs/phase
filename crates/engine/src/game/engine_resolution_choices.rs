@@ -15773,7 +15773,7 @@ mod token_materialization_completion_tests {
             if queued {
                 assert!(definitions.iter().any(|definition| {
                     definition.execute.as_ref().is_some_and(|body| {
-                        matches!(&body.effect, Effect::ChooseOneOf { branches, .. }
+                        matches!(body.effect.as_ref(), Effect::ChooseOneOf { branches, .. }
                             if branches.len() == 2 && branches.iter().all(|branch|
                                 matches!(branch.effect.as_ref(), Effect::Token { .. })))
                     })
@@ -15784,7 +15784,7 @@ mod token_materialization_completion_tests {
                     definition.event == ReplacementEvent::ChangeZone
                         && definition.valid_card == Some(TargetFilter::Any)
                         && definition.execute.as_ref().is_some_and(|body| {
-                            matches!(&body.effect, Effect::PutCounter {
+                            matches!(body.effect.as_ref(), Effect::PutCounter {
                                 counter_type: CounterType::Plus1Plus1,
                                 count: QuantityExpr::Fixed { value: 1 },
                                 target: TargetFilter::SelfRef,
