@@ -111,6 +111,8 @@ mod retained_spell_history_tests {
         assert!(parse_for_each_clause("for each creature you control that is a Fungus").is_none());
         for inner in [
             "",
+            "   ",
+            ".",
             "you control",
             "creature you control that is",
             "creature you control that is a Fungus inexplicably",
@@ -119,8 +121,9 @@ mod retained_spell_history_tests {
             let before = format!("{context:?}");
             assert!(
                 parse_for_each_clause_with_context(inner, &mut context).is_none(),
-                "{inner}"
+                "complete legacy noun: {inner:?}"
             );
+            assert!(parse_for_each_clause(inner).is_none(), "{inner:?}");
             assert_eq!(format!("{context:?}"), before);
             let source = format!("for each {inner}");
             assert!(all_consuming(nom_quantity::parse_for_each)
@@ -4162,7 +4165,9 @@ fn parse_for_each_clause_with_they_controller(
     // iterating player.
     let mut tp_ctx = for_each_anaphor_context(ctx, &antecedents);
     let (filter, remainder) = parse_type_phrase_folding_with_ctx(clause, &mut tp_ctx);
-    if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
+    // CR 109.2: a controller suffix alone does not describe an object class.
+    if nom_quantity::quantity_filter_has_meaningful_content(&filter) && remainder.trim().is_empty()
+    {
         return Some(QuantityRef::ObjectCount { filter });
     }
 

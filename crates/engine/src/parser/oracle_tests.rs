@@ -3325,6 +3325,7 @@ fn coordinated_relative_hearth_keeps_both_faces_and_linked_loaders() {
         .abilities
         .iter()
         .any(|ability| matches!(ability.effect.as_ref(), Effect::Unimplemented { .. })));
+    assert!(refused_lower.abilities.iter().any(|ability| ability.effect.unimplemented_description().is_some_and(|fragment| fragment.contains("the number of cards in your graveyard that are instant cards, sorcery cards, and/or have a synthetic unknown property"))), "complete malformed cost operand remains visible");
     assert!(refused_lower.abilities.iter().any(|ability| matches!(
         ability.effect.as_ref(),
         Effect::Draw {
@@ -7228,16 +7229,71 @@ fn coordinated_population_where_x_instruction_boundary() {
             &["Sorcery".into()],
             &[],
         );
+        let mut doc = parse_oracle_ir(
+            &source,
+            "Synthetic instruction boundary",
+            &[],
+            &["Sorcery".into()],
+            &[],
+        );
+        assert_eq!(doc.source_text, source);
+        assert_eq!(doc.items.len(), 1, "{source}");
+        assert_eq!(doc.items[0].source.fragment(), Some(source.as_str()));
+        let span = doc.items[0].source.span();
+        assert!(span.is_exact());
+        assert_eq!(
+            (
+                span.start_byte,
+                span.end_byte,
+                span.first_line,
+                span.last_line
+            ),
+            (0, source.len(), 0, 0)
+        );
+        assert_eq!(
+            lower_oracle_ir(&mut doc).abilities,
+            parsed.abilities,
+            "ordinary IR lowering: {source}"
+        );
+        assert!(parsed.parse_warnings.is_empty(), "{source}");
         assert!(
             parsed.abilities.iter().all(|a| !has_unimplemented(a)),
             "{source}: {:?}",
             parsed.abilities
         );
-        assert!(
-            parsed
-                .abilities
-                .iter()
-                .any(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. })),
+        let head = parsed
+            .abilities
+            .iter()
+            .find(|a| matches!(a.effect.as_ref(), Effect::GenericEffect { .. }))
+            .expect("continuous head retained");
+        assert_eq!(head.duration, Some(Duration::UntilEndOfTurn), "{source}");
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = head.effect.as_ref()
+        else {
+            unreachable!()
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn), "{source}");
+        assert_eq!(static_abilities.len(), 1, "{source}");
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            )),
+            "{source}"
+        );
+        assert_eq!(
+            static_abilities[0].modifications,
+            vec![
+                ContinuousModification::SetPowerDynamic {
+                    value: complete_coordinated_population_quantity()
+                },
+                ContinuousModification::SetToughnessDynamic {
+                    value: complete_coordinated_population_quantity()
+                }
+            ],
             "{source}"
         );
         fn has_draw(a: &AbilityDefinition) -> bool {
@@ -7248,6 +7304,18 @@ fn coordinated_population_where_x_instruction_boundary() {
             parsed.abilities.iter().any(has_draw),
             "following instruction retained: {source}"
         );
+        let mut draws = 0;
+        for ability in &parsed.abilities {
+            let _ = crate::types::ability_visit::visit_ability_def(ability, &mut |effect| {
+                if let Effect::Draw { count, target } = effect {
+                    assert_eq!(count, &QuantityExpr::Fixed { value: 1 }, "{source}");
+                    assert_eq!(target, &TargetFilter::Controller, "{source}");
+                    draws += 1;
+                }
+                std::ops::ControlFlow::<()>::Continue(())
+            });
+        }
+        assert_eq!(draws, 1, "no duplicated later instruction: {source}");
     }
     for prefix in ["one plus ", "twice ", "half "] {
         let source = format!("Until end of turn, creatures you control have base power and toughness X/X, where X is {prefix}{operand}.");

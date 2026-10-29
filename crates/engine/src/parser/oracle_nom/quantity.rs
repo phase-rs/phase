@@ -1024,7 +1024,7 @@ fn attach_property_to_quantity_filter(filter: &mut TargetFilter, property: Filte
     }
 }
 
-fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+pub(crate) fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
