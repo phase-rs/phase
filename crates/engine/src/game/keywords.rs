@@ -426,13 +426,15 @@ pub(crate) fn self_mana_cost_is_unpayable(
     object_id: ObjectId,
     cost: &ManaCost,
 ) -> bool {
-    matches!(
-        cost,
-        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. }
-    ) && matches!(
-        resolve_keyword_mana_cost(state, object_id, cost),
-        ManaCost::NoCost
-    )
+    match cost {
+        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. } => matches!(
+            resolve_keyword_mana_cost(state, object_id, cost),
+            ManaCost::NoCost
+        ),
+        // A concrete cost is payable as written; `SelfManaValue` concretizes to
+        // the recipient's mana value, which is 0 for a no-mana-cost object.
+        ManaCost::NoCost | ManaCost::Cost { .. } | ManaCost::SelfManaValue => false,
+    }
 }
 
 /// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
