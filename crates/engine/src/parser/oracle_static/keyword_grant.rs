@@ -2144,6 +2144,61 @@ pub(crate) fn find_refused_loyalty_grant_sentence(static_line: &str) -> Option<S
     None
 }
 
+/// Retain independently complete static units beside exact refused loyalty
+/// leaves. An empty definition vector denotes only a leaf proved by the existing
+/// refusal authority; every other unread unit aborts this document transaction.
+pub(crate) fn parse_static_with_refused_loyalty_units(
+    text: &str,
+) -> Option<Vec<(String, Vec<StaticDefinition>)>> {
+    let mut units = Vec::new();
+    for sentence in split_static_sentences(text) {
+        if super::shared::segment_is_back_referential_continuation(&sentence)
+            || super::shared::segment_subject_is_pronoun_it(&sentence)
+        {
+            return None;
+        }
+        let definitions = parse_static_line_multi(&sentence);
+        if !definitions.is_empty() {
+            units.push((sentence, definitions));
+            continue;
+        }
+        if find_refused_loyalty_grant_sentence(&sentence).as_deref() == Some(sentence.as_str()) {
+            units.push((sentence, Vec::new()));
+            continue;
+        }
+        let lower = sentence.to_lowercase();
+        let tp = TextPair::new(&sentence, &lower);
+        let (supported, definitions, refused) =
+            parse_continuous_subject_predicate(&tp, |subject, predicate| {
+                parse_continuous_subject_filter(subject)?;
+                let predicate_lower = predicate.to_lowercase();
+                TextPair::new(predicate, &predicate_lower).scan_around_outside_quotes(
+                    tag::<_, _, OracleError<'_>>(" and "),
+                    |before, _, after| {
+                        let refusal_probe = format!("{subject} has {}", after.original);
+                        find_refused_loyalty_grant_sentence(&refusal_probe)?;
+                        let supported_end = before.original.as_ptr() as usize + before.len()
+                            - sentence.as_ptr() as usize;
+                        let supported = sentence[..supported_end].trim();
+                        let definitions = parse_static_line_multi(supported);
+                        (!definitions.is_empty()).then(|| {
+                            (
+                                supported.to_string(),
+                                definitions,
+                                after.original.trim().to_string(),
+                            )
+                        })
+                    },
+                )
+            })?;
+        units.push((supported, definitions));
+        units.push((refused, Vec::new()));
+    }
+    let has_supported = units.iter().any(|(_, definitions)| !definitions.is_empty());
+    let has_refused = units.iter().any(|(_, definitions)| definitions.is_empty());
+    (has_supported && has_refused).then_some(units)
+}
+
 /// A complete predicate publishes no modification until every top-level clause
 /// has an owner. Quoted bodies and protection riders keep their own grammar.
 pub(crate) fn parse_complete_continuous_modifications(

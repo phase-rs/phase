@@ -136,9 +136,9 @@ use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
     parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
     parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
-    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
-    try_parse_graveyard_keyword_grant_source, try_parse_top_of_library_cast_permission,
-    GrantedCastKeywordKind,
+    parse_static_line, parse_static_line_multi, parse_static_with_refused_loyalty_units,
+    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_source,
+    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
@@ -7877,6 +7877,32 @@ fn parse_normalized_oracle_ir(
                     Some(raw_line),
                     Some(card_name),
                 );
+                if defs.is_empty() {
+                    if let Some(units) = parse_static_with_refused_loyalty_units(&static_line) {
+                        for (fragment, definitions) in units {
+                            if definitions.is_empty() {
+                                emitter.unsupported_ir_at(
+                                    item_line,
+                                    UnsupportedAbilityIr::new(
+                                        UnsupportedAbilityCategory::StaticStructure,
+                                        fragment.clone(),
+                                        fragment,
+                                    ),
+                                    min_x_value,
+                                );
+                            } else {
+                                for definition in definitions {
+                                    emitter.static_ir_at(
+                                        item_line,
+                                        StaticIr::from_definition(&fragment, definition),
+                                    );
+                                }
+                            }
+                        }
+                        i += 1;
+                        continue;
+                    }
+                }
                 if !defs.is_empty() {
                     // CR 611.3a + CR 702.95a: retain the unconditional paired
                     // grant while refusing an unrepresented partner-only gate.
@@ -7921,10 +7947,8 @@ fn parse_normalized_oracle_ir(
                             item_line,
                             UnsupportedAbilityIr::new(
                                 UnsupportedAbilityCategory::StaticStructure,
-                                format!(
-                                    "Static fallback adopted statics but dropped a refused loyalty-grant sentence: {refused}"
-                                ),
-                                line,
+                                refused.clone(),
+                                refused,
                             ),
                             min_x_value,
                         );

@@ -736,6 +736,11 @@ fn outer_grant_refusal_survives_relative_subject_and_unknown_payload() {
         "Each creature card in your graveyard that has an Adventure has flashback {2}. Its flashback cost is equal to its mana cost.",
         "Each creature card in your graveyard that has an Adventure has flashback {2} until end of turn.",
         "Each creature card in your graveyard that has an Adventure has flashback {2}..",
+        "Each creature card in your graveyard that has a fate counter on it in your hand has flashback {2}.",
+        "Each creature card in your graveyard that has a fate counter on it from your graveyard has flashback {2}.",
+        "Each creature card in your graveyard that has a fate counter on it on the battlefield has flashback {2}.",
+        "Each creature card in your graveyard that has a fate counter on it in graveyards has flashback {2}.",
+        "Each creature card in your graveyard that has a fate counter on it has flashback {2} unknown.",
     ] {
         assert!(matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(source), Some(Err(original)) if original == source), "{source}");
         assert!(parse_static_line(source).is_none(), "{source}");
@@ -744,6 +749,75 @@ fn outer_grant_refusal_survives_relative_subject_and_unknown_payload() {
     let positive = "Each creature card in your graveyard that has an Adventure has flashback {2}.";
     assert!(parse_static_line(positive).is_some());
     assert_eq!(parse_static_line_multi(positive).len(), 1);
+}
+
+#[test]
+fn counter_relative_grant_public_cast_uses_only_the_marked_graveyard_card() {
+    use crate::game::scenario::{GameScenario, P0};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Supplemental composition: the existing instant/relative/flashback axes,
+    // with a more expensive printed cost to discriminate the granted cost.
+    let source = scenario
+        .add_artifact_to_hand_from_oracle(
+            P0,
+            "Counter-relative grant",
+            "Each instant card in your graveyard that has a fate counter on it has flashback {2}.",
+        )
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let marked = scenario
+        .add_spell_to_graveyard(P0, "Marked instant", true)
+        .from_oracle_text("You gain 2 life.")
+        .with_mana_cost(ManaCost::generic(7))
+        .id();
+    let unmarked = scenario
+        .add_spell_to_graveyard(P0, "Unmarked instant", true)
+        .from_oracle_text("You gain 2 life.")
+        .with_mana_cost(ManaCost::generic(7))
+        .id();
+    scenario.with_counter(marked, CounterType::Generic("fate".into()), 1);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| {
+                crate::types::mana::ManaUnit::new(
+                    ManaType::Colorless,
+                    crate::types::identifiers::ObjectId(999),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner
+        .cast(source)
+        .resolve()
+        .assert_zone(&[source], Zone::Battlefield);
+    assert!(crate::game::keywords::object_has_effective_keyword_kind(
+        runner.state(),
+        marked,
+        KeywordKind::Flashback
+    ));
+    assert!(!crate::game::keywords::object_has_effective_keyword_kind(
+        runner.state(),
+        unmarked,
+        KeywordKind::Flashback
+    ));
+    let outcome = runner
+        .cast(marked)
+        .casting_variant(crate::types::game_state::CastingVariant::Flashback)
+        .resolve();
+    outcome.assert_life_delta(P0, 2);
+    outcome.assert_zone(&[marked], Zone::Exile);
+    outcome.assert_zone(&[unmarked], Zone::Graveyard);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
 }
 
 #[test]
@@ -1199,7 +1273,7 @@ fn color_conditional_keyword_grants_expand_per_color() {
         expected.len(),
         "one independent static per listed color: {defs:?}"
     );
-    for (def, (color, keyword)) in defs.iter().zip(expected) {
+    for (def, (color, keyword)) in defs.iter().zip(expected.clone()) {
         assert_eq!(def.mode, StaticMode::Continuous);
         assert_eq!(
             def.affected,
@@ -1218,6 +1292,63 @@ fn color_conditional_keyword_grants_expand_per_color() {
             def.condition.is_none(),
             "a per-recipient color qualifier is a filter, never a shared condition"
         );
+    }
+    // Verbatim Scion grant component, through a paid public source cast.
+    use crate::game::scenario::{GameScenario, P0, P1};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let recipients = expected
+        .iter()
+        .map(|(color, _)| {
+            scenario
+                .add_creature(P0, "Colored recipient", 2, 3)
+                .with_color(vec![*color])
+                .id()
+        })
+        .collect::<Vec<_>>();
+    let colorless = scenario.add_creature(P0, "Colorless recipient", 2, 3).id();
+    let opponent = scenario
+        .add_creature(P1, "Opponent white recipient", 2, 3)
+        .with_color(vec![ManaColor::White])
+        .id();
+    let source = scenario.add_artifact_to_hand_from_oracle(P0, "Scion grant component",
+        "Each creature you control has vigilance if it's white, hexproof if it's blue, lifelink if it's black, first strike if it's red, and trample if it's green.")
+        .with_mana_cost(ManaCost::generic(1)).id();
+    scenario.with_mana_pool(
+        P0,
+        vec![crate::types::mana::ManaUnit::new(
+            ManaType::Colorless,
+            crate::types::identifiers::ObjectId(999),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let outcome = runner.cast(source).resolve();
+    outcome.assert_zone(&[source], Zone::Battlefield);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert_eq!(outcome.state().objects[&source].static_definitions, defs);
+    for (recipient, (_, granted)) in recipients.iter().zip(&expected) {
+        for (_, keyword) in &expected {
+            assert_eq!(
+                outcome.state().objects[recipient]
+                    .keywords
+                    .contains(keyword),
+                keyword == granted
+            );
+        }
+    }
+    for excluded in [colorless, opponent] {
+        for (_, keyword) in &expected {
+            assert!(!outcome.state().objects[&excluded]
+                .keywords
+                .contains(keyword));
+        }
     }
 }
 
@@ -1914,7 +2045,7 @@ fn compound_subject_keyword_static_splits_inverted_as_long_as_heroes_hexproof() 
     use crate::types::keywords::Keyword;
 
     let defs = parse_static_line_multi(
-        "As long as Captain America has a shield counter on him, you and other Heroes you control have hexproof.",
+        "As long as ~ has a shield counter on him, you and other Heroes you control have hexproof.",
     );
     assert_eq!(
         defs.len(),
@@ -1953,6 +2084,24 @@ fn compound_subject_keyword_static_splits_inverted_as_long_as_heroes_hexproof() 
         player_def.condition, object_def.condition,
         "player half must share the object half's continuous gate"
     );
+    assert_eq!(
+        object_def.condition,
+        Some(StaticCondition::HasCounters {
+            counters: CounterMatch::OfType(CounterType::Shield),
+            minimum: 1,
+            maximum: None,
+        })
+    );
+    // CR 201.5 + CR 201.5c: shortened self names need the full card context.
+    let parsed = parse_card(
+        "First strike\nCaptain America enters with a shield counter on him. (If he would be dealt damage or destroyed, remove a shield counter from him instead.)\nAs long as Captain America has a shield counter on him, you and other Heroes you control have hexproof.",
+        "Captain America, Super-Soldier",
+        &["First strike"],
+        &["Creature"],
+        &["Human", "Soldier", "Hero"],
+    );
+    assert_eq!(parsed.statics, defs);
+    assert!(parsed.abilities.is_empty());
 }
 
 /// CR 702.18a + CR 611.3a: Compound shroud sibling of the hexproof class.
@@ -3191,6 +3340,81 @@ fn dual_gated_attached_grant_plus_restrictions_not_preempted() {
     }
 }
 
+#[test]
+fn dual_gated_equipment_public_equip_keeps_rule_modes_and_live_attack_gate() {
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host", 2, 3).id();
+    let forest = scenario
+        .add_land_from_oracle(P0, "Forest", "")
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let source = scenario.add_artifact_to_hand_from_oracle(P0, "Dual gated Equipment",
+        "Equipped creature gets +2/+2 and can't attack if you control a Forest and can't block if you control an Island.\nEquip {1}")
+        .with_subtypes(vec!["Equipment"]).with_mana_cost(ManaCost::generic(1)).id();
+    let bounce = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Remove the attack gate",
+            true,
+            "Return target permanent to its owner's hand.",
+        )
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| {
+                crate::types::mana::ManaUnit::new(
+                    ManaType::Colorless,
+                    crate::types::identifiers::ObjectId(999),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner
+        .cast(source)
+        .resolve()
+        .assert_zone(&[source], Zone::Battlefield);
+    let outcome = runner.activate(source, 0).target_object(host).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert_eq!(
+        (
+            outcome.state().objects[&host].power,
+            outcome.state().objects[&host].toughness
+        ),
+        (Some(4), Some(5))
+    );
+    for mode in [StaticMode::CantAttack, StaticMode::CantBlock] {
+        assert!(outcome.state().objects[&source]
+            .static_definitions
+            .iter()
+            .any(|definition| definition.mode == mode));
+    }
+    let mut prohibited = GameRunner::from_state(runner.state().clone());
+    prohibited.advance_to_combat();
+    assert!(prohibited
+        .declare_attackers(&[(host, crate::game::combat::AttackTarget::Player(P1))])
+        .is_err());
+    runner
+        .cast(bounce)
+        .target_object(forest)
+        .resolve()
+        .assert_zone(&[forest], Zone::Hand);
+    runner.advance_to_combat();
+    assert!(runner
+        .declare_attackers(&[(host, crate::game::combat::AttackTarget::Player(P1))])
+        .is_ok());
+}
+
 /// CR 509.1b: Kraken of the Straits — "Creatures with power less than the
 /// number of Islands you control can't block this creature." must lower to a
 /// `CantBeBlockedBy` restriction on the SOURCE whose blocker filter gates on a
@@ -4017,6 +4241,92 @@ fn cant_be_sacrificed_static_splits_from_grant() {
         cant.affected.is_some(),
         "CantBeSacrificed companion must have an affected set"
     );
+    let attack = defs
+        .iter()
+        .find(|definition| definition.mode == StaticMode::CantAttack)
+        .expect("scoped attack companion");
+    assert_eq!(attack.affected, continuous.affected);
+    assert_eq!(
+        attack.attack_defended,
+        Some(crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker)
+    );
+    assert_eq!(defs.len(), 3);
+    for source in [
+        "Equipped creature has \"{T}: This creature can't attack you\".",
+        "Equipped creature has haste, unknown, can't attack you.",
+        "Equipped creature has haste, can't attack you unless you control a Forest.",
+        "Equipped creature has haste, can't attack you and can't be sacrificed unless you control a Forest.",
+    ] {
+        assert!(super::evasion::try_split_and_cant_attack_scoped(source).is_none(), "{source}");
+    }
+}
+
+#[test]
+fn assault_suit_public_cast_and_equip_preserve_the_complete_grant() {
+    use crate::game::scenario::{GameScenario, P0};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Equipped host", 2, 3).id();
+    let other = scenario.add_creature(P0, "Unattached creature", 2, 3).id();
+    let source = scenario.add_artifact_to_hand_from_oracle(P0, "Assault Suit",
+        "Equipped creature gets +2/+2, has haste, can't attack you or planeswalkers you control, and can't be sacrificed.\nAt the beginning of each opponent's upkeep, you may have that player gain control of equipped creature until end of turn. If you do, untap it.\nEquip {3}")
+        .with_subtypes(vec!["Equipment"]).with_mana_cost(ManaCost::generic(4)).id();
+    scenario.with_mana_pool(
+        P0,
+        (0..7)
+            .map(|_| {
+                crate::types::mana::ManaUnit::new(
+                    ManaType::Colorless,
+                    crate::types::identifiers::ObjectId(999),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner
+        .cast(source)
+        .resolve()
+        .assert_zone(&[source], Zone::Battlefield);
+    let outcome = runner.activate(source, 0).target_object(host).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert_eq!(outcome.state().players[0].mana_pool.total(), 0);
+    assert_eq!(outcome.state().objects[&source].attached_to, Some(host));
+    assert_eq!(
+        (
+            outcome.state().objects[&host].power,
+            outcome.state().objects[&host].toughness
+        ),
+        (Some(4), Some(5))
+    );
+    assert!(outcome.state().objects[&host]
+        .keywords
+        .contains(&Keyword::Haste));
+    assert!(crate::game::static_abilities::object_has_static_other(
+        outcome.state(),
+        host,
+        "CantBeSacrificed"
+    ));
+    assert_eq!(
+        (
+            outcome.state().objects[&other].power,
+            outcome.state().objects[&other].toughness
+        ),
+        (Some(2), Some(3))
+    );
+    assert!(!outcome.state().objects[&other]
+        .keywords
+        .contains(&Keyword::Haste));
+    assert!(!crate::game::static_abilities::object_has_static_other(
+        outcome.state(),
+        other,
+        "CantBeSacrificed"
+    ));
 }
 
 /// CR 701.21: A simple pump compounded with the sacrifice prohibition also
@@ -12483,6 +12793,10 @@ fn quoted_grant_with_refused_loyalty_leaf_falls_back_to_quoted_static() {
             "the carried gap fragment must name the refused leaf; line: {line}\n{:?}",
             parsed.abilities
         );
+        assert_eq!(
+            parsed.abilities[0].effect.unimplemented_description(),
+            Some("~ has all loyalty abilities of all other planeswalkers on the battlefield.")
+        );
     }
 }
 
@@ -12523,11 +12837,9 @@ fn oath_sentence_gains_no_refusal_marker() {
     );
 }
 
-/// CR 613.1f + CR 606.2 + CR 607.5: single-sentence hybrid negative (V10) —
-/// `~ has "X" and all loyalty abilities of ...` — the quote-stripped
-/// predicate fails the `all_consuming` clause match at the emission site AND
-/// at the finder identically, so no refusal exists to carry and no gap is
-/// recorded. Reach-guard: the adopted quoted static proves the line parsed.
+/// CR 613.1f + CR 606.2: the original quoted-body positive remains complete;
+/// its unsupported loyalty conjunct must also survive as an exact residual.
+/// The historical test name is retained, but zero gaps was a defective premise.
 #[test]
 fn hybrid_single_sentence_gains_no_refusal_marker() {
     let line = "Grant Recipient has \"[0]: Proliferate\" and all loyalty abilities of all other planeswalkers on the battlefield.";
@@ -12561,11 +12873,26 @@ fn hybrid_single_sentence_gains_no_refusal_marker() {
         "the quoted grant must be Proliferate; line: {line}\n{:?}",
         parsed.statics
     );
-    assert!(
-        parsed.abilities.is_empty(),
-        "expected zero gaps for the hybrid sentence; line: {line}\n{:?}",
-        parsed.abilities
+    assert_eq!(parsed.abilities.len(), 1, "{line}: {:?}", parsed.abilities);
+    assert_eq!(
+        parsed.abilities[0].effect.unimplemented_description(),
+        Some("all loyalty abilities of all other planeswalkers on the battlefield.")
     );
+    assert!(matches!(
+        &*parsed.abilities[0].effect,
+        Effect::Unimplemented { name, .. } if name == "static_structure"
+    ));
+    assert!(!parsed
+        .statics
+        .iter()
+        .flat_map(|definition| &definition.modifications)
+        .any(|modification| matches!(
+            modification,
+            ContinuousModification::GrantAllActivatedAbilitiesOf {
+                kind: Some(ActivatedAbilityKind::Loyalty),
+                ..
+            }
+        )));
 }
 
 /// CR 613.1f + CR 108.3: "all artifact cards in your graveyard" — ownership-based
@@ -19318,7 +19645,8 @@ fn legendary_subtype_subject_peels_supertype_and_keeps_subtype() {
         Some("Human"),
         "remainder must be the real subtype, not a fabricated 'Legendary Human'"
     );
-    assert!(tf.type_filters.contains(&TypeFilter::Creature));
+    // CR 109.2 + CR 205.3m: Human alone includes noncreature Human permanents.
+    assert_eq!(tf.type_filters, vec![TypeFilter::Subtype("Human".into())]);
     assert!(
         tf.properties.contains(&FilterProp::HasSupertype {
             value: Supertype::Legendary,
@@ -19332,6 +19660,65 @@ fn legendary_subtype_subject_peels_supertype_and_keeps_subtype() {
         .contains(&ContinuousModification::AddKeyword {
             keyword: Keyword::Indestructible
         }));
+    let explicit = parse_static_line("Legendary Human creatures you control have indestructible.")
+        .expect("explicit creature control");
+    let Some(TargetFilter::Typed(explicit_filter)) = &explicit.affected else {
+        panic!("explicit creature subject")
+    };
+    assert!(explicit_filter.type_filters.contains(&TypeFilter::Creature));
+    assert_eq!(explicit_filter.get_subtype(), Some("Human"));
+    assert_eq!(explicit_filter.controller, tf.controller);
+    assert_eq!(explicit_filter.properties, tf.properties);
+    assert_eq!(explicit.modifications, def.modifications);
+
+    // CR 109.2 + CR 205.3m: exercise a noncreature Human in the live layer pass.
+    use crate::game::scenario::{GameScenario, P0, P1};
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let human = scenario
+        .add_artifact_from_oracle(P0, "Legendary Human artifact", "")
+        .with_subtypes(vec!["Human"])
+        .as_legendary()
+        .id();
+    let ordinary = scenario
+        .add_artifact_from_oracle(P0, "Ordinary Human artifact", "")
+        .with_subtypes(vec!["Human"])
+        .id();
+    let opponent = scenario
+        .add_artifact_from_oracle(P1, "Opponent Human artifact", "")
+        .with_subtypes(vec!["Human"])
+        .as_legendary()
+        .id();
+    let source = scenario
+        .add_artifact_to_hand_from_oracle(
+            P0,
+            "Human anthem component",
+            "Legendary Humans you control have indestructible.",
+        )
+        .id();
+    let mut runner = scenario.build();
+    // Supplemental noncreature Kindred artifacts (the engine retains the
+    // legacy Tribal enum name); both current and printed types agree.
+    for id in [human, ordinary, opponent] {
+        let object = runner.state_mut().objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Tribal);
+        object.base_card_types = object.card_types.clone();
+    }
+    let outcome = runner.cast(source).resolve();
+    outcome.assert_zone(&[source], Zone::Battlefield);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert!(outcome.state().objects[&human]
+        .keywords
+        .contains(&Keyword::Indestructible));
+    for excluded in [ordinary, opponent] {
+        assert!(!outcome.state().objects[&excluded]
+            .keywords
+            .contains(&Keyword::Indestructible));
+    }
 }
 
 #[test]
@@ -22170,7 +22557,7 @@ fn additive_type_clause_still_classifies_color_and_subtype() {
     // Regression: the unified word classifier keeps color + subtype grants
     // (Rise from the Grave's "black Zombie").
     let mods = parse_additive_type_clause_modifications(
-        "is a black Zombie in addition to its other types",
+        "is a black Zombie in addition to its other colors and types",
     )
     .expect("additive type clause must parse");
     assert!(mods.contains(&ContinuousModification::AddColor {
@@ -22179,6 +22566,20 @@ fn additive_type_clause_still_classifies_color_and_subtype() {
     assert!(mods.contains(&ContinuousModification::AddSubtype {
         subtype: "Zombie".to_string()
     }));
+    // CR 105.3: retaining other types does not retain other colors.
+    let types_only = parse_additive_type_clause_modifications(
+        "is a black Zombie in addition to its other types",
+    )
+    .expect("types-only control");
+    assert!(types_only.contains(&ContinuousModification::SetColor {
+        colors: vec![ManaColor::Black],
+    }));
+    assert!(types_only.contains(&ContinuousModification::AddSubtype {
+        subtype: "Zombie".to_string(),
+    }));
+    assert!(!types_only
+        .iter()
+        .any(|modification| matches!(modification, ContinuousModification::AddColor { .. })));
 }
 
 // CR 613.1f (Layer 6): a trailing "and has <keyword>" conjunct on an additive
@@ -39813,12 +40214,21 @@ fn complete_static_source_controller_change_rebinds_both_live_filters() {
         attacker,
         true,
     );
-    runner
+    let parsed_control = format!("{:?}", runner.state().objects[&control].abilities);
+    let committed = runner
         .cast(control)
         .target_player(P1)
         .target_object(source_id)
-        .resolve();
-    assert_eq!(runner.state().objects[&source_id].controller, P1);
+        .commit();
+    let announced_control = format!("{:?}", committed.state().stack);
+    let outcome = committed.resolve();
+    assert_eq!(
+        outcome.state().objects[&source_id].controller,
+        P1,
+        "control transfer precedes static rebinding: parsed={parsed_control}; announced={announced_control}; events={:?}; waiting={:?}",
+        outcome.events(),
+        outcome.final_waiting_for(),
+    );
     assert_complete_evasion_block(
         GameRunner::from_state(runner.state().clone()),
         attacker,

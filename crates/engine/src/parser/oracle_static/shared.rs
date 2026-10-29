@@ -841,14 +841,35 @@ pub(crate) fn target_filter_matches_granted_population(
     let mut cursor = lower.as_str();
     let mut expected = None;
     while let Some(locative) = nom_primitives::scan_at_word_boundaries(cursor, |input| {
+        // A complete nominal property owns its internal prepositions. Resume
+        // after that span so independent locatives still require validation.
+        if let Some((properties, consumed)) =
+            super::super::oracle_target::parse_that_clause_suffix(input, None)
+        {
+            if !properties.is_empty()
+                && properties
+                    .iter()
+                    .all(|property| matches!(property, FilterProp::Counters { .. }))
+            {
+                return Ok((&input[consumed..], (input, consumed)));
+            }
+        }
+        if let Some((_, consumed)) = super::super::oracle_target::parse_counter_suffix(input) {
+            return Ok((&input[consumed..], (input, consumed)));
+        }
         let (_, _) = nom::combinator::peek(alt((
             tag::<_, _, OracleError<'_>>("in "),
             tag("from "),
             tag("on "),
         )))
         .parse(input)?;
-        Ok((input, input))
+        Ok((input, (input, 0)))
     }) {
+        let (locative, property_len) = locative;
+        if property_len > 0 {
+            cursor = &locative[property_len..];
+            continue;
+        }
         let Ok((rest, (actual_zone, controller))) = scope(locative) else {
             return false;
         };
@@ -2016,7 +2037,7 @@ fn parse_multi_sentence_statics(text: &str) -> Option<Vec<StaticDefinition>> {
 /// CR 608.2c: True iff the sentence's subject is the bare pronoun "It" — an
 /// Aura/Equipment continuation referring to the enchanted/equipped creature,
 /// distinct from a self-name (`~`) or a typed subject.
-fn segment_subject_is_pronoun_it(segment: &str) -> bool {
+pub(super) fn segment_subject_is_pronoun_it(segment: &str) -> bool {
     // `trim_start` normalizes leading whitespace on the pre-split sentence chunk
     // and `to_lowercase` builds the TextPair lower half — both structural, not
     // dispatch. The "it " subject test itself runs through nom's `tag()` via the
@@ -2039,7 +2060,7 @@ fn affected_is_attached_scope(filter: &TargetFilter) -> bool {
 /// CR 611.3a: Recognize a sentence whose leading connector binds it to the
 /// preceding clause's condition rather than standing on its own. Such a sentence
 /// must not be split off as an independent static.
-fn segment_is_back_referential_continuation(segment: &str) -> bool {
+pub(super) fn segment_is_back_referential_continuation(segment: &str) -> bool {
     let lower = segment.to_lowercase();
     let result: OracleResult<'_, &str> =
         alt((tag("otherwise"), tag("instead"), tag("then "))).parse(lower.as_str());
@@ -2249,18 +2270,24 @@ pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
 /// untouched, so no existing coverage can regress. The stripped body carries no
 /// further label, so `strip_ability_word_with_name` yields `None` on the retry
 /// and the recursion terminates after a single hop.
+pub(super) fn known_static_ability_word_body(text: &str) -> Option<String> {
+    let (ability_word, body) = super::oracle_modal::strip_ability_word_with_name(text)?;
+    super::oracle_modal::is_known_ability_word(&ability_word).then_some(body)
+}
+
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
     let mut defs = parse_static_line_multi_dispatch(text);
     if !defs.is_empty() {
         append_cant_have_keyword_denials(text, &mut defs);
         return defs;
     }
-    if let Some((ability_word, body)) = super::oracle_modal::strip_ability_word_with_name(text) {
-        if super::oracle_modal::is_known_ability_word(&ability_word) {
-            let mut defs = parse_static_line_multi_dispatch(&body);
-            append_cant_have_keyword_denials(&body, &mut defs);
-            return defs;
+    if let Some(body) = known_static_ability_word_body(text) {
+        let mut defs = parse_static_line_multi_dispatch(&body);
+        append_cant_have_keyword_denials(&body, &mut defs);
+        for definition in &mut defs {
+            definition.description = Some(text.to_string());
         }
+        return defs;
     }
     defs
 }
@@ -3090,6 +3117,15 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         return vec![definition];
     }
 
+    // Preserve the complete class owners' canonical affected filters and
+    // top-level combat modes before publishing generic hosted members.
+    if let Some(definitions) = parse_color_conditional_keyword_grants(&stripped) {
+        return definitions;
+    }
+    if let Some(definitions) = try_split_grant_and_dual_gated_combat(&tp, &stripped) {
+        return definitions;
+    }
+
     // CR 611.3a: hosted member predicates stay live, with their own complete
     // recipient and board gates. No prefix is published on a refused member.
     if let Some(definitions) = parse_continuous_subject_predicate(&tp, |subject, predicate| {
@@ -3221,16 +3257,6 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // standalone sentence and strand the count on the first type (the observed bug:
     // every type gated on the single creature count).
     if let Some(defs) = parse_relative_count_typed_cast_prohibitions(&stripped) {
-        return defs;
-    }
-
-    // CR 613.1f + CR 105.2 (Scion of Draco): "<subject> has <K0> if it's <C0>, …, and
-    // <Kn> if it's <Cn>." — the COLOR-qualified sibling of the exiled-object grant
-    // above: one independent grant per listed pair, each color folded into its own
-    // branch's affected filter. Must precede the single-sentence pipeline, which reads
-    // only the first keyword and drops the "if it's <color>" qualifier — the observed
-    // bug (the whole static vanished, so the card did nothing).
-    if let Some(defs) = parse_color_conditional_keyword_grants(&stripped) {
         return defs;
     }
 
@@ -3419,14 +3445,6 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
     // gate; must split before the single-gate `can't block` dispatch arm.
     // Attached-subject forms scope `affected` to the enchanted/equipped host.
     if let Some(defs) = try_parse_dual_gated_cant_attack_and_cant_block(&tp, &stripped) {
-        return defs;
-    }
-
-    // CR 508.1c + CR 509.1b + CR 611.3a: "<grant> and can't attack if <A> and
-    // can't block if <B>" (Cagemail-class pump plus gated combat drawbacks).
-    // The bare dual-gate splitter declines when the subject carries a leading
-    // grant; peel the conjunct and append both gated combat statics.
-    if let Some(defs) = try_split_grant_and_dual_gated_combat(&tp, &stripped) {
         return defs;
     }
 

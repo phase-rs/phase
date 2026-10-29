@@ -169,8 +169,9 @@ pub(crate) use keyword_grant::{
     classify_quoted_inner, find_refused_loyalty_grant_sentence, parse_chosen_qualifier_subject,
     parse_complete_continuous_members, parse_complete_continuous_modifications,
     parse_continuous_modifications, parse_graveyard_granted_keyword_kind,
-    parse_quoted_ability_modifications, split_keyword_list,
-    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_source,
+    parse_quoted_ability_modifications, parse_static_with_refused_loyalty_units,
+    split_keyword_list, try_parse_graveyard_keyword_grant_clause,
+    try_parse_graveyard_keyword_grant_source,
 };
 pub(crate) use mana_transform::{
     is_unspent_mana_loss_causes_life_loss_static, try_parse_retain_unspent_mana_static,
@@ -227,7 +228,12 @@ pub(crate) fn parse_flashback_trailing_self_spell_cost_reduction(
 
 /// IR production: parse a static line into `StaticIr` (pre-lowering).
 pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
-    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow).or_else(|| {
+        let body = shared::known_static_ability_word_body(text)?;
+        let mut definition = parse_static_line_inner(&body, InvertedAsLongAs::Allow)?;
+        definition.description = Some(text.to_string());
+        Some(definition)
+    })?;
     Some(StaticIr {
         definition,
         source_text: text.to_string(),

@@ -1445,7 +1445,7 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
     Some(defs)
 }
 
-/// CR 508.1b + CR 508.1c: Decompose `"<grant or restriction>[,] and can't
+/// CR 508.1b + CR 508.1c: Decompose `"<grant or restriction>[, and|,|and] can't
 /// attack you [or planeswalkers you control]"` (the Vow cycle — Vow of
 /// Lightning, Duty, Flight, Torment, Wildness) into the first conjunct's
 /// static(s) plus a companion `CantAttack` static scoped to the Aura
@@ -1469,43 +1469,30 @@ pub(crate) fn try_split_and_cant_attack(text: &str) -> Option<Vec<StaticDefiniti
 pub(crate) fn try_split_and_cant_attack_scoped(text: &str) -> Option<Vec<StaticDefinition>> {
     type VE<'a> = OracleError<'a>;
     let lower = text.to_ascii_lowercase();
-
-    let (before, defended, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        let (i, _) = alt((
-            tag::<_, _, VE>("and can't attack"),
-            tag::<_, _, VE>("and can\u{2019}t attack"),
-        ))
-        .parse(i)?;
-        let (i, defended) = parse_cant_attack_defended_scope_nom(i)?;
-        let Some(defended) = defended else {
-            return Err(nom::Err::Error(OracleError::new(
-                i,
-                nom::error::ErrorKind::Tag,
-            )));
-        };
-        // Optional trailing duration phrase.
-        let (i, _) = opt(alt((
-            tag::<_, _, VE>(" each combat"),
-            tag::<_, _, VE>(" this combat"),
-            tag::<_, _, VE>(" this turn"),
-        )))
-        .parse(i)?;
-        Ok((i, defended))
-    })?;
-
-    // Terminal guard: decline unless the tail is empty (punctuation only).
-    if !rest.trim_start().trim_end_matches('.').trim().is_empty() {
-        return None;
-    }
-
-    let cut_end = before
-        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
-        .len();
-    let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
-    let mut defs = parse_static_line_multi(&line_a);
-    if defs.is_empty() {
-        return None;
-    }
+    let tp = TextPair::new(text, &lower);
+    let (mut defs, defended) = tp.scan_around_outside_quotes(
+        |i| {
+            let (i, _) = alt((tag::<_, _, VE>(", and "), tag(", "), tag(" and "))).parse(i)?;
+            let (i, _) = alt((tag("can't attack"), tag("can\u{2019}t attack"))).parse(i)?;
+            let (i, defended) = parse_cant_attack_defended_scope_nom(i)?;
+            let (i, _) = opt(alt((
+                tag(" each combat"),
+                tag(" this combat"),
+                tag(" this turn"),
+            )))
+            .parse(i)?;
+            Ok((i, defended))
+        },
+        |before, defended, rest| {
+            let defended = defended?;
+            if !rest.original.trim().trim_end_matches('.').trim().is_empty() {
+                return None;
+            }
+            let line = format!("{}.", before.original.trim_end_matches('.'));
+            let definitions = parse_static_line_multi(&line);
+            (!definitions.is_empty()).then_some((definitions, defended))
+        },
+    )?;
     for def in &mut defs {
         def.description = Some(text.to_string());
     }
