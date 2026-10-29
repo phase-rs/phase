@@ -37,7 +37,7 @@ fn qualified_cost_public_activation_snapshot_colors_and_cleanup() {
                 scenario.with_library_top(P1, &["Island", "Island", "Island"]);
                 let source = scenario.add_creature(P0, name, 2, 4).from_oracle_text(source_text).id();
                 scenario.add_creature(P1, name, 2, 4).from_oracle_text(source_text);
-                let spell = scenario.add_creature_to_hand_from_oracle(P0, spell_name, 3, 5, spell_text).with_mana_cost(parse_mtgjson_mana_cost(printed)).with_color(colors).id();
+                let spell = scenario.add_creature_to_hand_from_oracle(P0, spell_name, 3, 5, spell_text).with_mana_cost(parse_mtgjson_mana_cost(printed)).with_color(colors.clone()).id();
                 let life = (0..2).map(|_| scenario.add_spell_to_hand_from_oracle(P0, life_name, will, life_text).with_mana_cost(parse_mtgjson_mana_cost(life_mana)).id()).collect::<Vec<_>>();
                 scenario.with_mana_pool(P0, [ManaType::White, ManaType::Blue, ManaType::Black, ManaType::Red, ManaType::Green].into_iter().flat_map(|color| (0..12).map(move |_| ManaUnit::new(color, source, false, vec![]))).collect());
                 let mut runner = scenario.build();
