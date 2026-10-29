@@ -552,12 +552,28 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
     };
     let predicate_body = predicate.original.trim();
 
-    // CR 613.1f: parse the whole predicate ("has first strike and must be
-    // blocked by a Dalek if able") into its modeled continuous modifications
-    // (P/T + keyword grants). `parse_continuous_modifications` is the single
-    // authority for the grant portion and merges everything it can model; it does
-    // not consume combat-requirement / lure conjuncts ("must be blocked …").
-    let modifications = parse_continuous_modifications(predicate_body);
+    // The filtered requirement and its complete grant share one decomposition
+    // authority with ordinary attached predicates. Apply the live host gate to
+    // every member, including an explicit unsupported requirement.
+    if super::grammar::split_attached_lure_conjunct(&predicate).is_some() {
+        let gate = StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![combat_prop])),
+        };
+        let mut definitions = super::grammar::parse_enchanted_equipped_predicate(
+            predicate_body,
+            affected,
+            description,
+        );
+        for definition in &mut definitions {
+            definition.condition = Some(match definition.condition.take() {
+                Some(condition) => StaticCondition::And {
+                    conditions: vec![gate.clone(), condition],
+                },
+                None => gate.clone(),
+            });
+        }
+        return definitions;
+    }
 
     // CR 611.3a + CR 508.1a: gate the supported grant on the recipient (the
     // equipped/enchanted creature) being in the stated combat state.
@@ -565,14 +581,14 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![combat_prop])),
     };
     let mut defs = Vec::new();
-    if !modifications.is_empty() {
-        defs.push(
-            StaticDefinition::continuous()
-                .affected(affected.clone())
-                .modifications(modifications)
-                .condition(gate.clone())
-                .description(description.to_string()),
-        );
+    if let Some(modifications) =
+        super::keyword_grant::parse_complete_continuous_modifications(predicate_body)
+    {
+        return vec![StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .condition(gate)
+            .description(description.to_string())];
     }
 
     // CR 613.1f: identify conjuncts NOT covered by the grant above — the
@@ -584,6 +600,7 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         .or_else(|| nom_tag_lower(predicate_body, &body_lower, "have "))
         .unwrap_or(predicate_body);
     let mut residual_conjuncts: Vec<String> = Vec::new();
+    let mut modifications = Vec::new();
     for part in split_keyword_list(list_input.trim().trim_end_matches('.')) {
         let conjunct = part.trim();
         if conjunct.is_empty() {
@@ -599,9 +616,23 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         } else {
             format!("has {conjunct}")
         };
-        if parse_continuous_modifications(&grant_probe).is_empty() {
+        if let Some(grants) =
+            super::keyword_grant::parse_complete_continuous_modifications(&grant_probe)
+        {
+            modifications.extend(grants);
+        } else {
             residual_conjuncts.push(conjunct.to_string());
         }
+    }
+
+    if !modifications.is_empty() {
+        defs.push(
+            StaticDefinition::continuous()
+                .affected(affected.clone())
+                .modifications(modifications)
+                .condition(gate.clone())
+                .description(description.to_string()),
+        );
     }
 
     for residual_text in residual_conjuncts {
@@ -643,10 +674,10 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         // residual carried in a `GrantAbility` modification so coverage flags it and
         // the swallow check defers (see fn-level note). The stable category key
         // groups the gap in coverage; the raw conjunct text is the diagnostic.
-        defs.push(attached_grant_unmodeled_conjunct_residual(
-            affected.clone(),
-            &residual_text,
-        ));
+        let mut residual =
+            attached_grant_unmodeled_conjunct_residual(affected.clone(), &residual_text);
+        residual.condition = Some(gate.clone());
+        defs.push(residual);
     }
 
     defs

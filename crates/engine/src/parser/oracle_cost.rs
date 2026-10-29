@@ -40,22 +40,46 @@ use crate::types::zones::Zone;
 /// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
+    parse_oracle_cost_using(text, parse_single_cost, fixup_bare_noun_continuations)
+}
+
+/// CR 118.3 + CR 602.2b: a complete acquired activation must own every cost
+/// component before it is published. Ordinary cost channels keep their legacy
+/// population exemptions; only this completion boundary requires a typed noun.
+pub(crate) fn parse_complete_oracle_cost(text: &str) -> Option<AbilityCost> {
+    let cost = parse_oracle_cost_using(text, parse_complete_single_cost, |costs| {
+        fixup_bare_noun_continuations_using(costs, |population| {
+            parse_complete_single_cost(&format!("Sacrifice {population}"))
+        });
+    });
+    (!cost.contains_unimplemented()).then_some(cost)
+}
+
+fn parse_oracle_cost_using(
+    text: &str,
+    parse_leaf: fn(&str) -> AbilityCost,
+    fixup: fn(&mut [AbilityCost]),
+) -> AbilityCost {
     let text = text.trim();
     let lower = text.to_lowercase();
 
     if let Some(cost) = parse_oxford_mana_alternatives_nom(&lower)
-        .or_else(|| parse_binary_cost_alternatives_nom(&lower))
+        .or_else(|| parse_binary_cost_alternatives_nom(&lower, parse_leaf, fixup))
     {
         return cost;
     }
 
-    parse_oracle_cost_no_or(text)
+    parse_oracle_cost_no_or(text, parse_leaf, fixup)
 }
 
 /// CR 118.12: parse exactly two top-level cost alternatives with full input
 /// consumption. Typed-leaf validation prevents noun filters containing "or"
 /// from becoming payment branches.
-fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
+fn parse_binary_cost_alternatives_nom(
+    text: &str,
+    parse_leaf: fn(&str) -> AbilityCost,
+    fixup: fn(&mut [AbilityCost]),
+) -> Option<AbilityCost> {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let (_, (left, right)) = all_consuming(separated_pair(
         take_until::<_, _, E<'_>>(" or "),
@@ -72,8 +96,8 @@ fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
         return None;
     }
     let costs = vec![
-        parse_oracle_cost_no_or(left),
-        parse_oracle_cost_no_or(right),
+        parse_oracle_cost_no_or(left, parse_leaf, fixup),
+        parse_oracle_cost_no_or(right, parse_leaf, fixup),
     ];
     costs
         .iter()
@@ -228,7 +252,11 @@ fn is_reveal_chosen_attribute_noop(part: &str) -> bool {
     ) || parse_creature_subtype(attr).is_some_and(|(_, len)| len == attr.len())
 }
 
-fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
+fn parse_oracle_cost_no_or(
+    text: &str,
+    parse_leaf: fn(&str) -> AbilityCost,
+    fixup: fn(&mut [AbilityCost]),
+) -> AbilityCost {
     let text = text.trim();
 
     // Split on ", " for composite costs
@@ -247,16 +275,15 @@ fn parse_oracle_cost_no_or(text: &str) -> AbilityCost {
         .collect();
     let parts = if filtered.is_empty() { parts } else { filtered };
     if parts.len() > 1 {
-        let mut costs: Vec<AbilityCost> =
-            parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        let mut costs: Vec<AbilityCost> = parts.iter().map(|p| parse_leaf(p.trim())).collect();
         // CR 601.2b: "Sacrifice A, B, and C" splits into ["Sacrifice A", "B", "C"].
         // Bare noun-phrase continuations after a verb-cost are additional instances
         // of that same cost. Applies to Sacrifice, Exile, and TapCreatures.
-        fixup_bare_noun_continuations(&mut costs);
+        fixup(&mut costs);
         return AbilityCost::Composite { costs };
     }
 
-    parse_single_cost(parts.first().map_or(text, String::as_str))
+    parse_leaf(parts.first().map_or(text, String::as_str))
 }
 
 // CR 107.1a: Keep an explicit fractional rounding suffix inside its cost
@@ -377,6 +404,22 @@ fn is_from_among_remove_counter_cost(text: &str) -> bool {
 /// not independent costs. E.g., "Sacrifice a green creature, a white creature,
 /// and a blue creature" splits into three parts but only the first has the verb.
 fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
+    fixup_bare_noun_continuations_using(costs, |population| {
+        let (filter, _) = parse_target(&format!("target {population}"));
+        if matches!(filter, TargetFilter::Any) {
+            AbilityCost::Unimplemented {
+                description: population.to_string(),
+            }
+        } else {
+            AbilityCost::Sacrifice(SacrificeCost::count(filter, 1))
+        }
+    });
+}
+
+fn fixup_bare_noun_continuations_using(
+    costs: &mut [AbilityCost],
+    sacrifice: fn(&str) -> AbilityCost,
+) {
     #[derive(Clone, Copy)]
     enum PrecedingVerb {
         Sacrifice,
@@ -476,9 +519,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                     continue;
                 }
                 costs[i] = match verb {
-                    PrecedingVerb::Sacrifice => {
-                        AbilityCost::Sacrifice(SacrificeCost::count(filter, 1))
-                    }
+                    PrecedingVerb::Sacrifice => sacrifice(stripped),
                     PrecedingVerb::Exile { zone } => AbilityCost::Exile {
                         count: 1,
                         zone,
@@ -787,6 +828,55 @@ fn parse_remove_counter_target(target_text: &str) -> (Option<TargetFilter>, Coun
     (Some(target), selection)
 }
 
+fn complete_sacrifice_population(filter_text: &str) -> Option<TargetFilter> {
+    let (filter, tail) = parse_sacrifice_cost_population(filter_text)?;
+    fn meaningful(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(typed) => typed.has_meaningful_type_constraint(),
+            TargetFilter::Or { filters } => !filters.is_empty() && filters.iter().all(meaningful),
+            _ => false,
+        }
+    }
+    (tail.trim().is_empty() && meaningful(&filter)).then_some(filter)
+}
+
+fn build_counted_sacrifice_cost(
+    rest: &str,
+    parse_population: fn(&str) -> Option<TargetFilter>,
+) -> Option<AbilityCost> {
+    let (count, _, population) = parse_sacrifice_count_population(rest);
+    parse_population(&population)
+        .map(|filter| AbilityCost::Sacrifice(SacrificeCost::count(filter, count)))
+}
+
+fn parse_complete_single_cost(text: &str) -> AbilityCost {
+    let text = text.trim();
+    let lower = text.to_lowercase();
+    if let Some(((), rest)) = nom_on_lower(text, &lower, |input| {
+        value((), tag("sacrifice ")).parse(input)
+    }) {
+        let rest = rest.trim();
+        let rest_lower = rest.to_lowercase();
+        if let Some((filter, _)) = nom_on_lower(rest, &rest_lower, |input| {
+            all_consuming(parse_cost_self_reference).parse(input)
+        }) {
+            return AbilityCost::Sacrifice(SacrificeCost::count(filter, 1));
+        }
+        let cost = if let Some(((), population)) = nom_on_lower(rest, &rest_lower, |input| {
+            value((), tag("any number of ")).parse(input)
+        }) {
+            complete_sacrifice_population(population)
+                .map(|filter| AbilityCost::Sacrifice(SacrificeCost::count(filter, u32::MAX)))
+        } else {
+            build_counted_sacrifice_cost(rest, complete_sacrifice_population)
+        };
+        return cost.unwrap_or_else(|| AbilityCost::Unimplemented {
+            description: text.to_string(),
+        });
+    }
+    parse_single_cost(text)
+}
+
 pub fn parse_single_cost(text: &str) -> AbilityCost {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     let text = text.trim();
@@ -872,7 +962,6 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // Try to extract a numeric count: "sacrifice two creatures", "sacrifice three lands"
         // CR 107.3a: `X` in an activation or additional cost is chosen as part
         // of activating or casting, so preserve it as a variable cost marker.
-        let (use_count, _, filter_text) = parse_sacrifice_count_population(rest);
         // CR 205.2a: a sacrifice cost's filter may be a TYPE UNION whose right
         // conjunct leads with a determiner — "Sacrifice another creature or an
         // artifact" (Mold Folk, Elite Headhunter), "... or an enchantment"
@@ -897,12 +986,12 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // cost has nowhere to put a remainder and a lost restriction WIDENS the
         // set of permanents that may pay. `parse_sacrifice_cost_filter` carries
         // that rule and the two measured exemptions that keep it narrow.
-        let Some(filter) = parse_sacrifice_cost_filter(&filter_text) else {
+        let Some(cost) = build_counted_sacrifice_cost(rest, parse_sacrifice_cost_filter) else {
             return AbilityCost::Unimplemented {
                 description: text.to_string(),
             };
         };
-        return AbilityCost::Sacrifice(SacrificeCost::count(filter, use_count));
+        return cost;
     }
 
     // "Pay N life" / "Pay life equal to <dynamic quantity>" / "N life"

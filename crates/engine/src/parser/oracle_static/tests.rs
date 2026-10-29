@@ -13628,6 +13628,21 @@ fn unrecognized_lure_conjunct_surfaces_unimplemented_residual() {
         "P/T grant must be modeled, got {defs:?}"
     );
     // The lure is surfaced as an Unimplemented residual, not dropped.
+    assert!(defs.iter().any(|definition| {
+        definition.affected == Some(equipped_creature_filter())
+            && definition
+                .modifications
+                .contains(&ContinuousModification::AddPower { value: 3 })
+            && definition
+                .modifications
+                .contains(&ContinuousModification::AddToughness { value: 1 })
+    }));
+    assert_eq!(
+        defs.iter()
+            .filter(|definition| is_unimplemented_residual(definition, "must be blocked by a"))
+            .count(),
+        1
+    );
     assert!(
         defs.iter()
             .any(|d| is_unimplemented_residual(d, "must be blocked by a")),
@@ -45223,6 +45238,13 @@ fn complete_publication_reverse_members_asymmetric_axes_and_complete_quoted_tran
     assert_eq!(costs.len(), 2);
     assert_eq!(costs[0], AbilityCost::Tap);
     assert!(matches!(costs[1], AbilityCost::Sacrifice(_)));
+    assert_eq!(
+        costs[1],
+        AbilityCost::Sacrifice(crate::types::ability::SacrificeCost::count(
+            TargetFilter::Typed(TypedFilter::creature()),
+            1,
+        ))
+    );
     assert!(matches!(
         definition.effect.as_ref(),
         Effect::PutCounter {
@@ -45261,6 +45283,701 @@ fn complete_publication_reverse_members_asymmetric_axes_and_complete_quoted_tran
             parse_complete_continuous_modifications(bad).is_none(),
             "whole quoted transaction: {bad}"
         );
+    }
+}
+
+#[test]
+fn complete_static_modifier_leaves_preserve_types_costs_and_strict_boundaries() {
+    // SHAPE: the same primitive owns both printed all-type surfaces.
+    for copula in ["is", "are"] {
+        for noun in ["all creature types", "every creature type"] {
+            let body = format!("{copula} {noun}");
+            assert_eq!(
+                parse_complete_continuous_modifications(&body),
+                Some(vec![ContinuousModification::AddAllCreatureTypes])
+            );
+            for tail in [" unexplained", " and", " if an unexplained condition"] {
+                assert!(
+                    parse_complete_continuous_modifications(&format!("{body}{tail}")).is_none()
+                );
+            }
+        }
+    }
+    let granter = crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
+    for cost in [
+        "{T}, Sacrifice a creature".to_string(),
+        "Sacrifice ~".to_string(),
+        format!("{{3}}, {{T}}, Sacrifice {granter}"),
+        "Sacrifice X creatures".to_string(),
+        "Sacrifice any number of creatures".to_string(),
+        "Sacrifice another creature or an artifact".to_string(),
+        "Sacrifice an artifact or another creature".to_string(),
+        "Sacrifice an Aura attached to ~".to_string(),
+        "Sacrifice a green creature, a white creature, and a blue creature".to_string(),
+        "{T} or Sacrifice a creature".to_string(),
+    ] {
+        let complete = crate::parser::oracle_cost::parse_complete_oracle_cost(&cost)
+            .unwrap_or_else(|| panic!("complete cost {cost}"));
+        assert!(!complete.contains_unimplemented());
+        assert_eq!(
+            complete,
+            crate::parser::oracle_cost::parse_oracle_cost(&cost),
+            "existing quantity, union, Another and source binding: {cost}"
+        );
+        let quote = format!("has \"{cost}: Draw a card.\"");
+        assert!(
+            parse_complete_continuous_modifications(&quote).is_some(),
+            "{quote}"
+        );
+    }
+    for cost in [
+        "{T}, Sacrifice an unexplained thing",
+        "Sacrifice a creature, an unexplained thing",
+        "{T} or Sacrifice an unexplained thing",
+        "Sacrifice ~ wearing a hat",
+        "Sacrifice a creature wearing a hat",
+    ] {
+        assert!(
+            crate::parser::oracle_cost::parse_complete_oracle_cost(cost).is_none(),
+            "strict source {cost}"
+        );
+        assert!(parse_complete_continuous_modifications(&format!(
+            "gets +1/+0 and has \"{cost}: Draw a card.\""
+        ))
+        .is_none());
+    }
+    for body in [
+        "has \"{T}: Draw a card. An unexplained effect.\"",
+        "is a 3/4 creature with \"{T}, Sacrifice an unexplained thing: Draw a card.\"",
+        "has \"\"",
+    ] {
+        assert!(
+            parse_complete_continuous_modifications(body).is_none(),
+            "complete quote {body}"
+        );
+    }
+    for quality in ["an Eldrazi", "a Splorf"] {
+        let valid =
+            format!("Equipped creature gets +3/+1 and must be blocked by {quality} if able.");
+        assert!(parse_static_line_multi(&valid)
+            .iter()
+            .any(|definition| definition
+                .modifications
+                .contains(&ContinuousModification::AddPower { value: 3 })));
+        for prefix in ["gets +3/+1 unexplained", "gets +3/unknown"] {
+            let invalid =
+                format!("Equipped creature {prefix} and must be blocked by {quality} if able.");
+            assert!(
+                parse_static_line_multi(&invalid).is_empty(),
+                "failed prefix is not salvageable: {invalid}"
+            );
+        }
+    }
+    // A lure inside a quote remains in that acquired program, not on its host.
+    assert!(super::grammar::split_attached_lure_conjunct(&TextPair::new(
+        "has \"{T}: This creature must be blocked by an Eldrazi if able.\"",
+        "has \"{t}: this creature must be blocked by an eldrazi if able.\"",
+    ))
+    .is_none());
+}
+
+#[test]
+fn undercover_skrull_public_live_gate_controller_transfer_and_mana() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    const ORACLE: &str = "As long as there are two or more creature cards in your graveyard, this creature gets +2/+2 and is all creature types.\n{T}: Add one mana of any color.";
+    for own_count in [1, 2] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.state.all_creature_types = vec![
+            "Elf".into(),
+            "Eldrazi".into(),
+            "Skrull".into(),
+            "Shapeshifter".into(),
+            "Villain".into(),
+        ];
+        for player in [P0, P1] {
+            scenario.with_library_top(player, &["Safe draw", "Safe draw", "Safe draw"]);
+        }
+        let mut own_grave = Vec::new();
+        for _ in 0..own_count {
+            own_grave.push(
+                scenario
+                    .add_creature_to_graveyard(P0, "Qualifying creature", 2, 2)
+                    .id(),
+            );
+        }
+        scenario.add_land_to_graveyard(P0, "Nonqualifying land");
+        for _ in 0..2 {
+            scenario.add_creature_to_graveyard(P1, "Other graveyard creature", 2, 2);
+        }
+        let source = scenario
+            .add_creature_to_hand_from_oracle(P0, "Undercover Skrull", 1, 1, ORACLE)
+            .with_subtypes(vec!["Skrull", "Shapeshifter", "Villain"])
+            .id();
+        let other = scenario
+            .add_creature_from_oracle(P1, "Undercover Skrull", 1, 1, ORACLE)
+            .with_subtypes(vec!["Skrull", "Shapeshifter", "Villain"])
+            .id();
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Independent haste provider",
+            "Creatures you control have haste.",
+        );
+        let raise = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Raise Dead",
+                false,
+                "Return target creature card from your graveyard to your hand.",
+            )
+            .id();
+        let control = scenario.add_spell_to_hand_from_oracle(P1, "Act of Treason", false,
+            "Gain control of target creature until end of turn. Untap that creature. It gains haste until end of turn. (It can attack and {T} this turn.)").id();
+        let departure = scenario
+            .add_spell_to_hand_from_oracle(
+                P1,
+                "Synthetic departure",
+                true,
+                "Return target creature to its owner's hand.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let cast = runner.cast(source).resolve();
+        cast.assert_zone(&[source], Zone::Battlefield);
+        assert!(matches!(
+            cast.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let assert_source = |state: &crate::types::game_state::GameState, id, active| {
+            let object = &state.objects[&id];
+            assert_eq!(
+                (object.power, object.toughness),
+                if active {
+                    (Some(3), Some(3))
+                } else {
+                    (Some(1), Some(1))
+                }
+            );
+            for subtype in ["Elf", "Eldrazi"] {
+                assert_eq!(
+                    object
+                        .card_types
+                        .subtypes
+                        .iter()
+                        .any(|actual| actual == subtype),
+                    active
+                );
+            }
+            for subtype in ["Skrull", "Shapeshifter", "Villain"] {
+                assert!(object
+                    .card_types
+                    .subtypes
+                    .iter()
+                    .any(|actual| actual == subtype));
+            }
+        };
+        // CR 611.3a: the other graveyard's nonzero population does not satisfy "your".
+        assert_source(runner.state(), source, own_count == 2);
+        assert_source(runner.state(), other, true);
+        let selection =
+            crate::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+                .into_iter()
+                .find(|selection| {
+                    selection.source.object_id == source && selection.mana_type == ManaType::Red
+                })
+                .expect("independent any-color mana capability");
+        runner
+            .act(GameAction::ActivateManaSource { selection })
+            .unwrap();
+        assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+        assert!(runner.state().objects[&source].tapped);
+        if own_count == 2 {
+            let raised = runner.cast(raise).target_object(own_grave[0]).resolve();
+            raised.assert_zone(&[own_grave[0]], Zone::Hand);
+            assert!(matches!(
+                raised.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(
+                runner.state().players[0]
+                    .graveyard
+                    .iter()
+                    .filter(|id| runner.state().objects[id]
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Creature))
+                    .count(),
+                1
+            );
+            assert_source(runner.state(), source, false);
+        }
+        runner.advance_to_combat();
+        runner.declare_attackers(&[]).unwrap();
+        for _ in 0..96 {
+            if runner.state().active_player == P1 && runner.state().phase == Phase::PreCombatMain {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().active_player, P1);
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        let transfer = runner.cast(control).target_object(source).resolve();
+        // The recipient is the caster; this public control spell declares its actual object target.
+        assert_eq!(
+            transfer.state().objects[&source].controller,
+            P1,
+            "transfer must reach the static seam"
+        );
+        assert!(transfer.events().iter().any(|event| matches!(event, crate::types::events::GameEvent::ControllerChanged { object_id, old_controller, new_controller } if *object_id == source && *old_controller == P0 && *new_controller == P1)));
+        assert!(matches!(
+            transfer.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        assert_source(runner.state(), source, true);
+        assert_source(runner.state(), other, true);
+        runner
+            .cast(departure)
+            .target_object(source)
+            .resolve()
+            .assert_zone(&[source], Zone::Hand);
+        assert_source(runner.state(), source, false);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+}
+
+#[test]
+fn attached_lure_public_equip_combat_and_reattachment_follow_one_host() {
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
+    use crate::types::phase::{PhaseStop, PhaseStopScope};
+    for (name, oracle, blocker_type, equip_cost, toughness, first_strike) in [
+        ("Slayer's Cleaver", "Equipped creature gets +3/+1 and must be blocked by an Eldrazi if able.\nEquip {4}", "Eldrazi", 4, 4, false),
+        ("Ace's Baseball Bat", "Equipped creature gets +3/+0.\nAs long as equipped creature is attacking, it has first strike and must be blocked by a Dalek if able.\nEquip legendary creature {1}\nEquip {3}", "Dalek", 3, 3, true),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario.add_creature(P0, "First host", 2, 3).id();
+        let next_host = scenario.add_creature(P0, "Second host", 2, 3).id();
+        let source = scenario.add_artifact_from_oracle(P0, name, oracle).with_subtypes(vec!["Equipment"]).id();
+        let other = scenario.add_artifact_from_oracle(P1, name, oracle).with_subtypes(vec!["Equipment"]).id();
+        let required = scenario.add_creature(P1, "Required blocker", 2, 8).with_subtypes(vec![blocker_type]).id();
+        let ordinary = scenario.add_creature(P1, "Ordinary blocker", 2, 8).with_subtypes(vec!["Human"]).id();
+        let tap = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic tap", true, "Tap target creature.").id();
+        scenario.with_mana_pool(P0, (0..equip_cost * 2).map(|_| crate::types::mana::ManaUnit::new(ManaType::Colorless, source, false, vec![])).collect());
+        let mut runner = scenario.build();
+        let equip_index = runner.state().objects[&source].abilities.iter().position(|ability| ability.ability_tag == Some(AbilityTag::Equip) && ability.cost == Some(AbilityCost::Mana { cost: ManaCost::generic(equip_cost) })).unwrap();
+        runner.activate(source, equip_index).target_object(host).resolve();
+        assert_eq!((runner.state().objects[&host].power, runner.state().objects[&host].toughness), (Some(5), Some(toughness)));
+        assert_eq!(runner.state().objects[&next_host].power, Some(2));
+        assert!(!runner.state().objects[&host].keywords.contains(&Keyword::FirstStrike));
+        assert!(runner.state().objects[&other].attached_to.is_none());
+        let mut combat = GameRunner::from_state(runner.state().clone());
+        crate::game::engine::apply(combat.state_mut(), P1, GameAction::SetPhaseStops { stops: vec![PhaseStop { phase: Phase::DeclareBlockers, scope: PhaseStopScope::AllTurns }] }).unwrap();
+        combat.advance_to_combat();
+        combat.declare_attackers(&[(host, crate::game::combat::AttackTarget::Player(P1))]).unwrap();
+        for _ in 0..16 {
+            if matches!(combat.state().waiting_for, WaitingFor::DeclareBlockers { .. }) { break; }
+            assert!(matches!(combat.state().waiting_for, WaitingFor::Priority { .. }));
+            combat.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(combat.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == P1));
+        assert_eq!(combat.state().objects[&host].keywords.contains(&Keyword::FirstStrike), first_strike);
+        assert!(!combat.state().objects[&next_host].keywords.contains(&Keyword::FirstStrike));
+        // CR 509.1c: a legal required blocker makes declining it illegal.
+        assert!(combat.declare_blockers(&[(ordinary, host)]).is_err());
+        assert!(combat.declare_blockers(&[]).is_err());
+        combat.declare_blockers(&[(required, host)]).unwrap();
+        // With no legal required blocker, the requirement imposes no impossible choice.
+        let mut no_required = GameRunner::from_state(runner.state().clone());
+        no_required.cast(tap).target_object(required).resolve();
+        assert!(no_required.state().objects[&required].tapped);
+        crate::game::engine::apply(no_required.state_mut(), P1, GameAction::SetPhaseStops { stops: vec![PhaseStop { phase: Phase::DeclareBlockers, scope: PhaseStopScope::AllTurns }] }).unwrap();
+        no_required.advance_to_combat();
+        no_required.declare_attackers(&[(host, crate::game::combat::AttackTarget::Player(P1))]).unwrap();
+        for _ in 0..16 {
+            if matches!(no_required.state().waiting_for, WaitingFor::DeclareBlockers { .. }) { break; }
+            no_required.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(no_required.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == P1));
+        no_required.declare_blockers(&[(ordinary, host)]).unwrap();
+        runner.activate(source, equip_index).target_object(next_host).resolve();
+        assert_eq!((runner.state().objects[&host].power, runner.state().objects[&host].toughness), (Some(2), Some(3)));
+        assert_eq!((runner.state().objects[&next_host].power, runner.state().objects[&next_host].toughness), (Some(5), Some(toughness)));
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(runner.state().waiting_for, WaitingFor::Priority { .. }));
+        let mut reattached_combat = GameRunner::from_state(runner.state().clone());
+        crate::game::engine::apply(reattached_combat.state_mut(), P1, GameAction::SetPhaseStops { stops: vec![PhaseStop { phase: Phase::DeclareBlockers, scope: PhaseStopScope::AllTurns }] }).unwrap();
+        reattached_combat.advance_to_combat();
+        reattached_combat.declare_attackers(&[(host, crate::game::combat::AttackTarget::Player(P1)), (next_host, crate::game::combat::AttackTarget::Player(P1))]).unwrap();
+        for _ in 0..16 {
+            if matches!(reattached_combat.state().waiting_for, WaitingFor::DeclareBlockers { .. }) { break; }
+            reattached_combat.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(reattached_combat.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == P1));
+        assert!(reattached_combat.declare_blockers(&[(required, host), (ordinary, next_host)]).is_err());
+        reattached_combat.declare_blockers(&[(required, next_host), (ordinary, host)]).unwrap();
+    }
+}
+
+#[test]
+fn quoted_grants_public_riteknife_hammer_gond_pay_and_keep_source_identity() {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CastPaymentMode, WaitingFor};
+    const RITEKNIFE: &str = "Equipped creature gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on Rakdos Riteknife.\"\n{B}{R}, Sacrifice this Equipment: Target player sacrifices a permanent of their choice for each blood counter on this Equipment.\nEquip {2}";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Host", 2, 3).id();
+    let other_host = scenario.add_creature(P0, "Other host", 4, 5).id();
+    let fodder = scenario.add_creature(P0, "Cost creature", 1, 1).id();
+    let wrong_type = scenario
+        .add_artifact_from_oracle(P0, "Wrong cost type", "")
+        .id();
+    let victim_permanent = scenario
+        .add_artifact_from_oracle(P1, "Opposing sacrifice", "")
+        .id();
+    let spared = scenario
+        .add_artifact_from_oracle(P1, "Opposing spared permanent", "")
+        .id();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let other = scenario
+        .add_artifact_from_oracle(P0, "Rakdos Riteknife", RITEKNIFE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let blood = CounterType::Generic("blood".into());
+    scenario.with_counter(other, blood.clone(), 7);
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Black,
+            ManaType::Red,
+        ]
+        .into_iter()
+        .map(|color| crate::types::mana::ManaUnit::new(color, source, false, vec![]))
+        .collect(),
+    );
+    let mut runner = scenario.build();
+    let equip = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| ability.ability_tag == Some(AbilityTag::Equip))
+        .unwrap();
+    runner.activate(source, equip).target_object(host).resolve();
+    runner
+        .activate(other, equip)
+        .target_object(other_host)
+        .resolve();
+    assert_eq!(runner.state().objects[&host].power, Some(2));
+    assert_eq!(runner.state().objects[&other_host].power, Some(11));
+    let acquired = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.cost, Some(AbilityCost::Composite { .. })))
+        .unwrap();
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: acquired,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    let WaitingFor::PayCost {
+        player,
+        choices,
+        count,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("the acquired sacrifice cost must prompt")
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 1);
+    assert!(choices.contains(&fodder) && choices.contains(&host));
+    assert!(!choices.contains(&wrong_type));
+    assert!(runner
+        .act(GameAction::SelectCards {
+            cards: vec![wrong_type]
+        })
+        .is_err());
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![fodder],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&fodder].zone, Zone::Graveyard);
+    assert!(runner.state().objects[&host].tapped);
+    assert_eq!(
+        runner.state().objects[&source].counters.get(&blood),
+        Some(&1)
+    );
+    assert_eq!(
+        runner.state().objects[&other].counters.get(&blood),
+        Some(&7)
+    );
+    assert_eq!(runner.state().objects[&host].power, Some(3));
+    assert_eq!(runner.state().objects[&other_host].power, Some(11));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: acquired,
+            payment_mode: CastPaymentMode::Auto
+        })
+        .is_err());
+    // The independently printed BR activation still pays with this Equipment.
+    let printed = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| ability.ability_tag != Some(AbilityTag::Equip))
+        .unwrap();
+    let outcome = runner
+        .activate(source, printed)
+        .target_player(P1)
+        .pay_with(&[source])
+        .resolve();
+    let WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count,
+        ..
+    } = outcome.final_waiting_for()
+    else {
+        panic!("opponent chooses its permanent")
+    };
+    assert_eq!(*player, P1);
+    assert_eq!(*count, 1);
+    assert!(cards.contains(&victim_permanent));
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![victim_permanent],
+        })
+        .unwrap();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().objects[&victim_permanent].zone,
+        Zone::Graveyard
+    );
+    assert_eq!(runner.state().objects[&spared].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&host].power, Some(2));
+    assert!(runner.state().objects[&host].abilities.is_empty());
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    // CR 201.5a: the named sacrifice in Hammer's acquired program pays with the granter.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Hammer host", 2, 3).id();
+    let hammer = scenario.add_artifact_from_oracle(P0, "Deconstruction Hammer", "Equipped creature gets +1/+1 and has \"{3}, {T}, Sacrifice Deconstruction Hammer: Destroy target artifact or enchantment.\"\nEquip {1} ({1}: Attach to target creature you control. Equip only as a sorcery.)").with_subtypes(vec!["Equipment"]).id();
+    let victim = scenario.add_artifact_from_oracle(P1, "Victim", "").id();
+    let spend = scenario
+        .add_spell_to_hand_from_oracle(P0, "Synthetic mana payment", true, "You gain 1 life.")
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| crate::types::mana::ManaUnit::new(ManaType::Colorless, hammer, false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let equip = runner.state().objects[&hammer]
+        .abilities
+        .iter()
+        .position(|ability| ability.ability_tag == Some(AbilityTag::Equip))
+        .unwrap();
+    runner.activate(hammer, equip).target_object(host).resolve();
+    assert_eq!(runner.state().objects[&host].power, Some(3));
+    let acquired = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.cost, Some(AbilityCost::Composite { .. })))
+        .unwrap();
+    let mut insufficient = crate::game::scenario::GameRunner::from_state(runner.state().clone());
+    insufficient.cast(spend).resolve();
+    assert_eq!(insufficient.state().players[0].mana_pool.total(), 2);
+    assert!(insufficient
+        .act(GameAction::ActivateAbility {
+            source_id: host,
+            ability_index: acquired,
+            payment_mode: CastPaymentMode::Auto
+        })
+        .is_err());
+    runner
+        .activate(host, acquired)
+        .target_object(victim)
+        .pay_with(&[hammer])
+        .resolve()
+        .assert_zone(&[victim, hammer], Zone::Graveyard);
+    assert_eq!(runner.state().objects[&host].zone, Zone::Battlefield);
+    assert!(runner.state().objects[&host].tapped);
+    assert_eq!(runner.state().objects[&host].power, Some(2));
+    assert!(
+        runner.state().objects[&host].abilities.is_empty(),
+        "granter departure removes the acquired ability"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Gond host", 2, 3).id();
+    let aura = scenario.add_spell_to_hand(P0, "Presence of Gond", false).as_enchantment().with_subtypes(vec!["Aura"])
+        .from_oracle_text("Enchant creature\nEnchanted creature has \"{T}: Create a 1/1 green Elf Warrior creature token.\"").id();
+    let mut runner = scenario.build();
+    runner
+        .cast(aura)
+        .target_object(host)
+        .resolve()
+        .assert_zone(&[aura], Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(crate::game::game_object::AttachTarget::Object(host))
+    );
+    let before = runner.state().battlefield.len();
+    let acquired = runner.state().objects[&host]
+        .abilities
+        .iter()
+        .position(|ability| ability.cost == Some(AbilityCost::Tap))
+        .unwrap();
+    runner.activate(host, acquired).resolve();
+    assert!(runner.state().objects[&host].tapped);
+    assert_eq!(runner.state().battlefield.len(), before + 1);
+    assert!(runner.state().battlefield.iter().any(|id| {
+        let object = &runner.state().objects[id];
+        object.is_token
+            && object.controller == P0
+            && object.power == Some(1)
+            && object.toughness == Some(1)
+            && object.color.contains(&crate::types::mana::ManaColor::Green)
+            && object.card_types.subtypes.contains(&"Elf".into())
+            && object.card_types.subtypes.contains(&"Warrior".into())
+    }));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn quoted_host_self_and_another_cost_public_refusal_detach_and_departure() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{CastPaymentMode, WaitingFor};
+    const SOURCE: &str = "Equipped creature gets +1/+0 and has \"{T}, Sacrifice another creature: Put a blood counter on ~.\"\nEquip {0}";
+    for with_fodder in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let host = scenario.add_creature(P0, "Host", 2, 3).id();
+        let fodder = with_fodder.then(|| scenario.add_creature(P0, "Another creature", 1, 1).id());
+        let next_host = with_fodder.then(|| scenario.add_creature(P0, "Next host", 4, 5).id());
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Synthetic host-reference granter", SOURCE)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        scenario.add_artifact_from_oracle(P0, "Wrong cost type", "");
+        let bounce = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic departure",
+                true,
+                "Return target permanent to its owner's hand.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let equip = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .position(|ability| ability.ability_tag == Some(AbilityTag::Equip))
+            .unwrap();
+        runner.activate(source, equip).target_object(host).resolve();
+        assert_eq!(runner.state().objects[&host].power, Some(3));
+        let acquired = runner.state().objects[&host]
+            .abilities
+            .iter()
+            .position(|ability| matches!(ability.cost, Some(AbilityCost::Composite { .. })))
+            .unwrap();
+        if let Some(fodder) = fodder {
+            runner
+                .activate(host, acquired)
+                .pay_with(&[fodder])
+                .resolve()
+                .assert_zone(&[fodder], Zone::Graveyard);
+            let blood = CounterType::Generic("blood".into());
+            // CR 201.5b: the acquired self-reference names the host, unlike Riteknife's printed name.
+            assert_eq!(runner.state().objects[&host].counters.get(&blood), Some(&1));
+            assert!(runner.state().objects[&source]
+                .counters
+                .get(&blood)
+                .is_none());
+            assert!(runner.state().objects[&host].tapped);
+            let next_host = next_host.unwrap();
+            runner
+                .activate(source, equip)
+                .target_object(next_host)
+                .resolve();
+            assert_eq!(runner.state().objects[&host].power, Some(2));
+            assert!(runner.state().objects[&host].abilities.is_empty());
+            assert_eq!(runner.state().objects[&next_host].power, Some(5));
+            assert!(!runner.state().objects[&next_host].abilities.is_empty());
+            runner
+                .cast(bounce)
+                .target_object(source)
+                .resolve()
+                .assert_zone(&[source], Zone::Hand);
+            assert_eq!(runner.state().objects[&next_host].power, Some(4));
+            assert!(runner.state().objects[&next_host].abilities.is_empty());
+        } else {
+            assert!(runner
+                .act(GameAction::ActivateAbility {
+                    source_id: host,
+                    ability_index: acquired,
+                    payment_mode: CastPaymentMode::Auto
+                })
+                .is_err());
+            assert!(
+                !runner.state().objects[&host].tapped,
+                "an unpayable Another cost does not tap the host"
+            );
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 }
 

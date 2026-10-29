@@ -456,9 +456,31 @@ pub(crate) fn parse_every_creature_type_static_sentence(input: &str) -> OracleRe
 
 pub(crate) fn parse_every_creature_type_static_prefix(input: &str) -> OracleResult<'_, ()> {
     let (input, _) = parse_chosen_creature_type_static_subject(input)?;
-    let (input, _) = tag(" every creature type").parse(input)?;
+    let (input, _) = preceded(tag(" "), parse_all_creature_types_noun).parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     Ok((input, ()))
+}
+
+fn parse_all_creature_types_noun(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((tag("every creature type"), tag("all creature types"))),
+    )
+    .parse(input)
+}
+
+/// CR 205.3m + CR 613.1d: equivalent all-subtype predicates share the existing
+/// type modification. The enclosing member owns its subject and live condition.
+pub(crate) fn parse_all_creature_types_predicate(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            alt((tag("is "), tag("are "))),
+            parse_all_creature_types_noun,
+            opt(tag(".")),
+        ),
+    )
+    .parse(input)
 }
 
 pub(crate) fn parse_collection_counter_play_permission_static(
@@ -3194,17 +3216,10 @@ pub(crate) fn parse_all_creature_types_grant(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
-    let (subject_tp, rest_tp) = tp
-        .split_around(" is every creature type")
-        .or_else(|| tp.split_around(" are every creature type"))?;
-    // The predicate must terminate the line — only punctuation and trailing
-    // whitespace may remain. Anything else (e.g., a hypothetical "in addition
-    // to ..." extension) is outside the AddAllCreatureTypes contract and
-    // should fall through to other parsers rather than be silently dropped.
-    let tail = rest_tp.lower.trim().trim_end_matches('.').trim();
-    if !tail.is_empty() {
-        return None;
-    }
+    let subject_tp = tp.scan_around_outside_quotes(
+        |input| preceded(tag(" "), parse_all_creature_types_predicate).parse(input),
+        |subject, (), tail| tail.original.trim().is_empty().then_some(subject),
+    )?;
     let subject = subject_tp.lower.trim();
 
     if subject == "~" {
