@@ -63,7 +63,7 @@ pub fn resolve(
     shield.source_controller = Some(ability.controller);
     shield.valid_player = Some(ReplacementPlayerScope::You);
 
-    shield.runtime_execute = Some(state.install_replacement_continuation(substitute));
+    shield.runtime_execute = Some(state.install_replacement_continuation(substitute)?);
     state.pending_damage_replacements.push(shield);
 
     events.push(GameEvent::EffectResolved {

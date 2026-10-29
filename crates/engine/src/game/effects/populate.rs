@@ -17,6 +17,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     // Collect creature tokens the controller controls on the battlefield.
     let valid_tokens: Vec<ObjectId> = state
         .battlefield
@@ -39,7 +53,7 @@ pub fn resolve(
     } else {
         std::collections::VecDeque::new()
     };
-    super::token_copy::begin_creation(
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         work,
@@ -48,7 +62,8 @@ pub fn resolve(
             eligible: valid_tokens,
         },
         events,
-    );
+        declarations,
+    )?;
 
     Ok(())
 }
@@ -71,7 +86,7 @@ pub fn create_token_copy(
             eligible: vec![token_to_copy],
         },
         events,
-    );
+    )?;
     Ok(())
 }
 

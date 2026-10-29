@@ -13119,6 +13119,7 @@ pub fn player_matches_target_filter(
     player_id: PlayerId,
     source_controller: Option<PlayerId>,
 ) -> bool {
+    if player_predicate_needs_result_context(filter) { return false; }
     player_matches_target_filter_with(
         filter,
         player_id,
@@ -13153,6 +13154,7 @@ pub fn player_matches_target_filter_in_state(
     source_id: Option<ObjectId>,
 ) -> bool {
     let Some(source_id) = source_id else {
+        if player_predicate_needs_result_context(filter) { return false; }
         return player_matches_target_filter_with(
             filter,
             player_id,
@@ -13164,6 +13166,14 @@ pub fn player_matches_target_filter_in_state(
     let mut ctx = FilterContext::from_source(state, source_id);
     ctx.source_controller = source_controller;
     player_matches_target_filter_with_context(state, filter, player_id, &ctx)
+}
+
+fn player_predicate_needs_result_context(filter: &TargetFilter) -> bool {
+    let mut addressed = false;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        addressed |= reference.instruction_result_id().is_some();
+    });
+    addressed
 }
 
 pub(crate) fn player_matches_target_filter_with_context(

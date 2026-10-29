@@ -713,7 +713,8 @@ pub fn apply_debug_action(
                     body,
                 },
                 events,
-            );
+            )
+            .map_err(|err| EngineError::InvalidAction(format!("{err:?}")))?;
         }
 
         DebugAction::CreateTokenCopy {

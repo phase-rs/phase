@@ -15,8 +15,6 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 
-use super::resolve_resume_owned_ability_chain;
-
 /// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
 fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
     let proposed = ProposedEvent::AddCounter {
@@ -147,6 +145,7 @@ fn resolve_single_explorer(
     explorer_id: ObjectId,
     remaining: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let mut single = ResolvedAbility::new(
         Effect::Explore,
@@ -164,7 +163,7 @@ fn resolve_single_explorer(
     }
 
     single.bind_return_result_process(ability.return_result_process);
-    resolve_resume_owned_ability_chain(state, &single, events, 1)
+    super::resolve_carrier_owned_ability_chain(state, &single, events, 1, declarations)
 }
 
 fn advance_explore_all(
@@ -172,6 +171,7 @@ fn advance_explore_all(
     ability: &ResolvedAbility,
     remaining: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let Some((player, choosable)) = next_explore_chooser(state, &remaining) else {
         events.push(GameEvent::EffectResolved {
@@ -188,11 +188,15 @@ fn advance_explore_all(
             .into_iter()
             .filter(|obj_id| *obj_id != chosen)
             .collect();
-        return resolve_single_explorer(state, ability, chosen, remaining, events);
+        return resolve_single_explorer(state, ability, chosen, remaining, events, declarations);
     }
 
     state.waiting_for = WaitingFor::ExploreChoice {
-        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+        return_result_occurrence: super::retained_return_result_occurrence(
+            state,
+            ability,
+            declarations,
+        )?,
         player,
         source_id: ability.source_id,
         choosable,
@@ -400,11 +404,25 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_all_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_all_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let Effect::ExploreAll { filter } = &ability.effect else {
         return Ok(());
     };
     let remaining = collect_explorers(state, ability, filter);
-    advance_explore_all(state, ability, remaining, events)
+    advance_explore_all(state, ability, remaining, events, declarations)
 }
 
 pub fn handle_choice(
@@ -414,7 +432,13 @@ pub fn handle_choice(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, crate::game::engine::EngineError> {
-    let WaitingFor::ExploreChoice { choosable, .. } = &state.waiting_for else {
+    let WaitingFor::ExploreChoice {
+        choosable,
+        return_result_occurrence,
+        pending_effect,
+        ..
+    } = &state.waiting_for
+    else {
         return Err(crate::game::engine::EngineError::InvalidAction(
             "Not waiting for explore choice".to_string(),
         ));
@@ -424,6 +448,14 @@ pub fn handle_choice(
             "Invalid explore choice".to_string(),
         ));
     }
+    if &**pending_effect != ability {
+        return Err(crate::game::engine::EngineError::InvalidAction(
+            "explore choice owner mismatch".into(),
+        ));
+    }
+    let occurrence = *return_result_occurrence;
+    let owned = super::owned_cursor_declarations(state, occurrence, pending_effect)
+        .map_err(|error| crate::game::engine::EngineError::InvalidAction(error.to_string()))?;
 
     // CR 701.44d + CR 608.2c + CR 117.3b: Retire the consumed APNAP-ordering
     // choice before carrying out this explorer's instruction. `Priority` is an
@@ -439,7 +471,17 @@ pub fn handle_choice(
         .copied()
         .filter(|obj_id| *obj_id != chosen)
         .collect();
-    resolve_single_explorer(state, ability, chosen, remaining, events).map_err(|err| {
+    super::with_inherited_return_result_occurrence(state, occurrence, |state| {
+        resolve_single_explorer(
+            state,
+            ability,
+            chosen,
+            remaining,
+            events,
+            (&owned.0, &owned.1),
+        )
+    })
+    .map_err(|err| {
         crate::game::engine::EngineError::InvalidAction(format!(
             "Failed to continue explore sequence: {err}"
         ))

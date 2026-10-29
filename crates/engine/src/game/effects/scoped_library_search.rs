@@ -192,12 +192,38 @@ pub(crate) fn has_no_resolution_riders(ability: &ResolvedAbility) -> bool {
 /// CR 101.4 + CR 701.23i: Start an APNAP series of private self-library search
 /// choices. No selected card changes zones until every scoped player has made
 /// their choice, including an optional-search decline/accept decision.
+#[cfg(test)]
 pub(crate) fn start(
     state: &mut GameState,
     ability: &ResolvedAbility,
     matching_players: &[PlayerId],
     after_scope: Option<Box<ResolvedAbility>>,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| {
+            start_owned(
+                state,
+                executable,
+                matching_players,
+                after_scope,
+                events,
+                owner,
+            )
+        },
+    )
+}
+
+pub(crate) fn start_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    matching_players: &[PlayerId],
+    after_scope: Option<Box<ResolvedAbility>>,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     if state.pending_scoped_library_search.is_some()
         || !state.active_library_searches.is_empty()
@@ -233,7 +259,11 @@ pub(crate) fn start(
         }
     };
     let pending = PendingScopedLibrarySearch {
-        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+        return_result_occurrence: super::retained_return_result_occurrence(
+            state,
+            ability,
+            declarations,
+        )?,
         ability: Box::new(ability.clone()),
         phase,
         after_scope,

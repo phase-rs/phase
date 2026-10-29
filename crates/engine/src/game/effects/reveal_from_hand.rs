@@ -14,7 +14,7 @@ use crate::types::ability::{
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{GameState, WaitingFor};
 
 use crate::game::ability_utils::build_resolved_from_def_with_chain_root;
 
@@ -36,6 +36,20 @@ pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let (card_filter, on_decline) = match &ability.effect {
         Effect::RevealFromHand { filter, on_decline } => (filter.clone(), on_decline.clone()),
@@ -64,14 +78,16 @@ pub fn resolve(
     // CR 701.20a: No eligible card to reveal → the "if you don't" branch fires.
     // This is equivalent to the player declining the optional reveal.
     if eligible.is_empty() {
-        run_on_decline_now(
-            state,
-            on_decline.as_deref(),
-            controller,
-            source_id,
-            ability.context.chain_root_targets.clone(),
-            events,
-        );
+        if let Some(definition) = on_decline.as_deref() {
+            let selected = project_decline_branch(ability, definition);
+            super::resolve_parent_selected_ability_chain(
+                state,
+                &selected,
+                events,
+                1,
+                declarations,
+            )?;
+        }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,
             source_id,
@@ -91,18 +107,8 @@ pub fn resolve(
     // resolves correctly when drained. Mirrors `apply_post_replacement_effect`'s
     // convention of threading the source object as the default target.
     if let Some(def) = on_decline {
-        // CR 608.2h: propagate the creating ability's chain-root target list
-        // (see `build_resolved_from_def_with_chain_root`'s doc).
-        let mut resolved = build_resolved_from_def_with_chain_root(
-            &def,
-            source_id,
-            controller,
-            ability.context.chain_root_targets.clone(),
-        );
-        if resolved.targets.is_empty() {
-            resolved.push_target(TargetRef::Object(source_id));
-        }
-        state.park_ability_continuation(PendingContinuation::new(Box::new(resolved), state));
+        let resolved = project_decline_branch(ability, &def);
+        super::park_parent_selected_continuation(state, resolved, declarations)?;
     } else {
         let _ = state
             .take_active_ability_continuation()
@@ -129,39 +135,23 @@ pub fn resolve(
 /// Run the decline ability inline when no eligible hand card exists. Bypasses
 /// the WaitingFor path because no player choice is needed — CR 701.20a treats
 /// the "can't reveal" case identically to "chose not to reveal."
-fn run_on_decline_now(
-    state: &mut GameState,
-    on_decline: Option<&AbilityDefinition>,
-    controller: crate::types::player::PlayerId,
-    source_id: crate::types::identifiers::ObjectId,
-    chain_root_targets: Vec<TargetRef>,
-    events: &mut Vec<GameEvent>,
-) {
-    let Some(def) = on_decline else {
-        return;
-    };
-    // CR 107.3 + CR 611.2: Seed the resolved ability with the source as its
-    // object target so SelfRef-targeted effects (Tap SelfRef for reveal-lands)
-    // tap the source land. Post-replacement effects from other paths go through
-    // `apply_post_replacement_effect`, which threads the ETB'd object in the same
-    // way — we mirror that convention here because this path runs immediately
-    // (no player prompt) when the hand has no eligible card.
-    //
-    // CR 608.2c: Route through `resolve_ability_chain` (not `resolve_effect`) so
-    // any condition on the on_decline ability is evaluated. Reveal-tribal lands
-    // (Fortified Beachhead, Temple of the Dragon Queen) gate the on_decline Tap
-    // on `AbilityCondition::ControllerControlsMatching { negated: true }` — the
-    // Tap fires only when the controller doesn't already control a [filter]
-    // permanent. Bypassing the chain would skip that check.
-    //
-    // CR 608.2h: propagate the creating ability's chain-root target list (see
-    // `build_resolved_from_def_with_chain_root`'s doc).
-    let mut resolved =
-        build_resolved_from_def_with_chain_root(def, source_id, controller, chain_root_targets);
+pub(crate) fn project_decline_branch(
+    parent: &ResolvedAbility,
+    definition: &AbilityDefinition,
+) -> ResolvedAbility {
+    let mut resolved = build_resolved_from_def_with_chain_root(
+        definition,
+        parent.source_id,
+        parent.controller,
+        parent.context.chain_root_targets.clone(),
+    );
+    resolved.inherit_coin_target_inputs(parent);
+    resolved.bind_return_result_process(parent.return_result_process);
+    resolved.set_replacement_applied_recursive(parent.replacement_applied.clone());
     if resolved.targets.is_empty() {
-        resolved.push_target(TargetRef::Object(source_id));
+        resolved.push_target(TargetRef::Object(parent.source_id));
     }
-    let _ = super::resolve_ability_chain(state, &resolved, events, 0);
+    resolved
 }
 
 #[cfg(test)]

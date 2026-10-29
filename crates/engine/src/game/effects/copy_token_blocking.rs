@@ -22,6 +22,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let (source_filter, owner) = match &ability.effect {
         Effect::CopyTokenBlockingAttacker {
             source_filter,
@@ -78,14 +92,15 @@ pub fn resolve(
             std::collections::VecDeque::new(),
         )
     };
-    super::token_copy::begin_creation(
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         work,
         EffectKind::CopyTokenOf,
         caller,
         events,
-    );
+        declarations,
+    )?;
     Ok(())
 }
 

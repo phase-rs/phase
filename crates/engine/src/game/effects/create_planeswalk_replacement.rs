@@ -81,7 +81,7 @@ pub fn resolve(
 
     // CR 614.6: the substitute is installed only on the hosting path, so the early
     // return above leaves the arena unchanged.
-    shield.runtime_execute = Some(state.install_replacement_continuation(substitute));
+    shield.runtime_execute = Some(state.install_replacement_continuation(substitute)?);
     state.pending_damage_replacements.push(shield);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreatePlaneswalkReplacement,

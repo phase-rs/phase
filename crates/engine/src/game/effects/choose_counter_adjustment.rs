@@ -128,6 +128,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let Effect::ChooseCounterAdjustment {
         adjustment,
         counters,
@@ -161,12 +175,7 @@ pub fn resolve(
     };
     let mut branches = Vec::new();
     // Clone context/attribution but leave the outer resolution chain its sole tail.
-    let mut delegated = ability.clone();
-    delegated.declares_return_result = None;
-    delegated.context.counter_removal_result = result_binding;
-    delegated.sub_ability = None;
-    delegated.else_ability = None;
-    delegated.replace_target_occurrences(vec![(TargetRef::Object(pin.object_id), Some(pin))]);
+    let delegated = delegated_choice(ability, pin, result_binding, Vec::new());
     for kind in kinds {
         if adjustment.allows_remove() {
             let effect = Effect::RemoveCounter {
@@ -237,12 +246,33 @@ pub fn resolve(
     if branches.is_empty() {
         return Ok(());
     }
+    let delegated = delegated_choice(
+        ability,
+        pin,
+        delegated.context.counter_removal_result,
+        branches,
+    );
+    super::choose_one_of::resolve_owned(state, &delegated, events, declarations)
+}
+
+pub(crate) fn delegated_choice(
+    ability: &ResolvedAbility,
+    pin: ObjectIncarnationRef,
+    result_binding: Option<crate::types::game_state::CounterRemovalResultBinding>,
+    branches: Vec<AbilityDefinition>,
+) -> ResolvedAbility {
+    let mut delegated = ability.clone();
+    delegated.declares_return_result = None;
+    delegated.context.counter_removal_result = result_binding;
+    delegated.sub_ability = None;
+    delegated.else_ability = None;
+    delegated.replace_target_occurrences(vec![(TargetRef::Object(pin.object_id), Some(pin))]);
     delegated.effect = Effect::ChooseOneOf {
         kind: ChooseOneOfKind::Ordinary,
         chooser: PlayerFilter::Controller,
         branches,
     };
-    super::choose_one_of::resolve(state, &delegated, events)
+    delegated
 }
 
 #[cfg(test)]

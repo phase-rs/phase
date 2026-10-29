@@ -242,13 +242,16 @@ fn mandatory_runtime_execute_substitute_is_predicted_and_not_delivered() {
             "Words of Worship",
             Box::new(
                 |state: &mut GameState, repl: &mut ReplacementDefinition, source: ObjectId| {
-                    repl.runtime_execute =
-                        Some(state.install_replacement_continuation(ResolvedAbility::new(
-                            gain_life_substitute().effect.as_ref().clone(),
-                            Vec::new(),
-                            source,
-                            P0,
-                        )));
+                    repl.runtime_execute = Some(
+                        state
+                            .install_replacement_continuation(ResolvedAbility::new(
+                                gain_life_substitute().effect.as_ref().clone(),
+                                Vec::new(),
+                                source,
+                                P0,
+                            ))
+                            .expect("valid replacement continuation fixture"),
+                    );
                 },
             ),
         )),

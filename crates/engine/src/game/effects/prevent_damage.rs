@@ -1,5 +1,5 @@
 use crate::game::effects::choose_damage_source;
-use crate::game::quantity::resolve_quantity;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{prevention_shield_is_refused, ReplacementDurationExpiry};
 use crate::types::ability::{
     CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
@@ -304,6 +304,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let (
         lifetime,
         amount,
@@ -423,7 +437,7 @@ pub fn resolve(
     // count at effect-resolution time; the Next(n) shield itself is always static.
     let amount = match amount_dynamic {
         Some(expr) => {
-            let n = resolve_quantity(state, &expr, ability.controller, ability.source_id);
+            let n = resolve_quantity_with_targets(state, &expr, ability);
             PreventionAmount::Next(u32::try_from(n.max(0)).unwrap_or(0))
         }
         None => amount,
@@ -539,7 +553,13 @@ pub fn resolve(
         if ability.context.damage_source_choice.is_none() {
             if chooser.is_some() {
                 let prompt_filter = filter.as_deref().unwrap_or(&TargetFilter::Any);
-                choose_damage_source::open_source_choice(state, ability, prompt_filter, events)?;
+                choose_damage_source::open_source_choice_owned(
+                    state,
+                    ability,
+                    prompt_filter,
+                    events,
+                    declarations,
+                )?;
             }
             return Ok(());
         }
@@ -675,7 +695,7 @@ pub fn resolve(
             // CR 615.5: install once, before any hosting branch, so every hosted clone of the
             // shield names the same continuation; a path that hosts nothing leaves the entry
             // unnamed.
-            let id = state.install_replacement_continuation(rider);
+            let id = state.install_replacement_continuation(rider)?;
             shield = shield.runtime_execute(id);
         }
     }

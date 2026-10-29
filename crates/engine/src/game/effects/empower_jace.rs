@@ -30,6 +30,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let Effect::EmpowerJace { count } = &ability.effect else {
         return Ok(());
     };
@@ -63,7 +77,7 @@ pub fn resolve(
                 applied: HashSet::new(),
             },
         )]);
-    super::token_copy::begin_creation(
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         work,
@@ -73,7 +87,8 @@ pub fn resolve(
             count: n,
         },
         events,
-    );
+        declarations,
+    )?;
     Ok(())
 }
 

@@ -13743,7 +13743,9 @@ mod tests {
             let (mut prior, mut current) = with_object_def(def);
             for state in [&mut prior, &mut current] {
                 assert_eq!(
-                    state.install_replacement_continuation(runtime_body.clone()),
+                    state
+                        .install_replacement_continuation(runtime_body.clone())
+                        .expect("valid replacement continuation fixture"),
                     handle,
                     "reach guard: each frame's arena names the body at the def's handle"
                 );
@@ -24239,16 +24241,19 @@ mod tests {
                 // pipeline debug-asserts on one that declares neither.
                 definition.draw_scope = Some(DrawReplacementScope::IndividualDraw);
                 if with_body {
-                    definition.runtime_execute =
-                        Some(board.install_replacement_continuation(ResolvedAbility::new(
-                            Effect::LoseLife {
-                                amount: QuantityExpr::Fixed { value: 1 },
-                                target: None,
-                            },
-                            vec![],
-                            DEF_SRC,
-                            PlayerId(0),
-                        )));
+                    definition.runtime_execute = Some(
+                        board
+                            .install_replacement_continuation(ResolvedAbility::new(
+                                Effect::LoseLife {
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                    target: None,
+                                },
+                                vec![],
+                                DEF_SRC,
+                                PlayerId(0),
+                            ))
+                            .expect("valid replacement continuation fixture"),
+                    );
                 }
                 let mut object = GameObject::new(
                     DEF_SRC,
@@ -28097,9 +28102,13 @@ mod tests {
         };
         let mut state = GameState::new_two_player(42);
         for _ in 0..padding {
-            state.install_replacement_continuation(rider(rider_amount));
+            state
+                .install_replacement_continuation(rider(rider_amount))
+                .expect("valid replacement continuation fixture");
         }
-        let id = state.install_replacement_continuation(rider(rider_amount));
+        let id = state
+            .install_replacement_continuation(rider(rider_amount))
+            .expect("valid replacement continuation fixture");
         state.pending_damage_replacements.push(
             ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
                 .runtime_execute(id),
@@ -28198,17 +28207,19 @@ mod tests {
             .pending_damage_replacements
             .push(ReplacementDefinition::new(ReplacementEvent::DamageDone));
         assert!(!live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
-        let id = state.install_replacement_continuation(ResolvedAbility::new(
-            Effect::GainLife {
-                amount: QuantityExpr::Ref {
-                    qty: QuantityRef::TurnsTaken,
+        let id = state
+            .install_replacement_continuation(ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::TurnsTaken,
+                    },
+                    player: TargetFilter::Controller,
                 },
-                player: TargetFilter::Controller,
-            },
-            vec![],
-            ObjectId(1),
-            PlayerId(0),
-        ));
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            ))
+            .expect("valid replacement continuation fixture");
         state.pending_damage_replacements[0] =
             ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
         assert!(live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));

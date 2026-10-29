@@ -27660,6 +27660,7 @@ mod departure_source_boundary_tests {
             ReturnResultFrame {
                 process: Some(ReturnResultProcessId(5)),
                 declarations: None,
+                admitted_program: None,
                 results: [(ReturnResultId(7), InstructionResult::ZoneChanges(vec![]))]
                     .into_iter()
                     .collect(),

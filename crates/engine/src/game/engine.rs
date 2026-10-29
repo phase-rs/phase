@@ -9854,6 +9854,12 @@ fn drain_pending_deferred_life_cost_resume(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let admitted_payment = match state.pending_deferred_life_cost_resume.as_ref() {
+        Some(crate::types::game_state::DeferredLifeCostResume::ManaRoot { resume, .. }) => {
+            super::mana_abilities::admitted_payment_resume(state, resume)?
+        }
+        _ => None,
+    };
     let Some(resume) = state.pending_deferred_life_cost_resume.take() else {
         return Ok(state.waiting_for.clone());
     };
@@ -9961,8 +9967,14 @@ fn drain_pending_deferred_life_cost_resume(
                         }
                     }
                 }
-                super::mana_abilities::finish_mana_root_after_deferred_life_payment(
-                    state, player, *resume, events,
+                super::mana_abilities::finish_mana_root_after_deferred_life_payment_owned(
+                    state,
+                    player,
+                    *resume,
+                    events,
+                    admitted_payment
+                        .as_ref()
+                        .map(|(program, declarations)| (program, declarations)),
                 )
             }
             crate::types::game_state::DeferredLifeCostResume::TurnFaceUp {
@@ -14500,12 +14512,19 @@ fn apply_non_priority_pass_action(
                 ..
             },
             GameAction::CancelCast,
-        ) => mana_abilities::resume_mana_ability_root(
-            state,
-            pending_mana_ability.player,
-            pending_mana_ability.resume.clone(),
-            &mut events,
-        )?,
+        ) => {
+            let admitted_payment =
+                mana_abilities::admitted_payment_resume(state, &pending_mana_ability.resume)?;
+            mana_abilities::resume_mana_ability_root_owned(
+                state,
+                pending_mana_ability.player,
+                pending_mana_ability.resume.clone(),
+                &mut events,
+                admitted_payment
+                    .as_ref()
+                    .map(|(program, declarations)| (program, declarations)),
+            )?
+        }
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to
@@ -15048,6 +15067,7 @@ fn apply_non_priority_pass_action(
         ) => {
             let (player, resume) =
                 payment_window_resume(window).expect("the arm matches only payment windows");
+            let admitted_payment = mana_abilities::admitted_payment_resume(state, &resume)?;
             let events_before = events.len();
             let wf =
                 handle_tap_land_for_mana(state, player, &selection, resume.clone(), &mut events)?;
@@ -15085,13 +15105,16 @@ fn apply_non_priority_pass_action(
                 WaitingFor::ManaAbilityManaPayment {
                     pending_mana_ability,
                     ..
-                } => mana_abilities::resume_mana_ability_root(
+                } => mana_abilities::resume_mana_ability_root_owned(
                     state,
                     player,
                     ManaAbilityResume::ManaAbilityManaPayment {
                         pending_mana_ability,
                     },
                     &mut events,
+                    admitted_payment
+                        .as_ref()
+                        .map(|(program, declarations)| (program, declarations)),
                 )?,
                 wf => wf,
             };
@@ -15854,6 +15877,12 @@ fn apply_non_priority_pass_action(
             // priority player and drain continuation only when resolution
             // truly returned to Priority.
             let pending = pending_ability.clone();
+            let (program, declarations) = super::effects::owned_cursor_declarations(
+                state,
+                *return_result_occurrence,
+                &pending,
+            )
+            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
             let active_player = *player;
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
@@ -15863,11 +15892,12 @@ fn apply_non_priority_pass_action(
                 *return_result_occurrence,
                 |state| {
                     super::effects::validate_addressed_quantity_reads(state, &pending)?;
-                    super::effects::token::resolve_with_host_override(
+                    super::effects::token::resolve_with_host_override_owned(
                         state,
                         &pending,
                         &mut events,
                         Some(host),
+                        (&program, &declarations),
                     )
                 },
             )

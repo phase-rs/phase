@@ -32,6 +32,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let Effect::SeparateIntoPiles {
         partition_subject,
         object_filter,
@@ -59,6 +73,7 @@ pub fn resolve(
             chooser_id,
             chosen_pile_effect,
             unchosen_pile_effect,
+            declarations,
         ),
         PileSource::RevealedFromLibraryTop { count } => resolve_revealed_from_library_top(
             state,
@@ -68,6 +83,7 @@ pub fn resolve(
             chooser_id,
             chosen_pile_effect,
             unchosen_pile_effect,
+            declarations,
         ),
         PileSource::ExiledThisWay => resolve_exiled_this_way(
             state,
@@ -76,6 +92,7 @@ pub fn resolve(
             chooser_id,
             chosen_pile_effect,
             unchosen_pile_effect,
+            declarations,
         ),
     }
 }
@@ -91,6 +108,7 @@ fn resolve_battlefield(
     chooser_id: PlayerId,
     chosen_pile_effect: &crate::types::ability::AbilityDefinition,
     unchosen_pile_effect: &Option<Box<crate::types::ability::AbilityDefinition>>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let controller = ability.controller;
 
@@ -162,7 +180,11 @@ fn resolve_battlefield(
         subject_pools.into_iter().collect();
 
     state.waiting_for = WaitingFor::SeparatePilesPartition {
-        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+        return_result_occurrence: super::retained_return_result_occurrence(
+            state,
+            ability,
+            declarations,
+        )?,
         expected_return_result_process: ability.return_result_process,
         player: first_subject,
         eligible: first_pool,
@@ -190,6 +212,7 @@ fn resolve_revealed_from_library_top(
     chooser_id: PlayerId,
     chosen_pile_effect: &crate::types::ability::AbilityDefinition,
     unchosen_pile_effect: &Option<Box<crate::types::ability::AbilityDefinition>>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let controller = ability.controller;
 
@@ -251,7 +274,11 @@ fn resolve_revealed_from_library_top(
     if candidates.len() >= 2 {
         // Multiplayer: surface a choice prompt for the controller.
         state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
-            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            return_result_occurrence: super::retained_return_result_occurrence(
+                state,
+                ability,
+                declarations,
+            )?,
             expected_return_result_process: ability.return_result_process,
             player: controller,
             candidates,
@@ -266,7 +293,11 @@ fn resolve_revealed_from_library_top(
         // Two-player game: single opponent, no decision needed.
         let partitioner = candidates.into_iter().next().unwrap_or(controller);
         state.waiting_for = WaitingFor::SeparatePilesPartition {
-            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            return_result_occurrence: super::retained_return_result_occurrence(
+                state,
+                ability,
+                declarations,
+            )?,
             expected_return_result_process: ability.return_result_process,
             player: partitioner,
             eligible,
@@ -294,6 +325,7 @@ fn resolve_exiled_this_way(
     chooser_id: PlayerId,
     chosen_pile_effect: &crate::types::ability::AbilityDefinition,
     unchosen_pile_effect: &Option<Box<crate::types::ability::AbilityDefinition>>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let controller = ability.controller;
 
@@ -330,7 +362,11 @@ fn resolve_exiled_this_way(
 
     if candidates.len() >= 2 {
         state.waiting_for = WaitingFor::SeparatePilesChooseOpponent {
-            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            return_result_occurrence: super::retained_return_result_occurrence(
+                state,
+                ability,
+                declarations,
+            )?,
             expected_return_result_process: ability.return_result_process,
             player: controller,
             candidates,
@@ -344,7 +380,11 @@ fn resolve_exiled_this_way(
     } else {
         let partitioner = candidates.into_iter().next().unwrap_or(controller);
         state.waiting_for = WaitingFor::SeparatePilesPartition {
-            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            return_result_occurrence: super::retained_return_result_occurrence(
+                state,
+                ability,
+                declarations,
+            )?,
             expected_return_result_process: ability.return_result_process,
             player: partitioner,
             eligible,

@@ -5,7 +5,8 @@ use crate::game::{mana_payment, mana_sources};
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
     ChoiceValue, Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction,
-    ManaSpendRestriction, ManaTargetRole, ManaTargetSlot, ObjectScope, ResolvedAbility, TargetRef,
+    ManaSpendRestriction, ManaTargetRole, ManaTargetSlot, ObjectScope, QuantityExpr,
+    ResolvedAbility, TargetRef,
 };
 use crate::types::ability::{DevotionColors, QuantityRef};
 use crate::types::events::GameEvent;
@@ -197,6 +198,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     super::validate_addressed_quantity_reads(state, ability)?;
     let (produced, restrictions, grants, expiry, mana_role) = match &ability.effect {
         Effect::Mana {
@@ -287,7 +302,10 @@ pub fn resolve(
         state.waiting_for = WaitingFor::ChooseManaColor {
             player: prompt_player,
             return_result_occurrence: mana_choice_return_result_occurrence(
-                state, ability, &choice,
+                state,
+                ability,
+                &choice,
+                declarations,
             )?,
             choice,
             context: ManaChoiceContext::ResolvingEffect(Box::new(ability.clone())),
@@ -438,6 +456,7 @@ fn mana_choice_return_result_occurrence(
     state: &GameState,
     ability: &ResolvedAbility,
     prompt: &ManaChoicePrompt,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
     let mut reads = false;
     for_each_mana_choice_response_quantity(ability, prompt, &mut |reference| {
@@ -452,7 +471,7 @@ fn mana_choice_return_result_occurrence(
     } else {
         None
     };
-    validate_mana_choice_response(state, ability, prompt, occurrence)?;
+    validate_mana_choice_response_owned(state, ability, prompt, occurrence, Some(declarations))?;
     Ok(occurrence)
 }
 
@@ -462,20 +481,107 @@ pub(crate) fn validate_mana_choice_response(
     prompt: &ManaChoicePrompt,
     occurrence: Option<ReturnResultOccurrenceId>,
 ) -> Result<(), EffectError> {
+    validate_mana_choice_response_owned(state, ability, prompt, occurrence, None)
+}
+
+pub(crate) fn admitted_mana_response_matches_program(
+    state: &GameState,
+    program: &ResolvedAbility,
+    ability: &ResolvedAbility,
+    prompt: &ManaChoicePrompt,
+) -> bool {
+    let mut current = ability.clone();
+    current.sub_ability = None;
+    current.else_ability = None;
+    if let (
+        Effect::Mana {
+            produced: ManaProduction::AnyCombination { count, .. },
+            ..
+        },
+        ManaChoicePrompt::AnyCombination { .. },
+    ) = (&mut current.effect, prompt)
+    {
+        *count = QuantityExpr::Fixed { value: 0 };
+    }
+    super::visit_instruction_result_program_projections_for_cursor(
+        program,
+        ability,
+        &mut |candidate| {
+            let Effect::Mana { target, .. } = &candidate.effect else {
+                return false;
+            };
+            let mut expected = candidate.clone();
+            expected.sub_ability = None;
+            expected.else_ability = None;
+            if let (
+                Effect::Mana {
+                    produced: ManaProduction::AnyCombination { count, .. },
+                    ..
+                },
+                ManaChoicePrompt::AnyCombination { .. },
+            ) = (&mut expected.effect, prompt)
+            {
+                *count = QuantityExpr::Fixed { value: 0 };
+            }
+            if !super::instruction_result_projection_eq(&expected, &current) {
+                return false;
+            }
+            match (&candidate.effect, prompt) {
+                (
+                    Effect::Mana {
+                        produced:
+                            ManaProduction::AnyCombination {
+                                count,
+                                color_options,
+                            },
+                        ..
+                    },
+                    ManaChoicePrompt::AnyCombination {
+                        count: latched_count,
+                        options,
+                    },
+                ) => {
+                    *latched_count > 0
+                        && color_options
+                            .iter()
+                            .copied()
+                            .map(ManaType::from)
+                            .eq(options.iter().copied())
+                        && if let QuantityExpr::Fixed { value } = count {
+                            usize::try_from(*value).ok() == Some(*latched_count)
+                        } else {
+                            true
+                        }
+                }
+                _ => {
+                    let count_owner = count_scoped_ability(state, candidate, target.as_ref());
+                    crate::game::mana_abilities::mana_choice_prompt(
+                        &candidate.effect,
+                        state,
+                        candidate.source_id,
+                        Some(candidate),
+                        Some(&count_owner),
+                    )
+                    .as_ref()
+                        == Some(prompt)
+                }
+            }
+        },
+    )
+}
+
+fn validate_mana_choice_response_owned(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    prompt: &ManaChoicePrompt,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
+) -> Result<(), EffectError> {
     if !matches!(ability.effect, Effect::Mana { .. }) {
         return Err(EffectError::InvalidParam(
             "pending mana choice is not a mana effect".into(),
         ));
     }
-    let mut current = ability.clone();
-    current.sub_ability = None;
-    current.else_ability = None;
-    crate::types::ability::classify_instruction_result_invocation(
-        &current,
-        crate::types::ability::InstructionResultEntry::ResumeOwned,
-        None,
-    )
-    .map(|(summary, _)| summary)?;
     let mut failure = None;
     let mut invalid = None;
     for_each_mana_choice_response_quantity(ability, prompt, &mut |reference| {
@@ -499,6 +605,50 @@ pub(crate) fn validate_mana_choice_response(
     });
     if let Some(error) = failure {
         return Err(EffectError::InvalidParam(error));
+    }
+    let mut addressed = false;
+    for_each_mana_choice_response_quantity(ability, prompt, &mut |reference| {
+        addressed |= reference.instruction_result_id().is_some();
+    });
+    if addressed || occurrence.is_some() {
+        let frame = crate::types::game_state::checked_owned_return_result_frame(
+            state,
+            occurrence,
+            ability.return_result_process,
+        )
+        .map_err(EffectError::InvalidParam)?;
+        let saved_program = frame.admitted_program.as_deref().ok_or_else(|| {
+            EffectError::InvalidParam("mana response has no recovered admitted program".into())
+        })?;
+        let (_, declarations) = crate::types::ability::classify_instruction_result_invocation(
+            saved_program,
+            crate::types::ability::InstructionResultEntry::Independent,
+            None,
+        )?;
+        if frame.declarations.as_ref() != Some(&declarations)
+            || saved_program.return_result_process != frame.process
+        {
+            return Err(EffectError::InvalidParam(
+                "mana response program declaration mismatch".into(),
+            ));
+        }
+        if let Some((program, namespace)) = admitted {
+            if program != saved_program || namespace != &declarations {
+                return Err(EffectError::InvalidParam("mana prompt invocation owner mismatch".into()));
+            }
+        } else if !crate::types::game_state::retained_result_waits(state).into_iter().any(|waiting| matches!(waiting,
+            WaitingFor::ChooseManaColor { return_result_occurrence, choice, context: ManaChoiceContext::ResolvingEffect(pending), .. }
+                if *return_result_occurrence == occurrence && choice == prompt && pending.as_ref() == ability))
+        {
+            return Err(EffectError::InvalidParam("mana response does not own the active typed prompt".into()));
+        }
+        let matches_program =
+            admitted_mana_response_matches_program(state, saved_program, ability, prompt);
+        if !matches_program {
+            return Err(EffectError::InvalidParam(
+                "mana response is not the admitted operation and latched prompt".into(),
+            ));
+        }
     }
     if let Some(result) = invalid {
         return Err(EffectError::InvalidParam(format!(
@@ -5346,7 +5496,16 @@ mod tests {
         // Supplemental canonical direct-resolution fixture: the real complete
         // producer executes here; only the resolving recipient-role predicate
         // reads its result. The latched one-unit count supplies no authority.
-        for (empty, public) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (empty, public, eligible) in [
+            (false, false, true),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+        ] {
             let (mut foreign, foreign_spell, _, _) = departure_dynamic_mana_runner(4, true, false);
             let WaitingFor::ChooseManaColor {
                 return_result_occurrence: Some(foreign_occurrence),
@@ -5370,6 +5529,11 @@ mod tests {
                 scenario.add_creature(P0, "Centaur Courser", 3, 3);
                 scenario.add_creature(P0, "Grizzly Bears", 2, 2);
                 scenario.add_creature(P1, "Grizzly Bears", 2, 2);
+            }
+            if !eligible {
+                for _ in 0..if empty { 1 } else { 6 } {
+                    scenario.add_card_to_hand(P1, "Candidate hand boundary");
+                }
             }
             let reference = QuantityRef::ZoneChangeAggregate {
                 source: ZoneChangeRecordSource::InstructionResult {
@@ -5464,6 +5628,12 @@ mod tests {
             }
             let mut runner = scenario.build();
             let original_source = runner.state().objects[&source].clone();
+            if !public {
+                assert!(
+                    original_source.abilities.is_empty(),
+                    "the direct source never owns the admitted root"
+                );
+            }
             let mut events = vec![];
             if public {
                 events.extend(
@@ -5526,6 +5696,31 @@ mod tests {
                 .unwrap();
             }
             assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { record, .. } if record.from_zone == Some(Zone::Battlefield) && record.to_zone == Zone::Exile)).count(), if empty { 0 } else { 3 });
+            if !eligible {
+                assert_eq!(
+                    runner.state().players[1].hand.len(),
+                    if empty { 1 } else { 6 }
+                );
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+                assert_eq!(runner.state().players[1].mana_pool.total(), 0);
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty()
+                );
+                assert!(runner.state().return_result_frames.is_empty());
+                assert_eq!(
+                    runner.state().objects[&source].incarnation,
+                    original_source.incarnation
+                );
+                assert_eq!(runner.state().objects[&source].controller, P0);
+                if !public {
+                    assert!(runner.state().objects[&source].abilities.is_empty());
+                }
+                continue;
+            }
             let WaitingFor::ChooseManaColor {
                 player,
                 choice: ManaChoicePrompt::AnyCombination { count, options },
@@ -5540,6 +5735,25 @@ mod tests {
             assert_eq!(options, &[ManaType::Red, ManaType::Green]);
             assert!(body.sub_ability.is_none());
             let occurrence = *occurrence;
+            let admitted = runner.state().return_result_frames[&occurrence]
+                .admitted_program
+                .as_deref()
+                .expect("the full actual root survives after its prefix has disappeared");
+            assert_eq!(admitted.declares_return_result, Some(ReturnResultId(7)));
+            assert!(matches!(admitted.effect, Effect::ChangeZoneAll { .. }));
+            assert_eq!(admitted.source_id, source);
+            assert_eq!(admitted.return_result_process, body.return_result_process);
+            let (_, namespace) = crate::types::ability::classify_instruction_result_invocation(
+                admitted,
+                crate::types::ability::InstructionResultEntry::Independent,
+                None,
+            )
+            .unwrap();
+            assert_eq!(namespace.len(), 1);
+            assert_eq!(
+                namespace.get(&ReturnResultId(7)),
+                Some(&Some((Zone::Battlefield, Zone::Exile)))
+            );
             assert_eq!(
                 runner.state().return_result_frames[&occurrence].process,
                 body.return_result_process
@@ -5661,6 +5875,186 @@ mod tests {
                 }
                 assert_eq!(serde_json::to_value(bad.state()).unwrap(), before, "fail before role revalidation, count, recipient deposit, events or choice mutation");
             }
+            for fault in 0..10 {
+                let mut hostile = runner.state().clone();
+                match fault {
+                    0 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .declarations
+                            .as_mut()
+                            .unwrap()
+                            .insert(ReturnResultId(7), Some((Zone::Hand, Zone::Exile)));
+                    }
+                    1 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .declarations
+                            .as_mut()
+                            .unwrap()
+                            .insert(ReturnResultId(99), None);
+                    }
+                    2 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .admitted_program
+                            .as_mut()
+                            .unwrap()
+                            .source_id = ObjectId(u64::MAX);
+                    }
+                    3 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .admitted_program
+                            .as_mut()
+                            .unwrap()
+                            .set_source_incarnation_recursive(Some(u64::MAX));
+                    }
+                    4..=8 => {
+                        let WaitingFor::ChooseManaColor {
+                            context: ManaChoiceContext::ResolvingEffect(body),
+                            choice,
+                            ..
+                        } = &mut hostile.waiting_for
+                        else {
+                            unreachable!()
+                        };
+                        match fault {
+                            4 => body.controller = P1,
+                            5 => body.chosen_x = Some(77),
+                            6 => {
+                                let Effect::Mana { target, .. } = &mut body.effect else {
+                                    unreachable!()
+                                };
+                                *target = Some(TargetFilter::Controller);
+                            }
+                            7 => {
+                                let ManaChoicePrompt::AnyCombination { options, .. } = choice
+                                else {
+                                    unreachable!()
+                                };
+                                *options = vec![ManaType::Blue, ManaType::Green];
+                            }
+                            8 => {
+                                let ManaChoicePrompt::AnyCombination { count, .. } = choice else {
+                                    unreachable!()
+                                };
+                                *count = 2;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                    9 => {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .admitted_program
+                            .as_mut()
+                            .unwrap()
+                            .declares_return_result = None
+                    }
+                    _ => unreachable!(),
+                }
+                let before = serde_json::to_value(&hostile).unwrap();
+                assert!(
+                    serde_json::from_value::<GameState>(before.clone()).is_err(),
+                    "program/input fault {fault}"
+                );
+                let mut bad = GameRunner::from_state(hostile);
+                bad.act(GameAction::ChooseManaColor { choice: ManaChoice::Combination(vec![ManaType::Green]), count: 1 })
+                    .expect_err("an altered namespace, operation or invocation input is rejected before deposit");
+                assert_eq!(
+                    serde_json::to_value(bad.state()).unwrap(),
+                    before,
+                    "program/input fault {fault} is transactional"
+                );
+            }
+            let mut missing_map = runner.state().clone();
+            missing_map
+                .return_result_frames
+                .get_mut(&occurrence)
+                .unwrap()
+                .declarations = None;
+            let missing_map = serde_json::to_value(&missing_map).unwrap();
+            let restored: GameState = serde_json::from_value(missing_map)
+                .expect("the actual full program recovers an absent optional declaration map");
+            assert_eq!(
+                restored.return_result_frames[&occurrence]
+                    .declarations
+                    .as_ref()
+                    .unwrap()
+                    .len(),
+                1
+            );
+            let mut restored = GameRunner::from_state(restored);
+            restored
+                .act(GameAction::ChooseManaColor {
+                    choice: ManaChoice::Combination(vec![ManaType::Green]),
+                    count: 1,
+                })
+                .unwrap();
+            assert_eq!(restored.state().players[0].mana_pool.total(), 0);
+            assert_eq!(restored.state().players[1].mana_pool.total(), 1);
+            assert!(
+                restored.state().stack.is_empty()
+                    && restored.state().resolution_stack.is_empty()
+                    && restored.state().return_result_frames.is_empty()
+            );
+            if !public {
+                let mut erased_origin = runner.state().clone();
+                erased_origin
+                    .return_result_frames
+                    .get_mut(&occurrence)
+                    .unwrap()
+                    .admitted_program = None;
+                assert!(erased_origin.resolving_stack_entry.is_none());
+                assert!(erased_origin.objects[&source].abilities.is_empty());
+                let saved = serde_json::to_value(&erased_origin).unwrap();
+                let error = serde_json::from_value::<GameState>(saved.clone())
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("unrecoverable full program origin"),
+                    "{error}"
+                );
+                assert_eq!(serde_json::to_value(&erased_origin).unwrap(), saved);
+            } else {
+                let mut recoverable = runner.state().clone();
+                recoverable
+                    .return_result_frames
+                    .get_mut(&occurrence)
+                    .unwrap()
+                    .admitted_program = None;
+                let saved = serde_json::to_string(&recoverable).unwrap();
+                let recovered: GameState = serde_json::from_str(&saved)
+                    .expect("the actual public invocation retains recoverable full-program origin");
+                assert!(recovered.return_result_frames[&occurrence]
+                    .admitted_program
+                    .is_some());
+                let mut recovered = GameRunner::from_state(recovered);
+                recovered
+                    .act(GameAction::ChooseManaColor {
+                        choice: ManaChoice::Combination(vec![ManaType::Green]),
+                        count: 1,
+                    })
+                    .unwrap();
+                assert_eq!(recovered.state().players[0].mana_pool.total(), 0);
+                assert_eq!(recovered.state().players[1].mana_pool.total(), 1);
+                assert!(
+                    recovered.state().stack.is_empty()
+                        && recovered.state().resolution_stack.is_empty()
+                        && recovered.state().return_result_frames.is_empty()
+                );
+            }
             let saved = serde_json::to_value(runner.state()).unwrap();
             *runner.state_mut() = serde_json::from_value(saved)
                 .expect("latched production still retains its genuinely live role-filter read");
@@ -5690,6 +6084,12 @@ mod tests {
             ));
             assert!(runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty());
             assert!(runner.state().return_result_frames.is_empty());
+            if !public {
+                assert!(
+                    runner.state().objects[&source].abilities.is_empty(),
+                    "no installed program was fabricated to repair detached origin"
+                );
+            }
         }
     }
 

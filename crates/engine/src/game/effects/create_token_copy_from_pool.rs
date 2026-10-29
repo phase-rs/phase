@@ -43,6 +43,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     // 1. Destructure the typed fields from the effect.
     let crate::types::ability::Effect::CreateTokenCopyFromPool {
         owner,
@@ -167,14 +181,15 @@ pub fn resolve(
     });
 
     let work = super::token_copy::copy_batches_to_work(state, remaining);
-    super::token_copy::begin_creation(
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         work,
         EffectKind::from(&ability.effect),
         crate::types::game_state::TokenCreationCallerState::Plain,
         events,
-    );
+        declarations,
+    )?;
 
     Ok(())
 }

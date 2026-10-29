@@ -15516,9 +15516,8 @@ pub(crate) fn clear_registered_result_processes(
             if let ReplacementMode::MayCost { cost, .. } = &mut definition.mode {
                 cost.clear_embedded_return_result_processes();
             }
-            if let Some(body) = &mut definition.runtime_execute {
-                body.clear_return_result_process_recursive();
-            }
+            // Arena programs are cleared by their owning GameState projection
+            // or on a cloned invocation, never through this board-free handle.
         }
         DefinitionNodeMut::Static(definition) => {
             definition.mode.clear_embedded_return_result_processes();
@@ -17123,16 +17122,8 @@ fn validate_persistent_result_definition_node(
                     validate_persistent_result_token_spec(spec)?;
                 }
             }
-            // This raw runtime body is absent from the printed-definition visitor.
-            // It executes later as an independent invocation, never as a caller import.
-            if let Some(body) = &definition.runtime_execute {
-                classify_instruction_result_invocation(
-                    body,
-                    InstructionResultEntry::Independent,
-                    None,
-                )
-                .map(|(summary, _)| summary)?;
-            }
+            // State admission validates the referenced arena program as an
+            // independent invocation. The printed AST owns only its handle.
             Ok(())
         }
     }
@@ -34765,9 +34756,9 @@ macro_rules! define_effect_quantity_walk {
 
 // Predicate quantities complement, rather than replace, the exhaustive scalar-slot walkers.
 macro_rules! define_effect_predicate_quantity_walk {
- ([$($mut_:tt)?]; $predicates:ident; $nested:ident) => {
+ ([$($mut_:tt)?]; $payload:ty; $predicates:ident; $nested:ident) => {
 impl Effect {
- pub(crate) fn $predicates(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ pub(crate) fn $predicates(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? $payload)) {
  match self {
 Effect::StartYourEngines { player_scope, .. } => { player_scope.$nested(f); },
 Effect::ChangeSpeed { player_scope, .. } => { player_scope.$nested(f); },
@@ -35035,7 +35026,7 @@ Effect::Unimplemented { .. } => {}
 }
 }
 impl AbilityCost {
- pub(crate) fn $predicates(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? QuantityRef)) {
+ pub(crate) fn $predicates(& $($mut_)? self, f: &mut dyn FnMut(& $($mut_)? $payload)) {
  match self {
 AbilityCost::Discard { filter, .. } => { for nested in filter { nested.$nested(f); } },
 AbilityCost::Exile { filter, .. } => { for nested in filter { nested.$nested(f); } },
@@ -35076,10 +35067,11 @@ AbilityCost::Unimplemented { .. } => {}
 }
  };
 }
-define_effect_predicate_quantity_walk!([]; for_each_predicate_quantity_ref; for_each_nested_quantity_ref);
-define_effect_predicate_quantity_walk!([mut]; for_each_predicate_quantity_ref_mut; for_each_nested_quantity_ref_mut);
-define_effect_predicate_quantity_walk!([]; for_each_source_only_player_quantity_ref; for_each_source_only_player_quantity_ref);
-define_effect_predicate_quantity_walk!([mut]; clear_predicate_return_result_processes; clear_typed_return_result_processes);
+define_effect_predicate_quantity_walk!([]; QuantityRef; for_each_predicate_quantity_ref; for_each_nested_quantity_ref);
+define_effect_predicate_quantity_walk!([mut]; QuantityRef; for_each_predicate_quantity_ref_mut; for_each_nested_quantity_ref_mut);
+define_effect_predicate_quantity_walk!([]; QuantityRef; for_each_source_only_player_quantity_ref; for_each_source_only_player_quantity_ref);
+define_effect_predicate_quantity_walk!([mut]; QuantityRef; clear_predicate_return_result_processes; clear_typed_return_result_processes);
+define_effect_predicate_quantity_walk!([]; Keyword; for_each_predicate_keyword_payload; for_each_nested_keyword_payload);
 
 impl Effect {
     pub(crate) fn for_each_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
@@ -59210,12 +59202,27 @@ mod departure_raw_runtime_replacement_tests {
         definition.sub_ability = Some(Box::new(body));
         definition
     }
-    fn replacement(body: AbilityDefinition) -> ReplacementDefinition {
+    fn replacement(
+        body: AbilityDefinition,
+        state: &mut crate::types::game_state::GameState,
+    ) -> ReplacementDefinition {
         let mut runtime =
             crate::game::ability_utils::build_resolved_from_def(&body, ObjectId(1), PlayerId(0));
         runtime.return_result_process = Some(ReturnResultProcessId(901));
         let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
-        replacement.runtime_execute = Some(Box::new(runtime));
+        replacement.runtime_execute = Some(
+            match state.install_replacement_continuation(runtime.clone()) {
+                Ok(handle) => handle,
+                Err(_) => {
+                    // Deliberately corrupt the arena only after the real installer
+                    // refused this independent import; exercise enclosing preflight.
+                    let handle =
+                        ReplacementContinuationId(state.replacement_continuations.len() as u64);
+                    state.replacement_continuations.push_back(runtime);
+                    handle
+                }
+            },
+        );
         replacement
     }
     fn copied(replacement: ReplacementDefinition) -> CopiableValues {
@@ -59250,7 +59257,8 @@ mod departure_raw_runtime_replacement_tests {
                 2 => producer(7, read(7)),
                 _ => unreachable!(),
             };
-            let replacement = replacement(body);
+            let mut state = crate::types::game_state::GameState::new_two_player(42);
+            let replacement = replacement(body, &mut state);
             let direct = Effect::AddTargetReplacement {
                 replacement: Box::new(replacement.clone()),
                 target: TargetFilter::None,
@@ -59304,7 +59312,16 @@ mod departure_raw_runtime_replacement_tests {
                     7,
                     AbilityDefinition::new(AbilityKind::Spell, effect.clone()),
                 );
-                assert_eq!(validate_instruction_result_definition(&root).is_ok(), body_mode != 0, "raw runtime classification is independent of a colliding enclosing R7 or stale P901");
+                assert!(
+                    validate_instruction_result_definition(&root).is_ok(),
+                    "board-free definitions own only the handle"
+                );
+                let resolved = crate::game::ability_utils::build_resolved_from_def(
+                    &root,
+                    ObjectId(1),
+                    PlayerId(0),
+                );
+                assert_eq!(state.validate_replacement_program(&resolved).is_ok(), body_mode != 0, "state admission classifies the registered body independently of enclosing R7 or stale P901");
                 let cost = AbilityCost::Composite {
                     costs: vec![AbilityCost::OneOf {
                         costs: vec![AbilityCost::PerCounter {
@@ -59316,16 +59333,13 @@ mod departure_raw_runtime_replacement_tests {
                         }],
                     }],
                 };
-                assert_eq!(validate_result_cost_payloads(&cost).is_ok(), body_mode != 0);
-                assert_eq!(
-                    validate_persistent_result_cost(&cost).is_ok(),
-                    body_mode != 0
-                );
+                assert!(validate_result_cost_payloads(&cost).is_ok());
+                assert_eq!(validate_persistent_result_cost(&cost).is_ok(), true);
                 let mut cost_owner = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
                 cost_owner.cost = Some(cost);
                 assert_eq!(
                     validate_instruction_result_definition(&producer(7, cost_owner)).is_ok(),
-                    body_mode != 0
+                    true
                 );
             }
         }
@@ -59342,7 +59356,11 @@ mod departure_raw_runtime_replacement_tests {
         let mut runtime = snapshot;
         runtime.description = Some("Supplemental public runtime cost body".into());
         let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
-        replacement.runtime_execute = Some(Box::new(runtime));
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let handle = state
+            .install_replacement_continuation(runtime.clone())
+            .unwrap();
+        replacement.runtime_execute = Some(handle);
         let cost = AbilityCost::Composite {
             costs: vec![AbilityCost::EffectCost {
                 effect: Box::new(Effect::AddTargetReplacement {
@@ -59352,16 +59370,29 @@ mod departure_raw_runtime_replacement_tests {
             }],
         };
         let original = serde_json::to_value(&cost).unwrap();
-        assert!(original
-            .to_string()
-            .contains("\"return_result_process\":901"));
+        assert_eq!(
+            state
+                .replacement_continuation(handle)
+                .unwrap()
+                .return_result_process,
+            Some(ReturnResultProcessId(901))
+        );
         let mut cleared = cost.clone();
         cleared.clear_embedded_return_result_processes();
         let public = serde_json::to_value(&cleared).unwrap();
         assert!(!public.to_string().contains("return_result_process"));
-        assert!(public
-            .to_string()
-            .contains("Supplemental public runtime cost body"));
+        assert_eq!(
+            public, original,
+            "a board-free cost keeps the same arena handle"
+        );
+        let mut invocation = state.replacement_continuation(handle).unwrap().clone();
+        invocation.clear_return_result_process_recursive();
+        assert_eq!(invocation.return_result_process, None);
+        assert_eq!(
+            state.replacement_continuation(handle),
+            Some(&runtime),
+            "invocation clearing cannot mutate the canonical shared arena"
+        );
         assert!(public.to_string().contains("AddTargetReplacement"));
         let mut resolved = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
         resolved.unless_pay = Some(UnlessPayModifier {

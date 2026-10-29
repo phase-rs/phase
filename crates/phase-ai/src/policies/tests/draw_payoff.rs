@@ -1430,7 +1430,9 @@ fn mandatory_runtime_execute_substitution_is_a_no_op() {
         source,
         AI,
     );
-    let handle = st.install_replacement_continuation(runtime);
+    let handle = st
+        .install_replacement_continuation(runtime)
+        .expect("valid replacement continuation fixture");
     let obj = st.objects.get_mut(&source).unwrap();
     obj.replacement_definitions[0].runtime_execute = Some(handle);
     let (delta, reason) = draw_spell_verdict(&mut st);

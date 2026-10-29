@@ -26,6 +26,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let source_filter = match &ability.effect {
         Effect::ChooseDamageSource { source_filter } => source_filter.clone(),
         _ => {
@@ -38,7 +52,7 @@ pub fn resolve(
     if ability.context.damage_source_choice.is_some() {
         return Ok(());
     }
-    open_source_choice(state, ability, &source_filter, events)?;
+    open_source_choice_owned(state, ability, &source_filter, events, declarations)?;
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -258,7 +272,11 @@ pub(crate) fn damage_source_options(
             continue;
         }
         options.extend(definition.selected_damage_source.clone());
-        if let Some(runtime) = &definition.runtime_execute {
+        if let Some(runtime) = definition
+            .runtime_execute
+            .and_then(|id| usize::try_from(id.0).ok())
+            .and_then(|index| state.replacement_continuations.get(index))
+        {
             referred_by_ability(state, runtime, &mut options);
         }
     }
@@ -284,7 +302,24 @@ pub(crate) fn open_source_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     source_filter: &crate::types::ability::TargetFilter,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| {
+            open_source_choice_owned(state, executable, source_filter, events, owner)
+        },
+    )
+}
+
+pub(crate) fn open_source_choice_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    source_filter: &crate::types::ability::TargetFilter,
     _events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     use crate::types::game_state::{ChosenDamageSource, PendingContinuation, PromptSourceBinding};
     match &ability.effect {
@@ -307,14 +342,18 @@ pub(crate) fn open_source_choice(
         }));
         // Transfer the entire owned chain just as a nonempty prompt does.
         // Resolving it recursively here would let the caller run its tail twice.
-        state.park_ability_continuation(PendingContinuation::new(Box::new(resumed), state));
+        state.park_ability_continuation(PendingContinuation::new_owned(
+            Box::new(resumed),
+            state,
+            declarations,
+        )?);
         return Ok(());
     }
     let options = candidates
         .iter()
         .map(PromptSourceBinding::from_trigger_source)
         .collect();
-    let mut pending = PendingContinuation::new(Box::new(resumed), state);
+    let mut pending = PendingContinuation::new_owned(Box::new(resumed), state, declarations)?;
     pending.damage_source_candidates = candidates;
     state.park_ability_continuation(pending);
     state.waiting_for = WaitingFor::DamageSourceChoice {

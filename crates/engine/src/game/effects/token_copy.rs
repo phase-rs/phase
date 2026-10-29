@@ -48,7 +48,28 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    begin_copy_creation(state, ability, TokenCreationCallerState::Plain, events).map(|_| ())
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    begin_copy_creation_owned(
+        state,
+        ability,
+        TokenCreationCallerState::Plain,
+        events,
+        declarations,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn begin_copy_creation(
@@ -57,15 +78,33 @@ pub(crate) fn begin_copy_creation(
     caller: TokenCreationCallerState,
     events: &mut Vec<GameEvent>,
 ) -> Result<TokenCreationProgress, EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            begin_copy_creation_owned(state, executable, caller, events, declarations)
+        },
+    )
+}
+
+pub(crate) fn begin_copy_creation_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    caller: TokenCreationCallerState,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<TokenCreationProgress, EffectError> {
     let work = prepare_copy_creation(state, ability)?;
-    Ok(begin_creation(
+    begin_creation_owned(
         state,
         ability,
         work,
         EffectKind::from(&ability.effect),
         caller,
         events,
-    ))
+        declarations,
+    )
 }
 
 pub(crate) fn prepare_copy_creation(
@@ -522,6 +561,7 @@ pub(crate) fn drive_copy_token_batches(
         TokenCreationCallerState::Plain,
         events,
     )
+    .expect("fixed legacy copy batch has no instruction-result readers or producers")
 }
 
 pub(crate) fn copy_batches_to_work(
@@ -559,8 +599,35 @@ pub(crate) fn begin_creation(
     effect_kind: EffectKind,
     caller: TokenCreationCallerState,
     events: &mut Vec<GameEvent>,
-) -> TokenCreationProgress {
-    let id = install_creation(state, ability, work, effect_kind, caller);
+) -> Result<TokenCreationProgress, EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            begin_creation_owned(
+                state,
+                executable,
+                work,
+                effect_kind,
+                caller,
+                events,
+                declarations,
+            )
+        },
+    )
+}
+
+pub(crate) fn begin_creation_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    work: VecDeque<TokenCreationWork>,
+    effect_kind: EffectKind,
+    caller: TokenCreationCallerState,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<TokenCreationProgress, EffectError> {
+    let id = install_creation_owned(state, ability, work, effect_kind, caller, declarations)?;
     if state
         .resolution_stack
         .token_creation(id)
@@ -568,26 +635,67 @@ pub(crate) fn begin_creation(
         .pending
         == Some(TokenCreationPending::CallerSelection)
     {
-        return TokenCreationProgress::Pending(id);
+        return Ok(TokenCreationProgress::Pending(id));
     }
-    drive_creation(state, id, events)
+    Ok(drive_creation(state, id, events))
 }
 
 pub(crate) fn install_creation(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    work: VecDeque<TokenCreationWork>,
+    effect_kind: EffectKind,
+    caller: TokenCreationCallerState,
+) -> Result<TokenCreationFrameId, EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            install_creation_owned(state, executable, work, effect_kind, caller, declarations)
+        },
+    )
+}
+
+pub(crate) fn install_creation_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
     mut work: VecDeque<TokenCreationWork>,
     effect_kind: EffectKind,
     caller: TokenCreationCallerState,
-) -> TokenCreationFrameId {
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<TokenCreationFrameId, EffectError> {
+    super::validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )?;
     let mut creator = ability.clone();
-    let continuation = creator.sub_ability.take().map(|mut tail| {
-        if super::should_propagate_parent_targets(ability, &tail) {
-            tail.replace_target_occurrences(super::inherited_parent_occurrences(ability, &tail));
+    let continuation = match creator.sub_ability.take() {
+        Some(mut tail) => {
+            if super::should_propagate_parent_targets(ability, &tail) {
+                tail.replace_target_occurrences(super::inherited_parent_occurrences(
+                    ability, &tail,
+                ));
+            }
+            super::project_parent_chain_context(
+                &mut tail,
+                ability,
+                None,
+                state.last_parent_target_missing_reason.clone(),
+            );
+            Some(Box::new(PendingContinuation::new_owned(
+                tail,
+                state,
+                declarations,
+            )?))
         }
-        super::apply_parent_chain_context(&mut tail, ability, None, state);
-        Box::new(PendingContinuation::new(tail, state))
-    });
+        None => None,
+    };
+    if continuation.is_some() {
+        state.last_parent_target_missing_reason = None;
+    }
     let parent = creator.context.token_creation_parent.take();
     if let Some(parent) = parent.as_ref() {
         assert!(
@@ -635,7 +743,7 @@ pub(crate) fn install_creation(
             valid_tokens,
         };
     }
-    id
+    Ok(id)
 }
 
 /// Store a settled primary behind the expansion work queued by its replacements.
@@ -7596,7 +7704,8 @@ pub(crate) mod tests {
             EffectKind::CopyTokenOf,
             TokenCreationCallerState::Plain,
             &mut events,
-        );
+        )
+        .expect("token creation fixture admits its complete program");
         let TokenCreationProgress::Completed(result) = progress else {
             panic!("single deferred entry completes")
         };
@@ -7913,7 +8022,8 @@ pub(crate) mod tests {
             work,
             EffectKind::CopyTokenOf,
             TokenCreationCallerState::Plain,
-        );
+        )
+        .expect("token creation fixture admits its complete program");
         let member = ObjectIncarnationRef::from_object(&state.objects[&source]);
         state
             .resolution_stack
@@ -8364,7 +8474,8 @@ pub(crate) mod tests {
             work,
             EffectKind::CopyTokenOf,
             TokenCreationCallerState::Plain,
-        );
+        )
+        .expect("token creation fixture admits its complete program");
         let mut gift = ResolvedAbility::new(
             Effect::GiftDelivery {
                 kind: crate::types::keywords::GiftKind::Treasure,
@@ -9951,7 +10062,8 @@ pub(crate) mod tests {
             EffectKind::CopyTokenOf,
             TokenCreationCallerState::Plain,
             &mut events,
-        );
+        )
+        .expect("token creation fixture admits its complete program");
         assert!(matches!(pending, TokenCreationProgress::Pending(_)));
         assert!(matches!(
             state.waiting_for,

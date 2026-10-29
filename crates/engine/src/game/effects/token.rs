@@ -486,6 +486,15 @@ pub fn resolve(
     resolve_with_host_override(state, ability, events, None)
 }
 
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    resolve_with_host_override_owned(state, ability, events, None, declarations)
+}
+
 /// Resume a batch host choice before allocating the token creation owner.
 pub(crate) fn resolve_with_host_override(
     state: &mut GameState,
@@ -493,9 +502,26 @@ pub(crate) fn resolve_with_host_override(
     events: &mut Vec<GameEvent>,
     host_override: Option<AttachTarget>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            resolve_with_host_override_owned(state, executable, events, host_override, declarations)
+        },
+    )
+}
+
+pub(crate) fn resolve_with_host_override_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    host_override: Option<AttachTarget>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let attach_to = match &ability.effect {
         Effect::Token { attach_to, .. } => attach_to,
-        _ => return no_token(state, ability, events),
+        _ => return no_token_owned(state, ability, events, declarations),
     };
     let host_request = if let Some(host) = host_override {
         // Resumed after a "one of them" host choice: the choice is bound.
@@ -508,7 +534,11 @@ pub(crate) fn resolve_with_host_override(
             // side-effect-free up to this point.
             Some(candidates) if candidates.len() > 1 => {
                 state.waiting_for = WaitingFor::ChooseTokenHost {
-                    return_result_occurrence: state.active_return_result_occurrence,
+                    return_result_occurrence: super::retained_return_result_occurrence(
+                        state,
+                        ability,
+                        declarations,
+                    )?,
                     player: ability.controller,
                     source_id: ability.source_id,
                     legal_targets: candidates,
@@ -540,17 +570,19 @@ pub(crate) fn resolve_with_host_override(
         crate::types::game_state::TokenCreationCallerState::Plain,
         events,
         Some(host_request),
-    );
+        declarations,
+    )?;
     Ok(())
 }
 
-pub(crate) fn begin_token_creation(
+pub(crate) fn begin_token_creation_owned(
     state: &mut GameState,
     ability: &ResolvedAbility,
     caller: crate::types::game_state::TokenCreationCallerState,
     events: &mut Vec<GameEvent>,
-) -> crate::types::game_state::TokenCreationProgress {
-    begin_token_creation_with_host(state, ability, caller, events, None)
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<crate::types::game_state::TokenCreationProgress, EffectError> {
+    begin_token_creation_with_host(state, ability, caller, events, None, declarations)
 }
 
 fn begin_token_creation_with_host(
@@ -559,7 +591,14 @@ fn begin_token_creation_with_host(
     caller: crate::types::game_state::TokenCreationCallerState,
     events: &mut Vec<GameEvent>,
     host_override: Option<TokenHostRequest>,
-) -> crate::types::game_state::TokenCreationProgress {
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<crate::types::game_state::TokenCreationProgress, EffectError> {
+    super::validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )?;
     let work = resolve_token_spec(state, ability)
         .map(|(mut spec, owner, enter_tapped, count)| {
             if let Some(host) = host_override {
@@ -614,13 +653,14 @@ fn begin_token_creation_with_host(
         }
     }
 
-    super::token_copy::begin_creation(
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         work,
         EffectKind::from(&ability.effect),
         caller,
         events,
+        declarations,
     )
 }
 
@@ -729,14 +769,29 @@ pub(crate) fn no_token(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    super::token_copy::begin_creation(
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| no_token_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn no_token_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         Default::default(),
         EffectKind::from(&ability.effect),
         crate::types::game_state::TokenCreationCallerState::Plain,
         events,
-    );
+        declarations,
+    )?;
     Ok(())
 }
 

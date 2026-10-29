@@ -3031,6 +3031,8 @@ pub struct ReturnResultFrame {
     pub process: Option<ReturnResultProcessId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) declarations: Option<crate::types::ability::ResultProducerEnvironment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admitted_program: Option<Box<ResolvedAbility>>,
     pub results: BTreeMap<ReturnResultId, InstructionResult>,
 }
 
@@ -3042,6 +3044,8 @@ enum ReturnResultFrameWire {
         process: Option<ReturnResultProcessId>,
         #[serde(default, deserialize_with = "deserialize_result_declarations")]
         declarations: Option<crate::types::ability::ResultProducerEnvironment>,
+        #[serde(default)]
+        admitted_program: Option<Box<ResolvedAbility>>,
         #[serde(deserialize_with = "deserialize_instruction_results")]
         results: BTreeMap<ReturnResultId, InstructionResult>,
     },
@@ -3107,15 +3111,18 @@ impl From<ReturnResultFrameWire> for ReturnResultFrame {
             ReturnResultFrameWire::Owned {
                 process,
                 declarations,
+                admitted_program,
                 results,
             } => Self {
                 process,
                 declarations,
+                admitted_program,
                 results,
             },
             ReturnResultFrameWire::Legacy(results) => Self {
                 process: None,
                 declarations: None,
+                admitted_program: None,
                 results,
             },
         }
@@ -3332,7 +3339,7 @@ impl PendingContinuation {
     pub(crate) fn new_owned(
         chain: Box<ResolvedAbility>,
         state: &GameState,
-        declarations: &crate::types::ability::ResultProducerEnvironment,
+        declarations: crate::game::effects::AdmittedInstructionResult<'_>,
     ) -> Result<Self, crate::types::ability::EffectError> {
         let occurrence =
             crate::game::effects::retained_return_result_occurrence(state, &chain, declarations)?;
@@ -3356,7 +3363,7 @@ impl PendingContinuation {
     pub fn new(chain: Box<ResolvedAbility>, state: &GameState) -> Self {
         Self {
             chain,
-            return_result_occurrence: state.active_return_result_occurrence,
+            return_result_occurrence: None,
             pending_return_result_producer: None,
             damage_source_candidates: Vec::new(),
             parent_kind: None,
@@ -3382,7 +3389,7 @@ impl PendingContinuation {
     ) -> Self {
         Self {
             chain,
-            return_result_occurrence: state.active_return_result_occurrence,
+            return_result_occurrence: None,
             pending_return_result_producer: None,
             damage_source_candidates: Vec::new(),
             parent_kind: Some(parent_kind),
@@ -9589,10 +9596,78 @@ impl GameState {
     pub fn install_replacement_continuation(
         &mut self,
         rider: ResolvedAbility,
-    ) -> ReplacementContinuationId {
+    ) -> Result<ReplacementContinuationId, crate::types::ability::EffectError> {
+        crate::types::ability::classify_instruction_result_invocation(
+            &rider,
+            crate::types::ability::InstructionResultEntry::Independent,
+            None,
+        )?;
+        self.validate_replacement_program(&rider)?;
         let id = ReplacementContinuationId(self.replacement_continuations.len() as u64);
         self.replacement_continuations.push_back(rider);
-        id
+        Ok(id)
+    }
+
+    pub(crate) fn validate_replacement_program(
+        &self,
+        program: &ResolvedAbility,
+    ) -> Result<(), crate::types::ability::EffectError> {
+        use crate::types::ability::{
+            classify_instruction_result_invocation, EffectError, InstructionResultEntry,
+        };
+        fn validate(
+            state: &GameState,
+            program: &ResolvedAbility,
+            visiting: &mut BTreeSet<u64>,
+            done: &mut BTreeSet<u64>,
+        ) -> Result<(), EffectError> {
+            let mut references = BTreeSet::new();
+            crate::types::ability_visit::visit_resolved_replacements(program, &mut |definition| {
+                if let Some(id) = definition.runtime_execute {
+                    references.insert(id.0);
+                }
+            });
+            for id in references {
+                if done.contains(&id) {
+                    continue;
+                }
+                if !visiting.insert(id) {
+                    return Err(EffectError::InvalidParam(
+                        "cyclic replacement continuation program".into(),
+                    ));
+                }
+                let body = usize::try_from(id)
+                    .ok()
+                    .and_then(|index| state.replacement_continuations.get(index))
+                    .ok_or_else(|| {
+                        EffectError::InvalidParam(format!("dangling replacement continuation {id}"))
+                    })?;
+                classify_instruction_result_invocation(
+                    body,
+                    InstructionResultEntry::Independent,
+                    None,
+                )?;
+                validate(state, body, visiting, done)?;
+                visiting.remove(&id);
+                done.insert(id);
+            }
+            Ok(())
+        }
+        validate(self, program, &mut BTreeSet::new(), &mut BTreeSet::new())
+    }
+
+    pub(crate) fn validate_replacement_continuation_arena(&self) -> Result<(), String> {
+        for program in self.replacement_continuations.iter() {
+            crate::types::ability::classify_instruction_result_invocation(
+                program,
+                crate::types::ability::InstructionResultEntry::Independent,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            self.validate_replacement_program(program)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     /// CR 615.5 + CR 614.6: the single read authority for a runtime continuation.
@@ -14964,7 +15039,7 @@ pub(crate) fn reads_return_result_id(ability: &ResolvedAbility, result_id: Retur
             .is_some_and(|branch| reads_return_result_id(branch, result_id))
 }
 
-fn retained_result_waits(state: &GameState) -> Vec<&WaitingFor> {
+pub(crate) fn retained_result_waits(state: &GameState) -> Vec<&WaitingFor> {
     let mut waits = vec![&state.waiting_for];
     if let Some(wait) = state
         .pending_trigger_order
@@ -14998,6 +15073,454 @@ fn retained_result_waits(state: &GameState) -> Vec<&WaitingFor> {
         }
     }
     waits
+}
+
+/// Actual typed custody only. The admitted-program snapshot is deliberately
+/// absent: it neither keeps its own occurrence alive nor schedules work.
+fn retained_instruction_result_carriers(
+    state: &GameState,
+) -> Result<Vec<(Option<ReturnResultOccurrenceId>, &ResolvedAbility)>, String> {
+    let mut out: Vec<_> = retained_payment_result_owners(state)
+        .into_iter()
+        .map(|(occurrence, body, _)| (occurrence, body))
+        .collect();
+    for waiting in retained_result_waits(state) {
+        let occurrence = match waiting {
+            WaitingFor::RepeatDecision {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseTokenHost {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::UnlessPayment {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::UnlessPaymentChooseCost {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::WardDiscardChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::WardSacrificeChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::UnlessBounceChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ExploreChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ClashChooseOpponent {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseFromZoneOpponentChooser {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::MultiTargetSelection {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseOneOfBranch {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::VoteChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::SeparatePilesChooseOpponent {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::SeparatePilesPartition {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::SeparatePilesChoice {
+                return_result_occurrence,
+                ..
+            }
+            | WaitingFor::ChooseManaColor {
+                return_result_occurrence,
+                ..
+            } => *return_result_occurrence,
+            _ => None,
+        };
+        if occurrence.is_some() {
+            visit_waiting_for_chains(waiting, &mut |body, _| {
+                out.push((occurrence, body));
+                Ok(())
+            })?;
+        }
+    }
+    for frame in state.resolution_stack.iter() {
+        match frame {
+            ResolutionFrame::OptionalEffect(pending) => {
+                out.push((pending.return_result_occurrence, &pending.ability))
+            }
+            ResolutionFrame::AbilityContinuation(frame) => {
+                out.push((frame.pending.return_result_occurrence, &frame.pending.chain));
+                if let Some(parent) = &frame.pending.attachment_remainder {
+                    out.push((frame.pending.return_result_occurrence, &parent.producer));
+                }
+                if let Some(parent) = &frame.pending.attachment_choice {
+                    out.push((frame.pending.return_result_occurrence, &parent.operation));
+                }
+            }
+            ResolutionFrame::RepeatFor(pending) => {
+                out.push((pending.return_result_occurrence, &pending.ability))
+            }
+            ResolutionFrame::RepeatUntil(pending) => {
+                out.push((pending.return_result_occurrence, &pending.ability))
+            }
+            ResolutionFrame::PerPlayerZoneChoice(pending) => {
+                out.push((pending.return_result_occurrence, &pending.ability))
+            }
+            ResolutionFrame::PerCategoryZoneChoice(frame) => out.push((
+                frame.pending.return_result_occurrence,
+                &frame.pending.ability,
+            )),
+            ResolutionFrame::BatchDelivery(batch) => {
+                if let Some(BatchCompletion::ForEachCategoryExileComplete {
+                    return_result_occurrence,
+                    ability,
+                    ..
+                }) = &batch.completion
+                {
+                    out.push((*return_result_occurrence, ability));
+                }
+                if let Some(BatchCompletion::LibrarySearchDeliverySettled {
+                    resume:
+                        LibrarySearchDeliveryResume::Scoped {
+                            return_result_occurrence,
+                            after_scope: Some(body),
+                            ..
+                        },
+                }) = &batch.completion
+                {
+                    out.push((*return_result_occurrence, body));
+                }
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                if let Some(body) = &pending.continuation {
+                    out.push((pending.return_result_occurrence, body));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(pending) = &state.pending_scoped_library_search {
+        out.push((pending.return_result_occurrence, &pending.ability));
+        if let Some(body) = &pending.after_scope {
+            out.push((pending.return_result_occurrence, body));
+        }
+    }
+    if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
+        out.push((pending.return_result_occurrence, &pending.ability));
+    }
+    if let Some(pending) = &state.pending_player_scope_unless_payment {
+        out.push((pending.return_result_occurrence, &pending.pending_effect));
+    }
+    if let Some(pending) = state
+        .pending_discard_batch
+        .as_ref()
+        .and_then(|pending| pending.fan_out.as_ref())
+    {
+        out.push((pending.return_result_occurrence, &pending.scoped_template));
+        out.push((pending.return_result_occurrence, &pending.outer));
+    }
+    if let Some(LibrarySearchDeliveryResume::Scoped {
+        return_result_occurrence,
+        after_scope: Some(body),
+        ..
+    }) = &state.pending_library_search_delivery
+    {
+        out.push((*return_result_occurrence, body));
+    }
+    if let Some(PendingCostMoveResume::SacrificeForCost {
+        completion: PendingSacrificeCostCompletion::ResolutionOptionalPayment { frame, .. },
+        ..
+    }) = &state.pending_cost_move_resume
+    {
+        out.push((frame.return_result_occurrence, &frame.ability));
+    }
+    Ok(out)
+}
+
+pub(crate) fn is_retained_instruction_result_carrier(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    ability: &ResolvedAbility,
+) -> bool {
+    retained_instruction_result_carriers(state).is_ok_and(|carriers| {
+        carriers.into_iter().any(|(owner, body)| {
+            owner == occurrence
+                && crate::game::effects::instruction_result_projection_eq(body, ability)
+        })
+    })
+}
+
+fn retained_instruction_result_projection(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    program: &ResolvedAbility,
+    body: &ResolvedAbility,
+) -> bool {
+    if let Some(choice) = retained_result_waits(state)
+        .into_iter()
+        .find_map(|waiting| match waiting {
+            WaitingFor::ChooseManaColor {
+                return_result_occurrence,
+                choice,
+                context: ManaChoiceContext::ResolvingEffect(pending),
+                ..
+            } if *return_result_occurrence == occurrence && pending.as_ref() == body => {
+                Some(choice)
+            }
+            _ => None,
+        })
+    {
+        return crate::game::effects::mana::admitted_mana_response_matches_program(
+            state, program, body, choice,
+        );
+    }
+    crate::game::effects::instruction_result_owned_program_projects_to(
+        state, occurrence, program, body,
+    )
+}
+
+/// Recover missing metadata from the exact invocation's retained executable
+/// authorities. A declaration map or an equal integer on another source is
+/// never a program origin. All edits remain on the decoder-owned state.
+pub(crate) fn recover_return_result_programs(state: &mut GameState) -> Result<(), String> {
+    use crate::types::ability::{classify_instruction_result_invocation, InstructionResultEntry};
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    let mut definition_carriers = Vec::new();
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::CoinFlip(pending) = frame {
+            pending.branch_context.validate_branches(&[
+                pending.win_effect.as_deref(),
+                pending.lose_effect.as_deref(),
+            ])?;
+            for (outcome, definition) in [
+                (
+                    crate::types::ability::CoinFlipResult::Won,
+                    pending.win_effect.as_deref(),
+                ),
+                (
+                    crate::types::ability::CoinFlipResult::Lost,
+                    pending.lose_effect.as_deref(),
+                ),
+            ] {
+                if let Some(body) = crate::game::effects::flip_coin::build_flip_branch(
+                    state,
+                    definition,
+                    outcome,
+                    pending.source_id,
+                    pending.controller,
+                    &pending.targets,
+                    &pending.chain_root_targets,
+                    &pending.branch_context,
+                    pending.expected_return_result_process,
+                )
+                .map_err(|error| error.to_string())?
+                {
+                    definition_carriers.push((pending.return_result_occurrence, body));
+                }
+            }
+        }
+    }
+    let mut recovered = Vec::new();
+    for (occurrence, frame) in state.return_result_frames.iter() {
+        if let Some(program) = frame.admitted_program.as_deref() {
+            let (_, declarations) = classify_instruction_result_invocation(
+                program,
+                InstructionResultEntry::Independent,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            if program.return_result_process != frame.process
+                || frame
+                    .declarations
+                    .as_ref()
+                    .is_some_and(|saved| saved != &declarations)
+                || frame
+                    .results
+                    .keys()
+                    .any(|id| !declarations.contains_key(id))
+            {
+                return Err("instruction-result admitted program declaration mismatch".into());
+            }
+            if frame.declarations.is_none() {
+                recovered.push((*occurrence, program.clone(), declarations));
+            }
+            continue;
+        }
+        let carriers: Vec<_> = retained_instruction_result_carriers(state)?
+            .into_iter()
+            .chain(
+                definition_carriers
+                    .iter()
+                    .map(|(owner, body)| (*owner, body)),
+            )
+            .filter(|(owner, body)| {
+                *owner == Some(*occurrence) && body.return_result_process == frame.process
+            })
+            .map(|(_, body)| body)
+            .collect();
+        if carriers.is_empty() && frame.results.is_empty() {
+            continue;
+        }
+        let mut candidates: Vec<ResolvedAbility> =
+            carriers.iter().map(|body| (*body).clone()).collect();
+        if let Some(root) = state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+        {
+            if carriers
+                .iter()
+                .any(|body| same_instruction_result_invocation_inputs(root, body))
+            {
+                let mut root = root.clone();
+                root.bind_return_result_process(frame.process);
+                candidates.push(root);
+            }
+        }
+        for body in &carriers {
+            if let Some((source, reference)) = body
+                .trigger_source
+                .as_ref()
+                .zip(body.trigger_definition_ref.as_ref())
+            {
+                for entry in &source.trigger_entries {
+                    if source.definition_ref(entry) != *reference {
+                        continue;
+                    }
+                    if let Some(definition) = entry.definition.execute.as_deref() {
+                        let mut root = crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                            definition, body.source_id, body.original_controller.unwrap_or(body.controller),
+                            body.context.chain_root_targets.clone(), body.context.chain_root_targets.clone(),
+                        );
+                        root.inherit_coin_target_inputs(&body.coin_target_input_projection());
+                        root.bind_return_result_process(frame.process);
+                        candidates.push(root);
+                    }
+                }
+            }
+            if let Some((object, definition)) = body.ability_index.and_then(|index| {
+                let object = state.objects.get(&body.source_id)?;
+                let birth = body.source_incarnation.or_else(|| {
+                    body.trigger_source
+                        .as_ref()
+                        .map(|source| source.identity.reference.incarnation)
+                })?;
+                (object.incarnation == birth).then_some((object, object.abilities.get(index)?))
+            }) {
+                let mut root =
+                    crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                        definition,
+                        object.id,
+                        body.original_controller.unwrap_or(body.controller),
+                        body.context.chain_root_targets.clone(),
+                        body.context.chain_root_targets.clone(),
+                    );
+                root.inherit_coin_target_inputs(&body.coin_target_input_projection());
+                root.bind_return_result_process(frame.process);
+                candidates.push(root);
+            }
+        }
+        let mut meanings = Vec::new();
+        for candidate in candidates {
+            let Ok((_, declarations)) = classify_instruction_result_invocation(
+                &candidate,
+                InstructionResultEntry::Independent,
+                None,
+            ) else {
+                continue;
+            };
+            if declarations.is_empty()
+                || frame
+                    .declarations
+                    .as_ref()
+                    .is_some_and(|saved| saved != &declarations)
+                || frame
+                    .results
+                    .keys()
+                    .any(|id| !declarations.contains_key(id))
+                || !carriers.iter().all(|body| {
+                    retained_instruction_result_projection(
+                        state,
+                        Some(*occurrence),
+                        &candidate,
+                        body,
+                    )
+                })
+            {
+                continue;
+            }
+            if !meanings.iter().any(|(program, namespace)| {
+                namespace == &declarations
+                    && same_instruction_result_invocation_inputs(program, &candidate)
+                    && carriers.iter().all(|body| {
+                        retained_instruction_result_projection(
+                            state,
+                            Some(*occurrence),
+                            program,
+                            body,
+                        )
+                    })
+            }) {
+                meanings.push((candidate, declarations));
+            }
+        }
+        let Some((program, declarations)) = meanings.pop() else {
+            return Err(format!("instruction-result occurrence {:?} has unrecoverable full program origin after retained authority recovery", occurrence));
+        };
+        if !meanings.is_empty() {
+            return Err(format!(
+                "instruction-result occurrence {:?} has ambiguous retained full program origin",
+                occurrence
+            ));
+        }
+        recovered.push((*occurrence, program, declarations));
+    }
+    for (occurrence, program, declarations) in recovered {
+        let frame = state
+            .return_result_frames
+            .get_mut(&occurrence)
+            .expect("recovery retains its frame");
+        frame.admitted_program = Some(Box::new(program));
+        frame.declarations = Some(declarations);
+    }
+    Ok(())
+}
+
+fn same_instruction_result_invocation_inputs(a: &ResolvedAbility, b: &ResolvedAbility) -> bool {
+    a.source_id == b.source_id
+        && a.controller == b.original_controller.unwrap_or(b.controller)
+        && a.source_incarnation == b.source_incarnation
+        && a.announced_source_incarnation == b.announced_source_incarnation
+        && a.cast_occurrence == b.cast_occurrence
+        && a.trigger_source == b.trigger_source
+        && a.trigger_definition_ref == b.trigger_definition_ref
+        && a.ability_index == b.ability_index
+        && a.chosen_x == b.chosen_x
+        && a.cost_paid_object == b.cost_paid_object
+        && a.noted_mana_payment == b.noted_mana_payment
+        && a.cost_paid_objects == b.cost_paid_objects
 }
 
 // Follow existing typed payment custody only. Independent source definitions,
@@ -15678,6 +16201,24 @@ fn validate_retained_result_readers(
     mut future: HashSet<ReturnResultId>,
 ) -> Result<(), String> {
     crate::game::ability_utils::validate_coin_target_authority(root)?;
+    if occurrence.is_none()
+        && matches!(
+            crate::types::ability::classify_instruction_result_invocation(
+                root,
+                crate::types::ability::InstructionResultEntry::SelectedBody,
+                None
+            ),
+            Ok((
+                crate::types::ability::InstructionResultProcess::Local { .. },
+                _
+            )),
+        )
+    {
+        state
+            .validate_replacement_program(root)
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
     if let Some(id) = root.declares_return_result {
         future.insert(id);
     }
@@ -15756,25 +16297,28 @@ fn validate_retained_result_readers(
     Ok(())
 }
 
-fn retained_continuation_future_results(
+pub(crate) fn pending_instruction_results(
     state: &GameState,
-    pending: &PendingContinuation,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    process: Option<ReturnResultProcessId>,
 ) -> HashSet<ReturnResultId> {
-    let mut future: HashSet<_> = pending
-        .pending_return_result_producer
-        .map(|(_, result)| result)
-        .into_iter()
-        .collect();
+    let mut pending = HashSet::new();
+    let mut add = |owner, expected, result| {
+        if Some(owner) == occurrence && expected == process {
+            pending.insert(result);
+        }
+    };
     for frame in state.resolution_stack.iter() {
         match frame {
+            ResolutionFrame::AbilityContinuation(frame) => {
+                if let Some((owner, result)) = frame.pending.pending_return_result_producer {
+                    add(owner, frame.pending.chain.return_result_process, result);
+                }
+            }
             ResolutionFrame::ChangeZone(frame) => {
-                if let Some(work) = frame.pending.as_ref() {
-                    if work.return_result_process == pending.chain.return_result_process {
-                        if let Some((occurrence, result)) = work.pending_return_result_producer {
-                            if Some(occurrence) == pending.return_result_occurrence {
-                                future.insert(result);
-                            }
-                        }
+                if let Some(work) = &frame.pending {
+                    if let Some((owner, result)) = work.pending_return_result_producer {
+                        add(owner, work.return_result_process, result);
                     }
                 }
             }
@@ -15784,18 +16328,53 @@ fn retained_continuation_future_results(
                     result_id,
                     return_result_process,
                     ..
-                }) = batch.completion.as_ref()
+                }) = &batch.completion
                 {
-                    if Some(*occurrence_id) == pending.return_result_occurrence
-                        && *return_result_process == pending.chain.return_result_process
-                    {
-                        future.insert(*result_id);
-                    }
+                    add(*occurrence_id, *return_result_process, *result_id);
+                }
+            }
+            ResolutionFrame::CounterRemovals(queue) => {
+                if let Some(binding) = &queue.result_binding {
+                    add(binding.occurrence, binding.process, binding.result);
                 }
             }
             _ => {}
         }
     }
+    if let Some(ProposedEvent::RemoveCounter {
+        result_binding: Some(binding),
+        ..
+    }) = state
+        .pending_replacement
+        .as_ref()
+        .map(|pending| &pending.proposed)
+    {
+        add(binding.occurrence, binding.process, binding.result);
+    }
+    for waiting in retained_result_waits(state) {
+        if let WaitingFor::ChooseOneOfBranch { context, .. } = waiting {
+            if let Some(binding) = &context.counter_removal_result {
+                add(binding.occurrence, binding.process, binding.result);
+            }
+        }
+    }
+    pending
+}
+
+fn retained_continuation_future_results(
+    state: &GameState,
+    pending: &PendingContinuation,
+) -> HashSet<ReturnResultId> {
+    let mut future = pending_instruction_results(
+        state,
+        pending.return_result_occurrence,
+        pending.chain.return_result_process,
+    );
+    future.extend(
+        pending
+            .pending_return_result_producer
+            .map(|(_, result)| result),
+    );
     future
 }
 
@@ -16175,6 +16754,30 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
 }
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
+    for (occurrence, body) in retained_instruction_result_carriers(state)? {
+        if has_return_result_metadata(body) {
+            if occurrence.is_none()
+                && matches!(
+                    crate::types::ability::classify_instruction_result_invocation(
+                        body,
+                        crate::types::ability::InstructionResultEntry::SelectedBody,
+                        None
+                    ),
+                    Ok((
+                        crate::types::ability::InstructionResultProcess::Local { .. },
+                        _
+                    )),
+                )
+            {
+                state
+                    .validate_replacement_program(body)
+                    .map_err(|error| error.to_string())?;
+                continue;
+            }
+            crate::game::effects::owned_cursor_declarations(state, occurrence, body)
+                .map_err(|error| error.to_string())?;
+        }
+    }
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
         if let Some(ability) = entry.ability() {
             crate::game::ability_utils::validate_coin_target_authority(ability)?;
@@ -16513,11 +17116,38 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                     )
                 })?;
             }
-            let summary = crate::types::ability::classify_instruction_result_invocation(
-                ability,
-                crate::types::ability::InstructionResultEntry::ResumeOwned,
-                None,
-            )
+            let summary = if occurrence.is_some() && has_return_result_metadata(ability) {
+                let (program, declarations) =
+                    crate::game::effects::owned_cursor_declarations(state, occurrence, ability)
+                        .map_err(|error| error.to_string())?;
+                let completed: crate::types::ability::ResultProducerEnvironment = declarations
+                    .iter()
+                    .filter(|(id, _)| {
+                        state.return_result_frames[&occurrence.expect("checked occurrence")]
+                            .results
+                            .contains_key(id)
+                            && !pending_instruction_results(
+                                state,
+                                occurrence,
+                                ability.return_result_process,
+                            )
+                            .contains(id)
+                    })
+                    .map(|(id, zones)| (*id, *zones))
+                    .collect();
+                let _ = program;
+                crate::types::ability::classify_instruction_result_invocation(
+                    ability,
+                    crate::types::ability::InstructionResultEntry::ResumeOwned,
+                    Some((&declarations, &completed)),
+                )
+            } else {
+                crate::types::ability::classify_instruction_result_invocation(
+                    ability,
+                    crate::types::ability::InstructionResultEntry::ResumeOwned,
+                    None,
+                )
+            }
             .map(|(summary, _)| summary)
             .map_err(|error| error.to_string())?;
             if occurrence.is_none()
@@ -16744,7 +17374,19 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                             id
                         ));
                     }
-                    None if has_return_result_metadata(&pending.chain) => {
+                    None if has_return_result_metadata(&pending.chain)
+                        && !matches!(
+                            crate::types::ability::classify_instruction_result_invocation(
+                                &pending.chain,
+                                crate::types::ability::InstructionResultEntry::SelectedBody,
+                                None
+                            ),
+                            Ok((
+                                crate::types::ability::InstructionResultProcess::Local { .. },
+                                _
+                            )),
+                        ) =>
+                    {
                         return Err(
                             "return-result continuation has no occurrence stamp".to_string()
                         );
@@ -18335,6 +18977,146 @@ fn reject_dangling_state_handles(
         )),
         _ => Ok(()),
     }
+}
+
+/// Lift the old inline representation before typed decoding can erase or reject
+/// it. This only relocates a program; ordinary authority validation still owns
+/// its source, lifetime and invocation. Work on the decoder's private value.
+fn prepare_replacement_continuation_arena(value: &mut serde_json::Value) -> Result<(), String> {
+    use serde_json::Value;
+    let object = value
+        .as_object_mut()
+        .ok_or("game state must be a JSON object")?;
+    let mut arena = match object.remove("replacement_continuations") {
+        None => Vec::new(),
+        Some(Value::Array(entries)) => entries,
+        Some(_) => return Err("replacement_continuations must be an array".into()),
+    };
+    let recorded = arena.len();
+    fn lift(node: &mut Value, arena: &mut Vec<Value>, recorded: usize) -> Result<(), String> {
+        match node {
+            Value::Array(values) => {
+                for value in values {
+                    lift(value, arena, recorded)?;
+                }
+            }
+            Value::Object(fields) => {
+                for (key, child) in fields.iter_mut() {
+                    if key == "runtime_execute" {
+                        match child {
+                            Value::Null => {},
+                            Value::Number(number) => {
+                                let index = number.as_u64().ok_or("runtime_execute must name an unsigned arena position")?;
+                                if index >= recorded as u64 {
+                                    return Err(format!("serialized runtime_execute names replacement continuation {index}, but the state records {recorded}"));
+                                }
+                            }
+                            Value::Object(_) => {
+                                let mut body = std::mem::take(child);
+                                lift(&mut body, arena, recorded)?;
+                                let index = arena.len();
+                                arena.push(body);
+                                *child = Value::from(index as u64);
+                            }
+                            _ => return Err("runtime_execute must be null, an arena position, or a legacy resolved program".into()),
+                        }
+                    } else {
+                        lift(child, arena, recorded)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    // Existing positions stay fixed, including when one of their bodies refers
+    // to a nested old inline program appended during this pass.
+    for index in 0..recorded {
+        let mut body = std::mem::take(&mut arena[index]);
+        lift(&mut body, &mut arena, recorded)?;
+        arena[index] = body;
+    }
+    lift(value, &mut arena, recorded)?;
+    fn visit(
+        index: usize,
+        arena: &[Value],
+        visiting: &mut BTreeSet<usize>,
+        done: &mut BTreeSet<usize>,
+    ) -> Result<(), String> {
+        if done.contains(&index) {
+            return Ok(());
+        }
+        if !visiting.insert(index) {
+            return Err("cyclic replacement continuation program".into());
+        }
+        let body = arena
+            .get(index)
+            .ok_or("dangling replacement continuation program")?;
+        for target in collect_serialized_state_handles(body).replacement_continuations {
+            let target = usize::try_from(target)
+                .map_err(|_| "replacement continuation position overflow")?;
+            visit(target, arena, visiting, done)?;
+        }
+        visiting.remove(&index);
+        done.insert(index);
+        Ok(())
+    }
+    let mut done = BTreeSet::new();
+    for index in 0..arena.len() {
+        visit(index, &arena, &mut BTreeSet::new(), &mut done)?;
+    }
+    // Remembered definitions are by-value preferences, never new live handles.
+    fn preferences(node: &mut Value, arena: &[Value]) -> Result<(), String> {
+        match node {
+            Value::Array(values) => {
+                for child in values {
+                    preferences(child, arena)?;
+                }
+            }
+            Value::Object(fields) => {
+                if fields.get("type").and_then(Value::as_str) == Some("Definition") {
+                    if let Some(data) = fields.get_mut("data").and_then(Value::as_object_mut) {
+                        let handle = data
+                            .get("definition")
+                            .and_then(|definition| definition.get("runtime_execute"))
+                            .and_then(Value::as_u64);
+                        if let Some(handle) = handle {
+                            let body = arena
+                                .get(
+                                    usize::try_from(handle)
+                                        .map_err(|_| "remembered rider position overflow")?,
+                                )
+                                .ok_or("remembered rider names no arena entry")?;
+                            if data
+                                .get("rider")
+                                .is_some_and(|rider| !rider.is_null() && rider != body)
+                            {
+                                return Err(
+                                    "remembered replacement has conflicting by-value rider".into(),
+                                );
+                            }
+                            data.insert("rider".into(), body.clone());
+                            data.get_mut("definition")
+                                .and_then(Value::as_object_mut)
+                                .unwrap()
+                                .remove("runtime_execute");
+                        }
+                    }
+                }
+                for child in fields.values_mut() {
+                    preferences(child, arena)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    preferences(value, &arena)?;
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("replacement_continuations".into(), Value::Array(arena));
+    Ok(())
 }
 
 fn migrate_legacy_mana_target_roles_in_value(
@@ -29945,7 +30727,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
         image.source_object = definition.source_object;
         image.origin = definition.origin;
         image.is_consumed = definition.is_consumed;
-        image.runtime_execute = definition.runtime_execute.clone();
+        image.runtime_execute = definition.runtime_execute;
         match definition.shield_kind {
             ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot => {
                 if definition.damage_modification.is_some()
@@ -29997,7 +30779,18 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
         // The detached rider belongs to this definition. Installer identity,
         // two absent coordinates, and output equality do not identify an
         // invocation: one permanent can install identical native/chosen shields.
-        let Some(rider) = installed.runtime_execute.as_deref() else {
+        let arena: Box<im::Vector<ResolvedAbility>> = value
+            .get("replacement_continuations")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| format!("installed replacement arena: {error}"))?
+            .unwrap_or_default();
+        let Some(rider) = installed
+            .runtime_execute
+            .and_then(|id| usize::try_from(id.0).ok())
+            .and_then(|index| arena.get(index))
+        else {
             return Ok(None);
         };
         let Some(occurrence) = rider.cast_occurrence else {
@@ -30072,6 +30865,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 continue;
             }
             let mut scratch = GameState::new_two_player(0);
+            scratch.replacement_continuations = arena.clone();
             scratch.zone_changes_this_turn = value
                 .get("zone_changes_this_turn")
                 .cloned()
@@ -30184,7 +30978,7 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     Effect::CreateDamageReplacement { source_filter, .. } => source_filter,
                     _ => return,
                 };
-                let linked = installed.runtime_execute.as_deref().is_some_and(|rider| {
+                let linked = scratch.replacement_rider(installed).is_some_and(|rider| {
                     ability.cast_occurrence.is_some()
                         && ability.cast_occurrence == rider.cast_occurrence
                         && ability.source_id == rider.source_id
@@ -30228,9 +31022,8 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 if chosen && owner.context.damage_source_choice.is_none() {
                     // Invocation and typed source role are already established.
                     // Only this definition's owned continuation may lend context.
-                    owner.context.damage_source_choice = installed
-                        .runtime_execute
-                        .as_deref()
+                    owner.context.damage_source_choice = scratch
+                        .replacement_rider(installed)
                         .and_then(|rider| rider.context.damage_source_choice.clone());
                     if owner.context.damage_source_choice.is_none() {
                         owner.context.damage_source_choice =
@@ -30315,7 +31108,20 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                     let mut expected = installed.clone();
                     expected.selected_damage_source = None;
                     candidate.is_consumed = expected.is_consumed;
-                    if candidate == expected {
+                    let (mut candidate, candidate_rider) =
+                        materialized.split_replacement_rider(&candidate);
+                    let (mut expected, expected_rider) = scratch.split_replacement_rider(&expected);
+                    if let crate::types::ability::ReplacementOrigin::Resolution { installation } =
+                        &mut candidate.origin
+                    {
+                        *installation = None;
+                    }
+                    if let crate::types::ability::ReplacementOrigin::Resolution { installation } =
+                        &mut expected.origin
+                    {
+                        *installation = None;
+                    }
+                    if candidate == expected && candidate_rider == expected_rider {
                         if invalid_capture {
                             evidence.push(Err(Some(
                                 "incoherent retained selected-source owner and installed predicate"
@@ -30628,6 +31434,49 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
         Ok(())
     }
     recover_resident_selection(value, frames_key)?;
+    fn retain_historical_recheck(node: &mut Value, qualifier: &Value) {
+        match node {
+            Value::Object(object) => {
+                if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource")
+                    && !object.contains_key("chooser")
+                {
+                    object.insert("chooser".into(), Value::Null);
+                    if qualifier.get("type").and_then(Value::as_str) != Some("Any") {
+                        let previous = object
+                            .get("filter")
+                            .filter(|filter| !filter.is_null())
+                            .cloned();
+                        object.insert("filter".into(), match previous {
+                            Some(previous) if previous != *qualifier => serde_json::json!({"type":"And", "filters":[previous, qualifier]}),
+                            _ => qualifier.clone(),
+                        });
+                    }
+                    return;
+                }
+                let effect_type = object
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                for (key, child) in object.iter_mut() {
+                    if !crate::types::ability::is_registered_damage_source_payload(
+                        effect_type.as_deref(),
+                        key,
+                    ) {
+                        retain_historical_recheck(child, qualifier);
+                    }
+                }
+            }
+            Value::Array(array) => {
+                for child in array {
+                    retain_historical_recheck(child, qualifier);
+                }
+            }
+            Value::String(tag) if tag == "ChosenDamageSource" => {
+                *node = serde_json::json!({"type":"ChosenDamageSource", "chooser":null, "filter": if qualifier.get("type").and_then(Value::as_str) == Some("Any") { Value::Null } else { qualifier.clone() }});
+            }
+            _ => {}
+        }
+    }
     let legacy_choice = value
         .get("last_chosen_damage_source")
         .filter(|choice| choice.get("source_id").is_some())
@@ -30815,49 +31664,6 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             return Err("last_chosen_damage_source: unrecoverable selected-source identity; no unique owned exact capture".into());
         }
         let selected = serde_json::json!({"source": agreeing.pop(), "candidate_filter": legacy_choice.get("source_filter").cloned().unwrap_or_else(|| serde_json::json!({"type":"Any"}))});
-        fn retain_historical_recheck(node: &mut Value, qualifier: &Value) {
-            match node {
-                Value::Object(object) => {
-                    if object.get("type").and_then(Value::as_str) == Some("ChosenDamageSource")
-                        && !object.contains_key("chooser")
-                    {
-                        object.insert("chooser".into(), Value::Null);
-                        if qualifier.get("type").and_then(Value::as_str) != Some("Any") {
-                            let previous = object
-                                .get("filter")
-                                .filter(|filter| !filter.is_null())
-                                .cloned();
-                            object.insert("filter".into(), match previous {
-                                Some(previous) if previous != *qualifier => serde_json::json!({"type":"And", "filters":[previous, qualifier]}),
-                                _ => qualifier.clone(),
-                            });
-                        }
-                        return;
-                    }
-                    let effect_type = object
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
-                    for (key, child) in object.iter_mut() {
-                        if !crate::types::ability::is_registered_damage_source_payload(
-                            effect_type.as_deref(),
-                            key,
-                        ) {
-                            retain_historical_recheck(child, qualifier);
-                        }
-                    }
-                }
-                Value::Array(array) => {
-                    for child in array {
-                        retain_historical_recheck(child, qualifier);
-                    }
-                }
-                Value::String(tag) if tag == "ChosenDamageSource" => {
-                    *node = serde_json::json!({"type":"ChosenDamageSource", "chooser":null, "filter": if qualifier.get("type").and_then(Value::as_str) == Some("Any") { Value::Null } else { qualifier.clone() }});
-                }
-                _ => {}
-            }
-        }
         let qualifier = legacy_choice
             .get("source_filter")
             .cloned()
@@ -30911,48 +31717,343 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             })
     };
     if let Some(path) = flip_path {
-        let frame = value.pointer(&path).expect("checked frame");
-        if frame
-            .pointer("/branch_context/damage_source_choice")
-            .is_none_or(Value::is_null)
-        {
-            fn lexical_flip<'a>(
-                node: &'a Value,
-                frame: &Value,
-                selected: bool,
-            ) -> Option<&'a Value> {
-                let effect = node.get("effect")?;
-                let selected = selected
-                    || effect.get("type").and_then(Value::as_str) == Some("ChooseDamageSource");
-                if selected
-                    && effect.get("type").and_then(Value::as_str) == Some("FlipCoins")
-                    && effect.get("win_effect") == frame.get("win_effect")
-                    && effect.get("lose_effect") == frame.get("lose_effect")
-                {
-                    return Some(node);
+        // Establish the lexical origin on the untouched writer shape, then
+        // compare normalized COPIES with the strict announcement-custody owner.
+        // Equal coin syntax is not an instruction-position or lifetime proof.
+        fn lexical_flips<'a>(
+            node: &'a Value,
+            node_path: String,
+            origin: Option<(String, Value)>,
+            out: &mut Vec<(String, String, Value, &'a Value)>,
+        ) {
+            let Some(effect) = node.get("effect") else {
+                return;
+            };
+            let fresh = effect.get("type").and_then(Value::as_str) == Some("ChooseDamageSource");
+            let next_origin = if fresh {
+                Some((
+                    node_path.clone(),
+                    effect
+                        .get("source_filter")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type":"Any"})),
+                ))
+            } else {
+                origin.clone()
+            };
+            if effect.get("type").and_then(Value::as_str) == Some("FlipCoins") {
+                if let Some((origin, qualifier)) = &origin {
+                    out.push((node_path.clone(), origin.clone(), qualifier.clone(), node));
                 }
-                node.get("sub_ability")
-                    .and_then(|child| lexical_flip(child, frame, selected))
             }
-            let root = value.pointer("/resolving_stack_entry/kind/data/ability");
-            if let Some(root) = root.filter(|root| {
-                root.get("source_id") == frame.get("source_id")
-                    && root.get("controller") == frame.get("controller")
-            }) {
-                if let Some(owner) = lexical_flip(root, frame, false) {
-                    let choice = owner.pointer("/context/damage_source_choice").filter(|choice| !choice.is_null()).cloned()
-                        .ok_or_else(|| format!("{path}: unrecoverable selected-source identity in the owned flip branch"))?;
-                    let data = value
-                        .pointer_mut(&path)
-                        .and_then(Value::as_object_mut)
-                        .expect("checked frame object");
-                    let context = data
-                        .entry("branch_context")
-                        .or_insert_with(|| serde_json::json!({}));
-                    context
-                        .as_object_mut()
-                        .ok_or("flip branch context must be an object")?
-                        .insert("damage_source_choice".into(), choice);
+            for key in ["sub_ability", "else_ability"] {
+                if let Some(child) = node.get(key).filter(|child| !child.is_null()) {
+                    let reflexive = child
+                        .get("condition")
+                        .and_then(|condition| {
+                            serde_json::from_value::<crate::types::ability::AbilityCondition>(
+                                condition.clone(),
+                            )
+                            .ok()
+                        })
+                        .is_some_and(|condition| condition.has_when_you_do_marker());
+                    let later = key == "sub_ability"
+                        && serde_json::from_value::<crate::types::ability::Effect>(effect.clone())
+                            .ok()
+                            .zip(
+                                child
+                                    .get("sub_link")
+                                    .and_then(|link| serde_json::from_value(link.clone()).ok()),
+                            )
+                            .is_some_and(|(effect, link)| effect.sub_ability_resolves_later(link));
+                    if !reflexive && !later {
+                        lexical_flips(
+                            child,
+                            format!("{node_path}/{key}"),
+                            if fresh && key != "sub_ability" {
+                                origin.clone()
+                            } else {
+                                next_origin.clone()
+                            },
+                            out,
+                        );
+                    }
+                }
+            }
+            if let Some(branches) = node
+                .get("coin_branch_target_abilities")
+                .and_then(Value::as_array)
+            {
+                for (index, branch) in branches.iter().enumerate() {
+                    if let Some(body) = branch.get(1) {
+                        lexical_flips(
+                            body,
+                            format!("{node_path}/coin_branch_target_abilities/{index}/1"),
+                            origin.clone(),
+                            out,
+                        );
+                    }
+                }
+            }
+        }
+        fn normalize_region(node: &mut Value, qualifier: &Value) {
+            if node.pointer("/effect/type").and_then(Value::as_str) == Some("ChooseDamageSource") {
+                return;
+            }
+            let effect = node.get("effect").cloned().and_then(|effect| {
+                serde_json::from_value::<crate::types::ability::Effect>(effect).ok()
+            });
+            let Some(object) = node.as_object_mut() else {
+                return;
+            };
+            for (key, child) in object.iter_mut() {
+                match key.as_str() {
+                    "sub_ability" | "else_ability" => {
+                        let reflexive = child
+                            .get("condition")
+                            .and_then(|condition| {
+                                serde_json::from_value::<crate::types::ability::AbilityCondition>(
+                                    condition.clone(),
+                                )
+                                .ok()
+                            })
+                            .is_some_and(|condition| condition.has_when_you_do_marker());
+                        let link = child
+                            .get("sub_link")
+                            .and_then(|link| {
+                                serde_json::from_value::<crate::types::ability::SubAbilityLink>(
+                                    link.clone(),
+                                )
+                                .ok()
+                            })
+                            .unwrap_or_default();
+                        let later = key == "sub_ability"
+                            && effect
+                                .as_ref()
+                                .is_some_and(|effect| effect.sub_ability_resolves_later(link));
+                        if !reflexive && !later {
+                            normalize_region(child, qualifier);
+                        }
+                    }
+                    "coin_branch_target_abilities" => {
+                        if let Some(branches) = child.as_array_mut() {
+                            for branch in branches {
+                                if let Some(body) = branch.get_mut(1) {
+                                    normalize_region(body, qualifier);
+                                }
+                            }
+                        }
+                    }
+                    _ => retain_historical_recheck(child, qualifier),
+                }
+            }
+        }
+        let original_frame = value.pointer(&path).expect("checked flip frame").clone();
+        let selected = original_frame
+            .pointer("/branch_context/damage_source_choice")
+            .filter(|choice| !choice.is_null())
+            .cloned();
+        let occurrence = original_frame
+            .get("return_result_occurrence")
+            .and_then(Value::as_u64);
+        let admitted_path = occurrence
+            .map(|occurrence| format!("/return_result_frames/{occurrence}/admitted_program"));
+        let root_path = if value
+            .pointer("/resolving_stack_entry/kind/data/ability")
+            .is_some()
+        {
+            Some("/resolving_stack_entry/kind/data/ability".to_string())
+        } else {
+            admitted_path
+                .clone()
+                .filter(|path| value.pointer(path).is_some_and(|body| !body.is_null()))
+        };
+        if let Some(root_path) = root_path {
+            let original_root = value
+                .pointer(&root_path)
+                .expect("checked complete owner")
+                .clone();
+            let mut raw_candidates = Vec::new();
+            lexical_flips(&original_root, String::new(), None, &mut raw_candidates);
+            let mut proven = Vec::new();
+            for (instruction_path, origin_path, qualifier, node) in raw_candidates {
+                if node.get("source_id") != original_frame.get("source_id")
+                    || node.get("controller") != original_frame.get("controller")
+                {
+                    continue;
+                }
+                let choice = selected.clone().or_else(|| {
+                    node.pointer("/context/damage_source_choice")
+                        .filter(|choice| !choice.is_null())
+                        .cloned()
+                });
+                let Some(choice) = choice else {
+                    continue;
+                };
+                if choice.get("candidate_filter").and_then(|filter| {
+                    serde_json::from_value::<crate::types::ability::TargetFilter>(filter.clone())
+                        .ok()
+                }) != serde_json::from_value::<crate::types::ability::TargetFilter>(
+                    qualifier.clone(),
+                )
+                .ok()
+                {
+                    continue;
+                }
+                let mut pending_raw = original_frame.clone();
+                retain_historical_recheck(&mut pending_raw, &qualifier);
+                pending_raw["branch_context"]["damage_source_choice"] = choice.clone();
+                crate::types::ability::normalize_legacy_damage_source_program(&mut pending_raw);
+                let Ok(pending) = serde_json::from_value::<crate::types::resolution::PendingCoinFlip>(
+                    pending_raw.clone(),
+                ) else {
+                    continue;
+                };
+                let mut owner_raw = node.clone();
+                normalize_region(&mut owner_raw, &qualifier);
+                crate::types::ability::normalize_legacy_damage_source_program(&mut owner_raw);
+                let Ok(owner) = serde_json::from_value::<ResolvedAbility>(owner_raw) else {
+                    continue;
+                };
+                if !matches!(&owner.effect, crate::types::ability::Effect::FlipCoins { win_effect, lose_effect, .. }
+                    if win_effect == &pending.win_effect && lose_effect == &pending.lose_effect)
+                    || owner.context.chain_root_targets != pending.chain_root_targets
+                    || crate::game::ability_utils::validate_retained_coin_target_custody(
+                        &owner,
+                        &pending.branch_context,
+                    )
+                    .is_err()
+                    || pending
+                        .branch_context
+                        .validate_branches(&[
+                            pending.win_effect.as_deref(),
+                            pending.lose_effect.as_deref(),
+                        ])
+                        .is_err()
+                {
+                    continue;
+                }
+                // A resident following tail is an instruction-position witness.
+                // Compare complete inputs and meaning, after the SAME historical
+                // normalization, instead of selecting the first equal outcome.
+                let mut tail_witness = false;
+                if let Some(tail) = owner.sub_ability.as_deref() {
+                    let actual_parents = value
+                        .get(frames_key)
+                        .and_then(|stack| stack.get("frames"))
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter(|frame| {
+                            frame.get("type").and_then(Value::as_str) == Some("AbilityContinuation")
+                        })
+                        .filter_map(|frame| frame.pointer("/data/pending"))
+                        .chain(
+                            value
+                                .get("pending_continuation")
+                                .filter(|_| path == "/pending_coin_flip"),
+                        );
+                    for carrier in actual_parents {
+                        if carrier.get("return_result_occurrence")
+                            != original_frame.get("return_result_occurrence")
+                        {
+                            continue;
+                        }
+                        let Some(chain) = carrier.get("chain") else {
+                            continue;
+                        };
+                        let mut chain = chain.clone();
+                        normalize_region(&mut chain, &qualifier);
+                        crate::types::ability::normalize_legacy_damage_source_program(&mut chain);
+                        if let Ok(mut actual) = serde_json::from_value::<ResolvedAbility>(chain) {
+                            let mut expected = tail.clone();
+                            expected.bind_return_result_process(actual.return_result_process);
+                            // Selection is the actual pending flip's typed input;
+                            // it is not announcement target custody.
+                            expected.context.damage_source_choice =
+                                pending.branch_context.damage_source_choice.clone();
+                            if actual
+                                .context
+                                .damage_source_choice
+                                .as_ref()
+                                .is_some_and(|choice| {
+                                    Some(choice)
+                                        != pending.branch_context.damage_source_choice.as_ref()
+                                })
+                            {
+                                continue;
+                            }
+                            actual.context.damage_source_choice =
+                                pending.branch_context.damage_source_choice.clone();
+                            tail_witness |= expected == actual;
+                        }
+                    }
+                }
+                proven.push((
+                    instruction_path,
+                    origin_path,
+                    qualifier,
+                    pending_raw,
+                    owner,
+                    tail_witness,
+                ));
+            }
+            if proven.iter().any(|candidate| candidate.5) {
+                proven.retain(|candidate| candidate.5);
+            }
+            if let Some(first) = proven.first() {
+                if proven.iter().any(|candidate| {
+                    candidate.1 != first.1
+                        || candidate.2 != first.2
+                        || candidate.3 != first.3
+                        || (!candidate.5 && candidate.4 != first.4)
+                }) {
+                    return Err(format!("{path}: unrecoverable selected-source lexical lifetime or remaining-meaning ambiguity after custody/tail recovery"));
+                }
+                let (_, origin_path, qualifier, normalized_pending, _, _) = first.clone();
+                let region_path = format!("{root_path}{origin_path}/sub_ability");
+                if let Some(region) = value.pointer_mut(&region_path) {
+                    normalize_region(region, &qualifier);
+                }
+                *value
+                    .pointer_mut(&path)
+                    .expect("actual flip remains present") = normalized_pending;
+                if let Some(admitted_path) =
+                    admitted_path.filter(|admitted_path| admitted_path != &root_path)
+                {
+                    if let Some(raw_program) = value
+                        .pointer(&admitted_path)
+                        .cloned()
+                        .filter(|program| !program.is_null())
+                    {
+                        let mut root_proof = original_root.clone();
+                        let mut program_proof = raw_program;
+                        crate::types::ability::normalize_legacy_damage_source_program(
+                            &mut root_proof,
+                        );
+                        crate::types::ability::normalize_legacy_damage_source_program(
+                            &mut program_proof,
+                        );
+                        if let (Ok(mut root), Ok(program)) = (
+                            serde_json::from_value::<ResolvedAbility>(root_proof),
+                            serde_json::from_value::<ResolvedAbility>(program_proof),
+                        ) {
+                            root.bind_return_result_process(program.return_result_process);
+                            if root == program {
+                                if let Some(region) = value.pointer_mut(&format!(
+                                    "{admitted_path}{origin_path}/sub_ability"
+                                )) {
+                                    normalize_region(region, &qualifier);
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if selected.is_none() && !original_root.is_null() {
+                let mut raw = Vec::new();
+                lexical_flips(&original_root, String::new(), None, &mut raw);
+                if !raw.is_empty() {
+                    return Err(format!("{path}: unrecoverable selected-source identity in the owned flip branch after custody/tail recovery"));
                 }
             }
         }
@@ -32739,6 +33840,7 @@ impl GameStateDecode {
         // Collected before any part of the value is split off or consumed:
         // `ResolutionStateWire` removes `resolution_frames` before the state
         // materializes, and a frame can carry a state-arena handle.
+        prepare_replacement_continuation_arena(&mut value)?;
         let state_handles = collect_serialized_state_handles(&value);
         crate::types::resolution::reject_wire_projection_marker(&value)?;
         match mode {
@@ -32785,11 +33887,14 @@ impl GameStateDecode {
         let mut state = serde_json::from_value::<ResolutionStateWire>(value)
             .map(ResolutionStateWire::into_game_state)
             .map_err(|error| error.to_string())?;
+        reject_dangling_state_handles(&state, &state_handles)?;
+        state.validate_replacement_continuation_arena()?;
         validate_restored_attack_authority(&state, attack_map_present, &departure_targets_present)?;
         validate_restored_zone_change_replay_keys(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         crate::types::resolution::normalize_logical_zone_instruction_owners(&mut state)?;
+        recover_return_result_programs(&mut state)?;
         normalize_saved_liminal_copy_authority(&mut state)?;
         freeze_stored_created_token_referents(&mut state);
         validate_token_creation_authorities(&state)?;
@@ -32811,6 +33916,7 @@ impl GameStateDecode {
         mut value: serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<GameState, String> {
+        prepare_replacement_continuation_arena(&mut value)?;
         normalize_replacement_occurrence_authority(&mut value)?;
         prepare_damage_source_authority(&mut value)?;
         crate::types::ability::normalize_legacy_damage_source_program(&mut value);
@@ -32837,12 +33943,15 @@ impl GameStateDecode {
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
+        reject_dangling_state_handles(&state, &state_handles)?;
+        state.validate_replacement_continuation_arena()?;
         normalize_saved_liminal_copy_authority(&mut state)?;
         freeze_stored_created_token_referents(&mut state);
         validate_token_creation_authorities(&state)?;
         normalize_delayed_trigger_allocators(&mut state)?;
         normalize_resolution_cast_offer_allocator(&mut state)?;
         crate::types::resolution::normalize_logical_zone_instruction_owners(&mut state)?;
+        recover_return_result_programs(&mut state)?;
         // NO viewer-projection guard here, deliberately. This is the TRANSPORT decode
         // path as much as a restore path: `ServerMessage::GameStarted { state, .. }`
         // (`server-core/src/protocol.rs`) carries a `filter_state_for_viewer` projection
@@ -32883,6 +33992,7 @@ impl GameStateDecode {
         value: &mut serde_json::Value,
         mode: GameStateDecodeMode,
     ) -> Result<(), String> {
+        prepare_replacement_continuation_arena(value)?;
         normalize_replacement_occurrence_authority(value)?;
         prepare_damage_source_authority(value)?;
         crate::types::ability::normalize_legacy_damage_source_program(value);
@@ -49394,7 +50504,9 @@ mod tests {
             "Shielded Bear".to_string(),
             Zone::Battlefield,
         );
-        let id = state.install_replacement_continuation(continuation_rider(5));
+        let id = state
+            .install_replacement_continuation(continuation_rider(5))
+            .expect("valid replacement continuation fixture");
         let shield = ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
         match carrier {
             RiderCarrier::Object => state
@@ -49502,10 +50614,9 @@ mod tests {
         }
     }
 
-    /// CR 615.5: a save holding the pre-handle inline rider (`"runtime_execute": {…}`)
-    /// fails to decode at every ingress; it is not migrated.
+    /// CR 615.5: a recoverable inline rider retains its program at every ingress.
     #[test]
-    fn legacy_inline_runtime_execute_fails_to_decode() {
+    fn legacy_inline_runtime_execute_migrates_recoverable_program_and_rejects_malformed() {
         let inline = serde_json::to_value(continuation_rider(5)).unwrap();
         for carrier in [RiderCarrier::Object, RiderCarrier::Pending] {
             let state = rider_state(carrier);
@@ -49520,12 +50631,32 @@ mod tests {
                     1,
                     "reach-guard: {carrier:?} via {ingress:?} carries a handle to rewrite"
                 );
-                let error = ingress
-                    .decode(value)
-                    .expect_err("the legacy inline shape must not decode");
+                let decoded = ingress
+                    .decode(value.clone())
+                    .expect("lossless legacy inline migration");
+                assert_eq!(
+                    decoded.replacement_continuations.len(),
+                    state.replacement_continuations.len() + 1
+                );
+                assert_eq!(
+                    decoded.replacement_continuations.back(),
+                    Some(&continuation_rider(5))
+                );
+                let original = value.clone();
+                let mut malformed = value;
+                assert_eq!(
+                    rewrite_runtime_execute(&mut malformed, serde_json::json!("bad rider")),
+                    1
+                );
                 assert!(
-                    error.contains("invalid type: map"),
-                    "{carrier:?} via {ingress:?}: expected the type-mismatch refusal, got {error}"
+                    ingress.decode(malformed).is_err(),
+                    "malformed scalar must refuse"
+                );
+                assert_eq!(
+                    original.pointer("/replacement_continuations"),
+                    serde_json::to_value(&state)
+                        .unwrap()
+                        .pointer("/replacement_continuations")
                 );
             }
         }
@@ -63481,6 +64612,7 @@ mod departure_process_saved_authority_tests {
         let owned = ReturnResultFrame {
             process: Some(ReturnResultProcessId(5)),
             declarations: None,
+            admitted_program: None,
             results: [(result, records.clone())].into_iter().collect(),
         };
         let current: ReturnResultFrame =
@@ -64085,6 +65217,14 @@ mod damage_source_canonical_admission_tests {
         thumb: bool,
         source_history: SourceHistory,
     ) -> (GameRunner, ObjectId, ObjectId) {
+        paid_gambit_source_prompt_with_repeated_flip(thumb, source_history, false)
+    }
+
+    fn paid_gambit_source_prompt_with_repeated_flip(
+        thumb: bool,
+        source_history: SourceHistory,
+        repeated_flip: bool,
+    ) -> (GameRunner, ObjectId, ObjectId) {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let source = scenario.add_creature(P0, "Selected source", 2, 2).id();
@@ -64117,6 +65257,21 @@ mod damage_source_canonical_admission_tests {
             }),
         };
         let mut runner = scenario.build();
+        if repeated_flip {
+            let spell = runner.state_mut().objects.get_mut(&gambit).unwrap();
+            let definition = spell
+                .abilities
+                .iter_mut()
+                .find(|definition| matches!(definition.effect, Effect::ChooseDamageSource { .. }))
+                .expect("the real parsed Gambit has one source-choice instruction");
+            let first = definition
+                .sub_ability
+                .as_mut()
+                .expect("Gambit's parsed flip");
+            assert!(matches!(first.effect, Effect::FlipCoins { .. }));
+            assert!(first.sub_ability.is_none());
+            first.sub_ability = Some(Box::new((**first).clone()));
+        }
         if let Some((sorcerer, blink)) = blink {
             let old = crate::types::identifiers::ObjectIncarnationRef::of(
                 source,
@@ -64538,6 +65693,114 @@ mod damage_source_canonical_admission_tests {
             assert!(runner.state().stack.is_empty());
             assert!(runner.state().resolution_stack.is_empty());
             assert!(runner.state().owed_spell_final_part().is_none());
+        }
+    }
+
+    #[test]
+    fn repeated_equal_flips_under_one_source_choice_restore_the_lexical_region() {
+        for ingress in 0..3 {
+            let (mut runner, source, gambit) = paid_gambit_source_prompt_with_repeated_flip(
+                true,
+                SourceHistory::CurrentOnly,
+                true,
+            );
+            let selected =
+                ObjectIncarnationRef::of(source, runner.state().objects[&source].incarnation);
+            runner
+                .act(GameAction::ChooseDamageSource { source: selected })
+                .unwrap();
+            for ordinal in 0..2 {
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::CoinFlipKeepChoice { .. }
+                    ),
+                    "flip {ordinal}"
+                );
+                let mut saved = if ingress == 0 {
+                    serde_json::to_value(runner.state()).unwrap()
+                } else {
+                    serde_json::to_value(ResolutionStateWire::from_game_state(
+                        runner.state().clone(),
+                    ))
+                    .unwrap()
+                };
+                fn erase_only_legacy_chooser_tags(node: &mut serde_json::Value) {
+                    match node {
+                        serde_json::Value::Object(object) => {
+                            if object.get("type").and_then(serde_json::Value::as_str)
+                                == Some("ChosenDamageSource")
+                            {
+                                object.remove("chooser");
+                            }
+                            for child in object.values_mut() {
+                                erase_only_legacy_chooser_tags(child);
+                            }
+                        }
+                        serde_json::Value::Array(children) => {
+                            for child in children {
+                                erase_only_legacy_chooser_tags(child);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                erase_only_legacy_chooser_tags(&mut saved);
+                let input = serde_json::to_string(&saved).unwrap();
+                *runner.state_mut() = match ingress {
+                    0 => serde_json::from_str::<GameState>(&input).unwrap(),
+                    1 => serde_json::from_str::<ResolutionStateWire>(&input)
+                        .unwrap()
+                        .into_game_state(),
+                    _ => serde_json::from_str::<PersistedGameState>(&input)
+                        .unwrap()
+                        .into_game_state_unchecked(),
+                };
+                assert_eq!(
+                    runner
+                        .state()
+                        .active_coin_flip_frame()
+                        .unwrap()
+                        .branch_context
+                        .damage_source_choice
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .identity
+                        .reference,
+                    selected
+                );
+                runner
+                    .act(GameAction::SelectCoinFlips {
+                        keep_indices: vec![1],
+                    })
+                    .unwrap();
+            }
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&gambit].zone, Zone::Graveyard);
+            assert_eq!(
+                runner
+                    .state()
+                    .pending_damage_replacements
+                    .iter()
+                    .chain(
+                        runner.state().objects[&source]
+                            .replacement_definitions
+                            .iter_all()
+                    )
+                    .filter(|definition| definition
+                        .selected_damage_source
+                        .as_ref()
+                        .is_some_and(|capture| capture.identity.reference == selected))
+                    .count(),
+                2
+            );
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().owed_spell_final_part().is_none());
+            assert!(runner.state().return_result_frames.is_empty());
         }
     }
 

@@ -7222,7 +7222,9 @@ mod tests {
                 },
             )]),
         );
-        let rider = state.install_replacement_continuation(ability.clone());
+        let rider = state
+            .install_replacement_continuation(ability.clone())
+            .expect("valid replacement continuation fixture");
         state
             .objects
             .get_mut(&paid)
@@ -8073,7 +8075,9 @@ mod tests {
                 "/replacement_continuations/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
-                    let rider = state.install_replacement_continuation(fixture.ability.clone());
+                    let rider = state
+                        .install_replacement_continuation(fixture.ability.clone())
+                        .expect("valid replacement continuation fixture");
                     state.pending_damage_replacements =
                         vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)
                             .runtime_execute(rider)];
@@ -8084,7 +8088,9 @@ mod tests {
                 "/replacement_continuations/".to_string(),
                 2,
                 Box::new(|state: &mut GameState| {
-                    let rider = state.install_replacement_continuation(fixture.ability.clone());
+                    let rider = state
+                        .install_replacement_continuation(fixture.ability.clone())
+                        .expect("valid replacement continuation fixture");
                     state
                         .objects
                         .get_mut(&paid)
@@ -8716,7 +8722,9 @@ mod tests {
         let mut replacement = crate::types::ability::ReplacementDefinition::new(
             crate::types::replacements::ReplacementEvent::DamageDone,
         );
-        let replacement_rider = state.install_replacement_continuation(snapshot.clone());
+        let replacement_rider = state
+            .install_replacement_continuation(snapshot.clone())
+            .expect("valid replacement continuation fixture");
         replacement.runtime_execute = Some(replacement_rider);
         let cost = AbilityCost::Composite {
             costs: vec![
@@ -16666,7 +16674,9 @@ mod chosen_group_privacy_tests {
             Box::new(custody),
         )];
         ability.sub_ability = Some(Box::new(ability.clone()));
-        let rider = state.install_replacement_continuation(ability.clone());
+        let rider = state
+            .install_replacement_continuation(ability.clone())
+            .expect("valid replacement continuation fixture");
         let replacement =
             ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(rider);
         state

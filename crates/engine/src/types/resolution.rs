@@ -7309,6 +7309,8 @@ impl ResolutionStateWire {
                     .map_err(|error| error.to_string())?;
                 crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
                 crate::types::game_state::validate_owed_spell_final_part_coherence(&legacy)?;
+                legacy.validate_replacement_continuation_arena()?;
+                crate::types::game_state::recover_return_result_programs(&mut legacy)?;
                 crate::types::game_state::validate_return_result_occurrence_coherence(&legacy)?;
                 crate::types::game_state::validate_damage_source_authority(&legacy)?;
                 #[cfg(debug_assertions)]
@@ -7387,6 +7389,8 @@ impl ResolutionStateWire {
                 }
                 crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
                 crate::types::game_state::validate_owed_spell_final_part_coherence(&projected)?;
+                projected.validate_replacement_continuation_arena()?;
+                crate::types::game_state::recover_return_result_programs(&mut projected)?;
                 crate::types::game_state::validate_return_result_occurrence_coherence(&projected)?;
                 crate::types::game_state::validate_damage_source_authority(&projected)?;
                 #[cfg(debug_assertions)]

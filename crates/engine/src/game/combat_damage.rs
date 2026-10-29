@@ -2088,9 +2088,10 @@ fn fire_combat_prevention_riders(
             .damage_source_filter
             .as_ref()
             .and_then(shield_specific_source);
-        let Some(runtime) = state.replacement_rider(repl_def).cloned() else {
+        let Some(mut runtime) = state.replacement_rider(repl_def).cloned() else {
             continue;
         };
+        runtime.clear_return_result_process_recursive();
         state.last_effect_count = Some(total_prevented);
         // Policy is `Replace`: this path has always overwritten a resident
         // continuation rather than deferring to it. The rider inherits no applied

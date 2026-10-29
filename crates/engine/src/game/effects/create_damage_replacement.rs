@@ -37,6 +37,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     #[allow(clippy::type_complexity)]
     let (
         source_filter,
@@ -103,11 +117,12 @@ pub fn resolve(
         Some(TargetFilter::ChosenDamageSource { chooser, filter }) => {
             if ability.context.damage_source_choice.is_none() {
                 if chooser.is_some() {
-                    choose_damage_source::open_source_choice(
+                    choose_damage_source::open_source_choice_owned(
                         state,
                         ability,
                         filter.as_deref().unwrap_or(&TargetFilter::Any),
                         events,
+                        declarations,
                     )?;
                 }
                 return Ok(());

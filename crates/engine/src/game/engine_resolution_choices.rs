@@ -4364,7 +4364,7 @@ fn handle_resolution_choice_in_occurrence(
         }
         (
             WaitingFor::ClashChooseOpponent {
-                return_result_occurrence: _,
+                return_result_occurrence,
                 player,
                 candidates,
                 ability,
@@ -4378,10 +4378,21 @@ fn handle_resolution_choice_in_occurrence(
                     "Chosen clash opponent {opponent:?} is not a legal opponent"
                 )));
             }
+            let (program, declarations) =
+                effects::owned_cursor_declarations(state, return_result_occurrence, &ability)
+                    .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
             set_priority(state, player);
             let clash = effects::clash::perform_clash(state, &ability, opponent, events)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
-            match effects::finish_clash_resolution(state, &ability, clash).progress {
+            match effects::finish_clash_resolution(
+                state,
+                &ability,
+                clash,
+                (&program, &declarations),
+            )
+            .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?
+            .progress
+            {
                 effects::ResolutionProgress::Waiting => {}
                 effects::ResolutionProgress::Complete | effects::ResolutionProgress::Queued => {
                     super::engine::resume_pending_continuation_if_priority(state, events)
@@ -6060,7 +6071,9 @@ fn handle_resolution_choice_in_occurrence(
             if state.active_per_category_zone_choice().is_some() {
                 match effects::choose_from_zone::drain_active_per_category_zone_choice(
                     state, &chosen, events,
-                ) {
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
                     crate::game::zone_pipeline::BatchMoveResult::Done => {}
                     crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
                         return Ok(ResolutionChoiceOutcome::WaitingFor(

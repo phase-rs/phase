@@ -119,12 +119,13 @@ mod tests {
                 "Unselected live card".into(),
                 Zone::Library,
             );
-            let (_, process) = super::super::begin_return_result_occurrence(&mut state).unwrap();
-            let occurrence = state.active_return_result_occurrence.unwrap();
             let result_id = crate::types::ability::ReturnResultId(9);
             let mut ability =
                 make_reveal_top_ability(PlayerId(0), PlayerId(0), if empty_domain { 1 } else { 0 });
             ability.declares_return_result = Some(result_id);
+            let (_, process) =
+                super::super::begin_test_return_result_occurrence(&mut state, &ability).unwrap();
+            let occurrence = state.active_return_result_occurrence.unwrap();
             ability.bind_return_result_process(Some(process));
             resolve_for_players(
                 &mut state,

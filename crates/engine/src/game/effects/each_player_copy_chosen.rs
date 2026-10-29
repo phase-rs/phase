@@ -278,7 +278,7 @@ pub(crate) fn drive_from_copy(
         work,
         EffectKind::CopyTokenOf,
         crate::types::game_state::TokenCreationCallerState::EachPlayerCopyChosen,
-    );
+    )?;
     state.resolution_stack.bind_each_player_creation_child(id);
     if matches!(
         super::token_copy::drive_creation(state, id, events),

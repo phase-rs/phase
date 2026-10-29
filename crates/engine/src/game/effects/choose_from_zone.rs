@@ -28,6 +28,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let (
         count,
         zone,
@@ -91,7 +105,11 @@ pub fn resolve(
             state,
             ability,
             PerPlayerCursor {
-                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+                return_result_occurrence: super::retained_return_result_occurrence(
+                    state,
+                    ability,
+                    declarations,
+                )?,
                 remaining: players,
                 current: None,
                 nominee: None,
@@ -157,7 +175,11 @@ pub fn resolve(
             .collect();
         if candidates.len() >= 2 {
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
-                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+                return_result_occurrence: super::retained_return_result_occurrence(
+                    state,
+                    ability,
+                    declarations,
+                )?,
                 player: ability.controller,
                 candidates,
                 ability: Box::new(ability.clone()),
@@ -381,6 +403,22 @@ pub fn resolve_for_each_category(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| {
+            resolve_for_each_category_owned(state, executable, events, owner)
+        },
+    )
+}
+
+pub fn resolve_for_each_category_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let (category, action) = match &ability.effect {
         Effect::ForEachCategory {
             category, action, ..
@@ -404,7 +442,7 @@ pub fn resolve_for_each_category(
             .collect(),
         ForEachCategoryAction::ExileFromPool { .. } => category.member_filters(),
     };
-    prompt_next_category_member(state, ability, &pool, member_filters, events)
+    prompt_next_category_member(state, ability, &pool, member_filters, events, declarations)
 }
 
 /// Deprecated alias kept for call-site clarity during migration — dispatches to
@@ -429,6 +467,7 @@ fn prompt_next_category_member(
     pool: &[ObjectId],
     mut remaining_member_filters: Vec<TargetFilter>,
     events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let (zone, chooser, up_to, put_counter) = match &ability.effect {
         Effect::ForEachCategory {
@@ -499,7 +538,11 @@ fn prompt_next_category_member(
         };
         state.push_per_category_zone_choice(
             crate::types::game_state::PendingPerCategoryZoneChoice {
-                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+                return_result_occurrence: super::retained_return_result_occurrence(
+                    state,
+                    ability,
+                    declarations,
+                )?,
                 ability: Box::new(ability.clone()),
                 pool: pool.to_vec(),
                 remaining_member_filters,
@@ -569,12 +612,23 @@ pub(crate) fn drain_active_per_category_zone_choice(
     state: &mut GameState,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
-) -> crate::game::zone_pipeline::BatchMoveResult {
+) -> Result<crate::game::zone_pipeline::BatchMoveResult, EffectError> {
+    let Some(owner) = state.active_per_category_zone_choice() else {
+        return Ok(crate::game::zone_pipeline::BatchMoveResult::Done);
+    };
+    validate_per_category_result_owner(
+        state,
+        &owner.ability,
+        &owner.remaining_member_filters,
+        owner.return_result_occurrence,
+    )?;
+    let owned =
+        super::owned_cursor_declarations(state, owner.return_result_occurrence, &owner.ability)?;
     let Some(pending) = state
         .take_active_per_category_zone_choice()
         .expect("per-category zone-choice drain may consume only its active frame")
     else {
-        return crate::game::zone_pipeline::BatchMoveResult::Done;
+        return Ok(crate::game::zone_pipeline::BatchMoveResult::Done);
     };
     let crate::types::game_state::PendingPerCategoryZoneChoice {
         return_result_occurrence,
@@ -630,19 +684,21 @@ pub(crate) fn drain_active_per_category_zone_choice(
                 }
             })
             .collect();
-        return crate::game::zone_pipeline::move_objects_simultaneously_then(
-            state,
-            requests,
-            Some(
-                crate::types::game_state::BatchCompletion::ForEachCategoryExileComplete {
-                    return_result_occurrence,
-                    ability,
-                    pool,
-                    remaining_member_filters,
-                    chosen: chosen.to_vec(),
-                },
+        return Ok(
+            crate::game::zone_pipeline::move_objects_simultaneously_then(
+                state,
+                requests,
+                Some(
+                    crate::types::game_state::BatchCompletion::ForEachCategoryExileComplete {
+                        return_result_occurrence,
+                        ability,
+                        pool,
+                        remaining_member_filters,
+                        chosen: chosen.to_vec(),
+                    },
+                ),
+                events,
             ),
-            events,
         );
     }
 
@@ -673,8 +729,15 @@ pub(crate) fn drain_active_per_category_zone_choice(
         }
     }
 
-    let _ = prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events);
-    crate::game::zone_pipeline::BatchMoveResult::Done
+    prompt_next_category_member(
+        state,
+        &ability,
+        &pool,
+        remaining_member_filters,
+        events,
+        (&owned.0, &owned.1),
+    )?;
+    Ok(crate::game::zone_pipeline::BatchMoveResult::Done)
 }
 
 /// CR 608.2c: Complete one settled `ForEachCategoryExile` member. The typed
@@ -695,6 +758,7 @@ pub(crate) fn complete_per_category_exile(
         &remaining_member_filters,
         return_result_occurrence,
     )?;
+    let owned = super::owned_cursor_declarations(state, return_result_occurrence, &ability)?;
     super::with_inherited_return_result_occurrence(state, return_result_occurrence, |state| {
         if !chosen.is_empty() {
             super::publish_tracked_set_with_causes(
@@ -705,7 +769,14 @@ pub(crate) fn complete_per_category_exile(
                     .collect(),
             );
         }
-        prompt_next_category_member(state, &ability, &pool, remaining_member_filters, events)
+        prompt_next_category_member(
+            state,
+            &ability,
+            &pool,
+            remaining_member_filters,
+            events,
+            (&owned.0, &owned.1),
+        )
     })
 }
 
@@ -1085,12 +1156,19 @@ fn advance_per_player_iteration(
         ability,
         cursor.return_result_occurrence,
     )?;
+    let owned = super::owned_cursor_declarations(state, cursor.return_result_occurrence, ability)?;
     super::with_inherited_return_result_occurrence(
         state,
         cursor.return_result_occurrence,
         |state| {
             super::validate_addressed_quantity_reads(state, ability)?;
-            advance_per_player_iteration_in_occurrence(state, ability, cursor, events)
+            advance_per_player_iteration_in_occurrence(
+                state,
+                ability,
+                cursor,
+                events,
+                (&owned.0, &owned.1),
+            )
         },
     )
 }
@@ -1100,6 +1178,7 @@ fn advance_per_player_iteration_in_occurrence(
     ability: &ResolvedAbility,
     cursor: PerPlayerCursor,
     events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let spec = PerPlayerSpec::of(ability)?;
     // CR 608.2 + CR 605.3b + CR 605.4a: admission precedes every outcome —
@@ -1232,7 +1311,11 @@ fn advance_per_player_iteration_in_occurrence(
             );
             let election = players::substitute_chooser_election(state, object);
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
-                return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+                return_result_occurrence: super::retained_return_result_occurrence(
+                    state,
+                    ability,
+                    declarations,
+                )?,
                 player: election.elector,
                 candidates: election.candidates,
                 ability: Box::new(ability.clone()),

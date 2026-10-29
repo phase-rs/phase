@@ -308,6 +308,8 @@ fn handle_replacement_choice_inner(
             "replacement choice index {index} is outside 0..{option_count}"
         )));
     }
+    super::replacement::admitted_damage_remainder(state)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     // The simultaneous combat batch owns this survivor. Delivering it here
     // would bypass the batch's lifelink and combat-damage bookkeeping.
     let combat_replacement = matches!(
@@ -2838,6 +2840,7 @@ pub(crate) fn recover_selected_copy_continuation(
             let mut resolved = if let Some(runtime) = state.replacement_rider(&definition).cloned()
             {
                 let mut resolved = runtime;
+                resolved.clear_return_result_process_recursive();
                 while super::replacement::EventModifiers::is_event_modifier_effect(&resolved.effect)
                 {
                     let Some(next) = resolved.sub_ability.take() else {

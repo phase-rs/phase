@@ -12,43 +12,57 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    // CR 111.10f: A Clue token is a colorless Clue artifact token with
-    // "{2}, Sacrifice this artifact: Draw a card."
-    // Build a synthetic Token effect and resolve through the standard token pipeline.
-    let mut clue_ability = ResolvedAbility::new(
-        crate::types::ability::Effect::Token {
-            name: "Clue".to_string(),
-            power: PtValue::Fixed(0),
-            toughness: PtValue::Fixed(0),
-            types: vec!["Artifact".to_string(), "Clue".to_string()],
-            colors: vec![],
-            keywords: vec![],
-            tapped: false,
-            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-            owner: crate::types::ability::TargetFilter::Controller,
-            attach_to: None,
-            enters_attacking: false,
-            attack_destination: TokenAttackDestination::ControllerChooses,
-            supertypes: vec![],
-            static_abilities: vec![],
-            enter_with_counters: vec![],
-        },
-        ability.targets.clone(),
-        ability.source_id,
-        ability.controller,
-    );
-    clue_ability.context = ability.context.clone();
-    clue_ability.sub_ability = ability.sub_ability.clone();
-    super::token::begin_token_creation(
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    let clue_ability = project_token_ability(ability);
+    super::token::begin_token_creation_owned(
         state,
         &clue_ability,
         crate::types::game_state::TokenCreationCallerState::Investigate {
             player: ability.controller,
         },
         events,
-    );
+        declarations,
+    )?;
 
     Ok(())
+}
+
+pub(crate) fn project_token_ability(ability: &ResolvedAbility) -> ResolvedAbility {
+    // CR 111.10f: A Clue token is a colorless Clue artifact token with
+    // "{2}, Sacrifice this artifact: Draw a card."
+    // Build a synthetic Token effect and resolve through the standard token pipeline.
+    let mut clue_ability = ability.clone();
+    clue_ability.effect = crate::types::ability::Effect::Token {
+        name: "Clue".to_string(),
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        types: vec!["Artifact".to_string(), "Clue".to_string()],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+        owner: crate::types::ability::TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+    clue_ability
 }
 
 pub(crate) fn complete_creation(

@@ -628,14 +628,13 @@ pub(crate) fn matches_player_scope_with_context(
                         kind,
                         source,
                         min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
+                    } => crate::game::quantity::opponent_dealt_damage_matches_with_context(
                         state,
                         p.id,
-                        controller,
                         *kind,
                         source,
                         *min_sources,
-                        source_id,
+                        ctx,
                     ),
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
@@ -761,17 +760,28 @@ pub(crate) fn matches_player_scope_with_context(
                         comparator,
                         count,
                     } => {
-                        let threshold = crate::game::quantity::resolve_quantity(
-                            state, count, controller, source_id,
-                        );
+                        let threshold =
+                            crate::game::quantity::resolve_quantity_with_ctx_and_ability(
+                                state,
+                                count,
+                                controller,
+                                crate::game::quantity::QuantityContext {
+                                    scoped_player: Some(p.id),
+                                    trigger_source: ctx.trigger_source.cloned(),
+                                    recipient: ctx.recipient_id,
+                                    granting_object: ctx.granting_object,
+                                    ..crate::game::quantity::QuantityContext::new(source_id)
+                                },
+                                ctx.ability,
+                            );
                         crate::game::players::matches_relation(state, p.id, controller, *relation)
-                            && player_control_count_compares(
+                            && player_control_count_compares_with_context(
                                 state,
                                 p.id,
                                 filter,
                                 *comparator,
                                 threshold,
-                                source_id,
+                                ctx,
                             )
                     }
                     // CR 402.1 / 119.1 / 119.3 / 122.1f / 404.1: "each [player class]
@@ -818,14 +828,13 @@ pub(crate) fn matches_player_scope_with_context(
                         caused_by,
                     } => {
                         crate::game::players::matches_relation(state, p.id, controller, *relation)
-                            && crate::game::quantity::possessed_tracked_set_member(
+                            && crate::game::quantity::possessed_tracked_set_member_with_context(
                                 state,
                                 p.id,
                                 *possession,
                                 filter,
                                 *caused_by,
-                                controller,
-                                source_id,
+                                ctx,
                             )
                     }
                 }
@@ -875,6 +884,24 @@ pub(crate) fn player_control_count_compares(
     source_id: ObjectId,
 ) -> bool {
     let ctx = filter::FilterContext::from_source_with_controller(source_id, candidate_player);
+    player_control_count_compares_with_context(
+        state,
+        candidate_player,
+        filter,
+        comparator,
+        threshold,
+        &ctx,
+    )
+}
+
+fn player_control_count_compares_with_context(
+    state: &GameState,
+    candidate_player: PlayerId,
+    filter: &TargetFilter,
+    comparator: crate::types::ability::Comparator,
+    threshold: i32,
+    ctx: &filter::FilterContext<'_>,
+) -> bool {
     let count = state
         .battlefield
         .iter()
@@ -883,7 +910,7 @@ pub(crate) fn player_control_count_compares(
                 .objects
                 .get(id)
                 .is_some_and(|obj| obj.controller == candidate_player)
-                && filter::matches_target_filter(state, **id, filter, &ctx)
+                && filter::matches_target_filter(state, **id, filter, ctx)
         })
         .count();
     comparator.evaluate(
@@ -1939,6 +1966,37 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         let pending = state
             .active_ability_continuation()
             .expect("checked continuation");
+        if pending.return_result_occurrence.is_none()
+            && matches!(
+                crate::types::ability::classify_instruction_result_invocation(
+                    &pending.chain,
+                    crate::types::ability::InstructionResultEntry::SelectedBody,
+                    None,
+                ),
+                Ok((
+                    crate::types::ability::InstructionResultProcess::Local { .. },
+                    _
+                ))
+            )
+        {
+            let scheduled = pending.chain.clone();
+            let _ = with_instruction_result_entry(
+                state,
+                &scheduled,
+                crate::types::ability::InstructionResultEntry::SelectedBody,
+                |state, executable, _| {
+                    let occurrence = state.active_return_result_occurrence;
+                    let pending = state
+                        .active_ability_continuation_frame_mut()
+                        .expect("the fresh selected continuation remains the active owner");
+                    pending.pending.chain = Box::new(executable.clone());
+                    pending.pending.return_result_occurrence = occurrence;
+                    drain_pending_continuation(state, events);
+                    Ok(())
+                },
+            );
+            return;
+        }
         let Ok(declarations) =
             owned_cursor_declarations(state, pending.return_result_occurrence, &pending.chain)
         else {
@@ -2089,15 +2147,21 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         &remaining,
                         events,
                         1,
-                        &declarations,
+                        (&declarations.0, &declarations.1),
                     )
                     .ok();
                 }
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
-                chain_progress =
-                    resolve_owned_ability_chain_step(state, &chain, events, 1, &declarations).ok();
+                chain_progress = resolve_owned_ability_chain_step(
+                    state,
+                    &chain,
+                    events,
+                    1,
+                    (&declarations.0, &declarations.1),
+                )
+                .ok();
             }
         }
         if let Some(source_id) = state
@@ -2139,7 +2203,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     handoff,
                     events,
                     1,
-                    &declarations,
+                    (&declarations.0, &declarations.1),
                 )
                 .ok();
             }
@@ -2271,8 +2335,14 @@ fn retire_unreferenced_return_result_frames(state: &mut GameState) {
     state.return_result_frames.retain(|id, _| live.contains(id));
 }
 
+pub(crate) type AdmittedInstructionResult<'a> = (
+    &'a ResolvedAbility,
+    &'a crate::types::ability::ResultProducerEnvironment,
+);
+
 fn begin_return_result_occurrence(
     state: &mut GameState,
+    program: &ResolvedAbility,
     declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<
     (
@@ -2293,7 +2363,9 @@ fn begin_return_result_occurrence(
         .checked_add(1)
         .filter(|_| process.0 != 0)
         .ok_or_else(|| EffectError::InvalidParam("return process id overflow".into()))?;
-    // Check both domains before either allocator or frame is mutated.
+    let mut admitted_program = program.clone();
+    admitted_program.bind_return_result_process(Some(process));
+    // Check both domains and prepare the complete program before mutation.
     state.next_return_result_occurrence_id = next_occurrence;
     state.next_return_result_process_id = next_process;
     state.return_result_frames.insert(
@@ -2301,6 +2373,7 @@ fn begin_return_result_occurrence(
         ReturnResultFrame {
             process: Some(process),
             declarations: Some(declarations.clone()),
+            admitted_program: Some(Box::new(admitted_program)),
             results: Default::default(),
         },
     );
@@ -2308,13 +2381,32 @@ fn begin_return_result_occurrence(
 }
 
 /// CR 608.2c: a whole producing iteration executes in a fresh invocation.
+#[cfg(test)]
+fn begin_test_return_result_occurrence(
+    state: &mut GameState,
+    program: &ResolvedAbility,
+) -> Result<
+    (
+        Option<ReturnResultOccurrenceId>,
+        crate::types::game_state::ReturnResultProcessId,
+    ),
+    EffectError,
+> {
+    let (_, declarations) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    )?;
+    begin_return_result_occurrence(state, program, &declarations)
+}
+
 fn with_iteration_return_result_occurrence<T>(
     state: &mut GameState,
     ability: &ResolvedAbility,
     run: impl FnOnce(
         &mut GameState,
         &ResolvedAbility,
-        &crate::types::ability::ResultProducerEnvironment,
+        AdmittedInstructionResult<'_>,
     ) -> Result<T, EffectError>,
 ) -> Result<T, EffectError> {
     with_instruction_result_entry(
@@ -2332,17 +2424,19 @@ fn with_instruction_result_entry<T>(
     run: impl FnOnce(
         &mut GameState,
         &ResolvedAbility,
-        &crate::types::ability::ResultProducerEnvironment,
+        AdmittedInstructionResult<'_>,
     ) -> Result<T, EffectError>,
 ) -> Result<T, EffectError> {
     use crate::types::ability::{
         classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
     };
-    let (summary, declarations) = classify_instruction_result_invocation(ability, entry, None)?;
+    state.validate_replacement_program(ability)?;
+    let (summary, mut declarations) = classify_instruction_result_invocation(ability, entry, None)?;
     let mut executable = ability.clone();
     let previous = match summary {
         InstructionResultProcess::Local { .. } => {
-            let (previous, process) = begin_return_result_occurrence(state, &declarations)?;
+            let (previous, process) =
+                begin_return_result_occurrence(state, ability, &declarations)?;
             executable.bind_return_result_process(Some(process));
             previous
         }
@@ -2362,6 +2456,32 @@ fn with_instruction_result_entry<T>(
                 ));
             }
             executable.bind_return_result_process(ability.return_result_process);
+            let program = frame.admitted_program.as_deref().ok_or_else(|| {
+                EffectError::InvalidParam(
+                    "selected instruction-result owner has no admitted program".into(),
+                )
+            })?;
+            let (_, actual) = classify_instruction_result_invocation(
+                program,
+                InstructionResultEntry::Independent,
+                None,
+            )?;
+            if frame.declarations.as_ref() != Some(&actual) {
+                return Err(EffectError::InvalidParam(
+                    "selected instruction-result declaration origin mismatch".into(),
+                ));
+            }
+            if !crate::types::game_state::is_retained_instruction_result_carrier(
+                state,
+                Some(occurrence),
+                ability,
+            ) || !instruction_result_program_projects_to(program, ability)
+            {
+                return Err(EffectError::InvalidParam(
+                    "selected instruction-result body has no authenticated typed carrier".into(),
+                ));
+            }
+            declarations = actual;
             Some(occurrence)
         }
         InstructionResultProcess::Unused => {
@@ -2369,7 +2489,13 @@ fn with_instruction_result_entry<T>(
             state.active_return_result_occurrence.take()
         }
     };
-    let result = run(state, &executable, &declarations);
+    let program = state
+        .active_return_result_occurrence
+        .and_then(|id| state.return_result_frames.get(&id))
+        .and_then(|frame| frame.admitted_program.as_deref())
+        .cloned()
+        .unwrap_or_else(|| executable.clone());
+    let result = run(state, &executable, (&program, &declarations));
     state.active_return_result_occurrence = previous;
     retire_unreferenced_return_result_frames(state);
     result
@@ -2379,9 +2505,16 @@ pub(crate) fn owned_cursor_declarations(
     state: &GameState,
     occurrence: Option<ReturnResultOccurrenceId>,
     ability: &ResolvedAbility,
-) -> Result<crate::types::ability::ResultProducerEnvironment, EffectError> {
+) -> Result<
+    (
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    ),
+    EffectError,
+> {
     if !crate::types::game_state::has_return_result_metadata(ability) {
-        return Ok(Default::default());
+        state.validate_replacement_program(ability)?;
+        return Ok((ability.clone(), Default::default()));
     }
     let frame = crate::types::game_state::checked_return_result_frame(
         state,
@@ -2396,8 +2529,53 @@ pub(crate) fn owned_cursor_declarations(
             "instruction-result cursor has no recovered declaration origin".into(),
         )
     })?;
-    validate_owned_instruction_result_cursor(state, ability, occurrence, &declarations)?;
-    Ok(declarations)
+    let program = frame.admitted_program.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam(
+            "instruction-result cursor has no recovered admitted program".into(),
+        )
+    })?;
+    let (_, actual) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    )?;
+    if actual != declarations || program.return_result_process != frame.process {
+        return Err(EffectError::InvalidParam(
+            "instruction-result admitted program declaration mismatch".into(),
+        ));
+    }
+    state.validate_replacement_program(ability)?;
+    if !crate::types::game_state::is_retained_instruction_result_carrier(state, occurrence, ability)
+        && !(state
+            .active_coin_flip_frame()
+            .is_some_and(|pending| pending.return_result_occurrence == occurrence)
+            && instruction_result_coin_program_projects_to(state, occurrence, program, ability))
+    {
+        return Err(EffectError::InvalidParam(
+            "instruction-result lookup has no actual typed carrier".into(),
+        ));
+    }
+    if let Some(prompt) = crate::types::game_state::retained_result_waits(state)
+        .into_iter()
+        .find_map(|waiting| match waiting {
+            WaitingFor::ChooseManaColor {
+                return_result_occurrence,
+                choice,
+                context: crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending),
+                ..
+            } if *return_result_occurrence == occurrence
+                && instruction_result_projection_eq(pending, ability) =>
+            {
+                Some(choice)
+            }
+            _ => None,
+        })
+    {
+        mana::validate_mana_choice_response(state, ability, prompt, occurrence)?;
+        return Ok((program.clone(), declarations));
+    }
+    validate_owned_instruction_result_cursor(state, ability, occurrence, (program, &declarations))?;
+    Ok((program.clone(), declarations))
 }
 
 fn completed_instruction_result_declarations(
@@ -2422,9 +2600,14 @@ fn completed_instruction_result_declarations(
             "instruction-result cursor declaration owner mismatch".into(),
         ));
     }
+    let pending = crate::types::game_state::pending_instruction_results(
+        state,
+        occurrence,
+        ability.return_result_process,
+    );
     Ok(declarations
         .iter()
-        .filter(|(id, _)| frame.results.contains_key(id))
+        .filter(|(id, _)| frame.results.contains_key(id) && !pending.contains(id))
         .map(|(id, zones)| (*id, *zones))
         .collect())
 }
@@ -2433,16 +2616,639 @@ fn validate_owned_instruction_result_cursor(
     state: &GameState,
     ability: &ResolvedAbility,
     occurrence: Option<ReturnResultOccurrenceId>,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<crate::types::ability::InstructionResultProcess, EffectError> {
+    if !declarations.1.is_empty()
+        && !instruction_result_owned_program_projects_to(state, occurrence, declarations.0, ability)
+    {
+        return Err(EffectError::InvalidParam(
+            "instruction-result cursor is not an execution projection of its admitted program"
+                .into(),
+        ));
+    }
     let completed =
-        completed_instruction_result_declarations(state, ability, occurrence, declarations)?;
+        completed_instruction_result_declarations(state, ability, occurrence, declarations.1)?;
     crate::types::ability::classify_instruction_result_invocation(
         ability,
         crate::types::ability::InstructionResultEntry::ResumeOwned,
-        Some((declarations, &completed)),
+        Some((declarations.1, &completed)),
     )
     .map(|(summary, _)| summary)
+}
+
+/// Enumerate executable projections using the same own-resolution edges and
+/// pure binding operations as execution. A compatible namespace is not proof
+/// that a different instruction, source, announcement or target was admitted.
+pub(crate) fn visit_instruction_result_program_projections(
+    program: &ResolvedAbility,
+    scoped_player: Option<PlayerId>,
+    visit: &mut impl FnMut(&ResolvedAbility) -> bool,
+) -> bool {
+    visit_instruction_result_program_projections_inner(program, scoped_player, None, visit)
+}
+
+pub(crate) fn visit_instruction_result_program_projections_for_cursor(
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+    visit: &mut impl FnMut(&ResolvedAbility) -> bool,
+) -> bool {
+    visit_instruction_result_program_projections_inner(
+        program,
+        current.scoped_player,
+        Some(current),
+        visit,
+    )
+}
+
+fn visit_instruction_result_program_projections_inner(
+    program: &ResolvedAbility,
+    scoped_player: Option<PlayerId>,
+    current: Option<&ResolvedAbility>,
+    visit: &mut impl FnMut(&ResolvedAbility) -> bool,
+) -> bool {
+    use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
+    use std::ops::ControlFlow;
+    if visit(program) {
+        return true;
+    }
+    if (program.optional || program.optional_for.is_some())
+        && current.is_some_and(|current| !current.optional && current.optional_for.is_none())
+    {
+        let mut accepted = project_optional_decision_ability(program, AutoMayChoice::Accept);
+        accepted.optional_for = None;
+        if program.optional_for.is_some() {
+            if let Some(player) = current.and_then(|current| current.scoped_player) {
+                accepted.set_scoped_player_recursive(player);
+                accepted.context.accepting_player = Some(player);
+            }
+        }
+        if visit_instruction_result_program_projections_inner(
+            &accepted,
+            scoped_player,
+            current,
+            visit,
+        ) {
+            return true;
+        }
+    }
+    if let Some(current) = current {
+        if program.target_choice_timing == crate::types::ability::TargetChoiceTiming::Resolution
+            && program.targets.is_empty()
+            && !current.targets.is_empty()
+        {
+            let mut selected = program.clone();
+            selected.replace_target_occurrences(current.target_occurrences());
+            if visit_instruction_result_program_projections_inner(
+                &selected,
+                scoped_player,
+                Some(current),
+                visit,
+            ) {
+                return true;
+            }
+        }
+        if program.player_scope.is_some()
+            && program.unless_pay.is_some()
+            && matches!(
+                program.effect,
+                Effect::Token {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            )
+        {
+            let projected =
+                crate::game::engine_payment_choices::project_player_scope_token_unless_effect(
+                    program, None,
+                );
+            if visit_instruction_result_program_projections_inner(
+                &projected,
+                scoped_player,
+                Some(current),
+                visit,
+            ) {
+                return true;
+            }
+        }
+        if let (
+            Effect::PayCost {
+                cost: AbilityCost::Composite { costs },
+                ..
+            },
+            Effect::PayCost { .. },
+        ) = (&program.effect, &current.effect)
+        {
+            for index in 1..costs.len() {
+                let remainder = if costs.len() - index == 1 {
+                    costs[index].clone()
+                } else {
+                    AbilityCost::Composite {
+                        costs: costs[index..].to_vec(),
+                    }
+                };
+                for rider in [program.sub_ability.as_deref(), None] {
+                    let projected = project_remaining_pay_cost(
+                        program,
+                        current.controller,
+                        remainder.clone(),
+                        rider,
+                        None,
+                    );
+                    if visit_instruction_result_program_projections_inner(
+                        &projected,
+                        scoped_player,
+                        Some(current),
+                        visit,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if matches!(program.effect, Effect::Attach { .. }) {
+            let (split, _) = attach::split_attachment_choice_operation(program);
+            if instruction_result_projection_eq(&split, current) {
+                return true;
+            }
+            let mut bound = split;
+            if bound.attach_host_target().is_none() {
+                if let Some(host) = current.attach_host_target() {
+                    bound = attach::bind_attachment_choice_incarnations(&bound, &[*host]);
+                }
+            }
+            let selected: Vec<_> = current
+                .attach_attachment_targets()
+                .iter()
+                .copied()
+                .filter(|selected| !bound.attach_attachment_targets().contains(selected))
+                .collect();
+            if !selected.is_empty() {
+                bound = attach::bind_attachment_choice_incarnations(&bound, &selected);
+            }
+            if instruction_result_projection_eq(&bound, current) {
+                return true;
+            }
+            let remaining: Vec<_> = current
+                .attach_attachment_targets()
+                .iter()
+                .map(|pin| pin.object_id)
+                .collect();
+            if bound
+                .attach_attachment_targets()
+                .iter()
+                .any(|pin| !current.attach_attachment_targets().contains(pin))
+            {
+                let remainder = attach::remaining_attachment_operation(&bound, &remaining);
+                if instruction_result_projection_eq(&remainder, current) {
+                    return true;
+                }
+            }
+        }
+        match (&program.effect, &current.effect) {
+            (Effect::CombineHost { source, .. }, Effect::CombineHost { source: crate::types::ability::CombineSource::SpecificObject { id }, host })
+                if matches!(host.as_ref(), TargetFilter::ParentTarget) && match source {
+                    crate::types::ability::CombineSource::SpecificObject { id: original } => original == id,
+                    crate::types::ability::CombineSource::Source => *id == program.source_id,
+                    crate::types::ability::CombineSource::ParentTarget => program.targets.iter().find_map(|target|
+                        if let TargetRef::Object(id) = target { Some(id) } else { None }) == Some(id),
+                } =>
+            {
+                let mut projected = crate::game::augment::continuation_for_host_choice(program, *id);
+                if visit(&projected) { return true; }
+                projected.replace_target_occurrences(current.target_occurrences());
+                if visit(&projected) { return true; }
+            }
+            (Effect::ChooseAugmentAndCombineWithHost { host, .. }, Effect::CombineHost { source: crate::types::ability::CombineSource::ParentTarget, host: frozen })
+                if host == frozen || program.targets.iter().any(|target|
+                    matches!((target, frozen.as_ref()), (TargetRef::Object(id), TargetFilter::SpecificObject { id: frozen }) if id == frozen)) =>
+            {
+                let mut projected = crate::game::augment::continuation_for_augment_choice(program, (**frozen).clone());
+                if visit(&projected) { return true; }
+                projected.replace_target_occurrences(current.target_occurrences());
+                if visit(&projected) { return true; }
+            }
+            _ => {}
+        }
+        if let (Effect::ChooseDamageSource { source_filter }, Some(choice)) =
+            (&program.effect, &current.context.damage_source_choice)
+        {
+            if program.context.damage_source_choice.is_none()
+                && source_filter == &choice.candidate_filter
+            {
+                let mut selected = program.clone();
+                selected.context.damage_source_choice = Some(choice.clone());
+                if visit_instruction_result_program_projections_inner(
+                    &selected,
+                    scoped_player,
+                    Some(current),
+                    visit,
+                ) {
+                    return true;
+                }
+            }
+        }
+        if let (Some(scope), Some(seat)) = (&program.player_scope, scoped_player) {
+            let (template, after_scope) = split_player_scope_chain(program, scope);
+            let bound = bind_scoped_seat(&template, program.controller, seat);
+            if visit_instruction_result_program_projections_inner(
+                &bound,
+                scoped_player,
+                Some(current),
+                visit,
+            ) {
+                return true;
+            }
+            if let Some(tail) = after_scope {
+                if visit_instruction_result_program_projections_inner(
+                    &tail,
+                    scoped_player,
+                    Some(current),
+                    visit,
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    for (is_sub, child) in program
+        .sub_ability
+        .iter()
+        .map(|child| (true, child))
+        .chain(program.else_ability.iter().map(|child| (false, child)))
+    {
+        if child
+            .condition
+            .as_ref()
+            .is_some_and(AbilityCondition::has_when_you_do_marker)
+            || (is_sub && program.effect.sub_ability_resolves_later(child.sub_link))
+        {
+            continue;
+        }
+        let mut child = (**child).clone();
+        project_parent_chain_context(&mut child, program, None, None);
+        if should_propagate_parent_targets(program, &child) {
+            child.replace_target_occurrences(inherited_parent_occurrences(program, &child));
+        }
+        if visit_instruction_result_program_projections_inner(&child, scoped_player, current, visit)
+        {
+            return true;
+        }
+    }
+    if matches!(program.effect, Effect::Investigate)
+        && visit_instruction_result_program_projections_inner(
+            &investigate::project_token_ability(program),
+            scoped_player,
+            current,
+            visit,
+        )
+    {
+        return true;
+    }
+    if let Effect::RevealFromHand {
+        on_decline: Some(definition),
+        ..
+    } = &program.effect
+    {
+        if visit_instruction_result_program_projections_inner(
+            &reveal_from_hand::project_decline_branch(program, definition),
+            scoped_player,
+            current,
+            visit,
+        ) {
+            return true;
+        }
+    }
+    for (_, body) in &program.coin_branch_target_abilities {
+        if visit_instruction_result_program_projections_inner(body, scoped_player, current, visit) {
+            return true;
+        }
+    }
+    let mut found = false;
+    let _ = direct_nodes::visit_effect_scoped(
+        &program.effect,
+        ResolutionScope::OwnResolutionOnly,
+        &mut |node| {
+            let DefinitionNode::Ability(definition) = node else {
+                return ControlFlow::Continue(());
+            };
+            let mut selected =
+                crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+                    definition,
+                    program.source_id,
+                    program.controller,
+                    program.targets.clone(),
+                    program.context.chain_root_targets.clone(),
+                );
+            selected.inherit_coin_target_inputs(program);
+            selected.replace_target_occurrences(program.target_occurrences());
+            selected.bind_return_result_process(program.return_result_process);
+            selected.set_replacement_applied_recursive(program.replacement_applied.clone());
+            if matches!(program.effect, Effect::ChooseOneOf { .. }) {
+                if let Some(player) = scoped_player {
+                    selected = choose_one_of::project_selected_branch(program, definition, player);
+                }
+            }
+            found = visit_instruction_result_program_projections_inner(
+                &selected,
+                scoped_player,
+                current,
+                visit,
+            );
+            if !found {
+                if let Some(tail) = &program.sub_ability {
+                    let mut with_tail = selected;
+                    crate::game::ability_utils::append_to_sub_chain(
+                        &mut with_tail,
+                        (**tail).clone(),
+                    );
+                    found = visit_instruction_result_program_projections_inner(
+                        &with_tail,
+                        scoped_player,
+                        current,
+                        visit,
+                    );
+                }
+            }
+            if found {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        },
+    );
+    found
+}
+
+pub(crate) fn instruction_result_program_projects_to(
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
+    visit_instruction_result_program_projections_for_cursor(program, current, &mut |candidate| {
+        instruction_result_projection_eq(candidate, current)
+    })
+}
+
+pub(crate) fn instruction_result_owned_program_projects_to(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
+    instruction_result_program_projects_to(program, current)
+        || instruction_result_coin_program_projects_to(state, occurrence, program, current)
+        || instruction_result_damage_program_projects_to(program, current)
+        || visit_instruction_result_program_projections_for_cursor(
+            program,
+            current,
+            &mut |candidate| {
+                let Some(modifier) = &candidate.unless_pay else {
+                    return false;
+                };
+                if candidate.player_scope.is_none()
+                    || !matches!(
+                        (&modifier.cost, &modifier.payer, &candidate.effect),
+                        (
+                            AbilityCost::Sacrifice(crate::types::ability::SacrificeCost {
+                                requirement: crate::types::ability::SacrificeRequirement::Count {
+                                    count: 1
+                                },
+                                ..
+                            }),
+                            TargetFilter::ScopedPlayer | TargetFilter::Player,
+                            Effect::Token {
+                                count: QuantityExpr::Fixed { value: 1 },
+                                ..
+                            }
+                        )
+                    )
+                {
+                    return false;
+                }
+                let Effect::Token {
+                    count: QuantityExpr::Fixed { value },
+                    ..
+                } = &current.effect
+                else {
+                    return false;
+                };
+                let Ok(count) = usize::try_from(*value) else {
+                    return false;
+                };
+                if count > state.players.len() {
+                    return false;
+                }
+                if let Some(pending) = state.pending_player_scope_unless_payment.as_ref() {
+                    if pending.return_result_occurrence != occurrence
+                        || count != pending.declining_players.len()
+                    {
+                        return false;
+                    }
+                }
+                let projected =
+                    crate::game::engine_payment_choices::project_player_scope_token_unless_effect(
+                        candidate,
+                        Some(count),
+                    );
+                instruction_result_projection_eq(&projected, current)
+            },
+        )
+}
+
+fn instruction_result_damage_program_projects_to(
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
+    visit_instruction_result_program_projections_for_cursor(program, current, &mut |original| {
+        let (amount, own_source) = match &original.effect {
+            Effect::DealDamage {
+                amount,
+                damage_source,
+                ..
+            }
+            | Effect::DamageAll {
+                amount,
+                damage_source,
+                ..
+            } => (Some(amount), damage_source.is_none()),
+            Effect::DamageEachPlayer { amount, .. } => (Some(amount), true),
+            Effect::EachSourceDealsDamage { amount, .. } => (Some(amount), false),
+            Effect::EachDealsDamageEqualToPower { .. } => (None, false),
+            _ => return false,
+        };
+        let mut cursor = Some(current);
+        let mut saw_damage = false;
+        while let Some(node) = cursor {
+            let mut head = node.clone();
+            head.sub_ability = None;
+            let mut expected = match &node.effect {
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                } if *value >= 0 && node.targets.len() == 1 => {
+                    if node.controller != original.controller {
+                        return false;
+                    }
+                    if let Some(QuantityExpr::Fixed {
+                        value: original_amount,
+                    }) = amount
+                    {
+                        if (*original_amount).max(0) != *value {
+                            return false;
+                        }
+                    }
+                    let mut generated = deal_damage::build_remaining_damage_node(
+                        node.source_id,
+                        node.controller,
+                        node.targets[0].clone(),
+                        *value as u32,
+                    );
+                    deal_damage::carry_remaining_own_source(
+                        &mut generated,
+                        original,
+                        node.source_id,
+                    );
+                    generated.context.damage_opportunity = node.context.damage_opportunity.clone();
+                    generated
+                }
+                Effect::ApplyPostReplacementDamage {
+                    context,
+                    target,
+                    amount,
+                    is_combat,
+                } => {
+                    if context.source_id != node.source_id
+                        || context.controller != node.controller
+                        || context.source_incarnation != node.source_incarnation
+                    {
+                        return false;
+                    }
+                    let mut context: deal_damage::DamageContext = context.clone().into();
+                    context.trigger_source = node.trigger_source.clone();
+                    context.opportunity = std::rc::Rc::new(std::cell::RefCell::new(
+                        node.context.damage_opportunity.clone().unwrap_or_default(),
+                    ));
+                    let event = crate::types::proposed_event::ProposedEvent::Damage {
+                        source_id: node.source_id,
+                        target: target.clone(),
+                        amount: *amount,
+                        is_combat: *is_combat,
+                        applied: Default::default(),
+                    };
+                    let Some(generated) =
+                        deal_damage::build_post_replacement_damage_node(&context, &event)
+                    else {
+                        return false;
+                    };
+                    generated
+                }
+                _ => {
+                    if !saw_damage {
+                        return false;
+                    }
+                    return original.sub_ability.as_deref().is_some_and(|tail| {
+                        let tail = deal_damage::cast_tail_with_parent_targets(tail, original);
+                        instruction_result_program_projects_to(&tail, node)
+                    });
+                }
+            };
+            if own_source && node.source_id != original.source_id {
+                return false;
+            }
+            if own_source
+                && node.source_incarnation.is_some()
+                && original.source_incarnation.is_some()
+                && node.source_incarnation != original.source_incarnation
+            {
+                return false;
+            }
+            expected.bind_return_result_process(original.return_result_process);
+            if !instruction_result_projection_eq(&expected, &head) {
+                return false;
+            }
+            saw_damage = true;
+            cursor = node.sub_ability.as_deref();
+        }
+        saw_damage && original.sub_ability.is_none()
+    })
+}
+
+fn instruction_result_coin_program_projects_to(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    program: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> bool {
+    use crate::types::ability::CoinFlipResult;
+    use crate::types::resolution::FlipBranchContext;
+    visit_instruction_result_program_projections_for_cursor(program, current, &mut |candidate| {
+        let Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
+        } = &candidate.effect
+        else {
+            return false;
+        };
+        let captured = state.active_coin_flip_frame().filter(|pending| {
+            pending.return_result_occurrence == occurrence
+                && pending.expected_return_result_process == candidate.return_result_process
+                && pending.source_id == candidate.source_id
+                && pending.controller == candidate.controller
+                && pending.win_effect == *win_effect
+                && pending.lose_effect == *lose_effect
+                && pending.chain_root_targets == candidate.context.chain_root_targets
+                && crate::game::ability_utils::validate_retained_coin_target_custody(
+                    candidate,
+                    &pending.branch_context,
+                )
+                .is_ok()
+        });
+        let ordinary = FlipBranchContext::from_ability(candidate);
+        let context = captured
+            .map(|pending| &pending.branch_context)
+            .unwrap_or(&ordinary);
+        let targets = captured
+            .map(|pending| pending.targets.as_slice())
+            .unwrap_or(&candidate.targets);
+        for (outcome, definition) in [
+            (CoinFlipResult::Won, win_effect.as_deref()),
+            (CoinFlipResult::Lost, lose_effect.as_deref()),
+        ] {
+            if let Ok(Some(selected)) = flip_coin::build_flip_branch(
+                state,
+                definition,
+                outcome,
+                candidate.source_id,
+                candidate.controller,
+                targets,
+                &candidate.context.chain_root_targets,
+                context,
+                candidate.return_result_process,
+            ) {
+                if instruction_result_program_projects_to(&selected, current) {
+                    return true;
+                }
+            }
+        }
+        false
+    })
+}
+
+pub(crate) fn instruction_result_projection_eq(
+    expected: &ResolvedAbility,
+    actual: &ResolvedAbility,
+) -> bool {
+    expected == actual
+        && expected.cost_paid_objects == actual.cost_paid_objects
+        && expected.target_occurrences() == actual.target_occurrences()
+        && expected
+            .target_children()
+            .zip(actual.target_children())
+            .all(|((left_step, left), (right_step, right))| {
+                left_step == right_step && instruction_result_projection_eq(left, right)
+            })
 }
 
 pub(crate) fn addressed_quantity_ref_is_available(
@@ -2670,7 +3476,7 @@ pub(crate) fn validate_definition_waiting_for_result_owner(
 pub(crate) fn retained_return_result_occurrence(
     state: &GameState,
     ability: &ResolvedAbility,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
     use crate::types::ability::InstructionResultProcess;
     match validate_owned_instruction_result_cursor(
@@ -2772,12 +3578,99 @@ fn publish_instruction_result(
     expected: Option<crate::types::game_state::ReturnResultProcessId>,
     result: crate::types::game_state::InstructionResult,
 ) -> Result<(), EffectError> {
-    crate::types::game_state::checked_return_result_frame(
+    let admitted = crate::types::game_state::checked_return_result_frame(
         state,
         Some(occurrence_id),
         crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(expected),
     )
     .map_err(EffectError::InvalidParam)?;
+    let program = admitted.admitted_program.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam("instruction-result publication has no admitted program".into())
+    })?;
+    let (_, declarations) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    )?;
+    if admitted.declarations.as_ref() != Some(&declarations)
+        || !declarations.contains_key(&result_id)
+    {
+        return Err(EffectError::InvalidParam(
+            "instruction-result publication declaration mismatch".into(),
+        ));
+    }
+    fn producer(
+        node: &ResolvedAbility,
+        id: crate::types::ability::ReturnResultId,
+    ) -> Option<&ResolvedAbility> {
+        if node.declares_return_result == Some(id) {
+            return Some(node);
+        }
+        for child in node.sub_ability.iter().chain(&node.else_ability) {
+            if child
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::has_when_you_do_marker)
+                || (node
+                    .sub_ability
+                    .as_deref()
+                    .is_some_and(|sub| std::ptr::eq(sub, &**child))
+                    && node.effect.sub_ability_resolves_later(child.sub_link))
+            {
+                continue;
+            }
+            if let Some(found) = producer(child, id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let producer = producer(program, result_id).ok_or_else(|| {
+        EffectError::InvalidParam("instruction-result producer absent from admitted program".into())
+    })?;
+    use crate::types::game_state::InstructionResult;
+    let correct_kind = match (&producer.effect, &result) {
+        (
+            Effect::RevealTop { .. } | Effect::Dig { reveal: true, .. },
+            InstructionResult::RevealedCards(_),
+        ) => true,
+        (Effect::RemoveCounter { .. }, InstructionResult::CounterRemovals(_)) => true,
+        (
+            Effect::ChooseCounterAdjustment { adjustment, .. },
+            InstructionResult::CounterRemovals(_),
+        ) => adjustment.allows_remove(),
+        (
+            Effect::RevealTop { .. }
+            | Effect::Dig { reveal: true, .. }
+            | Effect::RemoveCounter { .. }
+            | Effect::ChooseCounterAdjustment { .. },
+            _,
+        ) => false,
+        (
+            Effect::ChangeZone { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Seek { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::Dig { reveal: false, .. }
+            | Effect::ExileTop { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::Mill { .. },
+            InstructionResult::ZoneChanges(records),
+        ) => records.iter().all(|record| {
+            crate::game::filter::departure_record_has_coherent_snapshot(record)
+                && declarations[&result_id]
+                    .is_none_or(|(origin, _)| record.from_zone == Some(origin))
+        }),
+        _ => false,
+    };
+    if !correct_kind {
+        return Err(EffectError::InvalidParam(
+            "instruction-result publication kind or origin mismatch".into(),
+        ));
+    }
     let frame = state
         .return_result_frames
         .get_mut(&occurrence_id)
@@ -2944,6 +3837,22 @@ fn publish_empty_return_result_for_active(
     ability: &ResolvedAbility,
 ) -> Result<(), EffectError> {
     let effect = &ability.effect;
+    if let Effect::RemoveCounter { counter_type, .. } = effect {
+        begin_counter_removal_result(
+            state,
+            ability,
+            None,
+            counter_type
+                .clone()
+                .map(crate::types::counter::CounterMatch::OfType)
+                .unwrap_or(crate::types::counter::CounterMatch::Any),
+        )?;
+        return Ok(());
+    }
+    if let Effect::ChooseCounterAdjustment { counters, .. } = effect {
+        begin_counter_removal_result(state, ability, None, counters.clone())?;
+        return Ok(());
+    }
     let occurrence_id = state
         .active_return_result_occurrence
         .ok_or_else(|| EffectError::MissingParam("return result occurrence".to_string()))?;
@@ -3136,14 +4045,22 @@ mod revealed_instruction_authority_tests {
         let def = parsed.abilities[0].sub_ability.as_deref().unwrap();
         let base =
             crate::game::ability_utils::build_resolved_from_def(def, ObjectId(100), PlayerId(0));
+        let program = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            ObjectId(100),
+            PlayerId(0),
+        );
         assert!(is_named_revealed_reader(&base));
         let id = base.reads_return_result.as_ref().unwrap().0;
         for fault in 0..12 {
             let mut state = GameState::new_two_player(42);
-            let (_, process) = begin_return_result_occurrence(&mut state).unwrap();
+            let (_, process) = begin_test_return_result_occurrence(&mut state, &program).unwrap();
             let occurrence = state.active_return_result_occurrence.unwrap();
             let mut reader = base.clone();
             reader.bind_return_result_process(Some(process));
+            let mut pending = PendingContinuation::new(Box::new(reader.clone()), &state);
+            pending.return_result_occurrence = Some(occurrence);
+            state.park_ability_continuation(pending);
             if fault != 0 {
                 let mut producer = crate::game::ability_utils::build_resolved_from_def(
                     &parsed.abilities[0],
@@ -3173,7 +4090,7 @@ mod revealed_instruction_authority_tests {
                     reader.reads_return_result.as_mut().unwrap().1.recipient = ControllerRef::You;
                 }
                 5 => {
-                    begin_return_result_occurrence(&mut state).unwrap();
+                    begin_test_return_result_occurrence(&mut state, &program).unwrap();
                 }
                 6 => {
                     reader.condition = Some(AbilityCondition::QuantityCheck {
@@ -3214,7 +4131,18 @@ mod revealed_instruction_authority_tests {
                 _ => {}
             }
             let mut events = Vec::new();
-            let result = resolve_chain_body(&mut state, &reader, &mut events, 1, None);
+            let result =
+                owned_cursor_declarations(&state, state.active_return_result_occurrence, &reader)
+                    .and_then(|owner| {
+                        resolve_owned_chain_body(
+                            &mut state,
+                            &reader,
+                            &mut events,
+                            1,
+                            None,
+                            (&owner.0, &owner.1),
+                        )
+                    });
             if fault == 8 {
                 assert!(result.is_ok(), "present empty is an authorized 0==0");
                 assert!(events.iter().any(|event| matches!(
@@ -3259,7 +4187,12 @@ mod revealed_instruction_authority_tests {
             ObjectId(100),
             PlayerId(0),
         );
-        let (_, process) = begin_return_result_occurrence(state).unwrap();
+        let program = crate::game::ability_utils::build_resolved_from_def(
+            &parsed.abilities[0],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let (_, process) = begin_test_return_result_occurrence(state, &program).unwrap();
         reader.bind_return_result_process(Some(process));
         let id = reader.reads_return_result.as_ref().unwrap().0;
         publish_reveal_result_for_ability(
@@ -4664,17 +5597,42 @@ pub(crate) fn append_to_pending_continuation(
     state: &mut GameState,
     tail: Option<Box<ResolvedAbility>>,
 ) {
-    let Some(tail) = tail else {
-        return;
-    };
+    if let Some(tail) = tail {
+        append_prepared_continuation(state, PendingContinuation::new(tail, state));
+    }
+}
 
+pub(crate) fn append_to_pending_continuation_owned(
+    state: &mut GameState,
+    tail: Option<Box<ResolvedAbility>>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    if let Some(tail) = tail {
+        let pending = PendingContinuation::new_owned(tail, state, declarations)?;
+        append_prepared_continuation(state, pending);
+    }
+    Ok(())
+}
+
+fn is_unused_instruction_result_program(ability: &ResolvedAbility) -> bool {
+    ability.context.counter_removal_result.is_none()
+        && matches!(
+            crate::types::ability::classify_instruction_result_invocation(
+                ability,
+                crate::types::ability::InstructionResultEntry::SelectedBody,
+                None
+            ),
+            Ok((crate::types::ability::InstructionResultProcess::Unused, _)),
+        )
+}
+
+fn append_prepared_continuation(state: &mut GameState, pending: PendingContinuation) {
     if let Some(active_occurrence) = state
         .active_ability_continuation()
         .map(|frame| frame.return_result_occurrence)
     {
-        if active_occurrence != state.active_return_result_occurrence {
-            let current_occurrence = state.active_return_result_occurrence;
-            let pending = PendingContinuation::new(tail, state);
+        if active_occurrence != pending.return_result_occurrence {
+            let current_occurrence = pending.return_result_occurrence;
             // CR 608.2c: A nested post-effect can park a child continuation
             // before the outer return discovers its delayed reader. Occurrence
             // IDs are minted in execution order: the older outer continuation
@@ -4693,35 +5651,38 @@ pub(crate) fn append_to_pending_continuation(
             return;
         }
     }
-    if let Some(frame) = state.active_ability_continuation_frame_mut() {
-        let mut cursor = frame.pending.chain.as_mut();
-        let tail = Some(tail);
-        loop {
-            if cursor.sub_ability.is_none() {
-                cursor.sub_ability = tail;
-                break;
-            }
-            cursor = cursor
-                .sub_ability
-                .as_mut()
-                .expect("sub_ability checked above")
-                .as_mut();
-        }
+    if pending.return_result_occurrence.is_none()
+        && pending.pending_return_result_producer.is_none()
+        && is_unused_instruction_result_program(&pending.chain)
+        && state.active_ability_continuation().is_some_and(|active| {
+            active.return_result_occurrence.is_none()
+                && active.pending_return_result_producer.is_none()
+                && is_unused_instruction_result_program(&active.chain)
+        })
+    {
+        let frame = state
+            .active_ability_continuation_frame_mut()
+            .expect("the unused continuation remains active");
+        super::ability_utils::append_to_sub_chain(&mut frame.pending.chain, *pending.chain);
+        return;
+    }
+    if state.active_ability_continuation().is_some() {
+        state
+            .insert_ability_continuation_parent_of_active(pending)
+            .expect("each appended operation keeps its own typed continuation custody");
     } else if state
         .resolution_stack
         .has_active_post_replacement_draw_pair()
     {
         state
-            .insert_ability_continuation_outside_active_post_replacement_draw(
-                PendingContinuation::new(tail, state),
-            )
+            .insert_ability_continuation_outside_active_post_replacement_draw(pending)
             .expect("paired post-replacement draw must retain its continuation outside the pair");
     } else if active_frame_requires_ability_continuation_parent(state) {
         state
-            .insert_ability_continuation_parent_of_active(PendingContinuation::new(tail, state))
+            .insert_ability_continuation_parent_of_active(pending)
             .expect("paused child operation must retain its continuation as an immediate parent");
     } else {
-        state.park_ability_continuation(PendingContinuation::new(tail, state));
+        state.park_ability_continuation(pending);
     }
 }
 
@@ -4766,16 +5727,22 @@ pub(crate) fn active_player_action_completion_requires(
 }
 
 pub(crate) fn prepend_to_pending_continuation(state: &mut GameState, head: ResolvedAbility) {
-    prepend_to_pending_continuation_with_producer(state, head, None, None);
+    prepend_to_pending_continuation_with_producer(state, head, None, None, None)
+        .expect("independent continuation has no instruction-result owner");
+}
+
+pub(crate) fn prepend_to_pending_continuation_owned(
+    state: &mut GameState,
+    head: ResolvedAbility,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    prepend_to_pending_continuation_with_producer(state, head, None, None, Some(declarations))
 }
 
 /// `x_announcement` marks `head` as the rider of a paused payment (see
-/// `PendingContinuation::x_announcement`). A merge happens only when neither
-/// `head` nor the active frame is marked, so a marked rider is never combined
-/// with another chain in either direction: a marked `head` is parked as its own
-/// new active frame, and an unmarked `head` above a marked rider is parked as its
-/// own frame too (the answer still finds the marked rider beneath it). Either
-/// park keeps the order a merge would give (`head`, then that frame's chain).
+/// `PendingContinuation::x_announcement`). A marked rider retains its own
+/// frame, so the payment answer stamps only that rider. Prepending keeps
+/// `head` before the previously active operation without combining ownership.
 /// The two early inserts (outside a post-replacement draw pair, beneath an active
 /// direct-choice child) leave it unset because `head` does not become the active
 /// frame there.
@@ -4787,9 +5754,15 @@ fn prepend_to_pending_continuation_with_producer(
         crate::types::ability::ReturnResultId,
     )>,
     x_announcement: Option<ContinuationXAnnouncement>,
-) {
+    declarations: Option<AdmittedInstructionResult<'_>>,
+) -> Result<(), EffectError> {
+    let owner = match declarations {
+        Some(declarations) => retained_return_result_occurrence(state, &head, declarations)?,
+        None => None,
+    };
     let make_pending = |state: &GameState, chain: Box<ResolvedAbility>| {
         let mut pending = PendingContinuation::new(chain, state);
+        pending.return_result_occurrence = owner;
         pending.pending_return_result_producer = pending_return_result_producer;
         pending
     };
@@ -4803,23 +5776,28 @@ fn prepend_to_pending_continuation_with_producer(
                 Box::new(head),
             ))
             .expect("paired post-replacement draw must retain its continuation outside the pair");
-        return;
+        return Ok(());
     }
     if active_frame_requires_ability_continuation_parent(state) {
         state
             .insert_ability_continuation_parent_of_active(make_pending(state, Box::new(head)))
             .expect("paused child operation must retain its continuation as an immediate parent");
-        return;
+        return Ok(());
     }
 
-    // CR 107.3f + CR 107.3i: X belongs to each object, so a merge may never
-    // combine a payment's marked rider with another chain: the answer's stamp
-    // would reach both. Merge only when neither side is marked; otherwise park
-    // `head` as its own frame above (the same order a merge gives).
+    // Result-bearing operations keep independent typed custody. Preserve the
+    // ordinary no-result concatenation only when both complete bodies have no
+    // invocation namespace and neither transports a pending publisher.
     if x_announcement.is_none()
-        && state
-            .active_ability_continuation()
-            .is_some_and(|active| active.x_announcement.is_none())
+        && owner.is_none()
+        && pending_return_result_producer.is_none()
+        && is_unused_instruction_result_program(&head)
+        && state.active_ability_continuation().is_some_and(|active| {
+            active.x_announcement.is_none()
+                && active.return_result_occurrence.is_none()
+                && active.pending_return_result_producer.is_none()
+                && is_unused_instruction_result_program(&active.chain)
+        })
     {
         let frame = state
             .take_active_ability_continuation()
@@ -4872,12 +5850,13 @@ fn prepend_to_pending_continuation_with_producer(
             },
             choose_zone_trigger_context: frame.choose_zone_trigger_context,
         });
-        return;
+        return Ok(());
     }
 
     let mut pending = make_pending(state, Box::new(head));
     pending.x_announcement = x_announcement;
     state.park_ability_continuation(pending);
+    Ok(())
 }
 
 fn park_player_scope_queue_end(state: &mut GameState, placeholder: ResolvedAbility) {
@@ -4900,6 +5879,22 @@ pub(crate) fn resolve_effect_pay_cost_rider(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            resolve_effect_pay_cost_rider_owned(state, executable, events, declarations)
+        },
+    )
+}
+
+pub(crate) fn resolve_effect_pay_cost_rider_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let Some(sub) = ability.sub_ability.as_ref() else {
         return Ok(());
     };
@@ -4908,15 +5903,16 @@ pub(crate) fn resolve_effect_pay_cost_rider(
         rider.mirror_targets_from(ability);
     }
     apply_parent_chain_context(&mut rider, ability, None, state);
-    resolve_resume_owned_ability_chain(state, &rider, events, 1)
+    resolve_carrier_owned_ability_chain(state, &rider, events, 1, declarations)
 }
 
-pub(crate) fn prepend_remaining_pay_cost_continuation(
-    state: &mut GameState,
+pub(crate) fn project_remaining_pay_cost(
     ability: &ResolvedAbility,
     payer: PlayerId,
     remaining_cost: AbilityCost,
-) {
+    rider: Option<&ResolvedAbility>,
+    handed: Option<crate::types::ability::ParentTargetMissingReason>,
+) -> ResolvedAbility {
     let mut remaining_payment = ability.clone();
     remaining_payment.controller = payer;
     remaining_payment.optional = false;
@@ -4927,49 +5923,59 @@ pub(crate) fn prepend_remaining_pay_cost_continuation(
         payer: TargetFilter::Controller,
     };
     remaining_payment.sub_ability = None;
-
-    if let Some(sub) = ability.sub_ability.as_ref() {
-        let mut sub_clone = sub.as_ref().clone();
+    if let Some(sub) = rider {
+        let mut sub_clone = sub.clone();
         if should_propagate_parent_targets(ability, &sub_clone) {
             sub_clone.mirror_targets_from(ability);
         }
-        apply_parent_chain_context(&mut sub_clone, ability, None, state);
+        project_parent_chain_context(&mut sub_clone, ability, None, handed);
         super::ability_utils::append_to_sub_chain(&mut remaining_payment, sub_clone);
     }
-
-    // CR 118.12 + CR 608.2c: when payment pauses before later sub-costs are
-    // paid, resume by paying those costs before following the original
-    // sub-ability chain.
-    //
-    // CR 107.3f: this remaining-cost frame carries no `x_announcement`, so an
-    // X announced by the paused sub-cost binds nothing here; a later sub-cost
-    // that announces X marks its own rider when it pauses through the walker.
-    // No printed card has a combined resolution cost with an X component (the
-    // five resolution-time `PayCost { Composite }` nodes in card-data.json are
-    // all fixed), so there is no class to carry the mark through yet.
-    prepend_to_pending_continuation(state, remaining_payment);
+    remaining_payment
 }
 
-/// CR 118.12 + CR 608.2c: A deferred life-payment root resumes after the
-/// original chain walker has already parked the PayCost rider. Prepend only
-/// the unpaid cost suffix here so that parked rider remains exactly once.
-pub(crate) fn prepend_remaining_pay_cost_before_parked_rider(
+pub(crate) fn prepend_remaining_pay_cost_continuation_owned(
     state: &mut GameState,
     ability: &ResolvedAbility,
     payer: PlayerId,
     remaining_cost: AbilityCost,
-) {
-    let mut remaining_payment = ability.clone();
-    remaining_payment.controller = payer;
-    remaining_payment.optional = false;
-    remaining_payment.optional_for = None;
-    remaining_payment.effect = Effect::PayCost {
-        cost: remaining_cost,
-        scale: None,
-        payer: TargetFilter::Controller,
-    };
-    remaining_payment.sub_ability = None;
-    prepend_to_pending_continuation(state, remaining_payment);
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )?;
+    let remaining_payment = project_remaining_pay_cost(
+        ability,
+        payer,
+        remaining_cost,
+        ability.sub_ability.as_deref(),
+        state.last_parent_target_missing_reason.clone(),
+    );
+    prepend_to_pending_continuation_owned(state, remaining_payment, declarations)?;
+    state.last_parent_target_missing_reason = None;
+    Ok(())
+}
+
+/// CR 118.12 + CR 608.2c: a deferred life payment owns only its unpaid cost
+/// suffix; the already parked rider stays under its original invocation.
+pub(crate) fn prepend_remaining_pay_cost_before_parked_rider_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    remaining_cost: AbilityCost,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )?;
+    let remaining_payment = project_remaining_pay_cost(ability, payer, remaining_cost, None, None);
+    prepend_to_pending_continuation_owned(state, remaining_payment, declarations)
 }
 
 pub(crate) fn parent_referent_context_from_events(
@@ -5393,6 +6399,7 @@ fn try_begin_deferred_else_branch_target_selection(
     state: &mut GameState,
     else_resolved: &mut ResolvedAbility,
     _events: &mut Vec<GameEvent>,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<bool, EffectError> {
     if !else_resolved.targets.is_empty() {
         return Ok(false);
@@ -5436,10 +6443,11 @@ fn try_begin_deferred_else_branch_target_selection(
             })
             .collect();
         if !candidates.is_empty() {
-            state.park_ability_continuation(PendingContinuation::new(
+            state.park_ability_continuation(PendingContinuation::new_owned(
                 Box::new(else_resolved.clone()),
                 state,
-            ));
+                declarations,
+            )?);
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: else_resolved.controller,
                 cards: candidates,
@@ -6312,7 +7320,7 @@ fn resolve_sub_with_missing_forward_result(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     let mut bound_sub = sub.clone();
     bind_forwarded_generic_self_ref(&mut bound_sub);
@@ -6413,6 +7421,22 @@ pub(crate) fn apply_parent_chain_context(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
     state: &mut GameState,
 ) {
+    project_parent_chain_context(
+        child,
+        parent,
+        effect_context_object,
+        state.last_parent_target_missing_reason.take(),
+    );
+}
+
+/// The context handoff itself is pure. Admission/recovery can construct the
+/// same child without consuming a relay or executing its preceding effect.
+pub(crate) fn project_parent_chain_context(
+    child: &mut ResolvedAbility,
+    parent: &ResolvedAbility,
+    effect_context_object: Option<&CostPaidObjectSnapshot>,
+    handed: Option<crate::types::ability::ParentTargetMissingReason>,
+) {
     // The face-down Exile marker is authored on the exact ChangeZone node by
     // the parser.  Ordinary chain context handoff replaces the child's
     // context wholesale, so preserve the node-local intent while inheriting
@@ -6497,7 +7521,6 @@ pub(crate) fn apply_parent_chain_context(
     // RevealHand reveal-choice/ExileTop/RevealUntil/library search coming up
     // with nothing. Consume it at this real parent->child hand-off, then give
     // that fresh result precedence over an inherited missing referent.
-    let handed = state.last_parent_target_missing_reason.take();
     inherit_missing_parent_referent(child, parent);
     if let Some(reason) = handed {
         child.parent_target_missing_reason = Some(reason);
@@ -7424,6 +8447,7 @@ fn entry_observation_deferred(
             .is_some_and(library_search_resume_may_apply_with_entry)
 }
 
+#[cfg(test)]
 pub(super) fn resolve_optional_effect_decision(
     state: &mut GameState,
     ability: ResolvedAbility,
@@ -7431,31 +8455,70 @@ pub(super) fn resolve_optional_effect_decision(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
-    resolve_optional_effect_decision_step(state, ability, choice, events, depth).map(|_| ())
+    with_instruction_result_entry(
+        state,
+        &ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| {
+            resolve_optional_effect_decision_owned(
+                state,
+                executable.clone(),
+                choice,
+                events,
+                depth,
+                declarations,
+            )
+        },
+    )
+}
+
+pub(super) fn resolve_optional_effect_decision_owned(
+    state: &mut GameState,
+    ability: ResolvedAbility,
+    choice: AutoMayChoice,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    resolve_optional_effect_decision_step(state, ability, choice, events, depth, declarations)
+        .map(|_| ())
+}
+
+fn project_optional_decision_ability(
+    ability: &ResolvedAbility,
+    choice: AutoMayChoice,
+) -> ResolvedAbility {
+    let mut ability = ability.clone();
+    ability.optional = false;
+    ability.repeat_until = None;
+    if choice == AutoMayChoice::Accept {
+        ability.context.optional_effect_performed = true;
+    }
+    ability
 }
 
 fn resolve_optional_effect_decision_step(
     state: &mut GameState,
-    mut ability: ResolvedAbility,
+    ability: ResolvedAbility,
     choice: AutoMayChoice,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 608.2c: qualification is read from the state the prompt parked, before
     // the answer lowers optionality and strips the enclosing repeat driver.
     let accepted_move = AcceptedOptionalMove::qualify(state, &ability);
-    ability.optional = false;
     // CR 608.2c: the enclosing repeat driver owns progression. This answer
     // performs only its current iteration, retaining optionality on the parent.
-    ability.repeat_until = None;
+    let ability = project_optional_decision_ability(&ability, choice);
     match choice {
         AutoMayChoice::Accept => {
-            ability.context.optional_effect_performed = true;
             state
                 .player_actions_this_way
                 .insert((ability.controller, PlayerActionKind::AcceptedOptionalEffect));
             let producer_events_start = events.len();
-            let progress = resolve_ability_chain_step(state, &ability, events, depth)?;
+            let progress =
+                resolve_owned_ability_chain_step(state, &ability, events, depth, declarations)?;
             // CR 608.2c: When an optional effect's prompt suspended the parent
             // chain, the "If you do" sibling continuation was stashed BEFORE the
             // player chose — so its context still carries
@@ -7544,7 +8607,13 @@ fn resolve_optional_effect_decision_step(
                 // silently skip the branch's effect. Strip the consumed gate so the
                 // branch resolves on its own optional decision.
                 strip_consumed_decline_performed_gate(&mut resolved);
-                return resolve_ability_chain_step(state, &resolved, events, depth);
+                return resolve_owned_ability_chain_step(
+                    state,
+                    &resolved,
+                    events,
+                    depth,
+                    declarations,
+                );
             }
         }
     }
@@ -14192,14 +15261,15 @@ pub(crate) fn finish_clash_resolution(
     state: &mut GameState,
     ability: &ResolvedAbility,
     clash: clash::ClashStep,
-) -> EffectStep {
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<EffectStep, EffectError> {
     if clash.result.is_none() && clash.progress == ResolutionProgress::Waiting {
-        return EffectStep {
+        return Ok(EffectStep {
             progress: clash.progress,
             result: None,
             tail: TailOwnership::Transferred,
             damage_opportunity: None,
-        };
+        });
     }
     let progress = if let Some(sub) = ability.sub_ability.as_deref() {
         let mut tail = sub.clone();
@@ -14221,7 +15291,11 @@ pub(crate) fn finish_clash_resolution(
             }
             _ => {}
         }
-        state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+        state.park_ability_continuation(PendingContinuation::new_owned(
+            Box::new(tail),
+            state,
+            declarations,
+        )?);
         match clash.progress {
             ResolutionProgress::Complete | ResolutionProgress::Queued => ResolutionProgress::Queued,
             ResolutionProgress::Waiting => ResolutionProgress::Waiting,
@@ -14229,12 +15303,12 @@ pub(crate) fn finish_clash_resolution(
     } else {
         clash.progress
     };
-    EffectStep {
+    Ok(EffectStep {
         progress,
         result: None,
         tail: TailOwnership::Transferred,
         damage_opportunity: None,
-    }
+    })
 }
 
 pub fn resolve_effect(
@@ -14250,6 +15324,20 @@ fn resolve_effect_step(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<EffectStep, EffectError> {
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned_effect_step(state, executable, events, owner),
+    )
+}
+
+fn resolve_owned_effect_step(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<EffectStep, EffectError> {
     validate_addressed_quantity_reads(state, ability)?;
     match &ability.effect {
         Effect::RollDie { .. } => Ok(EffectStep {
@@ -14259,8 +15347,8 @@ fn resolve_effect_step(
             damage_opportunity: None,
         }),
         Effect::Clash => {
-            let clash = clash::resolve(state, ability, events)?;
-            Ok(finish_clash_resolution(state, ability, clash))
+            let clash = clash::resolve_owned(state, ability, events, declarations)?;
+            finish_clash_resolution(state, ability, clash, declarations)
         }
         _ => {
             let mut damage_opportunity = None;
@@ -14277,12 +15365,12 @@ fn resolve_effect_step(
                             | Effect::EachSourceDealsDamage { .. }
                     ) {
                         let (opportunity, ownership) =
-                            deal_damage::resolve_owned(state, ability, events)?;
+                            deal_damage::resolve_owned(state, ability, events, declarations)?;
                         damage_opportunity = Some(opportunity);
                         tail = ownership;
                         None
                     } else {
-                        resolve_legacy_effect(state, ability, events)?
+                        resolve_legacy_effect(state, ability, events, declarations)?
                     };
                     // CR 608.2c: an exhausted replacement bookkeeping frame is not
                     // unfinished child work. Retire only new active empty frames;
@@ -14315,6 +15403,7 @@ fn resolve_legacy_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<Option<EffectResolutionResult>, EffectError> {
     match &ability.effect {
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
@@ -14337,7 +15426,7 @@ fn resolve_legacy_effect(
         Effect::RemoveAllDamage { .. } => remove_all_damage::resolve(state, ability, events),
         Effect::Counter { .. } => counter::resolve(state, ability, events),
         Effect::CounterAll { .. } => counter::resolve_all(state, ability, events),
-        Effect::Token { .. } => token::resolve(state, ability, events),
+        Effect::Token { .. } => token::resolve_owned(state, ability, events, declarations),
         Effect::GainLife { .. } => life::resolve_gain(state, ability, events),
         Effect::LoseLife { .. } => life::resolve_lose(state, ability, events),
         // CR 701.26a/b: scope (Single vs All) and state (Tap vs Untap) are
@@ -14361,7 +15450,7 @@ fn resolve_legacy_effect(
         Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::SetRoomDoorLock { .. } => set_room_door_lock::resolve(state, ability, events),
         Effect::ExchangeControl { .. } => exchange_control::resolve(state, ability, events),
-        Effect::Attach { .. } => attach::resolve(state, ability, events),
+        Effect::Attach { .. } => attach::resolve_owned(state, ability, events, Some(declarations)),
         Effect::UnattachAll { .. } => attach::resolve_unattach_all(state, ability, events),
         Effect::ControlNextTurn { .. } => control_next_turn::resolve(state, ability, events),
         Effect::Surveil { .. } => surveil::resolve(state, ability, events),
@@ -14369,8 +15458,10 @@ fn resolve_legacy_effect(
         Effect::Bounce { .. } => bounce::resolve(state, ability, events),
         Effect::BounceAll { .. } => bounce::resolve_all(state, ability, events),
         Effect::Explore => explore::resolve(state, ability, events),
-        Effect::ExploreAll { .. } => explore::resolve_all(state, ability, events),
-        Effect::Investigate => investigate::resolve(state, ability, events),
+        Effect::ExploreAll { .. } => {
+            explore::resolve_all_owned(state, ability, events, declarations)
+        }
+        Effect::Investigate => investigate::resolve_owned(state, ability, events, declarations),
         // CR 702.104a: Tribute — the chosen opponent decides pay/decline via
         // WaitingFor::TributeChoice (reuses GameAction::DecideOptionalEffect).
         Effect::Tribute { .. } => tribute::resolve(state, ability, events),
@@ -14392,37 +15483,49 @@ fn resolve_legacy_effect(
         Effect::ProliferateTarget { .. } => proliferate::resolve_target(state, ability, events),
         Effect::EndTheTurn => end_the_turn::resolve(state, ability, events),
         Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
-        Effect::Populate => populate::resolve(state, ability, events),
+        Effect::Populate => populate::resolve_owned(state, ability, events, declarations),
         Effect::Clash => unreachable!("native Clash dispatch precedes the legacy adapter"),
         Effect::ExileTopCardContest { .. } => {
             exile_top_card_contest::resolve(state, ability, events)
         }
         Effect::Behold { .. } => behold::resolve(state, ability, events),
         // CR 701.38: Council's-dilemma voting — see effects/vote.rs.
-        Effect::Vote { .. } => vote::resolve(state, ability, events),
+        Effect::Vote { .. } => vote::resolve_owned(state, ability, events, declarations),
         // CR 700.3 + CR 608: Pile-separation primitive — see effects/separate_piles.rs.
-        Effect::SeparateIntoPiles { .. } => separate_piles::resolve(state, ability, events),
+        Effect::SeparateIntoPiles { .. } => {
+            separate_piles::resolve_owned(state, ability, events, declarations)
+        }
         Effect::SwitchPT { .. } => switch_pt::resolve(state, ability, events),
         Effect::CopySpell { .. } => copy_spell::resolve(state, ability, events),
         Effect::EpicCopy { .. } => epic::resolve(state, ability, events),
         Effect::CastCopyOfCard { .. } => cast_copy_of_card::resolve(state, ability, events),
-        Effect::CopyTokenOf { .. } => token_copy::resolve(state, ability, events),
+        Effect::CopyTokenOf { .. } => {
+            token_copy::resolve_owned(state, ability, events, declarations)
+        }
         Effect::CreateTokenCopyFromPool { .. } => {
-            create_token_copy_from_pool::resolve(state, ability, events)
+            create_token_copy_from_pool::resolve_owned(state, ability, events, declarations)
         }
-        Effect::Myriad => myriad::resolve(state, ability, events),
+        Effect::Myriad => myriad::resolve_owned(state, ability, events, declarations),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
-        Effect::Encore => encore::resolve(state, ability, events),
-        Effect::CombineHost { .. } => {
-            crate::game::augment::resolve_combine_host(state, ability, events)
-        }
+        Effect::Encore => encore::resolve_owned(state, ability, events, declarations),
+        Effect::CombineHost { .. } => crate::game::augment::resolve_combine_host_owned(
+            state,
+            ability,
+            events,
+            Some(declarations),
+        ),
         Effect::ChooseAugmentAndCombineWithHost { .. } => {
-            crate::game::augment::resolve_choose_augment_and_combine(state, ability, events)
+            crate::game::augment::resolve_choose_augment_and_combine_owned(
+                state,
+                ability,
+                events,
+                Some(declarations),
+            )
         }
         Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
         Effect::CopyTokenBlockingAttacker { .. } => {
-            copy_token_blocking::resolve(state, ability, events)
+            copy_token_blocking::resolve_owned(state, ability, events, declarations)
         }
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         // CR 614.12a + CR 707.2c (Metamorphic Alteration): `ChoosePermanent` is an
@@ -14457,7 +15560,7 @@ fn resolve_legacy_effect(
         Effect::RegisterBending { .. } => register_bending::resolve(state, ability, events),
         Effect::GenericEffect { .. } => effect::resolve(state, ability, events),
         Effect::Cleanup { .. } => cleanup::resolve(state, ability, events),
-        Effect::Mana { .. } => mana::resolve(state, ability, events),
+        Effect::Mana { .. } => mana::resolve_owned(state, ability, events, declarations),
         Effect::Discard { .. } => discard::resolve(state, ability, events),
         Effect::Shuffle { .. } => shuffle::resolve(state, ability, events),
         Effect::Transform { .. } => transform_effect::resolve(state, ability, events),
@@ -14469,7 +15572,9 @@ fn resolve_legacy_effect(
         Effect::OpenBoosterPack { .. } => open_booster_pack::resolve(state, ability, events),
         Effect::Seek { .. } => seek::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
-        Effect::RevealFromHand { .. } => reveal_from_hand::resolve(state, ability, events),
+        Effect::RevealFromHand { .. } => {
+            reveal_from_hand::resolve_owned(state, ability, events, declarations)
+        }
         Effect::Reveal { .. } => reveal::resolve(state, ability, events),
         Effect::RevealChosenNumbers { .. } => {
             reveal_chosen_numbers::resolve(state, ability, events)
@@ -14522,7 +15627,9 @@ fn resolve_legacy_effect(
         Effect::SwapChosenLabels { .. } => swap_chosen_labels::resolve(state, ability, events),
         Effect::ChooseCounterKind { .. } => choose_counter_kind::resolve(state, ability, events),
         Effect::PutChosenCounter { .. } => put_chosen_counter::resolve(state, ability, events),
-        Effect::ChooseDamageSource { .. } => choose_damage_source::resolve(state, ability, events),
+        Effect::ChooseDamageSource { .. } => {
+            choose_damage_source::resolve_owned(state, ability, events, declarations)
+        }
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
         Effect::Unsuspect { .. } => suspect::resolve_unsuspect(state, ability, events),
         Effect::Connive { .. } => connive::resolve(state, ability, events),
@@ -14559,15 +15666,19 @@ fn resolve_legacy_effect(
         }
         Effect::CreateEmblem { .. } => create_emblem::resolve(state, ability, events),
         Effect::CreateBoon { .. } => create_boon::resolve(state, ability, events),
-        Effect::PayCost { .. } => pay::resolve(state, ability, events),
-        Effect::CastFromZone { .. } => cast_from_zone::resolve(state, ability, events),
+        Effect::PayCost { .. } => pay::resolve_owned(state, ability, events, Some(declarations)),
+        Effect::CastFromZone { .. } => {
+            cast_from_zone::resolve_owned(state, ability, events, declarations)
+        }
         Effect::FreeCastFromZones { .. } => free_cast_from_zones::resolve(state, ability, events),
         Effect::ExileResolvingSpellInsteadOfGraveyard { .. } => {
             exile_resolving_spell::resolve(state, ability, events)
         }
-        Effect::PreventDamage { .. } => prevent_damage::resolve(state, ability, events),
+        Effect::PreventDamage { .. } => {
+            prevent_damage::resolve_owned(state, ability, events, declarations)
+        }
         Effect::CreateDamageReplacement { .. } => {
-            create_damage_replacement::resolve(state, ability, events)
+            create_damage_replacement::resolve_owned(state, ability, events, declarations)
         }
         Effect::CreateDrawReplacement { .. } => {
             create_draw_replacement::resolve(state, ability, events)
@@ -14578,15 +15689,17 @@ fn resolve_legacy_effect(
         Effect::LoseTheGame { .. } => win_lose::resolve_lose(state, ability, events),
         Effect::WinTheGame { .. } => win_lose::resolve_win(state, ability, events),
         Effect::RollDie { .. } => unreachable!("native die dispatch precedes the legacy adapter"),
-        Effect::FlipCoins { .. } => flip_coin::resolve(state, ability, events),
+        Effect::FlipCoins { .. } => flip_coin::resolve_owned(state, ability, events, declarations),
         Effect::RingTemptsYou => ring::resolve(state, ability, events),
         Effect::GrantCastingPermission { .. } => grant_permission::resolve(state, ability, events),
-        Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
+        Effect::ChooseFromZone { .. } => {
+            choose_from_zone::resolve_owned(state, ability, events, declarations)
+        }
         Effect::RememberCard { .. } => remember_card::resolve(state, ability, events),
         Effect::NoteManaSpent => note_mana_spent::resolve(state, ability, events),
         Effect::NoteNumber { .. } => note_number::resolve(state, ability, events),
         Effect::ForEachCategory { .. } => {
-            choose_from_zone::resolve_for_each_category(state, ability, events)
+            choose_from_zone::resolve_for_each_category_owned(state, ability, events, declarations)
         }
         Effect::ChooseObjectsIntoTrackedSet { .. } => {
             choose_objects_into_tracked_set::resolve(state, ability, events)
@@ -14649,8 +15762,10 @@ fn resolve_legacy_effect(
         Effect::GiftDelivery { .. } => gift_delivery::resolve(state, ability, events),
         Effect::ChangeTargets { .. } => change_targets::resolve(state, ability, events),
         Effect::Incubate { .. } => incubate::resolve(state, ability, events),
-        Effect::Amass { .. } => amass::resolve(state, ability, events),
-        Effect::EmpowerJace { .. } => empower_jace::resolve(state, ability, events),
+        Effect::Amass { .. } => amass::resolve_owned(state, ability, events, declarations),
+        Effect::EmpowerJace { .. } => {
+            empower_jace::resolve_owned(state, ability, events, declarations)
+        }
         Effect::Monstrosity { .. } => monstrosity::resolve(state, ability, events),
         Effect::Specialize => specialize::resolve(state, ability, events),
         Effect::Renown { .. } => renown::resolve(state, ability, events),
@@ -14717,9 +15832,11 @@ fn resolve_legacy_effect(
         Effect::Intensify { .. } => intensify::resolve(state, ability, events),
         Effect::ApplyPerpetual { .. } => perpetual::resolve(state, ability, events),
         Effect::DraftFromSpellbook { .. } => spellbook::resolve(state, ability, events),
-        Effect::ChooseOneOf { .. } => choose_one_of::resolve(state, ability, events),
+        Effect::ChooseOneOf { .. } => {
+            choose_one_of::resolve_owned(state, ability, events, declarations)
+        }
         Effect::ChooseCounterAdjustment { .. } => {
-            choose_counter_adjustment::resolve(state, ability, events)
+            choose_counter_adjustment::resolve_owned(state, ability, events, declarations)
         }
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
@@ -14882,8 +15999,13 @@ fn park_resolution_object_choice(
     ability: &ResolvedAbility,
     continuation: ResolvedAbility,
     cards: Vec<ObjectId>,
-) -> ResolutionProgress {
-    state.park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<ResolutionProgress, EffectError> {
+    state.park_ability_continuation(PendingContinuation::new_owned(
+        Box::new(continuation),
+        state,
+        declarations,
+    )?);
     state.waiting_for = WaitingFor::ChooseFromZoneChoice {
         player: ability.controller,
         cards,
@@ -14893,7 +16015,7 @@ fn park_resolution_object_choice(
         source_id: ability.source_id,
         reciprocal_role: None,
     };
-    ResolutionProgress::Waiting
+    Ok(ResolutionProgress::Waiting)
 }
 
 /// CR 608.2c + CR 608.2d: once its resolution-time object choice is answered,
@@ -17234,6 +18356,11 @@ pub(super) fn complete_reciprocal_consume_selection(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     let plan = reciprocal_transition_plan(state, Some(actor), true, false)?;
+    let admitted = owned_cursor_declarations(
+        state,
+        plan.frame.pending.return_result_occurrence,
+        &plan.frame.pending.chain,
+    )?;
     let mut frame = take_validated_reciprocal_frame(state, &plan, false)?;
     let id = plan.tracked_set_id.ok_or_else(|| {
         EffectError::MissingParam("validated reciprocal set id disappeared".to_string())
@@ -17249,7 +18376,15 @@ pub(super) fn complete_reciprocal_consume_selection(
         with_inherited_return_result_occurrence(
             state,
             frame.pending.return_result_occurrence,
-            |state| resolve_resume_owned_ability_chain(state, &tail, events, 1),
+            |state| {
+                resolve_carrier_owned_ability_chain(
+                    state,
+                    &tail,
+                    events,
+                    1,
+                    (&admitted.0, &admitted.1),
+                )
+            },
         )?;
     } else {
         state.waiting_for = WaitingFor::Priority {
@@ -17271,6 +18406,11 @@ pub(super) fn complete_reciprocal_consume_no_candidates(
     ticket: ReciprocalTransitionPlan,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    let admitted = owned_cursor_declarations(
+        state,
+        ticket.frame.pending.return_result_occurrence,
+        &ticket.frame.pending.chain,
+    )?;
     let mut frame = take_validated_reciprocal_frame(state, &ticket, false)?;
     let tail = frame.pending.chain.sub_ability.take();
     events.push(GameEvent::EffectResolved {
@@ -17282,7 +18422,15 @@ pub(super) fn complete_reciprocal_consume_no_candidates(
         with_inherited_return_result_occurrence(
             state,
             frame.pending.return_result_occurrence,
-            |state| resolve_resume_owned_ability_chain(state, &tail, events, 1),
+            |state| {
+                resolve_carrier_owned_ability_chain(
+                    state,
+                    &tail,
+                    events,
+                    1,
+                    (&admitted.0, &admitted.1),
+                )
+            },
         )?;
     } else {
         state.waiting_for = WaitingFor::Priority {
@@ -17303,7 +18451,7 @@ fn drive_empty_reciprocal_producer(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<Option<ResolutionProgress>, EffectError> {
     if !matches!(
         ability.effect,
@@ -17345,7 +18493,7 @@ fn drive_empty_reciprocal_producer(
         }
         [opponent] => {
             let (_, progress) = LegacyEffectBoundary::run(state, consumer, |state, _| {
-                prepend_to_pending_continuation(state, consumer.clone());
+                prepend_to_pending_continuation_owned(state, consumer.clone(), declarations)?;
                 bind_reciprocal_consumer_from_picker(state, *opponent)?;
                 let bound = state
                     .active_ability_continuation()
@@ -17362,7 +18510,7 @@ fn drive_empty_reciprocal_producer(
             return Ok(Some(progress));
         }
         _ => {
-            prepend_to_pending_continuation(state, consumer.clone());
+            prepend_to_pending_continuation_owned(state, consumer.clone(), declarations)?;
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
                 return_result_occurrence: retained_return_result_occurrence(
                     state,
@@ -20137,7 +21285,7 @@ fn resolve_after_scope_with_created_seats(
     handoff: Option<CreatedTokenSeatsHandoff>,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     let Some(handoff) = handoff else {
         return resolve_owned_ability_chain_step(state, after_scope, events, depth, declarations);
@@ -20914,7 +22062,7 @@ fn perform_player_scope_sacrifices(
     mut selections: Vec<(PlayerId, Vec<ObjectId>)>,
     completion: Option<PendingPlayerScopeSacrificeCompletion>,
     events: &mut Vec<GameEvent>,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<PlayerScopeSacrificePerformOutcome, EffectError> {
     let mut completion = completion.unwrap_or_default();
     // A resumed replacement has already delivered its selected ZoneChange into
@@ -21318,7 +22466,7 @@ fn start_player_scope_sacrifice_choices(
     after_scope: Option<Box<ResolvedAbility>>,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 101.4: If multiple players make choices for one instruction, choices
     // are announced in APNAP order before the simultaneous action happens.
@@ -21329,7 +22477,7 @@ fn start_player_scope_sacrifice_choices(
             PlayerScopeSacrificeStep::Auto { player, cards } => selections.push((player, cards)),
             PlayerScopeSacrificeStep::Prompt(prompt) => {
                 if let Some(after_scope) = after_scope {
-                    append_to_pending_continuation(state, Some(after_scope));
+                    append_to_pending_continuation_owned(state, Some(after_scope), declarations)?;
                 }
                 state.pending_player_scope_sacrifice_choice =
                     Some(PendingPlayerScopeSacrificeChoice {
@@ -21800,6 +22948,14 @@ pub(crate) fn drain_pending_discard_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<PendingDiscardBatchOutcome, EffectError> {
+    let admitted = state
+        .pending_discard_batch
+        .as_ref()
+        .and_then(|batch| batch.fan_out.as_ref())
+        .map(|pending| {
+            owned_cursor_declarations(state, pending.return_result_occurrence, &pending.outer)
+        })
+        .transpose()?;
     let occurrence = state
         .pending_discard_batch
         .as_ref()
@@ -21813,13 +22969,20 @@ pub(crate) fn drain_pending_discard_batch(
         {
             validate_addressed_quantity_reads(state, &pending.scoped_template)?;
         }
-        drain_discard_batch_in_occurrence(state, events)
+        drain_discard_batch_in_occurrence(
+            state,
+            events,
+            admitted
+                .as_ref()
+                .map(|(program, declarations)| (program, declarations)),
+        )
     })
 }
 
 fn drain_discard_batch_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    admitted: Option<AdmittedInstructionResult<'_>>,
 ) -> Result<PendingDiscardBatchOutcome, EffectError> {
     let Some(mut batch) = state.pending_discard_batch.take() else {
         return Ok(PendingDiscardBatchOutcome::Idle);
@@ -21967,7 +23130,12 @@ fn drain_discard_batch_in_occurrence(
             with_inherited_return_result_occurrence(
                 state,
                 fan_out.return_result_occurrence,
-                |state| resolve_selected_ability_chain(state, &scoped, events, 1),
+                |state| match admitted {
+                    Some(parent) => {
+                        resolve_parent_selected_ability_chain(state, &scoped, events, 1, parent)
+                    }
+                    None => resolve_selected_ability_chain(state, &scoped, events, 1),
+                },
             )?;
             if state.waiting_for == initial_waiting_for {
                 continue;
@@ -21990,27 +23158,43 @@ fn drain_discard_batch_in_occurrence(
                     return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
                 }
             }
-            // BOUNDARY (measured, and deliberately not repaired here): the seat
-            // paused on something that is not a batch pause — an interactive
-            // `WaitingFor::DiscardChoice`, or any other resolution choice. Hand
-            // the remaining seats back to the generic continuation queue exactly
-            // as the driver does, and publish NOTHING: those legs each publish
-            // node-locally, which is the pre-existing behaviour this change does
-            // not extend to the interactive path.
-            let mut tail: Option<Box<ResolvedAbility>> = None;
+            // Remaining seats are separate selected invocations. In particular,
+            // two fresh local bodies may declare the same integer result ID;
+            // concatenating them would falsely put both declarations in one
+            // namespace. Insert them outside the actual paused child in order.
+            let has_child = state.active_ability_continuation().is_some()
+                || active_frame_requires_ability_continuation_parent(state);
             for &remaining_pid in fan_out.remaining_players[i + 1..].iter().rev() {
-                let mut remaining_scoped = (*fan_out.scoped_template).clone();
-                remaining_scoped.set_original_controller_recursive(fan_out.original_controller);
-                remaining_scoped.set_controller_recursive(remaining_pid);
-                remaining_scoped.set_scoped_player_recursive(remaining_pid);
-                remaining_scoped.sub_link = SubAbilityLink::SequentialSibling;
-                if let Some(prev) = tail {
-                    super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
+                let mut remaining = (*fan_out.scoped_template).clone();
+                remaining.set_original_controller_recursive(fan_out.original_controller);
+                remaining.set_controller_recursive(remaining_pid);
+                remaining.set_scoped_player_recursive(remaining_pid);
+                let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
+                    &remaining,
+                    crate::types::ability::InstructionResultEntry::SelectedBody,
+                    None,
+                )?;
+                let pending = match summary {
+                    crate::types::ability::InstructionResultProcess::Imported { .. } => {
+                        let parent = admitted.ok_or_else(|| {
+                            EffectError::InvalidParam(
+                                "discard remainder has no admitted parent".into(),
+                            )
+                        })?;
+                        PendingContinuation::new_owned(Box::new(remaining), state, parent)?
+                    }
+                    crate::types::ability::InstructionResultProcess::Local { .. }
+                    | crate::types::ability::InstructionResultProcess::Unused => {
+                        PendingContinuation::new(Box::new(remaining), state)
+                    }
+                };
+                if has_child {
+                    state
+                        .insert_ability_continuation_parent_of_active(pending)
+                        .expect("discard remainder stays outside its actual paused child");
+                } else {
+                    state.park_ability_continuation(pending);
                 }
-                tail = Some(Box::new(remaining_scoped));
-            }
-            if tail.is_some() {
-                append_to_pending_continuation(state, tail);
             }
             return Ok(PendingDiscardBatchOutcome::PausedForReplacement);
         }
@@ -22279,6 +23463,63 @@ pub(crate) fn resolve_selected_ability_chain(
     )
 }
 
+pub(crate) fn resolve_parent_selected_ability_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    parent: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
+        ability,
+        crate::types::ability::InstructionResultEntry::SelectedBody,
+        None,
+    )?;
+    match summary {
+        crate::types::ability::InstructionResultProcess::Imported { .. } => {
+            resolve_carrier_owned_ability_chain(state, ability, events, depth, parent)
+        }
+        crate::types::ability::InstructionResultProcess::Local { .. }
+        | crate::types::ability::InstructionResultProcess::Unused => {
+            resolve_selected_ability_chain(state, ability, events, depth)
+        }
+    }
+}
+
+pub(crate) fn park_parent_selected_continuation(
+    state: &mut GameState,
+    ability: ResolvedAbility,
+    parent: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
+        &ability,
+        crate::types::ability::InstructionResultEntry::SelectedBody,
+        None,
+    )?;
+    match summary {
+        crate::types::ability::InstructionResultProcess::Imported { .. } => {
+            let pending = PendingContinuation::new_owned(Box::new(ability), state, parent)?;
+            state.park_ability_continuation(pending);
+            Ok(())
+        }
+        crate::types::ability::InstructionResultProcess::Local { .. }
+        | crate::types::ability::InstructionResultProcess::Unused => with_instruction_result_entry(
+            state,
+            &ability,
+            crate::types::ability::InstructionResultEntry::SelectedBody,
+            |state, executable, declarations| {
+                let pending = PendingContinuation::new_owned(
+                    Box::new(executable.clone()),
+                    state,
+                    declarations,
+                )?;
+                state.park_ability_continuation(pending);
+                Ok(())
+            },
+        ),
+    }
+}
+
 pub(crate) fn resolve_selected_ability_chain_step(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -22310,6 +23551,31 @@ pub(crate) fn resolve_resume_owned_ability_chain(
                 .map(|_| ())
         },
     )
+}
+
+pub(crate) fn resolve_carrier_owned_ability_chain_with_payment_choice(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    payment_choice: Option<AutoMayChoice>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )?;
+    resolve_ability_chain_with_payment_choice(
+        state,
+        ability,
+        events,
+        depth,
+        payment_choice,
+        declarations,
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn resolve_resume_owned_ability_chain_with_payment_choice(
@@ -22367,7 +23633,7 @@ fn resolve_owned_ability_chain_step(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     resolve_ability_chain_with_payment_choice(state, ability, events, depth, None, declarations)
 }
@@ -22377,8 +23643,14 @@ pub(crate) fn resolve_carrier_owned_ability_chain(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
+    validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )?;
     resolve_owned_ability_chain_step(state, ability, events, depth, declarations).map(|_| ())
 }
 
@@ -22471,13 +23743,49 @@ pub(crate) fn resolve_flip_branch_chain(
     )
 }
 
+pub(crate) fn resolve_parent_flip_branch_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    parent: AdmittedInstructionResult<'_>,
+) -> Result<ResolutionProgress, EffectError> {
+    let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
+        ability,
+        crate::types::ability::InstructionResultEntry::SelectedBody,
+        None,
+    )?;
+    match summary {
+        crate::types::ability::InstructionResultProcess::Imported { .. } => {
+            validate_owned_instruction_result_cursor(
+                state,
+                ability,
+                state.active_return_result_occurrence,
+                parent,
+            )?;
+            resolve_ability_chain_with_root_result(
+                state,
+                ability,
+                events,
+                0,
+                None,
+                RootForwardedResult::Retain,
+                parent,
+            )
+        }
+        crate::types::ability::InstructionResultProcess::Local { .. }
+        | crate::types::ability::InstructionResultProcess::Unused => {
+            resolve_flip_branch_chain(state, ability, events)
+        }
+    }
+}
+
 fn resolve_ability_chain_with_payment_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     resolve_ability_chain_with_root_result(
         state,
@@ -22497,7 +23805,7 @@ fn resolve_ability_chain_with_root_result(
     depth: u32,
     mut payment_choice: Option<AutoMayChoice>,
     root_result: RootForwardedResult,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     validate_owned_instruction_result_cursor(
         state,
@@ -23234,7 +24542,7 @@ fn resolve_owned_chain_body(
     events: &mut Vec<GameEvent>,
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
-    declarations: &crate::types::ability::ResultProducerEnvironment,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 702.185a: old typed delayed roots acquire the same selected-result
     // dependency before they attempt the move. No historical move is inferred.
@@ -23329,13 +24637,13 @@ fn resolve_owned_chain_body(
         // 1. Reveal-all: resolve ONLY the producer effect once with targets left
         //    wide. `reveal_top::resolve` reveals every targeted player's top card
         //    (§2.4a) and fills `state.last_revealed_ids` with the full set.
-        let step = resolve_effect_step(state, ability, events)?;
+        let step = resolve_owned_effect_step(state, ability, events, declarations)?;
         progress = step.progress;
         if progress.is_pending() {
             if let Some(tail) = ability.sub_ability.as_ref() {
                 state
                     .insert_ability_continuation_parent_at_child_boundary(
-                        PendingContinuation::new(tail.clone(), state),
+                        PendingContinuation::new_owned(tail.clone(), state, declarations)?,
                         child_stack_start,
                     )
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
@@ -23413,7 +24721,7 @@ fn resolve_owned_chain_body(
                     }
                     tail = Some(Box::new(remaining));
                 }
-                append_to_pending_continuation(state, tail);
+                append_to_pending_continuation_owned(state, tail, declarations)?;
                 break;
             }
         }
@@ -23511,7 +24819,7 @@ fn resolve_owned_chain_body(
                         if let Some(tail) = after_fanout {
                             state
                                 .insert_ability_continuation_parent_at_child_boundary(
-                                    PendingContinuation::new(tail, state),
+                                    PendingContinuation::new_owned(tail, state, declarations)?,
                                     child_stack_start,
                                 )
                                 .expect("the dealer's frames sit above the tail's boundary");
@@ -23572,7 +24880,7 @@ fn resolve_owned_chain_body(
                         }
                         tail = Some(Box::new(remaining_narrowed));
                     }
-                    append_to_pending_continuation(state, tail);
+                    append_to_pending_continuation_owned(state, tail, declarations)?;
                     break;
                 }
             }
@@ -23715,7 +25023,8 @@ fn resolve_owned_chain_body(
             state,
             ability,
             matching_players.clone(),
-        ) {
+            declarations,
+        )? {
             return Ok(ResolutionProgress::Waiting);
         }
         // Inspect the original child chain before splitting it. The splitter
@@ -23791,12 +25100,13 @@ fn resolve_owned_chain_body(
         {
             let (_, search_progress) =
                 LegacyEffectBoundary::run(state, &scoped_template, |state, _| {
-                    scoped_library_search::start(
+                    scoped_library_search::start_owned(
                         state,
                         &scoped_template,
                         &matching_players,
                         after_scope,
                         events,
+                        declarations,
                     )
                 })?;
             progress = search_progress;
@@ -23825,7 +25135,7 @@ fn resolve_owned_chain_body(
                         if let Some(tail) = after_scope {
                             state
                                 .insert_ability_continuation_parent_at_child_boundary(
-                                    PendingContinuation::new(tail, state),
+                                    PendingContinuation::new_owned(tail, state, declarations)?,
                                     child_stack_start,
                                 )
                                 .expect("the dealer's frames sit above the tail's boundary");
@@ -24025,7 +25335,11 @@ fn resolve_owned_chain_body(
                     // Only the unscoped tail goes to the generic continuation;
                     // the per-seat legs do not exist on this path.
                     if after_scope.is_some() {
-                        append_to_pending_continuation(state, after_scope.clone());
+                        append_to_pending_continuation_owned(
+                            state,
+                            after_scope.clone(),
+                            declarations,
+                        )?;
                     }
                     // Deliberately skips the clause postlude below: the batch
                     // owns that publication now, and running it here as well
@@ -24100,7 +25414,7 @@ fn resolve_owned_chain_body(
                 // `capture_clause_minimum_snapshot` overwrites it; `apply()`
                 // disposes of any residue once resolution ends.
                 if tail.is_some() {
-                    append_to_pending_continuation(state, tail);
+                    append_to_pending_continuation_owned(state, tail, declarations)?;
                 }
                 // `i`, not `i + 1`: player `i` is the one who just paused, so
                 // they have NOT completed the clause and must not be filled as
@@ -24229,10 +25543,11 @@ fn resolve_owned_chain_body(
                             if !candidates.is_empty() {
                                 let mut cont = ability.clone();
                                 cont.clear_targets();
-                                state.park_ability_continuation(PendingContinuation::new(
+                                state.park_ability_continuation(PendingContinuation::new_owned(
                                     Box::new(cont),
                                     state,
-                                ));
+                                    declarations,
+                                )?);
                                 state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                                     player: chosen,
                                     cards: candidates,
@@ -24291,6 +25606,7 @@ fn resolve_owned_chain_body(
                     state,
                     &mut else_resolved,
                     events,
+                    declarations,
                 )? {
                     return Ok(ResolutionProgress::Waiting);
                 }
@@ -24505,6 +25821,7 @@ fn resolve_owned_chain_body(
             AutoMayChoice::Decline,
             events,
             depth + 1,
+            declarations,
         );
     }
 
@@ -24630,6 +25947,7 @@ fn resolve_owned_chain_body(
                 AutoMayChoice::Decline,
                 events,
                 depth + 1,
+                declarations,
             )?;
             return Ok(progress);
         };
@@ -24656,6 +25974,7 @@ fn resolve_owned_chain_body(
                     AutoMayChoice::Decline,
                     events,
                     depth + 1,
+                    declarations,
                 )?;
                 return Ok(progress);
             }
@@ -24668,6 +25987,7 @@ fn resolve_owned_chain_body(
                     AutoMayChoice::Decline,
                     events,
                     depth + 1,
+                    declarations,
                 )?;
                 return Ok(progress);
             }
@@ -24708,6 +26028,7 @@ fn resolve_owned_chain_body(
                     choice,
                     events,
                     depth + 1,
+                    declarations,
                 )?;
                 return Ok(progress);
             }
@@ -24938,12 +26259,13 @@ fn resolve_owned_chain_body(
                 _ => {
                     // CR 608.2d: park this instruction with its independently
                     // bound tail; the answer binds only the local recipient.
-                    return Ok(park_resolution_object_choice(
+                    return park_resolution_object_choice(
                         state,
                         ability,
                         ability.clone(),
                         legal,
-                    ));
+                        declarations,
+                    );
                 }
             }
         }
@@ -25004,7 +26326,13 @@ fn resolve_owned_chain_body(
                         if matches!(cont.effect, Effect::PutCounter { .. }) {
                             cont.clear_targets();
                         }
-                        return Ok(park_resolution_object_choice(state, ability, cont, legal));
+                        return park_resolution_object_choice(
+                            state,
+                            ability,
+                            cont,
+                            legal,
+                            declarations,
+                        );
                     }
                 }
             }
@@ -25086,7 +26414,13 @@ fn resolve_owned_chain_body(
                     // As for the single candidate: the pick supersedes an
                     // inherited absent-referent marker.
                     parked.context.forwarded_result_context = None;
-                    return Ok(park_resolution_object_choice(state, ability, parked, legal));
+                    return park_resolution_object_choice(
+                        state,
+                        ability,
+                        parked,
+                        legal,
+                        declarations,
+                    );
                 }
             }
         }
@@ -25131,7 +26465,11 @@ fn resolve_owned_chain_body(
             _ => {
                 let mut parked = ability.clone();
                 deal_damage::bind_recipient_pool(&mut parked, &candidates);
-                state.park_ability_continuation(PendingContinuation::new(Box::new(parked), state));
+                state.park_ability_continuation(PendingContinuation::new_owned(
+                    Box::new(parked),
+                    state,
+                    declarations,
+                )?);
                 state.waiting_for = WaitingFor::ChooseObjectsSelection {
                     player: ability.controller,
                     eligible: candidates,
@@ -25163,7 +26501,11 @@ fn resolve_owned_chain_body(
                 selected: Some(vec![member]),
                 group: None,
             });
-        state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+        state.park_ability_continuation(PendingContinuation::new_owned(
+            Box::new(tail),
+            state,
+            declarations,
+        )?);
         tail_ownership = TailOwnership::Transferred;
     }
 
@@ -25657,7 +26999,12 @@ fn resolve_owned_chain_body(
                             state,
                             iter_effective,
                             |state, executable, declarations| {
-                                let step = resolve_effect_step(state, executable, events)?;
+                                let step = resolve_owned_effect_step(
+                                    state,
+                                    executable,
+                                    events,
+                                    declarations,
+                                )?;
                                 if step.progress.is_pending() {
                                     iteration_parked =
                                         park_remaining(state, executable, creation_tail_owned);
@@ -25666,7 +27013,7 @@ fn resolve_owned_chain_body(
                             },
                         )
                     } else {
-                        resolve_effect_step(state, iter_effective, events)
+                        resolve_owned_effect_step(state, iter_effective, events, declarations)
                     };
                     match resolved {
                         Ok(step) => {
@@ -26319,7 +27666,7 @@ fn resolve_owned_chain_body(
                 tail.mirror_targets_from(ability);
             }
             apply_parent_chain_context(&mut tail, ability, effect_context_object.as_ref(), state);
-            let pending = PendingContinuation::new(Box::new(tail), state);
+            let pending = PendingContinuation::new_owned(Box::new(tail), state, declarations)?;
             if state.resolution_stack.capture_child_boundary() > child_stack_start {
                 state
                     .insert_ability_continuation_parent_at_child_boundary(
@@ -26532,7 +27879,7 @@ fn resolve_owned_chain_body(
                         ..
                     }
                 ) {
-                    prepend_to_pending_continuation(state, tail);
+                    prepend_to_pending_continuation_owned(state, tail, declarations)?;
                 } else {
                     // A paid offer owns only its immediate, direct synchronous
                     // trigger tail. Snapshot its producer ID before resolving;
@@ -26801,12 +28148,17 @@ fn resolve_owned_chain_body(
                             && state.active_ability_continuation()
                                 == pending_continuation_before.as_ref()
                         {
-                            state.park_ability_continuation(PendingContinuation::new(
+                            state.park_ability_continuation(PendingContinuation::new_owned(
                                 Box::new(resolved),
                                 state,
-                            ));
+                                declarations,
+                            )?);
                         } else {
-                            append_to_pending_continuation(state, Some(Box::new(resolved)));
+                            append_to_pending_continuation_owned(
+                                state,
+                                Some(Box::new(resolved)),
+                                declarations,
+                            )?;
                         }
                     } else {
                         progress = resolve_owned_ability_chain_step(
@@ -26902,12 +28254,17 @@ fn resolve_owned_chain_body(
                                 && state.active_ability_continuation()
                                     == pending_continuation_before.as_ref()
                             {
-                                state.park_ability_continuation(PendingContinuation::new(
+                                state.park_ability_continuation(PendingContinuation::new_owned(
                                     Box::new(resolved),
                                     state,
-                                ));
+                                    declarations,
+                                )?);
                             } else {
-                                append_to_pending_continuation(state, Some(Box::new(resolved)));
+                                append_to_pending_continuation_owned(
+                                    state,
+                                    Some(Box::new(resolved)),
+                                    declarations,
+                                )?;
                             }
                         } else {
                             progress = resolve_owned_ability_chain_step(
@@ -26998,7 +28355,7 @@ fn resolve_owned_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            append_to_pending_continuation(state, Some(Box::new(sub_clone)));
+            append_to_pending_continuation_owned(state, Some(Box::new(sub_clone)), declarations)?;
             return Ok(progress);
         }
         // CR 118.12 + CR 605.3b + CR 616.1: A paused resolution-time PayCost
@@ -27148,7 +28505,8 @@ fn resolve_owned_chain_body(
                 // a replacement post-effect may have parked a continuation beneath the
                 // producer's batch frame; a copy-token producer parks its own batch owner
                 // at that boundary.
-                let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
+                let mut pending =
+                    PendingContinuation::new_owned(Box::new(sub_clone), state, declarations)?;
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state
                     .insert_ability_continuation_parent_at_child_boundary(
@@ -27163,7 +28521,8 @@ fn resolve_owned_chain_body(
                 // CR 608.2c: the unchanged continuation belongs to an enclosing
                 // instruction. Keep this direct choice's tail above that owner
                 // so a die/repeat parent can park outside the complete child.
-                let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
+                let mut pending =
+                    PendingContinuation::new_owned(Box::new(sub_clone), state, declarations)?;
                 pending.pending_return_result_producer = pending_return_result_producer;
                 pending.x_announcement = x_announcement;
                 state.park_ability_continuation(pending);
@@ -27173,7 +28532,8 @@ fn resolve_owned_chain_body(
                     sub_clone,
                     pending_return_result_producer,
                     x_announcement,
-                );
+                    Some(declarations),
+                )?;
             }
             // CR 701.57c + CR 608.2h: a Discover follow-up stashed
             // here still binds the hit card as its referent (no-op otherwise).
@@ -27306,6 +28666,7 @@ fn resolve_owned_chain_body(
                         state,
                         &mut else_resolved,
                         events,
+                        declarations,
                     )? {
                         return Ok(ResolutionProgress::Waiting);
                     }
@@ -65476,12 +66837,18 @@ mod resolution_progress_contract_tests {
         optional.parent_target_missing_reason =
             Some(crate::types::ability::ParentTargetMissingReason::Dig);
         assert_eq!(
-            resolve_optional_effect_decision_step(
+            with_instruction_result_entry(
                 &mut state,
-                optional.clone(),
-                AutoMayChoice::Decline,
-                &mut Vec::new(),
-                1
+                &optional,
+                crate::types::ability::InstructionResultEntry::Independent,
+                |state, executable, declarations| resolve_optional_effect_decision_step(
+                    state,
+                    executable.clone(),
+                    AutoMayChoice::Decline,
+                    &mut Vec::new(),
+                    1,
+                    declarations,
+                ),
             )
             .unwrap(),
             ResolutionProgress::Complete
@@ -67048,7 +68415,7 @@ mod departure_process_entry_tests {
             state.next_return_result_occurrence_id = next_o;
             state.next_return_result_process_id = next_p;
             let before = serde_json::to_value(&state).unwrap();
-            assert!(begin_return_result_occurrence(&mut state).is_err());
+            assert!(begin_test_return_result_occurrence(&mut state, &producer(7)).is_err());
             assert_eq!(
                 serde_json::to_value(&state).unwrap(),
                 before,
@@ -67058,7 +68425,8 @@ mod departure_process_entry_tests {
         let mut state = GameState::new_two_player(42);
         state.next_return_result_occurrence_id = 11;
         state.next_return_result_process_id = 37;
-        let (previous, first) = begin_return_result_occurrence(&mut state).unwrap();
+        let (previous, first) =
+            begin_test_return_result_occurrence(&mut state, &producer(7)).unwrap();
         assert_eq!(previous, None);
         assert_eq!(first, ReturnResultProcessId(37));
         let first_o = state.active_return_result_occurrence.unwrap();
@@ -67067,7 +68435,7 @@ mod departure_process_entry_tests {
         state.active_return_result_occurrence = previous;
         retire_unreferenced_return_result_frames(&mut state);
         assert!(state.return_result_frames.is_empty());
-        let (_, second) = begin_return_result_occurrence(&mut state).unwrap();
+        let (_, second) = begin_test_return_result_occurrence(&mut state, &producer(7)).unwrap();
         assert_eq!(second, ReturnResultProcessId(38));
         assert_eq!(
             state.active_return_result_occurrence,
@@ -67100,6 +68468,122 @@ mod departure_process_entry_tests {
     }
 
     #[test]
+    fn public_resolution_preflights_independent_arena_programs_before_outer_departures() {
+        use crate::types::identifiers::ReplacementContinuationId;
+        use crate::types::replacements::{ReplacementDefinition, ReplacementEvent};
+        for fault in 0..4 {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let cohort = scenario.add_creature(P0, "Outer departure", 3, 3).id();
+            let host = scenario.add_creature(P0, "Replacement host", 4, 4).id();
+            let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone);
+            replacement.runtime_execute = Some(ReplacementContinuationId(0));
+            let producer = serde_json::from_value(serde_json::json!({
+                "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+                "target": TargetFilter::SpecificObject { id: cohort }
+            }))
+            .unwrap();
+            let mut definition = AbilityDefinition::new(AbilityKind::Activated, producer);
+            definition.declares_return_result = Some(ReturnResultId(7));
+            definition.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(replacement.clone()),
+                    target: TargetFilter::SpecificObject { id: host },
+                },
+            )));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental arena admission", "")
+                .with_ability_definition(definition)
+                .id();
+            let mut runner = scenario.build();
+            let mut local = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
+            local.declares_return_result = None;
+            let handle = runner
+                .state_mut()
+                .install_replacement_continuation(local)
+                .unwrap();
+            assert_eq!(handle, ReplacementContinuationId(0));
+            match fault {
+                0 => {}
+                1 => {
+                    let reader = ResolvedAbility::new(Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Ref { qty: QuantityRef::ZoneChangeAggregate {
+                            source: crate::types::ability::ZoneChangeRecordSource::InstructionResult { result: ReturnResultId(7) },
+                            from: Some(Zone::Battlefield), to: Some(Zone::Exile),
+                            filter: TargetFilter::Any,
+                            function: crate::types::ability::AggregateFunction::Sum,
+                            property: crate::types::ability::ObjectProperty::Power,
+                        } },
+                    }, vec![], source, P0);
+                    runner.state_mut().replacement_continuations.set(0, reader);
+                }
+                2 => runner.state_mut().replacement_continuations.clear(),
+                3 => {
+                    runner.state_mut().replacement_continuations.set(
+                        0,
+                        ResolvedAbility::new(
+                            Effect::AddTargetReplacement {
+                                replacement: Box::new(replacement),
+                                target: TargetFilter::None,
+                            },
+                            vec![],
+                            source,
+                            P0,
+                        ),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let arena = runner.state().replacement_continuations.clone();
+            let next_process = runner.state().next_return_result_process_id;
+            let next_occurrence = runner.state().next_return_result_occurrence_id;
+            let mut result = runner.act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            });
+            for _ in 0..8 {
+                if result.is_err() || runner.state().stack.is_empty() {
+                    break;
+                }
+                result = runner.act(GameAction::PassPriority);
+            }
+            assert_eq!(runner.state().replacement_continuations, arena);
+            if fault == 0 {
+                result.expect(
+                    "the actual public activation accepts an independent registered program",
+                );
+                assert_eq!(runner.state().objects[&cohort].zone, Zone::Exile);
+                assert!(runner.state().objects[&host]
+                    .replacement_definitions
+                    .iter_all()
+                    .any(|definition| definition.runtime_execute == Some(handle)));
+                assert!(
+                    runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty()
+                );
+                assert!(runner.state().return_result_frames.is_empty());
+            } else {
+                assert!(
+                    result.is_err(),
+                    "foreign/dangling/cyclic arena fault {fault}"
+                );
+                assert_eq!(runner.state().objects[&cohort].zone, Zone::Battlefield);
+                assert!(runner.state().objects[&host]
+                    .replacement_definitions
+                    .is_empty());
+                assert_eq!(runner.state().next_return_result_process_id, next_process);
+                assert_eq!(
+                    runner.state().next_return_result_occurrence_id,
+                    next_occurrence
+                );
+                assert!(runner.state().return_result_frames.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn departure_complete_root_mixed_import_refuses_before_any_producer_effect_reset_or_allocation()
     {
         let mut scenario = GameScenario::new();
@@ -67115,6 +68599,7 @@ mod departure_process_entry_tests {
             ReturnResultFrame {
                 process: Some(ReturnResultProcessId(37)),
                 declarations: None,
+                admitted_program: None,
                 results: [(
                     ReturnResultId(9),
                     crate::types::game_state::InstructionResult::ZoneChanges(vec![]),
@@ -67164,7 +68649,7 @@ mod departure_process_entry_tests {
     #[test]
     fn departure_entry_binds_the_executed_clone_and_restores_an_unrelated_outer_owner() {
         let mut state = GameState::new_two_player(42);
-        let (_, outer_p) = begin_return_result_occurrence(&mut state).unwrap();
+        let (_, outer_p) = begin_test_return_result_occurrence(&mut state, &producer(7)).unwrap();
         let outer_o = state.active_return_result_occurrence;
         let root = producer(7);
         let before_p = state.next_return_result_process_id;
@@ -67219,7 +68704,7 @@ mod departure_process_entry_tests {
             &mut state,
             &forbidden,
             InstructionResultEntry::Independent,
-            |_, _| {
+            |_, _, _| {
                 entered = true;
                 Ok(())
             }
@@ -67248,7 +68733,7 @@ mod departure_process_entry_tests {
             &mut state,
             &root,
             InstructionResultEntry::Independent,
-            |state, actual_root| {
+            |state, actual_root, _owner| {
                 let outer_o = state.active_return_result_occurrence;
                 let outer_p = actual_root.return_result_process.unwrap();
                 let registered = actual_root.sub_ability.as_ref().unwrap();
@@ -67265,7 +68750,7 @@ mod departure_process_entry_tests {
                     state,
                     registered,
                     InstructionResultEntry::Independent,
-                    |state, actual_child| {
+                    |state, actual_child, _owner| {
                         let inner_o = state.active_return_result_occurrence.unwrap();
                         let inner_p = actual_child.return_result_process.unwrap();
                         assert_ne!(Some(inner_o), outer_o);
@@ -67320,8 +68805,6 @@ mod departure_existing_receipt_process_tests {
         let charge = CounterType::Generic("charge".into());
         scenario.with_counter(source, charge.clone(), 3);
         let mut state = scenario.build().state().clone();
-        let (_, process) = begin_return_result_occurrence(&mut state).unwrap();
-        let occurrence = state.active_return_result_occurrence.unwrap();
         let pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
         let mut parent = ResolvedAbility::new(
             Effect::RemoveCounter {
@@ -67334,6 +68817,8 @@ mod departure_existing_receipt_process_tests {
             P0,
         );
         parent.declares_return_result = Some(ReturnResultId(2));
+        let (_, process) = begin_test_return_result_occurrence(&mut state, &parent).unwrap();
+        let occurrence = state.active_return_result_occurrence.unwrap();
         parent.bind_return_result_process(Some(process));
         let binding = begin_counter_removal_result(
             &mut state,

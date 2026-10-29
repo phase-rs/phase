@@ -55,6 +55,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     if !matches!(ability.effect, Effect::Encore) {
         return Err(EffectError::MissingParam("Encore".to_string()));
     }
@@ -75,7 +89,15 @@ pub fn resolve(
             std::collections::VecDeque::new(),
         )
     };
-    super::token_copy::begin_creation(state, ability, work, EffectKind::Encore, caller, events);
+    super::token_copy::begin_creation_owned(
+        state,
+        ability,
+        work,
+        EffectKind::Encore,
+        caller,
+        events,
+        declarations,
+    )?;
     Ok(())
 }
 

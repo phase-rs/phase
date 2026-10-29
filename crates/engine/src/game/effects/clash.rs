@@ -24,10 +24,25 @@ pub(crate) struct ClashStep {
 ///
 /// Returns the result to `finish_clash_resolution`, which binds the
 /// result-aware tail context once the outcome is known.
+#[cfg(test)]
 pub(crate) fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<ClashStep, EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<ClashStep, EffectError> {
     let controller = ability.controller;
 
@@ -58,7 +73,11 @@ pub(crate) fn resolve(
     // against `candidates`) is fed back through `perform_clash`.
     if candidates.len() >= 2 {
         state.waiting_for = WaitingFor::ClashChooseOpponent {
-            return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+            return_result_occurrence: super::retained_return_result_occurrence(
+                state,
+                ability,
+                declarations,
+            )?,
             player: controller,
             candidates,
             ability: Box::new(ability.clone()),

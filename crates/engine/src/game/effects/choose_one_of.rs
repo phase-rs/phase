@@ -22,6 +22,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let (chooser, branches) = match &ability.effect {
         Effect::ChooseOneOf {
             chooser, branches, ..
@@ -51,7 +65,8 @@ pub fn resolve(
     // context ONCE at prompt time — the pause below destroys
     // resolution-scoped context, and at branch time the event is already None.
     let trigger_context = ResolvingTriggerContext::capture(state);
-    let return_result_occurrence = super::retained_return_result_occurrence(state, ability)?;
+    let return_result_occurrence =
+        super::retained_return_result_occurrence(state, ability, declarations)?;
     prompt_next(
         state,
         PromptRequest {
@@ -200,6 +215,157 @@ pub(crate) struct BranchSelection {
     pub index: usize,
 }
 
+/// The selected executable and its source/announcement inputs are bound by
+/// one pure constructor shared with current/legacy program authentication.
+pub(crate) fn project_selected_branch(
+    parent: &ResolvedAbility,
+    branch: &AbilityDefinition,
+    player: PlayerId,
+) -> ResolvedAbility {
+    let mut resolved =
+        crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
+            branch,
+            parent.source_id,
+            parent.controller,
+            parent.targets.clone(),
+            parent.context.chain_root_targets.clone(),
+        );
+    resolved.inherit_coin_target_inputs(parent);
+    resolved.bind_return_result_process(parent.return_result_process);
+    resolved.context = parent.context.clone();
+    if matches!(resolved.effect, Effect::PutCounter { .. }) {
+        resolved.context.counter_removal_result = None;
+    }
+    // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
+    resolved.replace_target_occurrences(parent.target_occurrences());
+    resolved.set_replacement_applied_recursive(parent.replacement_applied.clone());
+    resolved.set_scoped_player_recursive(player);
+    // CR 603.2 + CR 608.2c (run boon-blockers-20261010): skip the chooser-target
+    // push when the SELECTED branch is event-context-bound (`target: None` with
+    // an `affected: TriggeringSource` carrier — the boon-fired keyword-choice
+    // shape, e.g. Swiftspear's Teachings' "it gains your choice of prowess or
+    // haste"). The unconditional push fills `ability.targets`, which defeats
+    // the `affected: TriggeringSource` early-return in effect.rs (gated on
+    // `ability.targets.is_empty()`) and misbinds the grant to
+    // `SpecificPlayer(chooser)` instead of the triggering object. Every other
+    // branch keeps the push byte-identically — ordinary `target: Some`
+    // branches, `affected: None`/`Controller`/broadcast recipients (the push
+    // is their recipient), and non-context `affected` — including the
+    // villainous-choice branches the push was introduced for (de2e0db063),
+    // which never carry `TriggeringSource`.
+    let branch_is_event_context_bound = matches!(
+        branch.effect.as_ref(),
+        Effect::GenericEffect {
+            target: None,
+            static_abilities,
+            ..
+        } if static_abilities
+            .iter()
+            .any(|s| matches!(s.affected, Some(TargetFilter::TriggeringSource)))
+    );
+    if !branch_is_event_context_bound
+        && !resolved
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
+    {
+        resolved.push_target(TargetRef::Player(player));
+    }
+
+    resolved
+}
+
+fn selection_program_owner(
+    state: &GameState,
+    selection: &BranchSelection,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+        ResolvedAbility,
+    )>,
+    EffectError,
+> {
+    let needs_owner = selection.branches.iter().any(|definition| {
+        let body = build_resolved_from_def(definition, selection.source_id, selection.controller);
+        matches!(
+            crate::types::ability::classify_instruction_result_invocation(
+                &body,
+                crate::types::ability::InstructionResultEntry::SelectedBody,
+                None
+            ),
+            Ok((
+                crate::types::ability::InstructionResultProcess::Imported { .. },
+                _
+            ))
+        )
+    }) || selection
+        .continuation
+        .as_deref()
+        .is_some_and(crate::types::game_state::has_return_result_metadata);
+    if !needs_owner {
+        return Ok(None);
+    }
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        selection.return_result_occurrence,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+            selection.expected_return_result_process,
+        ),
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let program = frame.admitted_program.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam(
+            "selected instruction-result owner has no recovered admitted program".into(),
+        )
+    })?;
+    let (_, declarations) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    )?;
+    if frame.declarations.as_ref() != Some(&declarations)
+        || program.return_result_process != frame.process
+    {
+        return Err(EffectError::InvalidParam(
+            "selected instruction-result program declaration mismatch".into(),
+        ));
+    }
+    let mut parent = None;
+    super::visit_instruction_result_program_projections(
+        program,
+        Some(selection.player),
+        &mut |candidate| {
+            let Effect::ChooseOneOf {
+                chooser, branches, ..
+            } = &candidate.effect
+            else {
+                return false;
+            };
+            if branches == &selection.branches
+                && candidate.source_id == selection.source_id
+                && candidate.controller == selection.controller
+                && candidate.target_occurrences() == selection.parent_occurrences.occurrences()
+                && candidate.context == selection.context
+                && candidate.sub_ability == selection.continuation
+                && candidate.replacement_applied == selection.replacement_applied
+                && choosing_players(state, candidate, chooser).contains(&selection.player)
+            {
+                parent = Some(candidate.clone());
+                true
+            } else {
+                false
+            }
+        },
+    );
+    let parent = parent.ok_or_else(|| {
+        EffectError::InvalidParam(
+            "selected instruction-result prompt is not owned by its admitted program".into(),
+        )
+    })?;
+    Ok(Some((program.clone(), declarations, parent)))
+}
+
 pub(crate) fn resolve_branch(
     state: &mut GameState,
     selection: BranchSelection,
@@ -219,13 +385,14 @@ pub(crate) fn resolve_branch(
             selection.return_result_occurrence,
         )?;
     }
+    let owner = selection_program_owner(state, &selection)?;
     state.waiting_for = WaitingFor::Priority {
         player: selection.player,
     };
     state.priority_player = selection.player;
     let occurrence = selection.return_result_occurrence;
     super::with_inherited_return_result_occurrence(state, occurrence, |state| {
-        resolve_branch_in_occurrence(state, selection, events)
+        resolve_branch_in_occurrence(state, selection, events, owner)
     })
 }
 
@@ -233,6 +400,11 @@ fn resolve_branch_in_occurrence(
     state: &mut GameState,
     selection: BranchSelection,
     events: &mut Vec<GameEvent>,
+    owner: Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+        ResolvedAbility,
+    )>,
 ) -> Result<(), EffectError> {
     let BranchSelection {
         return_result_occurrence,
@@ -313,47 +485,19 @@ fn resolve_branch_in_occurrence(
         });
     }
 
-    let mut resolved = build_resolved_from_def(branch, source_id, controller);
-    resolved.bind_return_result_process(expected_return_result_process);
-    resolved.context = context;
-    if matches!(resolved.effect, Effect::PutCounter { .. }) {
-        resolved.context.counter_removal_result = None;
-    }
-    // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
-    resolved.replace_target_occurrences(parent_occurrences.occurrences());
-    resolved.set_replacement_applied_recursive(replacement_applied);
-    resolved.set_scoped_player_recursive(player);
-    // CR 603.2 + CR 608.2c (run boon-blockers-20261010): skip the chooser-target
-    // push when the SELECTED branch is event-context-bound (`target: None` with
-    // an `affected: TriggeringSource` carrier — the boon-fired keyword-choice
-    // shape, e.g. Swiftspear's Teachings' "it gains your choice of prowess or
-    // haste"). The unconditional push fills `ability.targets`, which defeats
-    // the `affected: TriggeringSource` early-return in effect.rs (gated on
-    // `ability.targets.is_empty()`) and misbinds the grant to
-    // `SpecificPlayer(chooser)` instead of the triggering object. Every other
-    // branch keeps the push byte-identically — ordinary `target: Some`
-    // branches, `affected: None`/`Controller`/broadcast recipients (the push
-    // is their recipient), and non-context `affected` — including the
-    // villainous-choice branches the push was introduced for (de2e0db063),
-    // which never carry `TriggeringSource`.
-    let branch_is_event_context_bound = matches!(
-        branch.effect.as_ref(),
-        Effect::GenericEffect {
-            target: None,
-            static_abilities,
-            ..
-        } if static_abilities
-            .iter()
-            .any(|s| matches!(s.affected, Some(TargetFilter::TriggeringSource)))
-    );
-    if !branch_is_event_context_bound
-        && !resolved
-            .targets
-            .iter()
-            .any(|target| matches!(target, TargetRef::Player(pid) if *pid == player))
-    {
-        resolved.push_target(TargetRef::Player(player));
-    }
+    let mut parent = owner
+        .as_ref()
+        .map(|(_, _, parent)| parent.clone())
+        .unwrap_or_else(|| {
+            let mut parent = ResolvedAbility::new(Effect::NoOp, Vec::new(), source_id, controller);
+            parent.bind_return_result_process(expected_return_result_process);
+            parent.context = context.clone();
+            parent.replace_target_occurrences(parent_occurrences.occurrences());
+            parent.replacement_applied = replacement_applied.clone();
+            parent
+        });
+    parent.context = context;
+    let mut resolved = project_selected_branch(&parent, branch, player);
 
     // CR 608.2c + CR 701.55d: Instructions after a multi-player branch choice
     // run once, after the final chooser's selected branch. Keeping the runtime
@@ -379,10 +523,36 @@ fn resolve_branch_in_occurrence(
         .as_ref()
         .map(|ctx| super::super::triggers::push_resolving_trigger_context(state, ctx));
     let child_boundary = state.resolution_stack.capture_child_boundary();
-    let outer_pending =
-        outer_tail.map(|tail| crate::types::game_state::PendingContinuation::new(tail, state));
+    let outer_pending = outer_tail
+        .map(|tail| match owner.as_ref() {
+            Some((program, declarations, _)) => {
+                crate::types::game_state::PendingContinuation::new_owned(
+                    tail,
+                    state,
+                    (program, declarations),
+                )
+            }
+            None => Ok(crate::types::game_state::PendingContinuation::new(
+                tail, state,
+            )),
+        })
+        .transpose()?;
     let result = (|| {
-        super::resolve_selected_ability_chain(state, &resolved, events, 1)?;
+        if !local_branch {
+            if let Some((program, declarations, _)) = &owner {
+                super::resolve_carrier_owned_ability_chain(
+                    state,
+                    &resolved,
+                    events,
+                    1,
+                    (program, declarations),
+                )?;
+            } else {
+                super::resolve_selected_ability_chain(state, &resolved, events, 1)?;
+            }
+        } else {
+            super::resolve_selected_ability_chain(state, &resolved, events, 1)?;
+        }
         if let Some(pending) = outer_pending {
             if super::waits_for_resolution_choice(&state.waiting_for)
                 || state.resolution_stack.capture_child_boundary() > child_boundary
@@ -392,7 +562,17 @@ fn resolve_branch_in_occurrence(
                     .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
             } else {
                 super::restore_continuation_trigger_firing(state, pending.trigger_firing);
-                super::resolve_resume_owned_ability_chain(state, &pending.chain, events, 1)?;
+                if let Some((program, declarations, _)) = &owner {
+                    super::resolve_carrier_owned_ability_chain(
+                        state,
+                        &pending.chain,
+                        events,
+                        1,
+                        (program, declarations),
+                    )?;
+                } else {
+                    super::resolve_resume_owned_ability_chain(state, &pending.chain, events, 1)?;
+                }
             }
         }
         Ok::<_, EffectError>(())

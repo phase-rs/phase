@@ -1178,6 +1178,326 @@ pub(crate) mod direct_nodes_mut {
     define_walk!([mut]; [FnMut(DefinitionNodeMut<'_>) -> ControlFlow<()>]; skip_effects; visit_each_node; exclusive_iter; false);
 }
 
+/// State-owned programs keep arena handles in definitions, including definitions
+/// embedded in costs and frozen executable input. The callback deliberately has
+/// no access to GameState; the caller owns lookup and graph validation.
+pub(crate) fn visit_resolved_replacements(
+    root: &crate::types::ability::ResolvedAbility,
+    visit: &mut impl FnMut(&ReplacementDefinition),
+) {
+    use crate::types::ability::{CostPaidObjectRecord, QuantityRef};
+    use crate::types::keywords::*;
+
+    fn keyword(keyword: &Keyword, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        let cost = match keyword {
+            Keyword::CumulativeUpkeep(cost)
+            | Keyword::Escalate(cost)
+            | Keyword::Bestow(BestowCost::NonMana(cost))
+            | Keyword::Embalm(EmbalmCost::NonMana(cost))
+            | Keyword::Eternalize(EternalizeCost::NonMana(cost))
+            | Keyword::Cycling(CyclingCost::NonMana(cost))
+            | Keyword::Flashback(FlashbackCost::NonMana(cost))
+            | Keyword::Escape(EscapeCost::NonMana(cost))
+            | Keyword::Evoke(EvokeCost::NonMana(cost))
+            | Keyword::Blitz(BlitzCost::NonMana(cost))
+            | Keyword::Buyback(BuybackCost::NonMana(cost))
+            | Keyword::Echo(EchoCost::NonMana(cost)) => Some(cost),
+            _ => None,
+        };
+        if let Some(cost) = cost {
+            let _ = nodes::visit_cost(cost, &mut |node| replacement_node(node, visit));
+        }
+    }
+    fn reference(reference: &QuantityRef, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        reference.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    fn filter(value: &TargetFilter, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        value.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+    }
+    fn quantity(value: &crate::types::ability::QuantityExpr, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        value.for_each_ref(&mut |value| reference(value, visit));
+    }
+    fn delayed_condition(value: &crate::types::ability::DelayedTriggerCondition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        use crate::types::ability::DelayedTriggerCondition;
+        match value {
+            DelayedTriggerCondition::WhenDies { filter: value }
+            | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter: value }
+            | DelayedTriggerCondition::WhenEntersBattlefield { filter: value }
+            | DelayedTriggerCondition::WhenDiesOrExiled { filter: value } => filter(value, visit),
+            DelayedTriggerCondition::WheneverEvent { trigger, .. } => { let _ = nodes::visit_trigger(trigger, &mut |node| replacement_node(node, visit)); }
+            DelayedTriggerCondition::WhenNextEvent { trigger, or_trigger, .. } => {
+                let _ = nodes::visit_trigger(trigger, &mut |node| replacement_node(node, visit));
+                if let Some(trigger) = or_trigger { let _ = nodes::visit_trigger(trigger, &mut |node| replacement_node(node, visit)); }
+            }
+            _ => {},
+        }
+    }
+    fn trigger_condition(value: &crate::types::ability::TriggerCondition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        use crate::types::ability::TriggerCondition;
+        match value {
+            TriggerCondition::QuantityComparison { lhs, rhs, .. } => { quantity(lhs, visit); quantity(rhs, visit); }
+            TriggerCondition::ControlsType { filter: value }
+            | TriggerCondition::ControlCount { filter: value, .. }
+            | TriggerCondition::ControlsNone { filter: value }
+            | TriggerCondition::DefendingPlayerControlsNone { filter: value }
+            | TriggerCondition::ZoneChangeObjectMatchesFilter { filter: value, .. }
+            | TriggerCondition::SourceMatchesFilter { filter: value }
+            | TriggerCondition::EventDamageSourceMatchesFilter { filter: value }
+            | TriggerCondition::EventObjectMatchesFilter { filter: value }
+            | TriggerCondition::TriggeringSpellTargetsFilter { filter: value }
+            | TriggerCondition::TriggeringSpellMatchesFilter { filter: value }
+            | TriggerCondition::DealtDamageThisTurnBySource { source: value }
+            | TriggerCondition::MinCoAttackers { filter: Some(value), .. }
+            | TriggerCondition::CastSpellThisTurn { filter: Some(value) } => filter(value, visit),
+            TriggerCondition::DuringPlayersTurn { player } => player.for_each_nested_keyword_payload(&mut |value| keyword(value, visit)),
+            TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => { for value in conditions { trigger_condition(value, visit); } }
+            TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => trigger_condition(condition, visit),
+            _ => {},
+        }
+    }
+    fn static_condition(value: &crate::types::ability::StaticCondition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        use crate::types::ability::StaticCondition;
+        match value {
+            StaticCondition::QuantityComparison { lhs, rhs, .. } => { quantity(lhs, visit); quantity(rhs, visit); }
+            StaticCondition::IsPresent { filter: Some(value) }
+            | StaticCondition::DefendingPlayerControls { filter: value }
+            | StaticCondition::SourceMatchesFilter { filter: value }
+            | StaticCondition::TopOfLibraryMatches { filter: value }
+            | StaticCondition::RecipientMatchesFilter { filter: value } => filter(value, visit),
+            StaticCondition::Not { condition } => static_condition(condition, visit),
+            StaticCondition::And { conditions } | StaticCondition::Or { conditions } => { for value in conditions { static_condition(value, visit); } }
+            _ => {},
+        }
+    }
+    fn replacement_condition(value: &crate::types::ability::ReplacementCondition, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        use crate::types::ability::ReplacementCondition;
+        match value {
+            ReplacementCondition::OnlyIfQuantity { lhs, rhs, .. } | ReplacementCondition::UnlessQuantity { lhs, rhs, .. } => { quantity(lhs, visit); quantity(rhs, visit); }
+            ReplacementCondition::UnlessControlsOtherLeq { filter: value, .. } => filter(&TargetFilter::Typed(value.clone()), visit),
+            ReplacementCondition::UnlessControlsMatching { filter: value }
+            | ReplacementCondition::UnlessControlsCountMatching { filter: value, .. }
+            | ReplacementCondition::IfControlsMatching { filter: value, .. }
+            | ReplacementCondition::DealtDamageThisTurnBySource { source: value } => filter(value, visit),
+            ReplacementCondition::And { conditions } => { for value in conditions { replacement_condition(value, visit); } }
+            _ => {},
+        }
+    }
+    fn replacement_node(
+        node: DefinitionNode<'_>,
+        visit: &mut impl FnMut(&ReplacementDefinition),
+    ) -> ControlFlow<()> {
+        match node {
+            DefinitionNode::Replacement(definition) => {
+                visit(definition);
+                for value in [&definition.valid_card, &definition.damage_source_filter, &definition.redirect_target].into_iter().flatten() { filter(value, visit); }
+                if let Some(value) = &definition.condition { replacement_condition(value, visit); }
+                for spec in definition.additional_token_spec.iter().chain(definition.ensure_token_specs.iter().flatten()) {
+                    for value in &spec.characteristics.keywords { keyword(value, visit); }
+                    for definition in &spec.static_abilities {
+                        let _ = nodes::visit_static(definition, &mut |node| replacement_node(node, visit));
+                    }
+                    if let Some(window) = &spec.sacrifice_at { duration(window, visit); }
+                }
+            },
+            DefinitionNode::Ability(definition) => {
+                definition.for_each_direct_quantity_ref(&mut |value| reference(value, visit));
+                if let Some(condition) = &definition.condition {
+                    condition.for_each_nested_keyword_payload(&mut |value| keyword(value, visit));
+                }
+                if let Some(window) = &definition.duration { duration(window, visit); }
+            }
+            DefinitionNode::Static(definition) => {
+                mode(&definition.mode, visit);
+                if let Some(value) = &definition.affected { filter(value, visit); }
+                if let Some(value) = &definition.condition { static_condition(value, visit); }
+                for modification in &definition.modifications { modification_leaves(modification, visit); }
+            },
+            DefinitionNode::Trigger(definition) => {
+                for value in [&definition.valid_card, &definition.valid_target, &definition.valid_subject_player, &definition.valid_source].into_iter().flatten() { filter(value, visit); }
+                for clause in &definition.zone_change_clauses { if let Some(value) = &clause.valid_card { filter(value, visit); } }
+                if let Some(value) = &definition.condition { trigger_condition(value, visit); }
+                if let Some(value) = &definition.attack_cost_condition { static_condition(value, visit); }
+                if let Some(crate::types::ability::TriggerConstraint::NthSpellThisTurn { filter: Some(value), .. }) = &definition.constraint { filter(value, visit); }
+                if let Some(value) = &definition.unless_pay { filter(&value.payer, visit); }
+            }
+        }
+        ControlFlow::Continue(())
+    }
+    fn duration(value: &crate::types::ability::Duration, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        match value {
+            crate::types::ability::Duration::UntilEvent { event } => { let _ = nodes::visit_trigger(event, &mut |node| replacement_node(node, visit)); }
+            crate::types::ability::Duration::ForAsLongAs { condition } => static_condition(condition, visit),
+            crate::types::ability::Duration::UntilNextStepOf { player, .. } => player.for_each_nested_keyword_payload(&mut |value| keyword(value, visit)),
+            _ => {},
+        }
+    }
+    fn mode(value: &crate::types::statics::StaticMode, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        use crate::types::statics::StaticMode;
+        let cost = match value {
+            StaticMode::CastWithAlternativeCost { cost, .. }
+            | StaticMode::AlternativeKeywordCost { cost, .. }
+            | StaticMode::TopOfLibraryCastPermission { alt_cost: Some(cost), .. }
+            | StaticMode::ImposeAdditionalCost { cost, .. } => Some(cost),
+            StaticMode::GraveyardCastPermission { extra_cost: Some(cost), .. }
+            | StaticMode::ExileCastPermission { extra_cost: Some(cost), .. } => Some(&cost.cost),
+            _ => None,
+        };
+        if let Some(cost) = cost { let _ = nodes::visit_cost(cost, &mut |node| replacement_node(node, visit)); }
+        if let StaticMode::CastWithKeyword { keyword: value } | StaticMode::CantHaveKeyword { keyword: value } = value { keyword(value, visit); }
+    }
+    fn modification_leaves(value: &ContinuousModification, visit: &mut impl FnMut(&ReplacementDefinition)) {
+        match value {
+            ContinuousModification::AddKeyword { keyword: value }
+            | ContinuousModification::RemoveKeyword { keyword: value } => keyword(value, visit),
+            ContinuousModification::AddStaticMode { mode: value } => mode(value, visit),
+            ContinuousModification::CopyValues { values, .. } => {
+                for value in &values.keywords { keyword(value, visit); }
+                if let Some(face) = &values.prepare_face {
+                    for replacement in face.replacement_definitions.iter() {
+                        let _ = nodes::visit_replacement(replacement, &mut |node| replacement_node(node, visit));
+                    }
+                    for definition in &face.abilities {
+                        let _ = nodes::visit_ability_def(definition, &mut |node| replacement_node(node, visit));
+                    }
+                    for definition in face.static_definitions.iter() {
+                        let _ = nodes::visit_static(definition, &mut |node| replacement_node(node, visit));
+                    }
+                    for definition in face.trigger_definitions.iter() {
+                        let _ = nodes::visit_trigger(definition, &mut |node| replacement_node(node, visit));
+                    }
+                    for value in &face.keywords { keyword(value, visit); }
+                }
+            }
+            _ => {},
+        }
+    }
+    let _ = nodes::visit_effect(&root.effect, &mut |node| replacement_node(node, visit));
+    // These are the existing typed leaves of the shared effect walk, rather
+    // than a second list of its ordinary ability/trigger/cost carriers.
+    let _ = visit_effect(&root.effect, &mut |effect| {
+        use crate::types::ability::{PerpetualModification, PerpetualGrantModification};
+        match effect {
+            Effect::CopySpell { additional_modifications, .. }
+            | Effect::BecomeCopy { additional_modifications, .. }
+            | Effect::CopyTokenOf { additional_modifications, .. }
+            | Effect::EachPlayerCopyChosen { copy_modifications: additional_modifications, .. } => {
+                for modification in additional_modifications {
+                    let _ = nodes::visit_continuous_mod(modification, &mut |node| replacement_node(node, visit));
+                    modification_leaves(modification, visit);
+                }
+            }
+            Effect::ApplyPerpetual { modification: PerpetualModification::GrantAbility { modifications }, .. } => {
+                for modification in modifications {
+                    match modification {
+                        PerpetualGrantModification::GrantAbility { definition } => { let _ = nodes::visit_ability_def(definition, &mut |node| replacement_node(node, visit)); }
+                        PerpetualGrantModification::GrantTrigger { trigger } => { let _ = nodes::visit_trigger(trigger, &mut |node| replacement_node(node, visit)); }
+                        PerpetualGrantModification::AddStaticMode { mode: value } => mode(value, visit),
+                        PerpetualGrantModification::AddKeyword { keyword: value } => keyword(value, visit),
+                    }
+                }
+            }
+            Effect::Mana { grants, .. } => {
+                for grant in grants {
+                    match grant {
+                        crate::types::mana::ManaSpellGrant::TriggerOnSpend { ability, .. } => { let _ = nodes::visit_ability_def(ability, &mut |node| replacement_node(node, visit)); }
+                        crate::types::mana::ManaSpellGrant::AddKeywordUntilEndOfTurn { keyword: value, duration: window, .. } => { keyword(value, visit); duration(window, visit); }
+                        _ => {},
+                    }
+                }
+            }
+            Effect::ApplyPerpetual { modification:
+                PerpetualModification::ModifyPowerToughness { keywords, .. }
+                | PerpetualModification::GrantKeywords { keywords }
+                | PerpetualModification::Become { keywords, .. }, .. } => {
+                for value in keywords { keyword(value, visit); }
+            }
+            Effect::AddPendingEntersModifications { rider } => {
+                for modification in &rider.modifications {
+                    let _ = nodes::visit_continuous_mod(modification, &mut |node| replacement_node(node, visit));
+                    modification_leaves(modification, visit);
+                }
+                if let Some(value) = &rider.cast_filter { filter(value, visit); }
+            }
+            Effect::GrantNextSpellAbility { modifier: crate::types::game_state::NextSpellModifier::HasKeyword { keyword: value }, .. } => keyword(value, visit),
+            Effect::ReturnAsAura { grants, enchant_filter } => {
+                filter(enchant_filter, visit);
+                for value in grants { modification_leaves(value, visit); }
+            }
+            Effect::CreateDelayedTrigger { condition, .. }
+            | Effect::ExileResolvingSpellInsteadOfGraveyard { on_exile: Some(crate::types::ability::ExiledSpellRider::ReturnTo { timing: condition, .. }) } => delayed_condition(condition, visit),
+            _ => {},
+        }
+        if let Effect::Token { keywords, .. } | Effect::Animate { keywords, .. } | Effect::CopyTokenOf { extra_keywords: keywords, .. } = effect {
+            for value in keywords { keyword(value, visit); }
+        }
+        if let Effect::GenericEffect { duration: Some(window), .. } = effect { duration(window, visit); }
+        effect.for_each_quantity_ref(&mut |value| reference(value, visit));
+        ControlFlow::Continue(())
+    });
+    if let Some(payment) = &root.unless_pay {
+        let _ = nodes::visit_cost(&payment.cost, &mut |node| replacement_node(node, visit));
+    }
+    for definition in &root.mode_abilities {
+        let _ = nodes::visit_ability_def(definition, &mut |node| replacement_node(node, visit));
+    }
+    root.for_each_direct_quantity_ref(&mut |value| reference(value, visit));
+    if let Some(condition) = &root.condition { condition.for_each_nested_keyword_payload(&mut |value| keyword(value, visit)); }
+    if let Some(window) = &root.duration { duration(window, visit); }
+    if let Some(source) = &root.trigger_source {
+        for value in source
+            .lki
+            .keywords
+            .iter()
+            .chain(&source.cast_spell_keywords)
+        {
+            keyword(value, visit);
+        }
+        for trigger in &source.trigger_entries {
+            let _ = nodes::visit_trigger(&trigger.definition, &mut |node| {
+                replacement_node(node, visit)
+            });
+        }
+        if let Some(snapshot) = &source.cast_cost_paid_object {
+            for value in &snapshot.lki.keywords {
+                keyword(value, visit);
+            }
+        }
+        for snapshot in &source.mana_spent_source_snapshots {
+            for value in &snapshot.lki.keywords { keyword(value, visit); }
+        }
+    }
+    for snapshot in [
+        &root.cost_paid_object,
+        &root.effect_context_object,
+        &root.amassed_army_object,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for value in &snapshot.lki.keywords {
+            keyword(value, visit);
+        }
+    }
+    for record in &root.cost_paid_objects {
+        if let CostPaidObjectRecord::Captured(snapshot) = record {
+            for value in &snapshot.lki.keywords {
+                keyword(value, visit);
+            }
+        }
+    }
+    if let Some(result) = &root.context.direct_discard_result {
+        for value in &result.lki.keywords {
+            keyword(value, visit);
+        }
+    }
+    for child in root.sub_ability.iter().chain(&root.else_ability) {
+        visit_resolved_replacements(child, visit);
+    }
+    for (_, child) in &root.coin_branch_target_abilities {
+        visit_resolved_replacements(child, visit);
+    }
+}
+
 /// CR 201.5a: the positions in one definition node where a granter symbol is bound.
 ///
 /// The parser can place a symbol elsewhere; every entry that parses masked text then refuses

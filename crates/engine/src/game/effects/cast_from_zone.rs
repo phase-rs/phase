@@ -470,6 +470,7 @@ fn open_private_zone_cast_selection(
     target_filter: &TargetFilter,
     source_zone: Zone,
     events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let (stash, stored_filter) =
         private_zone_pick_stash(state, ability, target_filter, source_zone);
@@ -502,7 +503,8 @@ fn open_private_zone_cast_selection(
     // cleared and the reference would read 0 and reject every cast. Freeze the
     // gate to a `Fixed` on the stashed ability now, while the trigger context is
     // live, so the resume's finalize-time re-evaluation is correct.
-    let return_result_occurrence = super::retained_return_result_occurrence(state, &stash)?;
+    let return_result_occurrence =
+        super::retained_return_result_occurrence(state, &stash, declarations)?;
     let return_result_process = stash.return_result_process;
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
@@ -615,6 +617,7 @@ fn open_linked_exile_cast_selection(
     target_filter: &TargetFilter,
     pool: Vec<ObjectId>,
     events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let mut stash = ability.clone();
     snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
@@ -640,7 +643,8 @@ fn open_linked_exile_cast_selection(
         });
         return Ok(());
     }
-    let return_result_occurrence = super::retained_return_result_occurrence(state, &stash)?;
+    let return_result_occurrence =
+        super::retained_return_result_occurrence(state, &stash, declarations)?;
     let return_result_process = stash.return_result_process;
     crate::game::effects::append_to_pending_continuation(state, Some(Box::new(stash)));
     state.waiting_for = WaitingFor::EffectZoneChoice {
@@ -691,6 +695,20 @@ pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
     let (
         target_filter,
@@ -968,6 +986,7 @@ pub fn resolve(
             target_filter,
             Zone::Library,
             events,
+            declarations,
         );
     }
 
@@ -1031,6 +1050,7 @@ pub fn resolve(
                     target_filter,
                     source_zone,
                     events,
+                    declarations,
                 );
             }
         }
@@ -1052,6 +1072,7 @@ pub fn resolve(
                 target_filter,
                 Zone::Hand,
                 events,
+                declarations,
             );
         }
         // No targets resolved — nothing to cast.
@@ -1210,7 +1231,14 @@ pub fn resolve(
         && duration.is_none()
         && !target_ids.is_empty()
     {
-        return open_linked_exile_cast_selection(state, ability, target_filter, target_ids, events);
+        return open_linked_exile_cast_selection(
+            state,
+            ability,
+            target_filter,
+            target_ids,
+            events,
+            declarations,
+        );
     }
 
     let paid_during_resolution_cast = !without_paying
@@ -5185,17 +5213,6 @@ mod tests {
             );
             let mut events = vec![];
             zones::move_to_zone(&mut state, departed, Zone::Exile, &mut events);
-            let (_, process) =
-                crate::game::effects::begin_return_result_occurrence(&mut state).unwrap();
-            let occurrence = state.active_return_result_occurrence.unwrap();
-            crate::game::effects::publish_return_result(
-                &mut state,
-                occurrence,
-                ReturnResultId(7),
-                Some(process),
-                vec![record],
-            )
-            .unwrap();
             let quantity = QuantityExpr::Ref {
                 qty: QuantityRef::ZoneChangeAggregate {
                     source: ZoneChangeRecordSource::InstructionResult {
@@ -5243,12 +5260,32 @@ mod tests {
                     signal: EffectOutcomeSignal::OptionalEffectPerformed,
                 }),
             });
+            let producer_effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile"})).unwrap();
+            let mut program = ResolvedAbility::new(producer_effect, vec![], source, PlayerId(0));
+            program.declares_return_result = Some(ReturnResultId(7));
+            program.sub_ability = Some(Box::new(ability.clone()));
+            let (_, process) =
+                crate::game::effects::begin_test_return_result_occurrence(&mut state, &program)
+                    .unwrap();
+            let occurrence = state.active_return_result_occurrence.unwrap();
+            crate::game::effects::publish_return_result(
+                &mut state,
+                occurrence,
+                ReturnResultId(7),
+                Some(process),
+                vec![record],
+            )
+            .unwrap();
             ability.bind_return_result_process(Some(process));
-            crate::game::effects::resolve_resume_owned_ability_chain(
+            let owner =
+                crate::game::effects::owned_cursor_declarations(&state, Some(occurrence), &ability)
+                    .unwrap();
+            crate::game::effects::resolve_carrier_owned_ability_chain(
                 &mut state,
                 &ability,
                 &mut events,
                 0,
+                (&owner.0, &owner.1),
             )
             .unwrap();
             let WaitingFor::EffectZoneChoice {

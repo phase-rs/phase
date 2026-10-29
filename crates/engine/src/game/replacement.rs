@@ -11,7 +11,8 @@ use crate::types::ability::{
     ManaSpendPermission, PermissionGrantee, PostReplacementContinuation, PreventionAmount,
     PreventionFormula, QuantityExpr, QuantityModification, RedirectionLifetime,
     ReplacementChoiceAuthority, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter, TargetRef,
+    ReplacementOrigin, ResolvedAbility, RoundingMode, ShieldKind, TapStateChange, TargetFilter,
+    TargetRef,
 };
 use crate::types::actions::ReplacementAutoChoice;
 use crate::types::card_type::CoreType;
@@ -10750,7 +10751,8 @@ fn apply_single_replacement_with_definition(
                         // apply to Damage events, where there is no `etb_counters`
                         // slot to absorb the counters into.
                         let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                        if let Some(runtime) = state.replacement_rider(repl_def).cloned() {
+                        if let Some(mut runtime) = state.replacement_rider(repl_def).cloned() {
+                            runtime.clear_return_result_process_recursive();
                             Some(PostReplacementContinuation::Resolved(Box::new(runtime)))
                         } else {
                             repl_def.execute.as_deref().and_then(|def| {
@@ -11738,6 +11740,7 @@ pub(crate) fn take_immediate_opportunity_gain_riders(
             .replacement_rider(&definition)
             .cloned()
             .expect("an owned prevention total retains its rider");
+        rider.clear_return_result_process_recursive();
         state.last_effect_count = Some(total);
         if let Effect::GainLife { amount, .. } = &rider.effect {
             let value = crate::game::quantity::resolve_quantity_with_targets_and_event_amount(
@@ -13904,7 +13907,66 @@ fn same_identity_set(
     a: &[ReplacementAutoChoiceIdentity],
     b: &[ReplacementAutoChoiceIdentity],
 ) -> bool {
-    a.len() == b.len() && a.iter().all(|identity| b.contains(identity))
+    a.len() == b.len()
+        && a.iter().all(|identity| {
+            a.iter().filter(|item| *item == identity).count()
+                == b.iter().filter(|item| *item == identity).count()
+        })
+}
+
+/// A remembered program is a preference, not authority to apply a stale key.
+/// CR 616.1f: replay still constructs and rescans exact current candidates.
+fn preference_identity(identity: &ReplacementAutoChoiceIdentity) -> ReplacementAutoChoiceIdentity {
+    let mut image = identity.clone();
+    if let ReplacementAutoChoiceIdentity::Definition {
+        index,
+        occurrence,
+        definition,
+        ..
+    } = &mut image
+    {
+        match occurrence {
+            Some(AppliedReplacementKey::Object {
+                index: ordinal,
+                resolution_host: Some(_),
+                ..
+            }) => {
+                *index = 0;
+                *ordinal = 0;
+                if let ReplacementOrigin::Resolution { installation } = &mut definition.origin {
+                    *installation = None;
+                }
+            }
+            Some(AppliedReplacementKey::Object {
+                copy_effect: None,
+                resolution_host: None,
+                ..
+            }) => *occurrence = None,
+            _ => {}
+        }
+    }
+    image
+}
+
+fn preference_bijection(
+    saved: &[ReplacementAutoChoiceIdentity],
+    current: &[ReplacementAutoChoiceIdentity],
+) -> Option<Vec<usize>> {
+    if saved.len() != current.len() {
+        return None;
+    }
+    let mut used = vec![false; current.len()];
+    saved
+        .iter()
+        .map(|identity| {
+            let image = preference_identity(identity);
+            let index = current.iter().enumerate().position(|(index, candidate)| {
+                !used[index] && preference_identity(candidate) == image
+            })?;
+            used[index] = true;
+            Some(index)
+        })
+        .collect()
 }
 
 pub(crate) fn validate_remembered_replacement(
@@ -13965,9 +14027,13 @@ pub(crate) fn remember_replacement_choice(
         !(record.key.player == key.player
             && record.key.event == key.event
             && record.key.kind == key.kind
-            && same_identity_set(&record.key.candidates, &key.candidates))
+            && preference_bijection(&record.key.candidates, &key.candidates).is_some())
     });
-    let encoded = serde_json::to_vec(&key).expect("replacement key serializes");
+    let preference = ReplacementAutoChoiceKey {
+        candidates: key.candidates.iter().map(preference_identity).collect(),
+        ..key.clone()
+    };
+    let encoded = serde_json::to_vec(&preference).expect("replacement key serializes");
     let id = ReplacementAutoChoiceId(format!("r{:x}", Sha256::digest(encoded)));
     state
         .replacement_auto_choices
@@ -14027,32 +14093,37 @@ fn replay_pending_replacement(
                 record.key.player == key.player
                     && record.key.event == key.event
                     && record.key.kind == key.kind
-                    && same_identity_set(&record.key.candidates, &key.candidates)
+                    && preference_bijection(&record.key.candidates, &key.candidates).is_some()
             })
             .cloned();
-        record.and_then(|record| match record.choice {
-            ReplacementAutoChoice::Optional { index } => (index < 2).then_some(index),
-            ReplacementAutoChoice::Order { order } => {
-                if !crate::game::triggers::is_valid_permutation(&order, record.key.candidates.len())
-                {
-                    return None;
+        record.and_then(|record| {
+            let mapping = preference_bijection(&record.key.candidates, &key.candidates)?;
+            match record.choice {
+                ReplacementAutoChoice::Optional { index } => (index < 2).then_some(index),
+                ReplacementAutoChoice::Order { order } => {
+                    if !crate::game::triggers::is_valid_permutation(
+                        &order,
+                        record.key.candidates.len(),
+                    ) {
+                        return None;
+                    }
+                    let mut remaining: Vec<_> = order
+                        .iter()
+                        .map(|index| key.candidates[mapping[*index]].clone())
+                        .collect();
+                    let first = remaining.remove(0);
+                    let index = key
+                        .candidates
+                        .iter()
+                        .position(|identity| *identity == first)?;
+                    state.replacement_auto_choice_tail =
+                        (!remaining.is_empty()).then_some(ReplacementAutoChoiceTail {
+                            player,
+                            event: key.event,
+                            remaining,
+                        });
+                    Some(index)
                 }
-                let mut remaining: Vec<_> = order
-                    .iter()
-                    .map(|index| record.key.candidates[*index].clone())
-                    .collect();
-                let first = remaining.remove(0);
-                let index = key
-                    .candidates
-                    .iter()
-                    .position(|identity| *identity == first)?;
-                state.replacement_auto_choice_tail =
-                    (!remaining.is_empty()).then_some(ReplacementAutoChoiceTail {
-                        player,
-                        event: key.event,
-                        remaining,
-                    });
-                Some(index)
             }
         })
     } else {
@@ -14677,11 +14748,48 @@ pub(crate) fn pending_damage_has_opportunity(state: &GameState) -> bool {
     })
 }
 
+pub(crate) fn admitted_damage_remainder(
+    state: &GameState,
+) -> Result<
+    Option<(
+        crate::types::ability::ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    crate::types::ability::EffectError,
+> {
+    let Some(pending) = state
+        .pending_replacement
+        .as_ref()
+        .filter(|pending| matches!(pending.proposed, ProposedEvent::Damage { .. }))
+    else {
+        return Ok(None);
+    };
+    let Some(frame) = state.active_ability_continuation_frame().filter(|frame| {
+        frame
+            .pending
+            .chain
+            .context
+            .damage_opportunity
+            .as_ref()
+            .is_some_and(|owned| same_damage_opportunity_work(owned, &pending.damage_opportunity))
+    }) else {
+        return Ok(None);
+    };
+    crate::game::effects::owned_cursor_declarations(
+        state,
+        frame.pending.return_result_occurrence,
+        &frame.pending.chain,
+    )
+    .map(Some)
+}
+
 fn continue_replacement_impl(
     state: &mut GameState,
     chosen_index: usize,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
+    let admitted_remainder = admitted_damage_remainder(state)
+        .expect("replacement response preflight authenticated its retained damage remainder");
     let child_boundary = state.resolution_stack.capture_child_boundary();
     let owns_damage_opportunity = pending_damage_has_opportunity(state);
     let pending_damage = state
@@ -14781,7 +14889,11 @@ fn continue_replacement_impl(
             ctx,
             event,
             delivery_opportunity,
-        );
+            admitted_remainder
+                .as_ref()
+                .map(|(program, declarations)| (program, declarations)),
+        )
+        .expect("the survivor retains its preflighted damage program");
     }
     if !combat_event && !owns_remainder && !matches!(result, ReplacementResult::NeedsChoice(_)) {
         if let Some(rider) = take_immediate_opportunity_gain_riders(state, &mut opportunity) {
@@ -30124,8 +30236,12 @@ mod auto_choice_identity_tests {
                 panic!("two definition identities: {:?}", key.candidates);
             };
             assert!(
-                s0 == s1 && d0 == d1 && r0 == r1 && r0.is_some() && i0 != i1,
-                "the identities differ only in index"
+                s0 == s1 && d0 != d1 && r0 == r1 && r0.is_some() && i0 != i1,
+                "equal rider programs retain distinct installation stamps"
+            );
+            assert_eq!(
+                preference_identity(&key.candidates[0]),
+                preference_identity(&key.candidates[1])
             );
             assert!(d0.runtime_execute.is_none() && d1.runtime_execute.is_none());
             let proposed = runner
@@ -30188,9 +30304,53 @@ mod auto_choice_identity_tests {
             .expect("the rebuilt shields have identities");
             if differing_rider {
                 assert!(!same_identity_set(&rebuilt, &record.key.candidates));
+                assert!(preference_bijection(&record.key.candidates, &rebuilt).is_none());
                 continue;
             }
-            assert!(same_identity_set(&rebuilt, &record.key.candidates));
+            assert!(!same_identity_set(&rebuilt, &record.key.candidates));
+            assert!(preference_bijection(&record.key.candidates, &rebuilt).is_some());
+
+            assert!(preference_bijection(&record.key.candidates, &rebuilt[..1]).is_none());
+            let mut alien_birth = rebuilt.clone();
+            if let ReplacementAutoChoiceIdentity::Definition { source, .. } = &mut alien_birth[0] {
+                source.incarnation = source.incarnation.saturating_add(1);
+            }
+            assert!(preference_bijection(&record.key.candidates, &alien_birth).is_none());
+            let mut alien_copy = rebuilt.clone();
+            if let ReplacementAutoChoiceIdentity::Definition {
+                occurrence:
+                    Some(AppliedReplacementKey::Object {
+                        resolution_host, ..
+                    }),
+                ..
+            } = &mut alien_copy[0]
+            {
+                *resolution_host = None;
+            }
+            assert!(preference_bijection(&record.key.candidates, &alien_copy).is_none());
+
+            let mut stale_tail = GameRunner::from_state(runner.state().clone());
+            stale_tail.state_mut().replacement_auto_choice_tail = Some(ReplacementAutoChoiceTail {
+                player: record.key.player,
+                event: record.key.event,
+                remaining: record.key.candidates.clone(),
+            });
+            bolt_bear(&mut stale_tail, bolts[1], bear);
+            assert!(
+                matches!(
+                    stale_tail.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ),
+                "a preference-equivalent reinstall cannot authorize the old event tail"
+            );
+            assert!(stale_tail.state().replacement_auto_choice_tail.is_none());
+            assert_eq!(counters(stale_tail.state(), bear), 3);
+            stale_tail
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            stale_tail.advance_until_stack_empty();
+            assert_eq!(counters(stale_tail.state(), bear), 6);
+            assert!(stale_tail.state().resolution_stack.is_empty());
 
             bolt_bear(&mut runner, bolts[1], bear);
             assert!(

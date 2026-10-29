@@ -20,12 +20,26 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, declarations| resolve_owned(state, executable, events, declarations),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     if !matches!(ability.effect, Effect::Myriad) {
         return Err(EffectError::MissingParam("Myriad".to_string()));
     }
 
     let Some(defending_player) = defending_player_for_myriad(state, ability) else {
-        return super::token::no_token(state, ability, events);
+        return super::token::no_token_owned(state, ability, events, declarations);
     };
 
     let opponents: Vec<PlayerId> = players::opponents(state, ability.controller)
@@ -48,14 +62,15 @@ pub fn resolve(
             std::collections::VecDeque::new(),
         )
     };
-    super::token_copy::begin_creation(
+    super::token_copy::begin_creation_owned(
         state,
         ability,
         work,
         crate::types::ability::EffectKind::Myriad,
         caller,
         events,
-    );
+        declarations,
+    )?;
     Ok(())
 }
 

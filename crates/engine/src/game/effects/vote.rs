@@ -46,6 +46,20 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, owner| resolve_owned(state, executable, events, owner),
+    )
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    declarations: super::AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
     let Effect::Vote {
         choices,
         per_choice_effect,
@@ -218,7 +232,11 @@ pub fn resolve(
     };
 
     state.waiting_for = WaitingFor::VoteChoice {
-        return_result_occurrence: super::retained_return_result_occurrence(state, ability)?,
+        return_result_occurrence: super::retained_return_result_occurrence(
+            state,
+            ability,
+            declarations,
+        )?,
         expected_return_result_process: ability.return_result_process,
         player: first_player,
         remaining_votes: first_votes,
