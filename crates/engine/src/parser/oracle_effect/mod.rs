@@ -31105,156 +31105,156 @@ fn library_owner_names_subject(
 /// CR 701.13a + CR 608.2f: lower the objects of a third-person "<player>
 /// exiles …" instruction.
 ///
-/// A single library object of the subject's own library is the base
-/// `Effect::ExileTop`. Two or more objects are one simultaneous exile action
-/// (CR 608.2f): non-moving selection legs gather each object into the chain's
-/// tracked set, then one `ChangeZoneAll` exiles them all, under a `TargetOnly`
-/// root that carries the subject player target. A form this lowering can't
-/// express is a recorded gap.
+/// A lone library object of the subject's own library is the base
+/// `Effect::ExileTop`. A library object followed by at-random objects is one
+/// simultaneous exile action (CR 608.2f): a `TargetOnly` root announces the
+/// subject player, non-moving selection legs gather each object into one
+/// tracked set, then one `ChangeZoneAll` exiles that set. A form this lowering
+/// can't express is a recorded gap.
+///
+/// Two bindings make the gathered set exactly this instruction's objects:
+///   * the subject — every leg reads the player the root announces through the
+///     chosen-group link (`reads_chosen_group`, CR 608.2c "their"), so a
+///     leg's own pick handed on as its target never names the next leg's zone
+///     owner, and no other announced player can stand in for it;
+///   * the scope — the library leg comes first by the grammar and opens a fresh
+///     tracked set (`ZoneChoiceCandidateSource::LibraryTop`), and each
+///     at-random leg extends it, so a set an earlier instruction of the same
+///     resolution published is never gathered.
 fn lower_subject_exile_objects(
-    objects: Vec<SubjectExileObjectAst>,
+    objects: SubjectExileObjectsAst,
     affected: &TargetFilter,
     subject: &SubjectPhraseAst,
-    ctx: &ParseContext,
+    ctx: &mut ParseContext,
     text: &str,
 ) -> ParsedEffectClause {
-    match objects.as_slice() {
-        [] => parsed_clause(Effect::unimplemented("subject_exile_object_list", text)),
-        [SubjectExileObjectAst::LibraryTop {
+    let SubjectExileObjectsAst {
+        library_top:
+            SubjectExileLibraryTopAst {
+                count,
+                face_down,
+                owner,
+            },
+        at_random_from,
+    } = objects;
+    if at_random_from.is_empty() {
+        // CR 109.5: "target opponent exiles the top card of your library"
+        // reads the controller's library, not the subject's; exiling from
+        // the subject's own library would act on the wrong library.
+        if !library_owner_names_subject(&owner, affected, ctx) {
+            return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
+        }
+        return parsed_clause(Effect::ExileTop {
+            player: affected.clone(),
             count,
+            position: crate::types::ability::LibraryPosition::Top,
+            // CR 406.3: a trailing "face down" marks a hidden-information
+            // exile (Outrageous Robbery: "exiles the top X cards of their
+            // library face down"). The resolver propagates this to the
+            // moved object's `face_down` flag so `visibility.rs` redacts it.
             face_down,
-            owner,
-        }] => {
-            // CR 109.5: "target opponent exiles the top card of your library"
-            // reads the controller's library, not the subject's; exiling from
-            // the subject's own library would act on the wrong library.
-            if !library_owner_names_subject(owner, affected, ctx) {
-                return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
-            }
-            parsed_clause(Effect::ExileTop {
-                player: affected.clone(),
-                count: count.clone(),
-                position: crate::types::ability::LibraryPosition::Top,
-                // CR 406.3: a trailing "face down" marks a hidden-information
-                // exile (Outrageous Robbery: "exiles the top X cards of their
-                // library face down"). The resolver propagates this to the
-                // moved object's `face_down` flag so `visibility.rs` redacts it.
-                face_down: *face_down,
-                // CR 608.2c: the subject exiles from their own library.
-                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
-            })
-        }
-        [SubjectExileObjectAst::AtRandomFromZone { .. }] => {
-            parsed_clause(Effect::unimplemented("subject_exile_object_list", text))
-        }
-        [_, _, ..] => {
-            // CR 115.1 + CR 608.2c: "their" names the targeted subject player.
-            let Some(owner_target) = subject
-                .target
-                .as_ref()
-                .filter(|t| target_filter_can_target_player(t))
-            else {
-                return parsed_clause(Effect::unimplemented(
-                    "subject_exile_object_list_owner",
-                    text,
-                ));
-            };
-            let zone_owner = ZoneOwner::TargetedPlayer;
-            let choose =
-                |count: u32,
-                 zone: Zone,
-                 candidate_source: ZoneChoiceCandidateSource,
-                 selection: crate::types::ability::CardSelectionMode| {
-                    Effect::ChooseFromZone {
-                        count,
-                        zone,
-                        additional_zones: vec![],
-                        zone_owner,
-                        filter: None,
-                        chooser: Chooser::Controller.into(),
-                        candidate_source,
-                        reciprocal_role: None,
-                        up_to: false,
-                        selection,
-                        constraint: None,
-                    }
-                };
-            let mut legs = Vec::with_capacity(objects.len());
-            for object in &objects {
-                let leg = match object {
-                    SubjectExileObjectAst::LibraryTop {
-                        count,
-                        face_down,
-                        owner,
-                    } => {
-                        // CR 109.5: every leg reads the targeted subject's zones,
-                        // so a library object must be the subject's own library
-                        // through the anaphor; "your" names the controller.
-                        if *owner != imperative::that_player_library_filter(ctx) {
-                            return parsed_clause(Effect::unimplemented(
-                                "subject_exile_object_list",
-                                text,
-                            ));
-                        }
-                        match (count, face_down) {
-                            // CR 401.2: the top cards are identified by the
-                            // library's order, so the leg takes the default
-                            // selection; `LibraryTop` takes its pool whole.
-                            (QuantityExpr::Fixed { value: n }, false) if *n >= 1 => choose(
-                                *n as u32,
-                                Zone::Library,
-                                ZoneChoiceCandidateSource::LibraryTop,
-                                crate::types::ability::CardSelectionMode::default(),
-                            ),
-                            _ => {
-                                return parsed_clause(Effect::unimplemented(
-                                    "subject_exile_object_list",
-                                    text,
-                                ));
-                            }
-                        }
-                    }
-                    SubjectExileObjectAst::AtRandomFromZone { zone } => choose(
-                        1,
-                        *zone,
-                        ZoneChoiceCandidateSource::Direct,
-                        crate::types::ability::CardSelectionMode::Random,
-                    ),
-                };
-                legs.push(leg);
-            }
-            // CR 608.2f: the listed objects are exiled by one simultaneous action.
-            let exile_all = Effect::ChangeZoneAll {
-                origin: None,
-                destination: Zone::Exile,
-                target: TargetFilter::TrackedSet {
-                    id: TrackedSetId(0),
-                },
-                enters_under: None,
-                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-                enters_attacking: false,
-                enter_with_counters: vec![],
-                face_down_profile: None,
-                library_position: None,
-                library_shuffle: Default::default(),
-                random_order: false,
-            };
-            // Chain the legs in printed order, ending in the single exile.
-            let chain = legs.into_iter().rev().fold(
-                AbilityDefinition::new(AbilityKind::Spell, exile_all),
-                |tail, leg| {
-                    let mut def = AbilityDefinition::new(AbilityKind::Spell, leg);
-                    def.sub_ability = Some(Box::new(tail));
-                    def
-                },
-            );
-            let mut clause = parsed_clause(Effect::TargetOnly {
-                target: owner_target.clone(),
-            });
-            clause.sub_ability = Some(Box::new(chain));
-            clause
-        }
+            // CR 608.2c: the subject exiles from their own library.
+            actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
+        });
     }
+    // CR 115.1 + CR 608.2c: "their" names the targeted subject player.
+    let Some(owner_target) = subject
+        .target
+        .as_ref()
+        .filter(|t| target_filter_can_target_player(t))
+    else {
+        return parsed_clause(Effect::unimplemented(
+            "subject_exile_object_list_owner",
+            text,
+        ));
+    };
+    // CR 109.5: every leg reads the targeted subject's zones, so the library
+    // object must be the subject's own library through the anaphor; "your"
+    // names the controller.
+    if owner != imperative::that_player_library_filter(ctx) {
+        return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
+    }
+    let library_count = match (count, face_down) {
+        (QuantityExpr::Fixed { value: n }, false) if n >= 1 => n as u32,
+        _ => return parsed_clause(Effect::unimplemented("subject_exile_object_list", text)),
+    };
+    // CR 608.2c + CR 115.1: the group the root announces the subject under; the
+    // chunk loop takes it onto this clause (`clause_declared_group`) as the
+    // group its `TargetOnly` root declares.
+    let group = ChosenGroupId::declared_player(ctx.next_declared_player_group);
+    ctx.next_declared_player_group += 1;
+    ctx.clause_declared_group = Some(group);
+    let leg = |count: u32,
+               zone: Zone,
+               candidate_source: ZoneChoiceCandidateSource,
+               selection: crate::types::ability::CardSelectionMode| {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseFromZone {
+                count,
+                zone,
+                additional_zones: vec![],
+                zone_owner: ZoneOwner::TargetedPlayer,
+                filter: None,
+                chooser: Chooser::Controller.into(),
+                candidate_source,
+                reciprocal_role: None,
+                up_to: false,
+                selection,
+                constraint: None,
+            },
+        );
+        def.reads_chosen_group = Some(group);
+        def
+    };
+    // CR 401.2: the top cards are a pool the library's order fixes, taken
+    // whole — a candidate provenance, not a selection. No player looks at or
+    // chooses them, so the leg's `chooser` and default `selection` are inert
+    // placeholders that `LibraryTop`'s resolver pins (`library_top_shape`);
+    // neither enum has a "no player chooses" value.
+    let mut legs = vec![leg(
+        library_count,
+        Zone::Library,
+        ZoneChoiceCandidateSource::LibraryTop,
+        crate::types::ability::CardSelectionMode::default(),
+    )];
+    legs.extend(at_random_from.into_iter().map(|zone| {
+        leg(
+            1,
+            zone,
+            ZoneChoiceCandidateSource::Direct,
+            crate::types::ability::CardSelectionMode::Random,
+        )
+    }));
+    // CR 608.2f: the listed objects are exiled by one simultaneous action.
+    let exile_all = Effect::ChangeZoneAll {
+        origin: None,
+        destination: Zone::Exile,
+        target: TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        },
+        enters_under: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+        enter_with_counters: vec![],
+        face_down_profile: None,
+        library_position: None,
+        library_shuffle: Default::default(),
+        random_order: false,
+    };
+    // Chain the legs in printed order, ending in the single exile.
+    let chain = legs.into_iter().rev().fold(
+        AbilityDefinition::new(AbilityKind::Spell, exile_all),
+        |tail, mut def| {
+            def.sub_ability = Some(Box::new(tail));
+            def
+        },
+    );
+    let mut clause = parsed_clause(Effect::TargetOnly {
+        target: owner_target.clone(),
+    });
+    clause.sub_ability = Some(Box::new(chain));
+    clause
 }
 
 /// Bind the intrinsic mass-move/library continuation of a library zone move to
@@ -48987,6 +48987,18 @@ fn parse_effect_chain_ir_body(
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                 .declared_player_group(clause_declared_group)
                 .push();
+
+            // CR 608.2c + CR 115.1: a `TargetOnly` clause whose lowering minted a
+            // group for the player it announces (`clause_declared_group`) bound its
+            // own continuations to that group, so the clause declares it in place of
+            // the clause-id group every other `TargetOnly` producer carries.
+            if clause_declared_group.is_some() {
+                if let Some(declarer) = builder.last_mut() {
+                    if matches!(declarer.parsed.effect, Effect::TargetOnly { .. }) {
+                        declarer.declares_chosen_clause = None;
+                    }
+                }
+            }
 
             // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the
             // single object the immediately preceding instruction announced

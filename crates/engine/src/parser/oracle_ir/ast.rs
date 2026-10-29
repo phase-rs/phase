@@ -2204,20 +2204,26 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
 }
 
-/// CR 701.13a + CR 608.2f: one object of a "<player> exiles A, B, and C" instruction.
+/// CR 701.13a + CR 608.2f: the objects of a "<player> exiles A[, B][, and C]"
+/// instruction — a library object first, then any number of at-random objects.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) enum SubjectExileObjectAst {
-    /// CR 401.2 + CR 701.13a: the top N cards of `owner`'s library. `owner` is
-    /// the filter the shared library-owner authority (`parse_library_owner_phrase`)
-    /// maps the printed possessive to; the lowering decides whether it names the
-    /// exiling subject.
-    LibraryTop {
-        count: QuantityExpr,
-        face_down: bool,
-        owner: TargetFilter,
-    },
-    /// CR 701.13a: one card selected at random from the subject's graveyard or hand.
-    AtRandomFromZone { zone: Zone },
+pub(crate) struct SubjectExileObjectsAst {
+    /// The first object: the top cards of a library.
+    pub(crate) library_top: SubjectExileLibraryTopAst,
+    /// CR 701.13a: each further object is one card selected at random from the
+    /// subject's graveyard or hand, in printed order.
+    pub(crate) at_random_from: Vec<Zone>,
+}
+
+/// CR 401.2 + CR 701.13a: the top N cards of `owner`'s library. `owner` is the
+/// filter the shared library-owner authority (`parse_library_owner_phrase`) maps
+/// the printed possessive to; the lowering decides whether it names the exiling
+/// subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct SubjectExileLibraryTopAst {
+    pub(crate) count: QuantityExpr,
+    pub(crate) face_down: bool,
+    pub(crate) owner: TargetFilter,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

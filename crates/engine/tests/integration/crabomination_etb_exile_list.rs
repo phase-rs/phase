@@ -579,5 +579,149 @@ fn crabomination_stale_tracked_set_is_not_exiled_when_zones_empty() {
     assert_eq!(runner.state().objects[&bystander_gy].zone, Zone::Graveyard);
     assert_eq!(runner.state().objects[&bystander_hand].zone, Zone::Hand);
     assert!(runner.state().exile.is_empty());
+    // The guard: the exile action read the chain set this instruction bound —
+    // empty, since nothing was exiled — and consumed it (a consumed set is
+    // dropped); the stale set is neither read nor consumed.
+    let state = runner.state();
+    let read = state
+        .chain_tracked_set_id
+        .expect("the exile action's tracked set is bound");
+    assert_ne!(read, TrackedSetId(50));
+    assert_eq!(
+        state.tracked_object_sets.get(&read),
+        None,
+        "the exile action consumed the bound set"
+    );
+    assert_eq!(
+        state.tracked_object_sets.get(&TrackedSetId(50)),
+        Some(&vec![bystander_gy, bystander_hand]),
+        "the stale set is untouched"
+    );
     assert_priority_with_empty_stack(&runner);
+}
+
+/// Hostile (two player targets). CR 115.1 + CR 608.2c: every object of the
+/// list reads the zones of the instruction's own subject — the opponent its
+/// own "target opponent" announced — even when an earlier instruction of the
+/// same spell announced another player first. A random leg's pick must not
+/// redirect the next leg to that earlier player.
+#[test]
+fn subject_exile_list_reads_its_own_subject_after_an_earlier_player_target() {
+    const ORACLE: &str = "Target player draws a card. Target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Two Target Probe", false, ORACLE)
+        .id();
+    let p0_draw = scenario.add_spell_to_library_top(P0, "P0 Draw", false).id();
+    let p0_hand: Vec<ObjectId> = (0..4)
+        .map(|i| {
+            scenario
+                .add_spell_to_hand(P0, &format!("P0 Hand {i}"), true)
+                .id()
+        })
+        .collect();
+    let p0_gy = scenario
+        .add_spell_to_graveyard(P0, "P0 Graveyard", true)
+        .id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler", false);
+    let p1_lib = scenario
+        .add_spell_to_library_top(P1, "P1 Library", false)
+        .id();
+    let p1_gy = scenario
+        .add_spell_to_graveyard(P1, "P1 Graveyard", true)
+        .id();
+    let p1_hand = scenario.add_spell_to_hand(P1, "P1 Hand", true).id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_players(&[P0, P1]).resolve();
+
+    // Reach-guard: both instructions resolved — P0 drew its library card, and
+    // all three legs of the exile instruction ran.
+    assert_ne!(runner.state().objects[&p0_draw].zone, Zone::Library);
+    assert_eq!(
+        resolutions(&outcome, spell, EffectKind::ChooseFromZone),
+        3,
+        "the library, graveyard and hand legs each resolve"
+    );
+    let state = runner.state();
+    for id in [p1_lib, p1_gy, p1_hand] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "the targeted opponent's card is exiled"
+        );
+    }
+    let p0_exiled: Vec<ObjectId> = p0_hand
+        .iter()
+        .chain([&p0_draw])
+        .copied()
+        .filter(|id| state.objects[id].zone == Zone::Exile)
+        .collect();
+    assert!(
+        p0_exiled.is_empty(),
+        "no card of the first target's hand is exiled: {p0_exiled:?}"
+    );
+    assert_eq!(state.objects[&p0_gy].zone, Zone::Graveyard);
+    assert_priority_with_empty_stack(&runner);
+}
+
+/// Hostile (earlier exile instruction). CR 608.2c + CR 608.2f: the list
+/// gathers only its own objects. A card an earlier instruction of the same
+/// resolution exiled is neither moved again by the list's single exile action
+/// nor offered among the cards "exiled this way".
+#[test]
+fn subject_exile_list_gathers_only_its_own_objects_after_an_earlier_exile() {
+    const ORACLE: &str = "Exile target creature an opponent controls. Target opponent exiles the top card of their library and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Earlier Exile Probe", false, ORACLE)
+        .id();
+    let creature = scenario.add_creature(P1, "Earlier Creature", 2, 2).id();
+    scenario.add_spell_to_library_top(P1, "P1 Filler", false);
+    let p1_lib = scenario
+        .add_spell_to_library_top(P1, "P1 Library", false)
+        .from_oracle_text("Draw a card.")
+        .id();
+    let p1_hand = scenario
+        .add_spell_to_hand(P1, "P1 Hand", true)
+        .from_oracle_text("Draw a card.")
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(spell)
+        .target_object(creature)
+        .target_player(P1)
+        .resolve();
+
+    // Reach-guard: the earlier instruction exiled the creature, and both legs
+    // of the list ran and exiled their cards.
+    assert_eq!(runner.state().objects[&creature].zone, Zone::Exile);
+    assert_eq!(
+        resolutions(&outcome, spell, EffectKind::ChooseFromZone),
+        2,
+        "the library and hand legs each resolve"
+    );
+    assert_eq!(runner.state().objects[&p1_lib].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&p1_hand].zone, Zone::Exile);
+    let creature_moves = outcome
+        .events()
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged { object_id, .. } if *object_id == creature
+            )
+        })
+        .count();
+    assert_eq!(
+        creature_moves, 1,
+        "the earlier card is exiled once, not again"
+    );
+    let (player, candidates, remaining) = free_cast_window(outcome.final_waiting_for());
+    assert_eq!(player, P0);
+    assert_eq!(remaining, Some(1));
+    assert_eq!(sorted(candidates), sorted(vec![p1_lib, p1_hand]));
 }

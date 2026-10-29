@@ -204,12 +204,18 @@ pub enum ZoneChoiceCandidateSource {
     /// tracked set an earlier clause published. A member of the batch that has
     /// since left the zone (cast from exile onto the stack) is not offered.
     ParentTargets,
-    /// CR 401.2: read only the top `count` cards of the owner's library, top
-    /// first, and take them whole. The library's order identifies them, so no
-    /// player looks at or chooses them and no random draw selects among them;
-    /// the declared `zone` must be `Library`, with no `additional_zones`, no
-    /// `filter`, the default (non-random) `selection`, no `up_to`, no
-    /// `constraint` and no reciprocal role.
+    /// CR 401.2: read only the top `count` cards of the single owner's library,
+    /// top first, and take them whole. This is candidate provenance, not a
+    /// selection mode: the library's order fixes the pool and the whole pool is
+    /// taken, so no player looks at or chooses the cards and no random draw
+    /// selects among them. The node's `selection` and `chooser` are therefore
+    /// inert placeholders (the default `Chosen` and `Controller`; neither enum
+    /// has a "no player chooses" value). The resolver pins the shape
+    /// (`library_top_shape`): the declared `zone` must be `Library`, with no
+    /// `additional_zones`, no `filter`, the default `selection` and `chooser`,
+    /// no `up_to`, no `constraint` and no reciprocal role. A per-player
+    /// `zone_owner` is refused. The pick opens a fresh tracked set for the text
+    /// that gathers it.
     LibraryTop,
 }
 

@@ -790,9 +790,9 @@ pub(crate) fn resolve_random_in_chain(
     // it.
     if let ZoneOwner::Each(scope) = zone_owner {
         let mut picked = Vec::new();
-        // A refused shape (`library_top_shape`, which refuses every random
-        // `LibraryTop` pick) fails closed before any draw: every pool counts as
-        // empty, the same outcome as this branch's all-pools-empty case.
+        // A refused shape (`PerPlayerSpec::of` refuses every `LibraryTop`
+        // pick) fails closed before any draw: every pool counts as empty, the
+        // same outcome as this branch's all-pools-empty case.
         if let Ok(spec) = PerPlayerSpec::of(ability) {
             for player in per_player_iteration_population(state, ability, scope) {
                 let pool = spec.pool(state, ability, player);
@@ -843,7 +843,9 @@ pub(crate) fn resolve_random_in_chain(
         .copied()
         .collect();
     ability.set_unpinned_targets(picked.iter().map(|&id| TargetRef::Object(id)).collect());
-    // A zone-read pick that the following text gathers is added to the set it reads.
+    // A zone-read pick that the following text gathers is added to the set it
+    // reads: the set the gathering instruction's first leg opened
+    // (`resolve_library_top`).
     if candidate_source == ZoneChoiceCandidateSource::Direct
         && super::resolution_next_needs_tracked_set(state, ability)
     {
@@ -884,8 +886,12 @@ impl PerPlayerSpec {
                 candidate_source,
                 ..
             } => {
+                // CR 401.2: a `LibraryTop` pool is one owner's library order; no
+                // per-player iteration reads it, so the shape fails closed here.
                 if *candidate_source == ZoneChoiceCandidateSource::LibraryTop {
-                    library_top_shape(&ability.effect)?;
+                    return Err(EffectError::MissingParam(
+                        "ChooseFromZone LibraryTop reads a single owner's library".to_string(),
+                    ));
                 }
                 Ok(Self {
                     count: *count as usize,
@@ -905,9 +911,6 @@ impl PerPlayerSpec {
     fn pool(&self, state: &GameState, ability: &ResolvedAbility, owner: PlayerId) -> Vec<ObjectId> {
         if self.count == 0 {
             return Vec::new();
-        }
-        if self.candidate_source == ZoneChoiceCandidateSource::LibraryTop {
-            return library_top_candidates(state, owner, self.count);
         }
         let cards = collect_player_zone_cards(
             state,
@@ -1821,7 +1824,9 @@ fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
 /// by [`resolve_library_top`], so nothing may shape a selection from it: the
 /// selection is the default (not `Random`, whose chain route spends a random
 /// draw permuting the pool), with no `up_to`, no `constraint` and no
-/// reciprocal role.
+/// reciprocal role. The `selection` and `chooser` are inert placeholders, pinned
+/// to their defaults (`Chosen`, `Controller`) so no other value is read as
+/// meaning something.
 // CR 401.2: players can't look at cards in a library, so the top-of-library pool is identified by order alone and never offered to a chooser.
 fn library_top_shape(effect: &Effect) -> Result<(), EffectError> {
     match effect {
@@ -1830,6 +1835,7 @@ fn library_top_shape(effect: &Effect) -> Result<(), EffectError> {
             additional_zones,
             filter: None,
             selection: CardSelectionMode::Chosen,
+            chooser: ZoneChoiceChooser::Controller,
             up_to: false,
             constraint: None,
             reciprocal_role: None,
@@ -1842,13 +1848,18 @@ fn library_top_shape(effect: &Effect) -> Result<(), EffectError> {
     }
 }
 
-/// CR 401.2: settle a [`ZoneChoiceCandidateSource::LibraryTop`]
-/// pick. Its pool is the top `count` cards of the owner's library, top first
-/// (of each iterated player's library for `ZoneOwner::Each`), and it is taken
-/// whole: no prompt is raised and no random draw is made. The pick reaches
-/// the following text through the chain's tracked set — extended for a single
-/// owner when that text reads it, freshly published per player as the other
-/// per-player paths do. An empty pool picks nothing, as in [`resolve`].
+/// CR 401.2: settle a [`ZoneChoiceCandidateSource::LibraryTop`] pick. Its
+/// pool is the top `count` cards of the single owner's library, top first, and
+/// it is taken whole: no prompt is raised and no random draw is made. A
+/// per-player owner is refused (`resolve_zone_owner`), as `PerPlayerSpec::of`
+/// refuses it.
+///
+/// The pick reaches the following text through the chain's tracked set. The
+/// library object is the first object of its gathering instruction (the
+/// subject-exile object list's grammar puts it first), so it OPENS that
+/// instruction's set — a fresh set, published even when the library is empty —
+/// and the instruction's later at-random legs extend it. A set an earlier
+/// instruction of the same resolution published is therefore never gathered.
 fn resolve_library_top(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -1864,32 +1875,20 @@ fn resolve_library_top(
     else {
         return Err(EffectError::MissingParam("ChooseFromZone".to_string()));
     };
-    match *zone_owner {
-        ZoneOwner::Each(scope) => {
-            let spec = PerPlayerSpec::of(ability)?;
-            let picked: Vec<ObjectId> = per_player_iteration_population(state, ability, scope)
-                .into_iter()
-                .flat_map(|player| spec.pool(state, ability, player))
-                .collect();
-            super::publish_fresh_tracked_set(state, picked);
-        }
-        owner => {
-            let picked = resolve_candidate_cards(
-                state,
-                ability,
-                *zone,
-                additional_zones,
-                owner,
-                filter.as_ref(),
-                ZoneChoiceCandidateSource::LibraryTop,
-            )?;
-            if picked.is_empty() {
-                state.last_parent_target_missing_reason =
-                    Some(ParentTargetMissingReason::ChooseFromZone);
-            } else if super::resolution_next_needs_tracked_set(state, ability) {
-                super::publish_tracked_set(state, picked);
-            }
-        }
+    let picked = resolve_candidate_cards(
+        state,
+        ability,
+        *zone,
+        additional_zones,
+        *zone_owner,
+        filter.as_ref(),
+        ZoneChoiceCandidateSource::LibraryTop,
+    )?;
+    if picked.is_empty() {
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
+    }
+    if super::resolution_next_needs_tracked_set(state, ability) {
+        super::publish_fresh_tracked_set(state, picked);
     }
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
@@ -2052,13 +2051,14 @@ fn resolve_zone_owner(
         // hands") and Tariff ("the creature they control") — both of which
         // currently misparse to `zone: Exile` and so observe nothing here.
         ZoneOwner::Controller => Ok(ability.original_controller.unwrap_or(ability.controller)),
-        // CR 115.1 + CR 608.2c: the ability's declared player target, read from the resolving root after an intervening object hand-off; CR 608.2b: an illegal player target names no one.
-        ZoneOwner::TargetedPlayer => {
-            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
-                .ok_or_else(|| {
-                    EffectError::MissingParam("ChooseFromZone targeted player".to_string())
-                })
-        }
+        ZoneOwner::TargetedPlayer => ability
+            .targets
+            .iter()
+            .find_map(|target| match target {
+                TargetRef::Player(player) => Some(*player),
+                _ => None,
+            })
+            .ok_or_else(|| EffectError::MissingParam("ChooseFromZone targeted player".to_string())),
         ZoneOwner::Opponent => players::opponents(state, ability.controller)
             .into_iter()
             .next()
@@ -3903,8 +3903,7 @@ mod tests {
     }
 
     /// R10b. CR 401.2: the `LibraryTop` pool is the top `count` cards of the
-    /// owner's library, top first, on both the single-pool and the per-player
-    /// path.
+    /// owner's library, top first.
     #[test]
     fn library_top_pool_is_the_top_count_cards() {
         let mut state = GameState::new_two_player(42);
@@ -3929,39 +3928,30 @@ mod tests {
             candidates_of(&state, &single).unwrap(),
             vec![lib[0], lib[1]]
         );
-
-        let each = ResolvedAbility::new(
-            library_top_choice(2, ZoneOwner::Each(PerPlayerScope::AllPlayers)),
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        );
-        let spec = PerPlayerSpec::of(&each).expect("valid LibraryTop shape");
-        assert_eq!(spec.pool(&state, &each, PlayerId(1)), vec![lib[0], lib[1]]);
     }
 
     /// R10b. CR 401.2: `LibraryTop` refuses any pick other than an unfiltered,
     /// library-only pool taken whole — a random selection, `up_to`, a
-    /// constraint or a reciprocal role would each shape a selection from it —
-    /// on both paths.
+    /// constraint or a reciprocal role would each shape a selection from it, and
+    /// a chooser other than the inert default would read as one.
     #[test]
     fn library_top_rejects_invalid_shape() {
         let mut state = GameState::new_two_player(42);
         library_cards(&mut state, PlayerId(1), &["A", "B"]);
-        let ability = |effect: Effect, zone_owner_is_each: bool| {
-            let targets = if zone_owner_is_each {
-                vec![]
-            } else {
-                vec![TargetRef::Player(PlayerId(1))]
-            };
-            ResolvedAbility::new(effect, targets, ObjectId(100), PlayerId(0))
+        let ability = |effect: Effect| {
+            ResolvedAbility::new(
+                effect,
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(100),
+                PlayerId(0),
+            )
         };
-        let mutate = |zone_owner: ZoneOwner, edit: &dyn Fn(&mut Effect)| {
-            let mut effect = library_top_choice(1, zone_owner);
+        let mutate = |edit: &dyn Fn(&mut Effect)| {
+            let mut effect = library_top_choice(1, ZoneOwner::TargetedPlayer);
             edit(&mut effect);
             effect
         };
-        let invalid: [&dyn Fn(&mut Effect); 7] = [
+        let invalid: [&dyn Fn(&mut Effect); 8] = [
             &|e: &mut Effect| {
                 if let Effect::ChooseFromZone { filter, .. } = e {
                     *filter = Some(TargetFilter::Any);
@@ -3986,6 +3976,11 @@ mod tests {
                 }
             },
             &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { chooser, .. } = e {
+                    *chooser = ZoneChoiceChooser::OwningPlayer;
+                }
+            },
+            &|e: &mut Effect| {
                 if let Effect::ChooseFromZone { up_to, .. } = e {
                     *up_to = true;
                 }
@@ -4007,30 +4002,16 @@ mod tests {
             },
         ];
 
-        // Reach-guard: the valid shape is accepted on both paths.
-        let valid = ability(library_top_choice(1, ZoneOwner::TargetedPlayer), false);
+        // Reach-guard: the valid shape is accepted.
+        let valid = ability(library_top_choice(1, ZoneOwner::TargetedPlayer));
         assert!(!candidates_of(&state, &valid).unwrap().is_empty());
-        let valid_each = ability(
-            library_top_choice(1, ZoneOwner::Each(PerPlayerScope::AllPlayers)),
-            true,
-        );
-        assert!(PerPlayerSpec::of(&valid_each).is_ok());
 
         for edit in invalid {
-            let single = ability(mutate(ZoneOwner::TargetedPlayer, edit), false);
+            let single = ability(mutate(edit));
             assert!(
                 candidates_of(&state, &single).is_err(),
-                "single-pool shape must be refused: {:?}",
+                "shape must be refused: {:?}",
                 single.effect
-            );
-            let each = ability(
-                mutate(ZoneOwner::Each(PerPlayerScope::AllPlayers), edit),
-                true,
-            );
-            assert!(
-                PerPlayerSpec::of(&each).is_err(),
-                "per-player shape must be refused: {:?}",
-                each.effect
             );
         }
     }
@@ -4100,38 +4081,97 @@ mod tests {
         );
     }
 
-    /// R10b (F2): a per-player `LibraryTop` pick takes each player's top card
-    /// whole into a fresh set — no per-player prompt, no draw.
+    /// R10b (X-F6). CR 401.2: a `LibraryTop` pool is one owner's library order,
+    /// so a per-player `LibraryTop` pick fails closed on every path that reads
+    /// it — the dispatcher, the per-player spec and the single-owner pool — with
+    /// no prompt, no draw and no set published.
     #[test]
-    fn each_library_top_takes_each_top_card_without_a_prompt() {
+    fn each_library_top_is_refused_without_a_prompt_or_draw() {
         let mut state = GameState::new_two_player(42);
-        let p0 = library_cards(&mut state, PlayerId(0), &["P0 Top", "P0 Below"]);
         let p1 = library_cards(&mut state, PlayerId(1), &["P1 Top", "P1 Below"]);
-        let ability = ability_then(
+        library_cards(&mut state, PlayerId(0), &["P0 Top", "P0 Below"]);
+
+        // Reach-guard: the single-owner shape resolves and takes the top card.
+        let single = ability_then(
+            library_top_choice(1, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            Some(exile_tracked_set()),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &single, &mut events).expect("single-owner LibraryTop resolves");
+        let set = state.chain_tracked_set_id.expect("the pick is published");
+        assert_eq!(state.tracked_object_sets[&set], vec![p1[0]]);
+
+        let each = ability_then(
             library_top_choice(1, ZoneOwner::Each(PerPlayerScope::AllPlayers)),
             vec![],
             Some(exile_tracked_set()),
         );
         let rng_before = rng_position(&state);
+        let chain_before = state.chain_tracked_set_id;
         let mut events = Vec::new();
-
-        resolve(&mut state, &ability, &mut events).expect("LibraryTop resolves");
-
+        assert!(resolve(&mut state, &each, &mut events).is_err());
+        assert!(PerPlayerSpec::of(&each).is_err());
+        assert!(candidates_of(&state, &each).is_err());
         assert!(
             !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
             "{:?}",
             state.waiting_for
         );
         assert_eq!(rng_position(&state), rng_before, "no random draw");
-        let set = state
-            .chain_tracked_set_id
-            .expect("a fresh set is published");
-        let mut picked = state.tracked_object_sets[&set].clone();
-        picked.sort();
-        let mut tops = vec![p0[0], p1[0]];
-        tops.sort();
-        assert_eq!(picked, tops);
+        assert_eq!(state.chain_tracked_set_id, chain_before, "no set published");
+        assert_eq!(choose_from_zone_resolutions(&events), 0);
+    }
+
+    /// R10b (X-F4 + X-F2). CR 608.2c: the library leg opens its gathering
+    /// instruction's set: a fresh set holding only its pick, never the set an
+    /// earlier instruction of the resolution published — and a bound, empty
+    /// one when the library is empty.
+    #[test]
+    fn library_top_opens_a_fresh_set_even_when_empty() {
+        // An earlier instruction's set `[earlier]` is the chain set.
+        let with_earlier_set = || {
+            let mut state = GameState::new_two_player(42);
+            let earlier = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(1),
+                "Earlier Instruction".to_string(),
+                Zone::Exile,
+            );
+            state
+                .tracked_object_sets
+                .insert(TrackedSetId(1), vec![earlier]);
+            state.chain_tracked_set_id = Some(TrackedSetId(1));
+            state.next_tracked_set_id = 2;
+            (state, earlier)
+        };
+        let ability = ability_then(
+            library_top_choice(1, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            Some(exile_tracked_set()),
+        );
+
+        let (mut state, earlier) = with_earlier_set();
+        let lib = library_cards(&mut state, PlayerId(1), &["Top", "Below"]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("LibraryTop resolves");
+        let opened = state.chain_tracked_set_id.expect("the pick is published");
+        assert_ne!(opened, TrackedSetId(1), "a fresh set, not the earlier one");
+        assert_eq!(state.tracked_object_sets[&opened], vec![lib[0]]);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![earlier]);
+
+        // An empty library still opens a fresh, empty set.
+        let (mut empty, _) = with_earlier_set();
+        assert!(empty.library_of(PlayerId(1)).is_empty());
+        let mut events = Vec::new();
+        resolve(&mut empty, &ability, &mut events).expect("LibraryTop resolves");
         assert_eq!(choose_from_zone_resolutions(&events), 1);
+        let opened = empty
+            .chain_tracked_set_id
+            .expect("an empty set is published");
+        assert_ne!(opened, TrackedSetId(1));
+        assert_eq!(empty.tracked_object_sets.get(&opened), Some(&Vec::new()));
     }
 
     /// R10b (F2). A random `LibraryTop` pick is a refused shape, so the random

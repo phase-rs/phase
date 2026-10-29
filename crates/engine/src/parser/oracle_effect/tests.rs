@@ -33174,6 +33174,50 @@ fn subject_exile_object_list_lowers_crabomination_chain() {
         "cast: {:?}",
         chain[5]
     );
+    // CR 608.2c + CR 115.1: the root declares the subject under a group, and
+    // exactly the three legs read that group — "their" names the subject the
+    // root announced.
+    let defs: Vec<&AbilityDefinition> =
+        std::iter::successors(Some(&def), |d| d.sub_ability.as_deref()).collect();
+    let group = defs[0]
+        .declares_chosen_group
+        .expect("the root declares the subject's group");
+    assert!(group.is_declared_player(), "{group:?}");
+    let readers: Vec<usize> = defs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.reads_chosen_group == Some(group))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(readers, vec![1, 2, 3]);
+}
+
+/// R-MED (SHAPE). CR 608.2c + CR 115.1: after an earlier instruction that
+/// announces another player, the list's legs still read the group their own
+/// root declares, not the earlier one.
+#[test]
+fn subject_exile_object_list_legs_read_their_own_roots_group() {
+    let def = parse_effect_chain(
+        "Target player draws a card. Target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand.",
+        AbilityKind::Spell,
+    );
+    assert!(subject_exile_has_no_gap(&def), "{def:?}");
+    let defs: Vec<&AbilityDefinition> =
+        std::iter::successors(Some(&def), |d| d.sub_ability.as_deref()).collect();
+    let root = defs
+        .iter()
+        .position(|d| matches!(&*d.effect, Effect::TargetOnly { .. }))
+        .expect("the list's TargetOnly root");
+    assert_eq!(root, 1, "{defs:?}");
+    let group = defs[root].declares_chosen_group.expect("root group");
+    assert_ne!(defs[0].declares_chosen_group, Some(group));
+    for leg in &defs[root + 1..root + 4] {
+        assert!(
+            matches!(&*leg.effect, Effect::ChooseFromZone { .. }),
+            "{leg:?}"
+        );
+        assert_eq!(leg.reads_chosen_group, Some(group), "{leg:?}");
+    }
 }
 
 /// R9: an object the list grammar doesn't model is an honest gap, never dropped.
