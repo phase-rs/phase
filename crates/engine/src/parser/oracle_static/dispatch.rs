@@ -12,6 +12,22 @@ use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhras
 use crate::types::statics::ProhibitionScope;
 use nom::character::complete::multispace0;
 
+/// A complete typed predicate keeps its conditional suffix when that suffix
+/// cannot be parsed. Later self-only fallbacks must not claim the whole unit.
+fn owns_conditional_continuous_predicate(
+    predicate: &str,
+    affected: &TargetFilter,
+    description: &str,
+) -> bool {
+    let lower = predicate.to_lowercase();
+    TextPair::new(predicate, &lower)
+        .scan_around_outside_quotes(ContinuousConditionSeparator::parse, |body, _, _| {
+            parse_complete_continuous_predicate(body.original, affected.clone(), description)
+                .map(|_| ())
+        })
+        .is_some()
+}
+
 /// CR 201.5: Consume a self-reference subject — `~` (produced by
 /// `normalize_card_name_refs` for "text that refers to the object it's on by
 /// name") or a typed self-reference phrase ("this creature", "this permanent",
@@ -1798,8 +1814,13 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_complete_continuous_predicate(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_complete_continuous_predicate(predicate_text, filter.clone(), &text)
+        {
             return Some(def);
+        }
+        if owns_conditional_continuous_predicate(predicate_text, &filter, &text) {
+            return None;
         }
     }
 
@@ -1877,8 +1898,13 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_complete_continuous_predicate(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_complete_continuous_predicate(predicate_text, filter.clone(), &text)
+        {
             return Some(def);
+        }
+        if owns_conditional_continuous_predicate(predicate_text, &filter, &text) {
+            return None;
         }
     }
 

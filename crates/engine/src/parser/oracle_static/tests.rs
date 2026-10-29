@@ -8,7 +8,7 @@ fn assert_whole_conditional_refusal(source: &str) {
     let mut doc = crate::parser::oracle::parse_oracle_ir(
         &text,
         "Conditional refusal",
-        &[],
+        &["Flying".into()],
         &["Creature".into()],
         &[],
     );
@@ -455,6 +455,8 @@ fn grant_root_frames_preserve_strict_unknown_and_empty_sources() {
         "Each instant card in your graveyard has flashback {2} — Pay 2 life: Draw a card.",
         "Each instant card in your graveyard has — Pay 2 life: Draw a card.",
         "Instant cards in your graveyard have — Pay 2 life: Draw a card.",
+        "Sorcery cards in your graveyard have nonsense: Draw a card.",
+        "Artifact cards in your hand have — Pay 2 life: Draw a card.",
         "Each instant card in your graveyard has nonsense: Draw a card.",
         "Each instant card in your graveyard has flashback: Draw a card.",
         "Each unknown creature card in their graveyard has nonsense — Pay 2 life: Draw a card.",
@@ -39617,16 +39619,42 @@ fn assert_complete_evasion_block(
     permitted: bool,
 ) {
     // CR 509.1b: the live evasion restriction is checked at blocker declaration.
-    use crate::types::{game_state::WaitingFor, phase::Phase};
+    use crate::types::{
+        actions::GameAction,
+        game_state::WaitingFor,
+        phase::{Phase, PhaseStop, PhaseStopScope},
+    };
     let attacking_player = runner.state().objects[&attacker].controller;
     let defending_player = runner.state().objects[&blocker].controller;
     if runner.state().active_player != attacking_player {
         runner.advance_to_combat();
         runner.declare_attackers(&[]).unwrap();
-        runner.advance_to_phase(Phase::End);
-        runner.advance_to_phase(Phase::PreCombatMain);
+        for _ in 0..64 {
+            if runner.state().active_player == attacking_player
+                && runner.state().phase == Phase::PreCombatMain
+            {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
     }
     assert_eq!(runner.state().active_player, attacking_player);
+    crate::game::engine::apply(
+        runner.state_mut(),
+        defending_player,
+        GameAction::SetPhaseStops {
+            stops: vec![PhaseStop {
+                phase: Phase::DeclareBlockers,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        },
+    )
+    .unwrap();
     runner.advance_to_combat();
     runner
         .declare_attackers(&[(
@@ -39634,7 +39662,19 @@ fn assert_complete_evasion_block(
             crate::game::combat::AttackTarget::Player(defending_player),
         )])
         .unwrap();
-    runner.advance_to_phase(Phase::DeclareBlockers);
+    for _ in 0..16 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == defending_player)
     );
@@ -39651,7 +39691,17 @@ fn assert_complete_evasion_block(
         runner.state().waiting_for,
         WaitingFor::ManaPayment { .. }
     ));
-    runner.advance_to_phase(Phase::PostCombatMain);
+    for _ in 0..16 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().phase, Phase::PostCombatMain);
     assert!(runner.state().stack.is_empty());
     assert!(matches!(
         runner.state().waiting_for,
@@ -39697,9 +39747,15 @@ fn complete_static_suffix_composes_polarity_before_enforcement() {
             }]
         );
     }
-    let hostile =
-        "Creatures you control can't be blocked as long as you control a Forest unexplained.";
-    assert_whole_conditional_refusal(hostile);
+    for subject in ["Creatures you control", "Other creatures you control"] {
+        for separator in ["as long as", "if", "unless"] {
+            let hostile =
+                format!("{subject} can't be blocked {separator} you control a Forest unexplained.");
+            assert!(parse_static_line(&hostile).is_none(), "{hostile}");
+            assert!(parse_static_line_multi(&hostile).is_empty(), "{hostile}");
+            assert_whole_conditional_refusal(&hostile);
+        }
+    }
 }
 
 /// The FOURTH route into the same defect class (maintainer review of this PR),
@@ -41358,20 +41414,23 @@ fn unparsed_as_long_as_gate_policy_has_one_authority() {
         "the two polarities are deliberately asymmetric; collapsing them reds here"
     );
 
-    // Parse-shape witness for a real corpus line whose gate this parser cannot
-    // type. The inherited fallback is always true, even after defender is lost;
-    // this assertion records that limitation without judging runtime correctness.
+    // Manor Gargoyle's printed gate is now typed: the recipient must still have
+    // defender. The fallback-policy witnesses above retain their independent
+    // purpose; this known gate must not regress to either fallback marker.
     let gargoyle =
         parse_static_line("This creature has indestructible as long as it has defender.")
             .expect("the gated static still parses");
-    assert!(
-        matches!(
-            gargoyle.condition,
-            Some(StaticCondition::Unrecognized { .. })
-        ),
-        "an untypeable positive gate stays a bare Unrecognized so the static applies; \
-         got {:?}",
-        gargoyle.condition
+    assert_eq!(
+        gargoyle.condition,
+        Some(StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: None,
+                properties: vec![FilterProp::WithKeyword {
+                    keyword: Keyword::Defender,
+                }],
+            }),
+        })
     );
 }
 

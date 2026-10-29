@@ -67,14 +67,28 @@ fn consult_grant_root_frame(text: &str) -> Option<Result<(), &str>> {
     {
         return Some(Ok(()));
     }
-    if tag::<_, _, OracleError<'_>>("as long as ")
-        .parse(lower.as_str())
-        .is_ok()
-    {
-        let owns_body = super::shared::try_split_inverted_as_long_as(&TextPair::new(text, &lower))
-            .is_some_and(|split| {
-                try_parse_graveyard_keyword_grant_source(&split.effect_text).is_some()
-            });
+    if let Some(condition_body) = nom_tag_tp(&TextPair::new(text, &lower), "as long as ") {
+        // Conditional ownership uses the same lexical grant head as an
+        // unframed source, including bare typed card populations. Commas in a
+        // quoted grant cannot introduce another root. Each recursive source is
+        // a strictly shorter comma tail of this source.
+        let owns_body = condition_body
+            .scan_around_outside_quotes(
+                |input| tag(", ").parse(input),
+                |_, _, effect| {
+                    if let Some(frame) = consult_grant_root_frame(effect.original) {
+                        return Some(frame.is_err());
+                    }
+                    let (subject, payload) = select_grant_head_unframed(effect.original)?;
+                    // A complete ordinary keyword remains with its ordinary
+                    // continuous-grant owner, as it does on an unframed line.
+                    nominates_off_zone_grant(&subject, &payload).then(|| {
+                        parse_graveyard_granted_keyword_kind(&payload.to_lowercase()).is_ok()
+                            || complete_ordinary_keyword(&payload).is_none()
+                    })
+                },
+            )
+            .unwrap_or(false);
         return Some(if owns_body { Err(text) } else { Ok(()) });
     }
     super::oracle::find_root_activated_colon(text, |prefix| {
