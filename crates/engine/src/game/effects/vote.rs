@@ -1286,8 +1286,10 @@ mod admitted_ballot_public_tests {
                             )
                             .unwrap()
                         )
-                        .unwrap()
-                        .into_game_state()
+                        .map_err(|error| error.to_string())
+                        .and_then(|saved| saved
+                            .into_game_state()
+                            .map_err(|error| error.to_string()))
                         .is_err()
                     );
                 }

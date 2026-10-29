@@ -439,50 +439,82 @@ pub(crate) fn selection_program_owner(
     }
     state.validate_replacement_program(program)?;
     let mut parents = Vec::new();
-    let mut cursor = ResolvedAbility::new(
-        Effect::ChooseOneOf {
-            kind: ChooseOneOfKind::Ordinary,
-            chooser: crate::types::ability::PlayerFilter::Controller,
-            branches: selection.branches.clone(),
-        },
-        Vec::new(),
-        selection.source_id,
-        selection.controller,
-    );
-    cursor.bind_return_result_process(selection.expected_return_result_process);
-    cursor.context = selection.context.clone();
-    cursor.replace_target_occurrences(selection.parent_occurrences.occurrences());
-    cursor.sub_ability = selection.continuation.clone();
-    cursor.replacement_applied = selection.replacement_applied.clone();
-    super::visit_instruction_result_program_projections_for_cursor(
-        program,
-        &cursor,
-        &mut |candidate| {
-            let Effect::ChooseOneOf {
-                chooser, branches, ..
-            } = &candidate.effect
-            else {
-                return false;
-            };
-            if branches == &selection.branches
-                && candidate.source_id == selection.source_id
-                && candidate.controller == selection.controller
-                && candidate.target_occurrences() == selection.parent_occurrences.occurrences()
-                && candidate.context == selection.context
-                && candidate.sub_ability == selection.continuation
-                && candidate.replacement_applied == selection.replacement_applied
-                && choosing_players(state, candidate, chooser).contains(&selection.player)
+    let mut admit_parent = |candidate: &ResolvedAbility| {
+        let Effect::ChooseOneOf {
+            chooser, branches, ..
+        } = &candidate.effect
+        else {
+            return false;
+        };
+        if branches == &selection.branches
+            && candidate.source_id == selection.source_id
+            && candidate.controller == selection.controller
+            && candidate.target_occurrences() == selection.parent_occurrences.occurrences()
+            && candidate.context == selection.context
+            && candidate.sub_ability == selection.continuation
+            && candidate.replacement_applied == selection.replacement_applied
+            && choosing_players(state, candidate, chooser).contains(&selection.player)
+        {
+            if !parents
+                .iter()
+                .any(|known| super::instruction_result_projection_eq(known, candidate))
             {
-                if !parents
-                    .iter()
-                    .any(|known| super::instruction_result_projection_eq(known, candidate))
-                {
-                    parents.push(candidate.clone());
-                }
+                parents.push(candidate.clone());
             }
-            false
-        },
-    );
+        }
+        false
+    };
+    if let Some(ticket) = &selection.context.counter_removal_result {
+        let occurrences = selection.parent_occurrences.occurrences();
+        if let [(TargetRef::Object(id), Some(pin))] = occurrences.as_slice() {
+            if *id == pin.object_id {
+                // CR 608.2h: the held branches carry the already-applied amount.
+                // Derive every complete candidate from its admitted original;
+                // a partial search cursor cannot supply the original's inputs.
+                super::visit_instruction_result_program_projections(
+                    program,
+                    None,
+                    &mut |original| {
+                        let delegated = super::choose_counter_adjustment::delegated_choice(
+                            original,
+                            *pin,
+                            Some(ticket.clone()),
+                            selection.branches.clone(),
+                        );
+                        if let Some(candidate) =
+                            super::choose_counter_adjustment::project_latched_choice(
+                                original, &delegated,
+                            )
+                        {
+                            admit_parent(&candidate);
+                        }
+                        false
+                    },
+                );
+            }
+        }
+    } else {
+        let mut cursor = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                kind: ChooseOneOfKind::Ordinary,
+                chooser: crate::types::ability::PlayerFilter::Controller,
+                branches: selection.branches.clone(),
+            },
+            Vec::new(),
+            selection.source_id,
+            selection.controller,
+        );
+        cursor.bind_return_result_process(selection.expected_return_result_process);
+        cursor.context = selection.context.clone();
+        cursor.replace_target_occurrences(selection.parent_occurrences.occurrences());
+        cursor.sub_ability = selection.continuation.clone();
+        cursor.replacement_applied = selection.replacement_applied.clone();
+        super::visit_instruction_result_program_projections_for_cursor(
+            program,
+            &cursor,
+            &mut admit_parent,
+        );
+    }
     if parents.len() > 1 {
         return Err(EffectError::InvalidParam(
             "selected operation has conflicting admitted parent inputs".into(),

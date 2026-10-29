@@ -2804,100 +2804,244 @@ fn handle_legacy_copy_token_source_choice(
 }
 
 pub(crate) fn recover_selected_copy_continuation(
-    state: &GameState,
+    state: &mut GameState,
     source_id: ObjectId,
     player: PlayerId,
+    retained: Option<&ResolvedAbility>,
 ) -> Result<Option<Box<ResolvedAbility>>, String> {
     let Some(drain) = state
         .active_post_replacement_drains()
         .and_then(|drains| drains.resident())
+        .cloned()
     else {
+        if state.resolution_stack.iter().any(|frame| {
+            matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::PostReplacement(_)
+            )
+        }) {
+            return Err("legacy selected copy has no active original occurrence".into());
+        }
         return Ok(None);
     };
-    if !matches!(drain.status, crate::types::game_state::DrainStatus::Paused)
-        || drain.source != Some(source_id)
-    {
-        return Ok(None);
+    if !matches!(drain.status, crate::types::game_state::DrainStatus::Paused) {
+        return Err("legacy selected copy original occurrence is not paused".into());
     }
-    let object = state
-        .entering_or_live_object(source_id)
-        .ok_or("selected copy recipient is missing")?;
-    let mut selected = None;
-    for key in &drain.applied {
-        if key.source() != source_id {
+    if drain.source.is_some_and(|source| source != source_id) {
+        return Err("legacy selected copy has a conflicting resident recipient".into());
+    }
+
+    if drain.token_creation_parent.as_ref().is_some_and(|parent| {
+        state
+            .resolution_stack
+            .token_creation(parent.frame)
+            .is_none()
+    }) {
+        return Err("legacy selected copy lost its original token creation owner".into());
+    }
+
+    // Only the active entry's retained event is evidence. Turn history and the
+    // proposed prompt cannot manufacture an entrant for an external host.
+    let mut entries = Vec::new();
+    for event in &state.deferred_entry_events {
+        let GameEvent::ZoneChanged {
+            object_id,
+            from,
+            to,
+            record,
+        } = event
+        else {
+            continue;
+        };
+        if *to != Zone::Battlefield {
             continue;
         }
-        let mut definitions = Vec::new();
-        if let Some(definition) =
-            super::replacement::replacement_definition_for_key(state, *key, &Default::default())
-                .cloned()
-        {
-            definitions.push(definition);
+        if *object_id != record.object_id || *from != record.from_zone || *to != record.to_zone {
+            return Err("legacy selected copy has a conflicting entry record".into());
         }
-        if let AppliedReplacementKey::Object {
-            copy_effect: None,
-            resolution_host: None,
-            index,
-            ..
-        } = key
+        let witness = (
+            *object_id,
+            record.arrival.controller,
+            record.entered_incarnation,
+        );
+        if !entries.contains(&witness) {
+            entries.push(witness);
+        }
+    }
+    if let Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+        source_id: entrant,
+        player: actor,
+        event,
+    }) = &state.pending_liminal_entry_resume
+    {
+        let ProposedEvent::TokenEntry {
+            entry_ref, applied, ..
+        } = event
+        else {
+            return Err("legacy selected copy has a conflicting liminal entry event".into());
+        };
+        let liminal = state
+            .liminal_entries
+            .get(entry_ref)
+            .ok_or("legacy selected copy lost its liminal entry projection")?;
+        if entrant != entry_ref
+            || *actor != player
+            || drain
+                .token_creation_parent
+                .as_ref()
+                .is_some_and(|parent| liminal.creation_frame != Some(parent.frame))
+            || applied != &drain.applied
+            || drain
+                .controller
+                .is_some_and(|controller| controller != *actor)
         {
-            if let Some(definition) = object.base_replacement_definitions.get(*index) {
-                if !definitions.contains(definition) {
-                    definitions.push(definition.clone());
+            return Err("legacy selected copy has a conflicting liminal entry identity".into());
+        }
+        let witness = (
+            *entry_ref,
+            liminal.object.projected().controller,
+            Some(liminal.object.projected().incarnation),
+        );
+        if !entries.contains(&witness) {
+            entries.push(witness);
+        }
+    }
+    let opportunity = Default::default();
+    let mut selected = None;
+    let mut applied_keys: Vec<_> = drain.applied.iter().copied().collect();
+    applied_keys.sort_unstable();
+    for key in &applied_keys {
+        let definition =
+            super::replacement::replacement_definition_for_key(state, *key, &opportunity).ok_or(
+                "legacy selected copy lost an applied original definition or installation",
+            )?;
+        if !matches!(
+            definition.event,
+            ReplacementEvent::Moved | ReplacementEvent::ChangeZone
+        ) || definition.destination_zone != Some(Zone::Battlefield)
+        {
+            continue;
+        }
+        let self_entry = definition.valid_card == Some(TargetFilter::SelfRef);
+        let relevant: Vec<_> = entries
+            .iter()
+            .copied()
+            .filter(|(id, _, _)| !self_entry || *id == key.source())
+            .collect();
+        let mut entry = None;
+        for witness in relevant {
+            if let Some(prior) = entry {
+                let (id, affected, epoch): (ObjectId, PlayerId, Option<u64>) = prior;
+                if id != witness.0
+                    || affected != witness.1
+                    || epoch.zip(witness.2).is_some_and(|(a, b)| a != b)
+                {
+                    return Err(
+                        "legacy selected copy has ambiguous active entry occurrences".into(),
+                    );
                 }
+                entry = Some((id, affected, epoch.or(witness.2)));
+            } else {
+                entry = Some(witness);
             }
         }
-        for definition in definitions {
-            let mut resolved = if let Some(runtime) = state.replacement_rider(&definition).cloned()
+        let entrant = if self_entry {
+            key.source()
+        } else {
+            entry
+                .ok_or("legacy selected copy lost the external host's active entry evidence")?
+                .0
+        };
+        let object = state
+            .entering_or_live_object(entrant)
+            .ok_or("legacy selected copy recipient is missing")?;
+        if let Some((entry_id, affected, epoch)) = entry {
+            if entry_id != entrant
+                || affected != object.controller
+                || epoch.is_some_and(|epoch| epoch != object.incarnation)
             {
-                let mut resolved = runtime;
-                resolved.clear_return_result_process_recursive();
-                while super::replacement::EventModifiers::is_event_modifier_effect(&resolved.effect)
-                {
-                    let Some(next) = resolved.sub_ability.take() else {
-                        break;
-                    };
-                    resolved = *next;
-                }
-                resolved
-            } else {
-                let Some(definition) = definition.execute.as_deref().and_then(|definition| {
-                    super::replacement::EventModifiers::first_non_modifier_ability(Some(definition))
-                }) else {
-                    continue;
-                };
-                build_resolved_from_def_with_targets(
-                    definition,
-                    source_id,
-                    drain.controller.unwrap_or(player),
-                    Vec::new(),
-                )
+                return Err(
+                    "legacy selected copy has a conflicting recipient or entry epoch".into(),
+                );
+            }
+            if epoch.is_none() && !self_entry {
+                return Err(
+                    "legacy selected copy lost the external entrant's incarnation evidence".into(),
+                );
+            }
+        }
+        let controller = drain
+            .controller
+            .or(definition.source_controller)
+            .ok_or("legacy selected copy lost its captured branch actor")?;
+        let mut branches = Vec::new();
+        if super::replacement::replacement_mode_is_optional(&definition.mode) {
+            if let Some(execute) = definition.execute.clone() {
+                branches.push(PostReplacementContinuation::Template(execute));
+            }
+            if let Some(decline) = super::replacement::replacement_mode_decline(&definition.mode) {
+                branches.push(PostReplacementContinuation::Template(Box::new(
+                    decline.clone(),
+                )));
+            }
+        } else if let Some(runtime) = state.replacement_rider(definition) {
+            let mut runtime = runtime.clone();
+            runtime.clear_return_result_process_recursive();
+            branches.push(PostReplacementContinuation::Resolved(Box::new(runtime)));
+        } else if let Some(execute) = definition.execute.clone() {
+            branches.push(PostReplacementContinuation::Template(execute));
+        }
+        for branch in branches {
+            let Some(resolved) = prepare_selected_post_replacement_continuation(
+                state,
+                branch,
+                ContinuationSubjects {
+                    affected: Some(entrant),
+                    controller: Some(controller),
+                },
+                drain.applied.clone(),
+                drain.token_creation_parent.clone(),
+            ) else {
+                continue;
             };
             if !matches!(resolved.effect, Effect::BecomeCopy { .. }) {
                 continue;
             }
-            if resolved.controller != player {
-                return Err("legacy selected copy controller conflicts with its prompt".into());
-            }
-            if object.controller != player {
-                resolved.set_scoped_player_recursive(object.controller);
-            }
-            resolved.set_source_incarnation_recursive(Some(object.incarnation));
-            resolved.set_replacement_applied_recursive(drain.applied.clone());
-            if selected.as_ref().is_some_and(|prior| prior != &resolved) {
+            if selected.is_some() {
                 return Err(
-                    "legacy selected copy has conflicting lifetime or instruction origins".into(),
+                    "legacy selected copy has ambiguous instruction origins or lifetimes".into(),
+                );
+            }
+            if resolved.controller != controller {
+                return Err(
+                    "legacy selected copy runtime actor conflicts with its captured branch actor"
+                        .into(),
+                );
+            }
+            if entrant != source_id || resolved.controller != player {
+                return Err(
+                    "legacy selected copy recipient or actor conflicts with its prompt".into(),
                 );
             }
             selected = Some(resolved);
         }
     }
-    selected
-        .map(|resolved| Some(Box::new(resolved)))
-        .ok_or_else(|| {
-            "legacy selected copy instruction cannot be recovered from its applied occurrence"
-                .into()
-        })
+    let selected = selected.ok_or(
+        "legacy selected copy instruction cannot be recovered from its applied occurrence",
+    )?;
+    if retained.is_some_and(|retained| retained != &selected) {
+        return Err(
+            "legacy selected copy retained instruction conflicts with its complete original".into(),
+        );
+    }
+    // Authenticate the entire operation before repairing this exact resident.
+    // No fallible check or frame mutation follows the missing-source write.
+    state
+        .active_post_replacement_drains_mut()
+        .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+        .expect("authenticated active selected copy resident")
+        .source = Some(source_id);
+    Ok(Some(Box::new(selected)))
 }
 
 pub(super) fn handle_copy_target_choice(
@@ -3005,11 +3149,22 @@ pub(super) fn handle_copy_target_choice(
         // returns `None` and the `unwrap_or_else` fabricates a `BecomeCopy` that
         // transforms the source.
         CopyTargetPurpose::BecomeCopy { continuation } => {
-            selected_copy = match continuation {
-                Some(continuation) => Some(continuation),
-                None => recover_selected_copy_continuation(state, source_id, player)
-                    .map_err(EngineError::InvalidAction)?,
-            }
+            let missing_source = state
+                .active_post_replacement_drains()
+                .and_then(|drains| drains.resident())
+                .is_some_and(|drain| drain.source.is_none());
+            selected_copy = if continuation.is_none() || missing_source {
+                let recovered = recover_selected_copy_continuation(
+                    state,
+                    source_id,
+                    player,
+                    continuation.as_deref(),
+                )
+                .map_err(EngineError::InvalidAction)?;
+                continuation.or(recovered)
+            } else {
+                continuation
+            };
         }
     }
 
@@ -4177,6 +4332,87 @@ pub(crate) fn post_replacement_dispatch_is_live() -> bool {
     POST_REPLACEMENT_DISPATCH_LIVE.with(std::cell::Cell::get)
 }
 
+// CR 614.12a + CR 707.2: retain the selected entry operation's complete
+// bindings and copiable instruction tree for both dispatch and restoration.
+fn prepare_selected_post_replacement_continuation(
+    state: &GameState,
+    continuation: PostReplacementContinuation,
+    subjects: ContinuationSubjects,
+    replacement_applied: HashSet<AppliedReplacementKey>,
+    parent: Option<crate::types::proposed_event::TokenCreationParentContext>,
+) -> Option<ResolvedAbility> {
+    let source = subjects.affected;
+    let replacement_controller = subjects.controller;
+    let mut resolved = match continuation {
+        PostReplacementContinuation::Resolved(resolved) => *resolved,
+        PostReplacementContinuation::Template(definition) => {
+            let definition =
+                super::replacement::EventModifiers::first_non_modifier_ability(Some(&definition))
+                    .unwrap_or(&definition);
+            let affected_controller = source
+                .and_then(|id| state.entering_or_live_object(id))
+                .map(super::replacement::replacement_source_player)
+                .unwrap_or(state.active_player);
+            let controller = replacement_controller.unwrap_or(affected_controller);
+            let mut resolved = build_resolved_from_def_with_targets(
+                definition,
+                source.unwrap_or(ObjectId(0)),
+                controller,
+                source.into_iter().map(TargetRef::Object).collect(),
+            );
+            if controller != affected_controller {
+                resolved.set_scoped_player_recursive(affected_controller);
+            }
+            resolved
+        }
+    };
+    while super::replacement::EventModifiers::is_event_modifier_effect(&resolved.effect) {
+        let Some(next) = resolved.sub_ability.take() else {
+            return None;
+        };
+        resolved = *next;
+    }
+    fn stamp(
+        ability: &mut ResolvedAbility,
+        parent: &crate::types::proposed_event::TokenCreationParentContext,
+    ) {
+        ability.context.token_creation_parent = Some(parent.clone());
+        if let Some(child) = ability.sub_ability.as_deref_mut() {
+            stamp(child, parent);
+        }
+        if let Some(child) = ability.else_ability.as_deref_mut() {
+            stamp(child, parent);
+        }
+    }
+    if matches!(resolved.effect, Effect::BecomeCopy { .. }) {
+        fn bind_recipient(node: &mut ResolvedAbility, source: ObjectId) {
+            node.source_id = source;
+            if let Some(child) = node.sub_ability.as_deref_mut() {
+                bind_recipient(child, source);
+            }
+            if let Some(child) = node.else_ability.as_deref_mut() {
+                bind_recipient(child, source);
+            }
+        }
+        if let Some(source) = source {
+            bind_recipient(&mut resolved, source);
+        }
+    }
+    if !matches!(resolved.effect, Effect::BecomeCopy { .. }) && parent.is_none() {
+        return None;
+    }
+    if let Some(parent) = parent {
+        stamp(&mut resolved, &parent);
+    }
+    resolved.set_source_incarnation_recursive(
+        source
+            .and_then(|id| state.entering_or_live_object(id))
+            .map(|object| object.incarnation),
+    );
+    resolved.set_replacement_applied_recursive(replacement_applied);
+    Some(resolved)
+}
+
 pub(crate) fn apply_pending_post_replacement_effect(
     state: &mut GameState,
     object_id: Option<ObjectId>,
@@ -4228,81 +4464,42 @@ pub(crate) fn apply_pending_post_replacement_effect(
             ))
         });
     let prepared = selected.and_then(|(parent, continuation)| {
-        let mut resolved = match continuation {
-            PostReplacementContinuation::Resolved(resolved) => *resolved,
-            PostReplacementContinuation::Template(definition) => {
-                let definition = super::replacement::EventModifiers::first_non_modifier_ability(
-                    Some(&definition),
-                )
-                .unwrap_or(&definition);
-                let affected_controller = source
-                    .and_then(|id| state.entering_or_live_object(id))
-                    .map(super::replacement::replacement_source_player)
-                    .unwrap_or(state.active_player);
-                let controller = replacement_controller.unwrap_or(affected_controller);
-                let mut resolved = build_resolved_from_def_with_targets(
-                    definition,
-                    source.unwrap_or(ObjectId(0)),
-                    controller,
-                    source.into_iter().map(TargetRef::Object).collect(),
-                );
-                if controller != affected_controller {
-                    resolved.set_scoped_player_recursive(affected_controller);
-                }
-                resolved
-            }
-        };
-        while super::replacement::EventModifiers::is_event_modifier_effect(&resolved.effect) {
-            let Some(next) = resolved.sub_ability.take() else {
-                return None;
-            };
-            resolved = *next;
-        }
-        fn stamp(
-            ability: &mut ResolvedAbility,
-            parent: &crate::types::proposed_event::TokenCreationParentContext,
-        ) {
-            ability.context.token_creation_parent = Some(parent.clone());
-            if let Some(child) = ability.sub_ability.as_deref_mut() {
-                stamp(child, parent);
-            }
-            if let Some(child) = ability.else_ability.as_deref_mut() {
-                stamp(child, parent);
-            }
-        }
-        if matches!(resolved.effect, Effect::BecomeCopy { .. }) {
-            fn bind_recipient(node: &mut ResolvedAbility, source: ObjectId) {
-                node.source_id = source;
-                if let Some(child) = node.sub_ability.as_deref_mut() {
-                    bind_recipient(child, source);
-                }
-                if let Some(child) = node.else_ability.as_deref_mut() {
-                    bind_recipient(child, source);
-                }
-            }
-            if let Some(source) = source {
-                bind_recipient(&mut resolved, source);
-            }
-        }
-        if !matches!(resolved.effect, Effect::BecomeCopy { .. }) && parent.is_none() {
-            return None;
-        }
+        let resolved = prepare_selected_post_replacement_continuation(
+            state,
+            continuation,
+            ContinuationSubjects {
+                affected: source,
+                controller: replacement_controller,
+            },
+            replacement_applied.clone(),
+            parent.clone(),
+        )?;
         if let Some(parent) = parent {
-            stamp(&mut resolved, &parent);
             state
                 .resolution_stack
                 .token_creation_mut(parent.frame)
                 .expect("selected substitution owner")
                 .pending = Some(crate::types::game_state::TokenCreationPending::Substitution);
         }
-        resolved.set_source_incarnation_recursive(
-            source
-                .and_then(|id| state.entering_or_live_object(id))
-                .map(|object| object.incarnation),
-        );
-        resolved.set_replacement_applied_recursive(replacement_applied.clone());
         Some(resolved)
     });
+
+    // CR 614.12a + CR 616.1c: an entry caller deliberately clears the
+    // replacement host's SelfRef before dispatch. The selected complete copy
+    // instruction has now bound that SelfRef to the actual entrant; retain the
+    // same binding on this still-Ready resident before nested work can run.
+    // Non-copy riders retain their existing source/context semantics.
+    if let Some(source) = source.filter(|_| {
+        prepared
+            .as_ref()
+            .is_some_and(|resolved| matches!(resolved.effect, Effect::BecomeCopy { .. }))
+    }) {
+        state
+            .active_post_replacement_drains_mut()
+            .and_then(crate::types::game_state::PostReplacementDrainStack::resident_mut)
+            .expect("the selected Ready copy continuation is still resident")
+            .source = Some(source);
+    }
 
     let recipients = state
         .resolution_stack
@@ -8962,6 +9159,13 @@ mod tests {
     fn drive_copy_enchantment_of_aura(
         num_hosts: usize,
     ) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
+        drive_copy_enchantment_of_aura_with_setup(num_hosts, |_, _, _| None)
+    }
+
+    fn drive_copy_enchantment_of_aura_with_setup(
+        num_hosts: usize,
+        setup: impl FnOnce(&mut GameState, ObjectId, ObjectId) -> Option<ObjectId>,
+    ) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
         use crate::types::ability::{Effect, TargetFilter, TypeFilter, TypedFilter};
         use crate::types::keywords::Keyword;
 
@@ -9049,6 +9253,16 @@ mod tests {
                     )),
             );
 
+        // Retain the same original through the normal layer reseed, before
+        // the event is proposed. Legacy recovery must never insert evidence.
+        let original = state.objects[&copy_ench].replacement_definitions.clone();
+        state
+            .objects
+            .get_mut(&copy_ench)
+            .unwrap()
+            .base_replacement_definitions = std::sync::Arc::new(original.as_slice().to_vec());
+        let preferred_origin = setup(&mut state, copy_ench, aura);
+
         // Propose the Stack → Battlefield entry so the replacement pipeline
         // surfaces the optional "may enter as a copy" choice.
         let mut events = Vec::new();
@@ -9078,12 +9292,40 @@ mod tests {
         };
         state.waiting_for = replacement_mod::replacement_choice_waiting_for(player, &state);
         state.priority_player = player;
-        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
-            .expect("accept Copy Enchantment's enter-as-a-copy");
+        for _ in 0..4 {
+            let pending = state
+                .pending_replacement
+                .as_ref()
+                .expect("real replacement pause");
+            let index = if pending.is_optional {
+                usize::from(preferred_origin.is_some())
+            } else {
+                pending
+                    .candidates
+                    .iter()
+                    .position(|id| preferred_origin.is_none_or(|source| source == id.source))
+                    .expect("the retained copy origin is offered")
+            };
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index })
+                .expect("accept selected copy origin or decline only the ordering fixture");
+            if !matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }) {
+                break;
+            }
+        }
 
         // The mid-entry copy target choice must now be pending, with the Aura as
         // the only legal copy source (a creature host is not an enchantment).
-        let WaitingFor::CopyTargetChoice { valid_targets, .. } = state.waiting_for.clone() else {
+        let WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            valid_targets,
+            purpose:
+                CopyTargetPurpose::BecomeCopy {
+                    continuation: Some(selected),
+                },
+            ..
+        } = state.waiting_for.clone()
+        else {
             panic!(
                 "expected CopyTargetChoice after accepting the copy, got {:?}",
                 state.waiting_for
@@ -9093,6 +9335,26 @@ mod tests {
             valid_targets.contains(&aura),
             "the Level Up Aura must be a legal copy source"
         );
+        let resident = state
+            .active_post_replacement_drains()
+            .unwrap()
+            .resident()
+            .unwrap();
+        assert_eq!(source_id, copy_ench);
+        assert_eq!(selected.source_id, source_id);
+        assert_eq!(selected.controller, player);
+        assert_eq!(
+            resident.source,
+            Some(source_id),
+            "the selected entrant must survive the deliberate host-source clear"
+        );
+        assert_eq!(resident.controller.unwrap_or(player), player);
+        assert_eq!(resident.applied, selected.replacement_applied);
+        assert!(matches!(
+            resident.status,
+            crate::types::game_state::DrainStatus::Paused
+        ));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
 
         (state, copy_ench, aura, hosts)
     }
@@ -9264,6 +9526,25 @@ mod tests {
         );
     }
 
+    fn install_optional_counter_doubler(state: &mut GameState) {
+        let card = CardId(state.next_object_id);
+        let source = create_object(
+            state,
+            card,
+            PlayerId(0),
+            "Typed counter doubling authority".into(),
+            Zone::Battlefield,
+        );
+        let definition = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+            .mode(ReplacementMode::Optional { decline: None })
+            .quantity_modification(crate::types::ability::QuantityModification::DOUBLE);
+        let object = state.objects.get_mut(&source).unwrap();
+        object.base_card_types.core_types = vec![CoreType::Artifact];
+        object.card_types.core_types = vec![CoreType::Artifact];
+        object.replacement_definitions.push(definition.clone());
+        std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(definition);
+    }
+
     /// CR 614.12a + CR 616.1: consuming the copy answer preserves a newly
     /// raised counter replacement, then resumes the copied Aura's entry tail.
     #[test]
@@ -9283,29 +9564,345 @@ mod tests {
         let donor = state.objects.get_mut(&aura).unwrap();
         donor.replacement_definitions.push(entry_counters.clone());
         std::sync::Arc::make_mut(&mut donor.base_replacement_definitions).push(entry_counters);
-        state.pending_damage_replacements.push(
-            ReplacementDefinition::new(ReplacementEvent::AddCounter)
-                .mode(crate::types::ability::ReplacementMode::Optional { decline: None })
-                .quantity_modification(crate::types::ability::QuantityModification::DOUBLE),
+        install_optional_counter_doubler(&mut state);
+        let selected = match &state.waiting_for {
+            WaitingFor::CopyTargetChoice {
+                purpose:
+                    CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(selected),
+                    },
+                ..
+            } => selected.clone(),
+            other => {
+                panic!("the public entry must retain the complete selected instruction: {other:?}")
+            }
+        };
+        assert!(
+            !selected.replacement_applied.is_empty(),
+            "the applied-set hostile must remove an actual selected occurrence"
         );
+        assert_eq!(
+            selected.source_incarnation,
+            Some(state.objects[&copy_ench].incarnation)
+        );
+        for corruption in 0..8 {
+            let mut hostile = state.clone();
+            match corruption {
+                0 => {
+                    hostile
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .source = Some(aura)
+                }
+                1 => {
+                    hostile
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .controller = Some(PlayerId(1))
+                }
+                2 => {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(selected),
+                            },
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    selected.source_incarnation = Some(state.objects[&copy_ench].incarnation + 1);
+                }
+                3 => hostile
+                    .active_post_replacement_drains_mut()
+                    .unwrap()
+                    .resident_mut()
+                    .unwrap()
+                    .applied
+                    .clear(),
+                4 => {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(selected),
+                            },
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    selected.effect = Effect::Draw {
+                        target: TargetFilter::Controller,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    };
+                }
+                5 => {
+                    hostile
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .status = crate::types::game_state::DrainStatus::Dispatching
+                }
+                6 | 7 => {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(selected),
+                            },
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    if corruption == 6 {
+                        selected.source_id = aura;
+                    } else {
+                        selected.controller = PlayerId(1);
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&hostile).unwrap();
+            if corruption != 2 {
+                let frames =
+                    crate::types::resolution::canonicalize_legacy_resolution_state(&hostile)
+                        .unwrap();
+                assert!(
+                    frames.validate(&hostile.waiting_for).is_err(),
+                    "corruption {corruption} must not become canonical authority"
+                );
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+            } else {
+                assert!(serde_json::from_value::<GameState>(before.clone()).is_err());
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+            }
+            // Dispatching is separately rejected by canonical restoration above;
+            // the public boundary's existing orphan recovery precedes rollback.
+            if corruption != 5 {
+                assert!(apply_as_current(
+                    &mut hostile,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(aura))
+                    }
+                )
+                .is_err());
+                assert_eq!(
+                    serde_json::to_value(&hostile).unwrap(),
+                    before,
+                    "hostile answer {corruption} must refuse before mutation"
+                );
+            }
+        }
+        use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+        use crate::types::resolution::ResolutionStateWire;
+        let readers = vec![
+            state.clone(),
+            serde_json::from_value::<GameState>(serde_json::to_value(&state).unwrap()).unwrap(),
+            serde_json::from_value::<TrustedGameStateEnvelope>(
+                serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            PersistedGameState::capture(state.clone())
+                .into_game_state()
+                .unwrap(),
+            serde_json::from_value::<ResolutionStateWire>(
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        ];
+        for mut state in readers {
+            let WaitingFor::CopyTargetChoice {
+                purpose:
+                    CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(restored),
+                    },
+                ..
+            } = &state.waiting_for
+            else {
+                panic!("each reader retains its complete selected copy instruction")
+            };
+            assert_eq!(restored, &selected);
+            apply_as_current(
+                &mut state,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(aura)),
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice {
+                    player: PlayerId(0),
+                    ..
+                }
+            ));
+            assert_eq!(
+                state.objects[&copy_ench]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Time),
+                None
+            );
+            assert!(state.resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::CounterAdditions(_)
+            )));
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+            assert_eq!(
+                state.objects[&copy_ench]
+                    .counters
+                    .get(&crate::types::counter::CounterType::Time),
+                Some(&2),
+                "the copied entry counter applies its replacement once; wait={:?}; pending={:?}; frames={:?}; entry={:?}",
+                state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&copy_ench]
+            );
+            assert_eq!(
+                state.objects[&copy_ench].attached_to,
+                Some(crate::game::game_object::AttachTarget::Object(hosts[0]))
+            );
+            assert!(state.deferred_entry_events.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.resolution_stack.is_empty());
+        }
+    }
+
+    // Supplemental typed authority fixtures. The printed Copy Enchantment
+    // clause still supplies the real copy operation; external hosting/runtime
+    // storage and the one-Time-counter donor are representation controls.
+    fn legacy_copy_pause(
+        external: bool,
+        runtime: bool,
+        unrelated_runtime: bool,
+    ) -> (GameState, ObjectId, ObjectId, Vec<ObjectId>) {
+        drive_copy_enchantment_of_aura_with_setup(1, |state, entrant, donor| {
+            state.phase = crate::types::phase::Phase::End;
+            let entry_counter = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PutCounter {
+                        counter_type: CounterType::Time,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::SelfRef,
+                    },
+                ));
+            let donor = state.objects.get_mut(&donor).unwrap();
+            donor.replacement_definitions.push(entry_counter.clone());
+            std::sync::Arc::make_mut(&mut donor.base_replacement_definitions).push(entry_counter);
+            install_optional_counter_doubler(state);
+            let host = if external {
+                let card = CardId(state.next_object_id);
+                let host = create_object(
+                    state,
+                    card,
+                    PlayerId(1),
+                    "External replacement authority fixture".into(),
+                    Zone::Battlefield,
+                );
+                let object = state.objects.get_mut(&host).unwrap();
+                object.base_card_types.core_types = vec![CoreType::Artifact];
+                object.card_types.core_types = vec![CoreType::Artifact];
+                host
+            } else {
+                entrant
+            };
+            let mut definition = state.objects[&entrant].replacement_definitions[0].clone();
+            if external {
+                definition.valid_card = Some(TargetFilter::SpecificObject { id: entrant });
+            }
+            if runtime || unrelated_runtime {
+                let mut rider = build_resolved_from_def_with_targets(
+                    definition.execute.as_deref().unwrap(),
+                    host,
+                    if external { PlayerId(1) } else { PlayerId(0) },
+                    vec![TargetRef::Player(PlayerId(1))],
+                );
+                rider.chosen_x = Some(7);
+                if runtime {
+                    if let Effect::BecomeCopy { duration, .. } = &mut rider.effect {
+                        *duration = Some(crate::types::ability::Duration::UntilEndOfTurn);
+                    }
+                } else {
+                    rider.effect = Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 9 },
+                    };
+                }
+                definition.runtime_execute =
+                    Some(state.install_replacement_continuation(rider).unwrap());
+            }
+            if runtime {
+                definition.mode = ReplacementMode::Mandatory;
+            }
+            if external {
+                state
+                    .objects
+                    .get_mut(&entrant)
+                    .unwrap()
+                    .replacement_definitions
+                    .clear();
+                state
+                    .objects
+                    .get_mut(&entrant)
+                    .unwrap()
+                    .base_replacement_definitions = Default::default();
+            }
+            {
+                let object = state.objects.get_mut(&host).unwrap();
+                object.replacement_definitions = vec![definition.clone()].into();
+                object.base_replacement_definitions = std::sync::Arc::new(vec![definition]);
+            }
+            if runtime {
+                // A real second optional candidate forces public ordering of the
+                // mandatory runtime origin; declining it preserves that origin.
+                let ordering = ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .mode(ReplacementMode::Optional { decline: None })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::LoseLife {
+                            target: Some(TargetFilter::Controller),
+                            amount: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ));
+                let object = state.objects.get_mut(&entrant).unwrap();
+                object.replacement_definitions.push(ordering.clone());
+                std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(ordering);
+                Some(host)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn complete_legacy_copy(
+        mut state: GameState,
+        entrant: ObjectId,
+        donor: ObjectId,
+        host: ObjectId,
+        finite: bool,
+    ) {
         apply_as_current(
             &mut state,
             GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(aura)),
+                target: Some(TargetRef::Object(donor)),
             },
         )
         .unwrap();
         assert!(matches!(
             state.waiting_for,
-            WaitingFor::ReplacementChoice {
-                player: PlayerId(0),
-                ..
-            }
+            WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(
-            state.objects[&copy_ench]
-                .counters
-                .get(&crate::types::counter::CounterType::Time),
+            state.objects[&entrant].counters.get(&CounterType::Time),
             None
         );
         assert!(state.resolution_stack.iter().any(|frame| matches!(
@@ -9313,21 +9910,703 @@ mod tests {
             crate::types::resolution::ResolutionFrame::CounterAdditions(_)
         )));
         apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 }).unwrap();
+        // CR 616.1g + CR 303.4f: finish the nested counter operation once,
+        // then complete the copied Aura's sole legal attachment.
         assert_eq!(
-            state.objects[&copy_ench]
-                .counters
-                .get(&crate::types::counter::CounterType::Time),
-            Some(&2),
-            "the copied entry counter applies its replacement once; wait={:?}; pending={:?}; frames={:?}; entry={:?}",
-            state.waiting_for, state.pending_replacement, state.resolution_stack, state.objects[&copy_ench]
+            state.objects[&entrant].counters.get(&CounterType::Time),
+            Some(&2)
         );
         assert_eq!(
-            state.objects[&copy_ench].attached_to,
-            Some(crate::game::game_object::AttachTarget::Object(hosts[0]))
+            state.objects[&entrant].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(host))
         );
-        assert!(state.deferred_entry_events.is_empty());
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.resolution_stack.is_empty());
+        assert!(state.deferred_entry_events.is_empty());
+        assert!(state.pending_replacement.is_none());
+        assert!(state.pending_liminal_entry_resume.is_none());
+        if finite {
+            let effects: Vec<_> = state
+                .transient_continuous_effects
+                .iter()
+                .filter(|effect| {
+                    effect
+                        .affected_recipient
+                        .is_some_and(|pin| pin.object_id == entrant)
+                        && effect.duration == crate::types::ability::Duration::UntilEndOfTurn
+                })
+                .map(|effect| effect.id)
+                .collect();
+            assert_eq!(
+                effects.len(),
+                1,
+                "the captured runtime's finite copy lifetime is installed"
+            );
+            assert_eq!(state.phase, crate::types::phase::Phase::End);
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+            apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+            assert!(
+                state
+                    .transient_continuous_effects
+                    .iter()
+                    .all(|effect| !effects.contains(&effect.id)),
+                "the original finite lifetime expires at the real cleanup boundary"
+            );
+            assert_eq!(
+                state.objects[&entrant].counters.get(&CounterType::Time),
+                Some(&2)
+            );
+            assert!(state.resolution_stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
+    #[test]
+    fn legacy_selected_copy_recovers_complete_program_for_self_external_and_runtime_readers() {
+        use crate::types::game_state::{PersistedGameState, TrustedGameStateEnvelope};
+        use crate::types::resolution::{ResolutionFrame, ResolutionStateWire};
+        for (external, runtime, unrelated_runtime) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (true, false, true),
+        ] {
+            let (state, entrant, donor, hosts) =
+                legacy_copy_pause(external, runtime, unrelated_runtime);
+            let selected = match &state.waiting_for {
+                WaitingFor::CopyTargetChoice {
+                    purpose:
+                        CopyTargetPurpose::BecomeCopy {
+                            continuation: Some(selected),
+                            ..
+                        },
+                    ..
+                } => selected.clone(),
+                other => panic!("actual copy producer must pause: {other:?}"),
+            };
+            assert_eq!(
+                selected.controller,
+                if external { PlayerId(1) } else { PlayerId(0) }
+            );
+            assert_eq!(selected.source_id, entrant);
+            assert!(!selected.replacement_applied.is_empty());
+            assert!(selected.replacement_applied.iter().all(|key| {
+                replacement_mod::replacement_definition_for_key(&state, *key, &Default::default())
+                    .is_some()
+            }));
+            assert!(state.deferred_entry_events.iter().any(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, record, .. }
+                if *object_id == entrant && record.entered_incarnation == selected.source_incarnation)));
+            assert_eq!(selected.chosen_x, if runtime { Some(7) } else { None });
+            if runtime {
+                assert_eq!(selected.targets, vec![TargetRef::Player(PlayerId(1))]);
+                assert!(matches!(
+                    selected.effect,
+                    Effect::BecomeCopy {
+                        duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+                        ..
+                    }
+                ));
+            } else {
+                assert_eq!(selected.targets, vec![TargetRef::Object(entrant)]);
+                assert_eq!(selected.scoped_player, external.then_some(PlayerId(0)));
+            }
+            for (erase_source, erase_program) in [(true, false), (true, true), (false, true)] {
+                let mut legacy = state.clone();
+                if erase_source {
+                    legacy
+                        .active_post_replacement_drains_mut()
+                        .unwrap()
+                        .resident_mut()
+                        .unwrap()
+                        .source = None;
+                }
+                if erase_program {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose: CopyTargetPurpose::BecomeCopy { continuation, .. },
+                        ..
+                    } = &mut legacy.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    *continuation = None;
+                }
+                let before = serde_json::to_value(&legacy).unwrap();
+                let mut v1 =
+                    serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone()))
+                        .unwrap();
+                assert_eq!(
+                    legacy.resolution_stack.len(),
+                    1,
+                    "the v1 fixture is representable without flattening"
+                );
+                let ResolutionFrame::PostReplacement(drains) =
+                    legacy.resolution_stack.iter().next().unwrap()
+                else {
+                    unreachable!()
+                };
+                v1.as_object_mut().unwrap().remove("resolution_frames");
+                v1["resolution_state_version"] = 1.into();
+                v1["post_replacement_drains"] = serde_json::to_value(drains).unwrap();
+                let mut prior_typed =
+                    serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone()))
+                        .unwrap();
+                prior_typed["resolution_state_version"] = 2.into();
+                let readers = vec![
+                    serde_json::from_value::<GameState>(before.clone()).unwrap(),
+                    serde_json::from_value::<TrustedGameStateEnvelope>(
+                        serde_json::to_value(TrustedGameStateEnvelope::capture(legacy.clone()))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state(),
+                    PersistedGameState::capture(legacy.clone())
+                        .into_game_state()
+                        .unwrap(),
+                    serde_json::from_value::<ResolutionStateWire>(
+                        serde_json::to_value(ResolutionStateWire::from_game_state(legacy.clone()))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state(),
+                    serde_json::from_value::<ResolutionStateWire>(prior_typed)
+                        .unwrap()
+                        .into_game_state(),
+                    serde_json::from_value::<ResolutionStateWire>(v1)
+                        .unwrap()
+                        .into_game_state(),
+                ];
+                assert_eq!(serde_json::to_value(&legacy).unwrap(), before);
+                for restored in readers {
+                    let WaitingFor::CopyTargetChoice {
+                        purpose:
+                            CopyTargetPurpose::BecomeCopy {
+                                continuation: Some(actual),
+                                ..
+                            },
+                        ..
+                    } = &restored.waiting_for
+                    else {
+                        unreachable!()
+                    };
+                    assert_eq!(
+                        actual, &selected,
+                        "the complete captured operation must survive recovery"
+                    );
+                    assert_eq!(
+                        restored
+                            .active_post_replacement_drains()
+                            .unwrap()
+                            .resident()
+                            .unwrap()
+                            .source,
+                        Some(entrant)
+                    );
+                    restored
+                        .resolution_stack
+                        .validate(&restored.waiting_for)
+                        .unwrap();
+                    complete_legacy_copy(restored, entrant, donor, hosts[0], runtime);
+                }
+                complete_legacy_copy(legacy, entrant, donor, hosts[0], runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_selected_copy_rejects_correlated_and_nested_program_corruption_atomically() {
+        let (state, entrant, donor, _) = legacy_copy_pause(true, false, false);
+        for corruption in 0..11 {
+            let mut hostile = state.clone();
+            hostile
+                .active_post_replacement_drains_mut()
+                .unwrap()
+                .resident_mut()
+                .unwrap()
+                .source = None;
+            if corruption == 0 {
+                let WaitingFor::CopyTargetChoice {
+                    source_id,
+                    purpose:
+                        CopyTargetPurpose::BecomeCopy {
+                            continuation: Some(selected),
+                            ..
+                        },
+                    ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                *source_id = donor;
+                selected.set_source_incarnation_recursive(Some(state.objects[&donor].incarnation));
+                selected.source_id = donor;
+            } else if corruption == 1 {
+                let WaitingFor::CopyTargetChoice {
+                    player,
+                    purpose:
+                        CopyTargetPurpose::BecomeCopy {
+                            continuation: Some(selected),
+                            ..
+                        },
+                    ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                *player = PlayerId(0);
+                selected.controller = PlayerId(0);
+            } else if corruption == 2 {
+                hostile
+                    .active_post_replacement_drains_mut()
+                    .unwrap()
+                    .resident_mut()
+                    .unwrap()
+                    .applied
+                    .clear();
+            } else if corruption == 3 {
+                hostile.deferred_entry_events.clear();
+            } else if corruption == 4 {
+                for event in &mut hostile.deferred_entry_events {
+                    if let GameEvent::ZoneChanged { record, .. } = event {
+                        record.entered_incarnation = Some(999);
+                    }
+                }
+            } else if corruption == 9 {
+                let original = *hostile
+                    .active_post_replacement_drains()
+                    .unwrap()
+                    .resident()
+                    .unwrap()
+                    .applied
+                    .iter()
+                    .next()
+                    .unwrap();
+                hostile
+                    .active_post_replacement_drains_mut()
+                    .unwrap()
+                    .resident_mut()
+                    .unwrap()
+                    .applied =
+                    HashSet::from([AppliedReplacementKey::object(original.source(), 999)]);
+            } else {
+                let WaitingFor::CopyTargetChoice {
+                    purpose:
+                        CopyTargetPurpose::BecomeCopy {
+                            continuation: Some(selected),
+                            ..
+                        },
+                    ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                match corruption {
+                    5 => selected.targets.clear(),
+                    6 => selected.chosen_x = Some(99),
+                    7 => {
+                        selected.effect = Effect::Draw {
+                            target: TargetFilter::Controller,
+                            count: QuantityExpr::Fixed { value: 9 },
+                        }
+                    }
+                    10 => {
+                        let Effect::BecomeCopy { duration, .. } = &mut selected.effect else {
+                            unreachable!()
+                        };
+                        *duration = Some(crate::types::ability::Duration::UntilEndOfTurn);
+                    }
+                    8 => {
+                        selected.sub_ability = Some(Box::new(ResolvedAbility::new(
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Fixed { value: 99 },
+                            },
+                            Vec::new(),
+                            entrant,
+                            PlayerId(1),
+                        )))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            let before = serde_json::to_value(&hostile).unwrap();
+            assert!(
+                serde_json::from_value::<GameState>(before.clone()).is_err(),
+                "corruption {corruption}"
+            );
+            assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+            assert!(
+                apply_as_current(
+                    &mut hostile,
+                    GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(donor)),
+                    }
+                )
+                .is_err(),
+                "public corruption {corruption}"
+            );
+            assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn legacy_selected_copy_refuses_genuinely_ambiguous_origins_and_missing_originals() {
+        let (state, _entrant, _, _) =
+            drive_copy_enchantment_of_aura_with_setup(1, |state, entrant, _| {
+                let mut second = state.objects[&entrant].replacement_definitions[0].clone();
+                if let Effect::BecomeCopy { duration, .. } =
+                    second.execute.as_deref_mut().unwrap().effect.as_mut()
+                {
+                    *duration = Some(crate::types::ability::Duration::UntilEndOfTurn);
+                }
+                let object = state.objects.get_mut(&entrant).unwrap();
+                object.replacement_definitions.push(second.clone());
+                std::sync::Arc::make_mut(&mut object.base_replacement_definitions).push(second);
+                None
+            });
+        assert_eq!(
+            state
+                .active_post_replacement_drains()
+                .unwrap()
+                .resident()
+                .unwrap()
+                .applied
+                .len(),
+            2
+        );
+        let mut ambiguous = state.clone();
+        ambiguous
+            .active_post_replacement_drains_mut()
+            .unwrap()
+            .resident_mut()
+            .unwrap()
+            .source = None;
+        let before = serde_json::to_value(&ambiguous).unwrap();
+        let error = serde_json::from_value::<GameState>(before.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ambiguous instruction origins or lifetimes"),
+            "{error}"
+        );
+        assert_eq!(serde_json::to_value(&ambiguous).unwrap(), before);
+
+        let (mut missing, entrant, donor, _) = legacy_copy_pause(false, false, false);
+        missing
+            .active_post_replacement_drains_mut()
+            .unwrap()
+            .resident_mut()
+            .unwrap()
+            .source = None;
+        let object = missing.objects.get_mut(&entrant).unwrap();
+        object.replacement_definitions.clear();
+        object.base_replacement_definitions = Default::default();
+        let before = serde_json::to_value(&missing).unwrap();
+        let error = serde_json::from_value::<GameState>(before.clone())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("applied original definition or installation"),
+            "{error}"
+        );
+        assert_eq!(serde_json::to_value(&missing).unwrap(), before);
+        assert!(apply_as_current(
+            &mut missing,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(donor)),
+            }
+        )
+        .is_err());
+        assert_eq!(serde_json::to_value(&missing).unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_selected_copy_recovers_only_the_inner_public_token_substitution_resident() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::ability::{PtValue, TokenAttackDestination, TypeFilter, TypedFilter};
+        use crate::types::resolution::ResolutionFrame;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let aura_host = scenario.add_creature(P0, "Only Aura host", 2, 2).id();
+        let copy_source = scenario.add_creature(P0, "Copy Enchantment", 0, 0)
+            .as_enchantment()
+            .from_oracle_text("You may have this enchantment enter as a copy of any enchantment on the battlefield.")
+            .id();
+        let entry_counter = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Battlefield)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Time,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                },
+            ));
+        let donor = scenario
+            .add_creature(P0, "Typed Aura donor", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .with_keyword(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                TypeFilter::Creature,
+            ))))
+            .with_replacement_definition(entry_counter)
+            .id();
+        let copy = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                owner: TargetFilter::Controller,
+                source_filter: None,
+                enters_attacking: false,
+                attack_destination: TokenAttackDestination::ControllerChooses,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords: Vec::new(),
+                additional_modifications: Vec::new(),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+        ));
+        let substitution = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .mode(ReplacementMode::Optional { decline: None })
+            .execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChoosePermanent {
+                        filter: TargetFilter::SpecificObject { id: copy_source },
+                    },
+                )
+                .sub_ability(copy),
+            );
+        let outer_source = scenario
+            .add_creature(P0, "Typed substitution authority", 0, 0)
+            .as_artifact()
+            .with_replacement_definition(substitution)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand(P0, "Typed token creation", true)
+            .with_ability(Effect::Token {
+                name: "Original".into(),
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                types: vec!["Artifact".into()],
+                colors: Vec::new(),
+                keywords: Vec::new(),
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                owner: TargetFilter::Controller,
+                attach_to: None,
+                enters_attacking: false,
+                attack_destination: TokenAttackDestination::ControllerChooses,
+                supertypes: Vec::new(),
+                static_abilities: Vec::new(),
+                enter_with_counters: Vec::new(),
+            })
+            .id();
+        let mut runner = scenario.build();
+        // Existing battlefield Auras are a fixture, rather than another entry
+        // under test; seed the donor's coherent legal attachment before casting.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&donor)
+            .unwrap()
+            .attached_to = Some(crate::game::game_object::AttachTarget::Object(aura_host));
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&aura_host)
+            .unwrap()
+            .attachments
+            .push(donor);
+        install_optional_counter_doubler(runner.state_mut());
+        runner.cast(spell).resolve();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::CopyTargetChoice {
+            source_id, purpose: CopyTargetPurpose::CopyTokenSource { continuation: Some(_) }, ..
+        } if source_id == outer_source)
+        );
+        let outer = serde_json::to_value(
+            runner
+                .state()
+                .active_post_replacement_drains()
+                .unwrap()
+                .resident()
+                .unwrap(),
+        )
+        .unwrap();
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(copy_source)),
+            })
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ));
+        runner
+            .act(GameAction::ChooseReplacement { index: 0 })
+            .unwrap();
+        let (entrant, selected) = match &runner.state().waiting_for {
+            WaitingFor::CopyTargetChoice {
+                source_id,
+                purpose:
+                    CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(selected),
+                        ..
+                    },
+                ..
+            } => (*source_id, selected.clone()),
+            other => panic!("the actual inner entry must pause: {other:?}"),
+        };
+        assert_ne!(entrant, copy_source);
+        assert!(runner.state().liminal_entries.contains_key(&entrant));
+        let retained_outer = runner
+            .state()
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                ResolutionFrame::PostReplacement(drains) => drains
+                    .drains()
+                    .find(|drain| drain.source == Some(outer_source)),
+                _ => None,
+            })
+            .expect("the actual outer substitution remains resident while its token enters");
+        assert_eq!(serde_json::to_value(retained_outer).unwrap(), outer);
+        let outer_applied = retained_outer.applied.clone();
+        let outer_parent = retained_outer
+            .token_creation_parent
+            .clone()
+            .expect("the actual substitution owns its creation parent");
+        assert!(
+            selected.context.token_creation_parent.is_none(),
+            "the inner ordinary entry must not inherit the outer substitution's context"
+        );
+        for wrong_parent in [false, true] {
+            let mut hostile = runner.state().clone();
+            hostile
+                .active_post_replacement_drains_mut()
+                .unwrap()
+                .resident_mut()
+                .unwrap()
+                .source = None;
+            if wrong_parent {
+                let WaitingFor::CopyTargetChoice {
+                    purpose:
+                        CopyTargetPurpose::BecomeCopy {
+                            continuation: Some(selected),
+                            ..
+                        },
+                    ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                selected.context.token_creation_parent = Some(outer_parent.clone());
+            } else {
+                hostile
+                    .active_post_replacement_drains_mut()
+                    .unwrap()
+                    .resident_mut()
+                    .unwrap()
+                    .applied = outer_applied.clone();
+            }
+            let before = serde_json::to_value(&hostile).unwrap();
+            assert!(serde_json::from_value::<GameState>(before.clone()).is_err());
+            assert!(apply_as_current(
+                &mut hostile,
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                }
+            )
+            .is_err());
+            assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+        }
+        for erase_program in [false, true] {
+            let mut legacy = runner.state().clone();
+            legacy
+                .active_post_replacement_drains_mut()
+                .unwrap()
+                .resident_mut()
+                .unwrap()
+                .source = None;
+            if erase_program {
+                let WaitingFor::CopyTargetChoice {
+                    purpose: CopyTargetPurpose::BecomeCopy { continuation, .. },
+                    ..
+                } = &mut legacy.waiting_for
+                else {
+                    unreachable!()
+                };
+                *continuation = None;
+            }
+            let before = serde_json::to_value(&legacy).unwrap();
+            let restored: GameState = serde_json::from_value(before.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&legacy).unwrap(), before);
+            let WaitingFor::CopyTargetChoice {
+                purpose:
+                    CopyTargetPurpose::BecomeCopy {
+                        continuation: Some(actual),
+                        ..
+                    },
+                ..
+            } = &restored.waiting_for
+            else {
+                unreachable!()
+            };
+            assert_eq!(actual, &selected);
+            let mut resumed = GameRunner::from_state(restored);
+            resumed
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(donor)),
+                })
+                .unwrap();
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            resumed
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap();
+            resumed.advance_until_stack_empty();
+            assert_eq!(
+                resumed.state().objects[&entrant]
+                    .counters
+                    .get(&CounterType::Time),
+                Some(&2)
+            );
+            assert_eq!(
+                resumed.state().objects[&entrant].attached_to,
+                Some(crate::game::game_object::AttachTarget::Object(aura_host))
+            );
+            assert_eq!(
+                resumed.state().players[0].life,
+                23,
+                "the distinct outer continuation runs once"
+            );
+            assert!(resumed.state().liminal_entries.is_empty());
+            assert!(resumed.state().pending_liminal_entry_resume.is_none());
+            assert!(resumed.state().deferred_entry_events.is_empty());
+            assert!(resumed.state().resolution_stack.is_empty());
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
     }
 
     /// CR 303.4g + CR 704.5m: With NO legal host on the battlefield, the copied
