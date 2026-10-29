@@ -7908,6 +7908,8 @@ pub(crate) mod tests {
                         .find(|trigger| trigger.source_id == source)
                         .unwrap();
                     assert_eq!(delayed.ability.target_incarnations.len(), 3);
+                    assert!(delayed.one_shot);
+                    assert_eq!(state.delayed_triggers.len(), 1);
                     let births = delayed.ability.target_incarnations.clone();
                     assert_eq!(
                         events
@@ -7950,6 +7952,7 @@ pub(crate) mod tests {
                             );
                         }
                     }
+                    let unchanged_source = serde_json::to_value(&state.objects[&source]).unwrap();
                     let mut runner = crate::game::scenario::GameRunner::from_state(state);
                     for _ in 0..160 {
                         if runner
@@ -7972,16 +7975,65 @@ pub(crate) mod tests {
                             },
                             _ => GameAction::PassPriority,
                         };
-                        runner.act(action).unwrap();
+                        events.extend(runner.act(action).unwrap().events);
                     }
                     assert!(!runner.state().stack.is_empty());
-                    runner.advance_until_stack_empty();
-                    for member in births {
-                        assert_ne!(
-                            runner.state().objects[&member.object_id].zone,
-                            Zone::Battlefield
-                        );
+                    let delayed_entry = runner
+                        .state()
+                        .stack
+                        .iter()
+                        .find(|entry| entry.source_id == source)
+                        .unwrap();
+                    assert_eq!(delayed_entry.ability().unwrap().target_incarnations, births);
+                    for _ in 0..40 {
+                        if runner.state().stack.is_empty()
+                            && runner.state().resolution_stack.is_empty()
+                        {
+                            break;
+                        }
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::Priority { .. }
+                        ));
+                        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
                     }
+                    for member in &births {
+                        // CR 701.21a: the public sacrifice moves this exact birth
+                        // from the battlefield to its owner's graveyard once.
+                        assert_eq!(events.iter().filter(|event| matches!(event,
+                            GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, record }
+                            if *object_id == member.object_id && record.trigger_source_context.as_ref().is_some_and(|context| context.identity.reference == *member)
+                        )).count(), 1);
+                        assert_eq!(events.iter().filter(|event| matches!(event,
+                            GameEvent::PermanentSacrificed { object_id, player_id: PlayerId(0) }
+                            if *object_id == member.object_id
+                        )).count(), 1);
+                    }
+                    for member in &births {
+                        // CR 111.7 + CR 704.5d: off-battlefield tokens cease to exist.
+                        assert!(!member.is_current(runner.state()));
+                        assert!(!runner.state().objects.contains_key(&member.object_id));
+                        assert!(!runner.state().battlefield.contains(&member.object_id));
+                    }
+                    assert!(runner.state().stack.is_empty());
+                    assert!(runner.state().resolution_stack.is_empty());
+                    assert!(runner.state().return_result_frames.is_empty());
+                    assert!(runner.state().active_return_result_occurrence.is_none());
+                    assert!(runner.state().resolving_stack_entry.is_none());
+                    assert!(runner.state().pending_resolution_completion.is_none());
+                    assert!(runner.state().pending_liminal_entry_resume.is_none());
+                    assert!(runner.state().liminal_entries.is_empty());
+                    assert!(runner.state().pending_replacement.is_none());
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    // CR 603.7b: the registered one-shot trigger was consumed.
+                    assert!(runner.state().delayed_triggers.is_empty());
+                    assert_eq!(
+                        serde_json::to_value(&runner.state().objects[&source]).unwrap(),
+                        unchanged_source
+                    );
                 }
             }
         }
@@ -8609,13 +8661,19 @@ pub(crate) mod tests {
             .id();
         let donor = scenario
             .add_creature_from_oracle(P1, "Silver Myr", 1, 1, "{T}: Add {U}.")
-            .as_artifact()
+            .as_artifact_creature()
             .with_subtypes(vec!["Myr"])
             .id();
         for player in [P0, P1] {
             scenario.with_library_top(player, &["Reserve", "Reserve", "Reserve"]);
         }
         let mut runner = scenario.build();
+        for core_type in [CoreType::Artifact, CoreType::Creature] {
+            assert!(runner.state().objects[&donor]
+                .card_types
+                .core_types
+                .contains(&core_type));
+        }
         runner.advance_to_phase(Phase::BeginCombat);
         for _ in 0..20 {
             match runner.state().waiting_for.clone() {
@@ -9040,15 +9098,35 @@ pub(crate) mod tests {
             for matching_type in [false, true] {
                 let (mut state, source, entrant) = synthetic_liminal_selected_copy_prompt(
                     Duration::Permanent,
-                    vec![ContinuousModification::AddCounterOnEnter {
-                        counter_type: CounterType::Plus1Plus1,
-                        count: QuantityExpr::Fixed { value: 2 },
-                        if_type: Some(if matching_type {
-                            CoreType::Creature
-                        } else {
-                            CoreType::Enchantment
-                        }),
-                    }],
+                    vec![
+                        ContinuousModification::AddCounterOnEnter {
+                            counter_type: CounterType::Plus1Plus1,
+                            count: QuantityExpr::Fixed { value: 2 },
+                            if_type: Some(if matching_type {
+                                CoreType::Creature
+                            } else {
+                                CoreType::Enchantment
+                            }),
+                        },
+                        ContinuousModification::SetPowerDynamic {
+                            value: QuantityExpr::Ref {
+                                qty: crate::types::ability::QuantityRef::ObjectCount {
+                                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                                },
+                            },
+                        },
+                        ContinuousModification::SetToughnessDynamic {
+                            value: QuantityExpr::Ref {
+                                qty: crate::types::ability::QuantityRef::ObjectCount {
+                                    filter: TargetFilter::Typed(
+                                        TypedFilter::creature().properties(vec![
+                                            crate::types::ability::FilterProp::Another,
+                                        ]),
+                                    ),
+                                },
+                            },
+                        },
+                    ],
                 );
                 let carrier = creation_test_source(
                     &mut state,
@@ -9135,6 +9213,62 @@ pub(crate) mod tests {
                 assert!(!state.objects.contains_key(&entrant));
                 let entry = &state.liminal_entries[&entrant];
                 assert_eq!(entry.installed_copy_effects.len(), 1);
+                let owner = entry.installed_copy_effects[0];
+                let projection = entry.object.projected();
+                assert_eq!(projection.layer1_copy_effect, Some(owner));
+                assert!(!state.battlefield.contains(&entrant));
+                // CR 614.12: the detached candidate receives the installed
+                // program without joining either live quantity population.
+                // Both the all-creature and recipient-relative "other" count
+                // see only the carrier and final donor, never this entrant.
+                assert_eq!(
+                    (projection.layer_base_power, projection.layer_base_toughness),
+                    (Some(2), Some(2))
+                );
+                for guard in 0..4 {
+                    let mut foreign = state.clone();
+                    let installed = foreign
+                        .transient_continuous_effects
+                        .iter_mut()
+                        .find(|effect| effect.id == owner.continuous_effect_id)
+                        .unwrap();
+                    let ContinuousModification::CopyValues { values, .. } =
+                        &mut installed.modifications[0]
+                    else {
+                        panic!("positive selected-copy path installed CopyValues");
+                    };
+                    values.name = "Foreign copy must not apply".into();
+                    match guard {
+                        0 => installed.affected = TargetFilter::SpecificObject { id: final_copy },
+                        1 => {
+                            installed.affected_recipient = Some(ObjectIncarnationRef::from_object(
+                                &state.objects[&final_copy],
+                            ))
+                        }
+                        2 => {
+                            let mut stale = ObjectIncarnationRef::from_object(projection);
+                            stale.incarnation += 1;
+                            installed.affected_recipient = Some(stale);
+                        }
+                        3 => {
+                            installed.condition = Some(crate::types::ability::StaticCondition::Or {
+                                conditions: vec![],
+                            })
+                        }
+                        _ => unreachable!(),
+                    }
+                    let unchanged = serde_json::to_value(&foreign).unwrap();
+                    crate::game::layers::apply_installed_copy_to_liminal_entry(
+                        &mut foreign,
+                        entrant,
+                        owner.continuous_effect_id,
+                    );
+                    assert_eq!(
+                        serde_json::to_value(&foreign).unwrap(),
+                        unchanged,
+                        "guard {guard}"
+                    );
+                }
                 assert_eq!(
                     entry
                         .copy_exception_counters
@@ -10108,6 +10242,8 @@ pub(crate) mod tests {
         }
         assert_eq!(prompts, 4, "one noncommuting counter order per birth; the Divine/body and token-count replacements commute");
         assert!(state.resolution_stack.is_empty());
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert!(state.delayed_triggers[0].one_shot);
         let births = state.delayed_triggers[0]
             .ability
             .target_incarnations
@@ -10145,6 +10281,7 @@ pub(crate) mod tests {
                 "the chosen order is (one + one) doubled for each exact birth"
             );
         }
+        let unchanged_source = serde_json::to_value(&state.objects[&source]).unwrap();
         let mut runner = crate::game::scenario::GameRunner::from_state(state);
         for _ in 0..150 {
             if !runner.state().stack.is_empty() {
@@ -10162,17 +10299,69 @@ pub(crate) mod tests {
                 },
                 _ => GameAction::PassPriority,
             };
-            runner.act(action).unwrap();
+            events.extend(runner.act(action).unwrap().events);
         }
         assert!(!runner.state().stack.is_empty());
-        runner.advance_until_stack_empty();
-        for member in births {
-            assert_ne!(
-                runner.state().objects[&member.object_id].zone,
-                Zone::Battlefield
+        let delayed_entry = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == source)
+            .unwrap();
+        assert_eq!(delayed_entry.ability().unwrap().target_incarnations, births);
+        for _ in 0..40 {
+            if runner.state().stack.is_empty() && runner.state().resolution_stack.is_empty() {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        for member in &births {
+            // CR 701.21a: prove the actual exact-birth sacrifice before SBA absence.
+            assert_eq!(events.iter().filter(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, record }
+                if *object_id == member.object_id && record.trigger_source_context.as_ref().is_some_and(|context| context.identity.reference == *member)
+            )).count(), 1);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                        GameEvent::PermanentSacrificed { object_id, player_id: PlayerId(0) }
+                        if *object_id == member.object_id
+                    ))
+                    .count(),
+                1
             );
         }
+        for member in &births {
+            // CR 111.7 + CR 704.5d: the sacrificed tokens cease to exist.
+            assert!(!member.is_current(runner.state()));
+            assert!(!runner.state().objects.contains_key(&member.object_id));
+            assert!(!runner.state().battlefield.contains(&member.object_id));
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().return_result_frames.is_empty());
+        assert!(runner.state().active_return_result_occurrence.is_none());
+        assert!(runner.state().resolving_stack_entry.is_none());
+        assert!(runner.state().pending_resolution_completion.is_none());
+        assert!(runner.state().pending_liminal_entry_resume.is_none());
+        assert!(runner.state().liminal_entries.is_empty());
+        assert!(runner.state().pending_replacement.is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        // CR 603.7b: the delayed instruction fires only once.
+        assert!(runner.state().delayed_triggers.is_empty());
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            serde_json::to_value(&runner.state().objects[&source]).unwrap(),
+            unchanged_source
+        );
     }
 
     // ── Chatterfang's appended Squirrels share the created referent ──────────
