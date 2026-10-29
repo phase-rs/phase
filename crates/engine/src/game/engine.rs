@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use rand::Rng;
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
@@ -130,7 +131,7 @@ pub enum EngineError {
     /// engine's `i32`/`u32` storage). Representability is an engine limit, not
     /// a game rule; the action boundary rejects the whole action and restores
     /// its pre-action snapshot rather than silently skipping the change.
-    #[error("Life change is not representable for player {player:?}")]
+    #[error("Player-resource change is not representable for player {player:?}")]
     LifeChangeUnrepresentable { player: PlayerId },
 }
 

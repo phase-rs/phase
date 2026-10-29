@@ -1,4 +1,5 @@
 use crate::game::effects::{resolve_ability_chain, search_library};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility, SubAbilityLink,

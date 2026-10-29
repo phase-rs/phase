@@ -16,7 +16,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::types::card::TokenImageRef;
-use crate::types::proposed_event::TokenCharacteristics;
+use crate::types::token_spec::TokenCharacteristics;
 
 /// CR 111.10: Stable identifier for predefined-ability artifact tokens. Each
 /// variant maps to one arm of `effects::token::predefined_token_abilities`,

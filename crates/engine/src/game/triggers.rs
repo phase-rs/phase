@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::database::synthesis::KeywordTriggerInstaller;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
@@ -46162,6 +46163,187 @@ pub mod tests {
             time_counters(runner.state(), printed_suspend),
             Some(3),
             "the printed Suspend card loses one time counter (4 to 3)"
+        );
+        assert_eq!(runner.state().phase, Phase::PreCombatMain);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority {
+                player: PlayerId(0)
+            }
+        ));
+    }
+
+    /// CR 113.6b + CR 702.62a: each of the trigger collector's off-zone keyword
+    /// scopes that gathers walks the object map once for static-effect sources
+    /// outside the battlefield and command zone, however many of its keyword
+    /// queries fall open, and that one walk's list carries an exiled card's
+    /// static to the card it grants Suspend. `GameRunner` drives player 0 from
+    /// the untap step through upkeep to the precombat main phase over four
+    /// exiled cards player 0 owns: `static_granted`, `transient_granted`,
+    /// `anchor` and `bystander`. `anchor`'s static states that it functions in
+    /// exile (`active_zones: [Exile]`) and grants Suspend to `static_granted`;
+    /// a transient effect that lasts until the end of the game
+    /// (`Duration::Permanent`, the duration CR 611.2a gives an effect that
+    /// states none) grants Suspend to `transient_granted`; `bystander` has no
+    /// suspend. The fixture puts four time counters on `static_granted`,
+    /// `transient_granted` and `bystander`.
+    ///
+    /// The transient grants a keyword, so every off-zone keyword gather on this
+    /// board checks its liveness and is `ContextDependent`: in each scope frame
+    /// the first query gathers in the `Pending` arm of
+    /// `collect_applicable_off_zone_keyword_effects` and every later query in its
+    /// `ContextDependent` arm, both reading the frame's one source list.
+    /// `off_zone_keyword_scopes_during` records each frame's walks
+    /// (`off_zone_static_source_scan_count`) and tallies.
+    ///
+    /// A scoped query reaches the anchor only through that list, and the
+    /// collector reconciles a granted Suspend into the card's exile triggers
+    /// inside such a scope, so `static_granted` losing a time counter at upkeep
+    /// (CR 702.62b: it is suspended) shows the list holds the anchor.
+    /// `transient_granted` loses one too; `bystander` keeps its four. Fails at
+    /// the walk-count assertion when either arm walks the object map itself
+    /// instead of reading the list: once per query in the `ContextDependent`
+    /// arm, or a second time per frame from the `Pending` arm.
+    #[test]
+    fn upkeep_collection_scans_off_zone_static_sources_once_per_keyword_scope() {
+        use crate::game::off_zone_characteristics::{
+            effective_off_zone_keywords, off_zone_keyword_scopes_during,
+        };
+        use crate::game::scenario::GameRunner;
+
+        let time_counters = |state: &GameState, id: ObjectId| {
+            state.objects[&id].counters.get(&CounterType::Time).copied()
+        };
+        let has_suspend = |state: &GameState, id: ObjectId| {
+            effective_off_zone_keywords(state, id)
+                .iter()
+                .any(|keyword| keyword.kind() == KeywordKind::Suspend)
+        };
+        let suspend = Keyword::Suspend {
+            count: 0,
+            cost: ManaCost::generic(1),
+        };
+
+        let mut state = setup();
+        let granter = make_creature(&mut state, PlayerId(0), "Suspend Granter", 1, 1);
+        let static_granted = off_zone_test_card(&mut state, 0, Zone::Exile);
+        let transient_granted = off_zone_test_card(&mut state, 1, Zone::Exile);
+        let anchor = off_zone_test_card(&mut state, 2, Zone::Exile);
+        let bystander = off_zone_test_card(&mut state, 3, Zone::Exile);
+        // CR 113.6b: the anchor's static states that it functions in exile.
+        state
+            .objects
+            .get_mut(&anchor)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: static_granted })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: suspend.clone(),
+                    }])
+                    .active_zones(vec![Zone::Exile]),
+            );
+        // CR 611.2a: the transient lasts until the end of the game
+        // (`Duration::Permanent`), so it stays stored for the whole drive;
+        // because it grants a keyword, every keyword gather checks its liveness.
+        state.add_transient_continuous_effect(
+            granter,
+            PlayerId(0),
+            Duration::Permanent,
+            TargetFilter::SpecificObject {
+                id: transient_granted,
+            },
+            vec![ContinuousModification::AddKeyword { keyword: suspend }],
+            None,
+        );
+        // CR 702.62b: in exile with suspend and a time counter, the two granted
+        // cards are suspended; `bystander`, without suspend, is not.
+        for id in [static_granted, transient_granted, bystander] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Time, 4);
+        }
+        // CR 504.1 + CR 704.5b: player 0 draws in the draw step; an empty
+        // library would lose the game.
+        for index in 0..3 {
+            create_object(
+                &mut state,
+                CardId(8320 + index),
+                PlayerId(0),
+                format!("Library Card {index}"),
+                Zone::Library,
+            );
+        }
+        state.turn_number = 2;
+        state.phase = Phase::Untap;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        // An unscoped query walks the object map itself: the fresh-walk reading.
+        assert!(
+            has_suspend(&state, static_granted),
+            "reach-guard: the anchor's static grants Suspend from exile"
+        );
+        assert!(
+            has_suspend(&state, transient_granted),
+            "reach-guard: the transient grants Suspend"
+        );
+        assert!(
+            !has_suspend(&state, bystander),
+            "the bystander has no suspend"
+        );
+
+        let mut runner = GameRunner::from_state(state);
+        let scopes = off_zone_keyword_scopes_during(|| {
+            runner.auto_advance_to_main_phase();
+            runner.advance_until_stack_empty();
+        });
+
+        assert!(
+            scopes.iter().all(|scope| {
+                let counts = scope.counts;
+                counts.context_fall_opens == counts.matched
+                    && (counts.fills, counts.hits, counts.unmatched) == (0, 0, 0)
+            }),
+            "reach-guard: every keyword query in every frame asked the frame's state and fell \
+             open: {scopes:?}"
+        );
+        assert!(
+            scopes.iter().any(|scope| scope.counts.matched >= 2),
+            "reach-guard: a frame's first query took the Pending arm and a later one the \
+             ContextDependent arm: {scopes:?}"
+        );
+        for scope in &scopes {
+            assert_eq!(
+                scope.source_scans,
+                usize::from(scope.counts.matched > 0),
+                "one off-zone static-source walk per frame that gathered, not one per query: \
+                 {scope:?}"
+            );
+        }
+
+        // CR 702.62a: each suspended card's upkeep trigger removed one time counter.
+        assert_eq!(
+            time_counters(runner.state(), static_granted),
+            Some(3),
+            "the card granted Suspend by the exiled anchor's static loses one time counter (4 to 3)"
+        );
+        assert_eq!(
+            time_counters(runner.state(), transient_granted),
+            Some(3),
+            "the card granted Suspend by the transient loses one time counter (4 to 3)"
+        );
+        assert_eq!(
+            time_counters(runner.state(), bystander),
+            Some(4),
+            "a card without suspend keeps its time counters"
         );
         assert_eq!(runner.state().phase, Phase::PreCombatMain);
         assert!(runner.state().stack.is_empty());

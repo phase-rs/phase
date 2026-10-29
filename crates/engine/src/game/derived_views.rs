@@ -3085,6 +3085,7 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::combat::CombatState;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -5577,6 +5578,7 @@ mod tests {
                 linked_exile_snapshot: Vec::new(),
                 is_token: false,
                 combat_status: Default::default(),
+                block_pairs: Vec::new(),
                 co_departed: Vec::new(),
                 attached_to: None,
                 entered_incarnation: None,

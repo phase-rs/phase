@@ -1,5 +1,6 @@
 //! P1 runtime coverage for resolved-command mana provenance.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;

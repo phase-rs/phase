@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 pub(crate) use crate::types::ability::{
     effect_owns_resolution_zone_choice, effect_refs_parent_target,
     effect_requires_parent_target_object, filter_refs_parent_or_event_subject,

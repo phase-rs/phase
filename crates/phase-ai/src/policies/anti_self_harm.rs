@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;

@@ -14563,6 +14563,7 @@ mod provoke_runtime_tests {
     use crate::game::ability_utils::build_resolved_from_def_with_targets;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::effects::resolve_ability_chain;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;

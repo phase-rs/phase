@@ -1,4 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ObjectProperty, QuantityExpr, ResolvedAbility, TargetFilter,

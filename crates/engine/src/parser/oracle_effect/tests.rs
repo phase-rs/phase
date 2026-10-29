@@ -49022,7 +49022,7 @@ fn perpetual_grant_ability_rejects_resolution_time_generic_effect_body() {
         classified.iter().any(|m| matches!(
             m,
             ContinuousModification::GrantAbility { definition }
-                if crate::game::coverage::ability_tree_any(definition, &|d| matches!(
+                if crate::types::ability_visit::ability_tree_any(definition, &|d| matches!(
                     &*d.effect,
                     Effect::GenericEffect { static_abilities, .. } if !static_abilities.is_empty()
                 ))
@@ -49097,7 +49097,7 @@ fn perpetual_grant_ability_rejects_boareskyr_tollkeeper_enters_tapped() {
         panic!("expected the quoted fallback to produce one granted ability, got {classified:?}");
     };
     assert!(
-        crate::game::coverage::ability_tree_any(definition, &|d| {
+        crate::types::ability_visit::ability_tree_any(definition, &|d| {
             matches!(&*d.effect, Effect::Unimplemented { .. })
         }),
         "the quoted fallback must retain its unimplemented inner effect"
@@ -58415,7 +58415,7 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
         modifications.iter().any(|modification| matches!(
             modification,
             ContinuousModification::GrantAbility { definition }
-                if crate::game::coverage::ability_tree_any(
+                if crate::types::ability_visit::ability_tree_any(
                     definition,
                     &|node| matches!(&*node.effect, Effect::Unimplemented { .. })
                 )

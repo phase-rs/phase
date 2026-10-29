@@ -36,6 +36,7 @@ use crate::types::ability::{
     StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TriggerCondition,
     TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
+use crate::types::ability_visit::{ability_tree_any, visit_direct_effect_ability_payloads};
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, SubtypeSet};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -8079,25 +8080,6 @@ fn visit_face_modifications(face: &CardFace, visit: &mut impl FnMut(&ContinuousM
 /// `Effect::for_each_nested_definition` was introduced to close.
 use crate::types::ability::NestedDefinitionEdge as DirectEffectPayloadEdge;
 
-/// Visits the one-level executable ability payloads embedded directly in an effect.
-///
-/// Thin adapter over [`Effect::for_each_nested_definition`], the single
-/// authority for which effects carry a direct executable payload. The traversal
-/// and its exhaustiveness guarantee live in the AST layer; this wrapper exists
-/// only so coverage's many call sites keep their `impl FnMut` call style rather
-/// than each spelling out `&mut`.
-///
-/// Because the AST-layer match is exhaustive and wildcard-free, a newly added
-/// definition-carrying `Effect` variant is a compile error there — and every
-/// consumer in this module inherits that guarantee instead of needing its own
-/// arm list to be kept in sync by hand.
-fn visit_direct_effect_ability_payloads<'a>(
-    effect: &'a Effect,
-    mut visit: impl FnMut(DirectEffectPayloadEdge, &'a AbilityDefinition),
-) {
-    effect.for_each_nested_definition(&mut visit);
-}
-
 /// Recursively visit modifications inside an ability's effect graph.
 /// Descends into static carriers, direct effect modification carriers,
 /// sub-abilities, and modal branches.
@@ -11288,61 +11270,6 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
 // Semantic audit — detect semantic mismatches between Oracle text and parsed
 // ability data across all supported cards.
 // ---------------------------------------------------------------------------
-
-/// Walk an ability definition tree, visiting all nested `AbilityDefinition`s including
-/// those embedded in compound effects (`FlipCoins`, `RollDie`, `GrantAbility`, etc.).
-/// Returns `true` if the predicate returns `true` for any node in the tree.
-///
-/// `pub(crate)`: also the single-authority walker `PerpetualGrantModification::try_from`
-/// (`types/ability.rs`) reuses to reject a `GrantAbility` whose nested tree contains
-/// `Effect::Unimplemented` -- never reimplement tree-walking at that call site.
-pub(crate) fn ability_tree_any(
-    def: &AbilityDefinition,
-    pred: &impl Fn(&AbilityDefinition) -> bool,
-) -> bool {
-    if pred(def) {
-        return true;
-    }
-    // Standard chaining: sub_ability, else_ability, mode_abilities
-    if let Some(ref sub) = def.sub_ability {
-        if ability_tree_any(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(ref else_ab) = def.else_ability {
-        if ability_tree_any(else_ab, pred) {
-            return true;
-        }
-    }
-    for mode_ab in &def.mode_abilities {
-        if ability_tree_any(mode_ab, pred) {
-            return true;
-        }
-    }
-    let mut found = false;
-    visit_direct_effect_ability_payloads(&def.effect, |_, payload| {
-        found |= ability_tree_any(payload, pred);
-    });
-    if found {
-        return true;
-    }
-    // ContinuousModification::GrantAbility inside GenericEffect
-    if let Effect::GenericEffect {
-        static_abilities, ..
-    } = &*def.effect
-    {
-        for stat in static_abilities {
-            for modif in &stat.modifications {
-                if let ContinuousModification::GrantAbility { definition } = modif {
-                    if ability_tree_any(definition, pred) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
-}
 
 fn ability_places_counter(def: &AbilityDefinition, counter_type: &CounterType) -> bool {
     match &*def.effect {

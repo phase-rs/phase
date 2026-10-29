@@ -52,7 +52,7 @@ use crate::types::ability::{
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
 use crate::types::counter::CounterType;
-use crate::types::game_state::{DistributionUnit, TargetSelectionConstraint};
+use crate::types::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use crate::types::phase::Phase;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::{EtbTapState, Zone};

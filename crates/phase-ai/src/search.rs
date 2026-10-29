@@ -14,6 +14,8 @@ use engine::ai_support::{
     retarget_actions, root_may_yield_adverse_exchange, targeted_exchange_verdict,
     validated_candidate_actions_for_semantic_owner, AiDecisionContract, TargetedExchangeVerdict,
 };
+use engine::game::cost_payability::AbilityCostPayability;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, Duration, Effect, ResolvedAbility,
     StaticDefinition, TargetFilter, TargetRef,
