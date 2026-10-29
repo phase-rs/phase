@@ -917,6 +917,11 @@ fn resolve_all_declined_opponent_may(
             sub_resolved.context = ability.context.clone();
             effects::resolve_carrier_owned_ability_chain(state, &sub_resolved, events, 1, admitted)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        } else if let Some(survivor) = effects::project_optional_decline_ability(state, ability) {
+            // CR 608.2c + CR 608.2d: declining this instruction leaves its
+            // independent later instructions to resolve in written order.
+            effects::resolve_carrier_owned_ability_chain(state, &survivor, events, 1, admitted)
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         }
     }
     Ok(())

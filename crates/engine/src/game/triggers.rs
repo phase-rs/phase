@@ -11680,6 +11680,7 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     // its instruction-result frames still belong to the resolving carrier.
     if state.resolving_stack_entry.is_some()
         && (super::engine_resolution_choices::handles(&state.waiting_for)
+            || super::effects::waits_for_resolution_choice(&state.waiting_for)
             || matches!(
                 state.waiting_for,
                 WaitingFor::CopyRetarget { .. }

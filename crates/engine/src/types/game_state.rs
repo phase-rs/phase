@@ -16714,7 +16714,190 @@ pub(crate) fn retained_forwarded_zone_selection(
     })
 }
 
+fn validate_retained_counter_result_owners(state: &GameState) -> Result<(), String> {
+    let counter_reader_waits_for = |source_id: ObjectId| {
+        state
+            .resolution_stack
+            .ability_continuations()
+            .any(|pending| {
+                pending.chain.source_id == source_id
+                    && pending
+                        .chain
+                        .condition
+                        .as_ref()
+                        .and_then(super::ability::AbilityCondition::counter_removal_event)
+                        .is_some()
+            })
+    };
+    let validate_binding = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
+        if binding.occurrence.0 == 0
+            || !crate::game::effects::counter_removal_binding_is_valid(state, binding)
+        {
+            return Err("counter-removal result binding is missing or incoherent".into());
+        }
+        if state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|owner| {
+                owner.source_id != binding.source.reference.object_id
+                    || owner
+                        .trigger_source
+                        .as_ref()
+                        .is_some_and(|source| source.identity != binding.source)
+                    || owner
+                        .source_ref(state)
+                        .is_some_and(|pin| pin != binding.source.reference)
+            })
+        {
+            return Err("counter-removal ticket disagrees with its resolving owner".into());
+        }
+        Ok(())
+    };
+    let validate_reader = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
+        if !state
+            .resolution_stack
+            .ability_continuations()
+            .any(|pending| {
+                pending.return_result_occurrence == Some(binding.occurrence)
+                    && reads_return_result_id(&pending.chain, binding.result)
+            })
+        {
+            return Err("counter-removal ticket has no exact owned reader continuation".into());
+        }
+        Ok(())
+    };
+    let readerless_producer = |binding: &CounterRemovalResultBinding| {
+        crate::game::effects::readerless_generated_counter_producer(state, binding)
+            .map_err(|error| error.to_string())
+    };
+    let readerless_queue = |queue: &PendingCounterRemovalQueue,
+                            binding: &CounterRemovalResultBinding| {
+        if queue.result_binding.as_ref() == Some(binding)
+            && queue.source_ability_id == binding.source.reference.object_id
+        {
+            readerless_producer(binding)
+        } else {
+            Ok(None)
+        }
+    };
+    if let Some(pending) = &state.pending_replacement {
+        if let ProposedEvent::RemoveCounter {
+            result_binding: Some(binding),
+            object_id,
+            counter_type,
+            ..
+        } = &pending.proposed
+        {
+            validate_binding(binding)?;
+            let producer = if let Some(queue) = state.active_counter_removals().filter(|queue| {
+                queue.in_flight.as_ref().is_some_and(|flight| {
+                    flight.removal.object_id == *object_id
+                        && flight.removal.counter_type == *counter_type
+                })
+            }) {
+                readerless_queue(queue, binding)?
+            } else {
+                None
+            };
+            if producer.is_none() {
+                validate_reader(binding)?;
+            }
+            if !binding
+                .recipient
+                .is_some_and(|pin| pin.object_id == *object_id)
+                || !binding.counters.matches(counter_type)
+            {
+                return Err("pending counter removal disagrees with its bound producer".into());
+            }
+        }
+        if let ProposedEvent::RemoveCounter { result_binding, .. } = &pending.proposed {
+            if result_binding.is_none()
+                && state.resolution_stack.iter().any(|frame| {
+                    matches!(frame, ResolutionFrame::CounterRemovals(queue) if queue.result_binding.is_some())
+                })
+            {
+                return Err("current bound counter proposal is missing its result ticket".into());
+            }
+            if let Some(queue) = state.active_counter_removals() {
+                if queue.in_flight.is_some() && &queue.result_binding != result_binding {
+                    return Err("counter proposal disagrees with its owning queue ticket".into());
+                }
+            }
+        }
+    }
+    if let WaitingFor::ChooseOneOfBranch {
+        context,
+        continuation,
+        source_id,
+        parent_occurrences,
+        ..
+    } = &state.waiting_for
+    {
+        if let Some(binding) = &context.counter_removal_result {
+            validate_binding(binding)?;
+            if readerless_producer(binding)?.is_some() {
+                crate::game::effects::choose_one_of::validate_waiting_result_owner(
+                    state,
+                    &state.waiting_for,
+                )
+                .map_err(|error| error.to_string())?;
+            } else {
+                validate_reader(binding)?;
+            }
+            if binding.source.reference.object_id != *source_id
+                || !matches!(parent_occurrences.occurrences().as_slice(), [(TargetRef::Object(id), Some(pin))]
+                    if Some(*pin) == binding.recipient && *id == pin.object_id)
+            {
+                return Err("counter branch recipient/source disagrees with result".into());
+            }
+        } else if counter_reader_waits_for(*source_id)
+            || continuation.as_deref().is_some_and(|ability| {
+                ability
+                    .condition
+                    .as_ref()
+                    .and_then(super::ability::AbilityCondition::counter_removal_event)
+                    .is_some()
+            })
+        {
+            return Err("counter branch is missing producer authority".into());
+        }
+    }
+    for frame in state.resolution_stack.iter() {
+        match frame {
+            ResolutionFrame::CounterRemovals(queue) => {
+                if let Some(binding) = &queue.result_binding {
+                    validate_binding(binding)?;
+                    if readerless_queue(queue, binding)?.is_none() {
+                        validate_reader(binding)?;
+                    }
+                } else if counter_reader_waits_for(queue.source_ability_id) {
+                    // The owned reader requires its producer's authority even
+                    // when both optional transport copies were omitted.
+                    return Err("counter-removal queue is missing producer authority".into());
+                }
+            }
+            ResolutionFrame::ChooseOneOf(pending) => {
+                if let Some(binding) = &pending.context.counter_removal_result {
+                    validate_binding(binding)?;
+                    if readerless_producer(binding)?.is_some() {
+                        crate::game::effects::choose_one_of::validate_pending_result_owner(
+                            state, pending,
+                        )
+                        .map_err(|error| error.to_string())?;
+                    } else {
+                        validate_reader(binding)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<(), String> {
+    validate_retained_counter_result_owners(state)?;
     state
         .resolution_stack
         .validate_independent_departure_scopes()?;
@@ -17169,72 +17352,6 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         .map(|(summary, _)| summary)
         .map_err(|error| error.to_string())?;
     }
-    let counter_reader_waits_for = |source_id: ObjectId| {
-        state
-            .resolution_stack
-            .ability_continuations()
-            .any(|pending| {
-                pending.chain.source_id == source_id
-                    && pending
-                        .chain
-                        .condition
-                        .as_ref()
-                        .and_then(super::ability::AbilityCondition::counter_removal_event)
-                        .is_some()
-            })
-    };
-    let validate_binding = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
-        if binding.occurrence.0 == 0
-            || !crate::game::effects::counter_removal_binding_is_valid(state, binding)
-        {
-            return Err("counter-removal result binding is missing or incoherent".into());
-        }
-        if state
-            .resolving_stack_entry
-            .as_ref()
-            .and_then(|entry| entry.ability())
-            .is_some_and(|owner| {
-                owner.source_id != binding.source.reference.object_id
-                    || owner
-                        .trigger_source
-                        .as_ref()
-                        .is_some_and(|source| source.identity != binding.source)
-                    || owner
-                        .source_ref(state)
-                        .is_some_and(|pin| pin != binding.source.reference)
-            })
-        {
-            return Err("counter-removal ticket disagrees with its resolving owner".into());
-        }
-        Ok(())
-    };
-    let validate_reader = |binding: &CounterRemovalResultBinding| -> Result<(), String> {
-        if !state
-            .resolution_stack
-            .ability_continuations()
-            .any(|pending| {
-                pending.return_result_occurrence == Some(binding.occurrence)
-                    && reads_return_result_id(&pending.chain, binding.result)
-            })
-        {
-            return Err("counter-removal ticket has no exact owned reader continuation".into());
-        }
-        Ok(())
-    };
-    let readerless_producer = |binding: &CounterRemovalResultBinding| {
-        crate::game::effects::readerless_generated_counter_producer(state, binding)
-            .map_err(|error| error.to_string())
-    };
-    let readerless_queue = |queue: &PendingCounterRemovalQueue,
-                            binding: &CounterRemovalResultBinding| {
-        if queue.result_binding.as_ref() == Some(binding)
-            && queue.source_ability_id == binding.source.reference.object_id
-        {
-            readerless_producer(binding)
-        } else {
-            Ok(None)
-        }
-    };
     if let Some(pending) = &state.pending_replacement {
         if !crate::game::replacement::damage_source_context_coherent(
             state,
@@ -17242,116 +17359,6 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             pending.damage_source_context.as_deref(),
         ) {
             return Err("pending damage source authority is missing or incoherent".into());
-        }
-        if let ProposedEvent::RemoveCounter {
-            result_binding: Some(binding),
-            object_id,
-            counter_type,
-            ..
-        } = &pending.proposed
-        {
-            validate_binding(binding)?;
-            let producer = if let Some(queue) = state.active_counter_removals().filter(|queue| {
-                queue.in_flight.as_ref().is_some_and(|flight| {
-                    flight.removal.object_id == *object_id
-                        && flight.removal.counter_type == *counter_type
-                })
-            }) {
-                readerless_queue(queue, binding)?
-            } else {
-                None
-            };
-            if producer.is_none() {
-                validate_reader(binding)?;
-            }
-            if !binding
-                .recipient
-                .is_some_and(|pin| pin.object_id == *object_id)
-                || !binding.counters.matches(counter_type)
-            {
-                return Err("pending counter removal disagrees with its bound producer".into());
-            }
-        }
-        if let ProposedEvent::RemoveCounter { result_binding, .. } = &pending.proposed {
-            if result_binding.is_none()
-                && state.resolution_stack.iter().any(|frame| {
-                    matches!(frame, ResolutionFrame::CounterRemovals(queue) if queue.result_binding.is_some())
-                })
-            {
-                return Err("current bound counter proposal is missing its result ticket".into());
-            }
-            if let Some(queue) = state.active_counter_removals() {
-                if queue.in_flight.is_some() && &queue.result_binding != result_binding {
-                    return Err("counter proposal disagrees with its owning queue ticket".into());
-                }
-            }
-        }
-    }
-    if let WaitingFor::ChooseOneOfBranch {
-        context,
-        continuation,
-        source_id,
-        parent_occurrences,
-        ..
-    } = &state.waiting_for
-    {
-        if let Some(binding) = &context.counter_removal_result {
-            validate_binding(binding)?;
-            if readerless_producer(binding)?.is_some() {
-                crate::game::effects::choose_one_of::validate_waiting_result_owner(
-                    state,
-                    &state.waiting_for,
-                )
-                .map_err(|error| error.to_string())?;
-            } else {
-                validate_reader(binding)?;
-            }
-            if binding.source.reference.object_id != *source_id
-                || !matches!(parent_occurrences.occurrences().as_slice(), [(TargetRef::Object(id), Some(pin))]
-                    if Some(*pin) == binding.recipient && *id == pin.object_id)
-            {
-                return Err("counter branch recipient/source disagrees with result".into());
-            }
-        } else if counter_reader_waits_for(*source_id)
-            || continuation.as_deref().is_some_and(|ability| {
-                ability
-                    .condition
-                    .as_ref()
-                    .and_then(super::ability::AbilityCondition::counter_removal_event)
-                    .is_some()
-            })
-        {
-            return Err("counter branch is missing producer authority".into());
-        }
-    }
-    for frame in state.resolution_stack.iter() {
-        match frame {
-            ResolutionFrame::CounterRemovals(queue) => {
-                if let Some(binding) = &queue.result_binding {
-                    validate_binding(binding)?;
-                    if readerless_queue(queue, binding)?.is_none() {
-                        validate_reader(binding)?;
-                    }
-                } else if counter_reader_waits_for(queue.source_ability_id) {
-                    // The owned reader requires its producer's authority even
-                    // when both optional transport copies were omitted.
-                    return Err("counter-removal queue is missing producer authority".into());
-                }
-            }
-            ResolutionFrame::ChooseOneOf(pending) => {
-                if let Some(binding) = &pending.context.counter_removal_result {
-                    validate_binding(binding)?;
-                    if readerless_producer(binding)?.is_some() {
-                        crate::game::effects::choose_one_of::validate_pending_result_owner(
-                            state, pending,
-                        )
-                        .map_err(|error| error.to_string())?;
-                    } else {
-                        validate_reader(binding)?;
-                    }
-                }
-            }
-            _ => {}
         }
     }
     for frame in state.resolution_stack.iter() {

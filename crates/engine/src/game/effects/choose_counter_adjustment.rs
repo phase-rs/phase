@@ -757,24 +757,24 @@ mod tests {
         (runner, source, recipient)
     }
 
+    #[track_caller]
     fn restore_counter_input(state: &GameState, ingress: usize) -> GameState {
         use crate::types::game_state::TrustedGameStateEnvelope;
         match ingress {
-            0 => serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap(),
+            0 => serde_json::from_value(serde_json::to_value(state).unwrap()),
             1 => serde_json::from_value::<TrustedGameStateEnvelope>(
                 serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
             )
-            .unwrap()
-            .into_game_state(),
+            .map(TrustedGameStateEnvelope::into_game_state),
             _ => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
                 serde_json::to_value(
                     crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
                 )
                 .unwrap(),
             )
-            .unwrap()
-            .into_game_state(),
+            .map(crate::types::resolution::ResolutionStateWire::into_game_state),
         }
+        .unwrap_or_else(|error| panic!("counter restore ingress {ingress}: {error}"))
     }
 
     fn counter_prompt_root(state: &GameState) -> &ResolvedAbility {
@@ -910,8 +910,10 @@ mod tests {
         assert_eq!(state.players[1].life, p1_life);
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert!(state.stack.is_empty());
+        assert!(state.resolving_stack_entry.is_none());
         assert!(state.resolution_stack.is_empty());
         assert!(state.return_result_frames.is_empty());
+        assert!(state.pending_replacement.is_none());
     }
 
     fn settle_latched_three(
@@ -951,13 +953,62 @@ mod tests {
         }
     }
 
-    fn assert_counter_refuses_intact(mut hostile: GameState, actor: PlayerId, action: GameAction) {
+    #[track_caller]
+    fn assert_counter_refuses_intact(
+        mut hostile: GameState,
+        actor: PlayerId,
+        action: GameAction,
+        case: &str,
+    ) {
         assert!(
-            serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap()).is_err()
+            serde_json::from_value::<GameState>(serde_json::to_value(&hostile).unwrap()).is_err(),
+            "{case}: raw decode must refuse {actor:?} / {action:?}"
         );
         let before = hostile.clone();
-        assert!(apply(&mut hostile, actor, action).is_err());
-        assert_eq!(hostile, before);
+        assert!(
+            apply(&mut hostile, actor, action.clone()).is_err(),
+            "{case}: public action must refuse {actor:?} / {action:?}"
+        );
+        assert_eq!(
+            hostile, before,
+            "{case}: refused action leaves the whole state and RNG intact"
+        );
+    }
+
+    fn restore_counter_without_cached_snapshot(state: &GameState, ingress: usize) -> GameState {
+        let WaitingFor::ChooseOneOfBranch { context, .. } = &state.waiting_for else {
+            panic!("snapshot recovery requires the genuine generated prompt")
+        };
+        let ticket = context.counter_removal_result.as_ref().unwrap();
+        let expected = state.return_result_frames[&ticket.occurrence].clone();
+        assert!(expected.admitted_program.is_some());
+        assert!(expected.declarations.is_some());
+        assert_eq!(expected.process, ticket.process);
+        assert!(state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some());
+        let mut torn = state.clone();
+        torn.return_result_frames
+            .get_mut(&ticket.occurrence)
+            .unwrap()
+            .admitted_program = None;
+        let saved = serde_json::to_value(&torn).unwrap();
+        let recovered = restore_counter_input(&torn, ingress);
+        assert_eq!(
+            recovered.return_result_frames[&ticket.occurrence], expected,
+            "ingress {ingress}: recover the complete root, declaration map, process and results"
+        );
+        assert_eq!(recovered.resolving_stack_entry, state.resolving_stack_entry);
+        assert_eq!(recovered.waiting_for, state.waiting_for);
+        assert_eq!(recovered.rng.get_word_pos(), state.rng.get_word_pos());
+        assert_eq!(
+            serde_json::to_value(&torn).unwrap(),
+            saved,
+            "ingress {ingress}: recovery must not mutate the saved input"
+        );
+        recovered
     }
 
     #[test]
@@ -991,7 +1042,12 @@ mod tests {
         };
         assert!(context.optional_effect_performed);
         context.optional_effect_performed = false;
-        assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 1 });
+        assert_counter_refuses_intact(
+            hostile,
+            P0,
+            GameAction::ChooseBranch { index: 1 },
+            "plain optional performed",
+        );
         settle_latched_three(runner, P0, P0, source, recipient, 20);
         let mut declined = GameRunner::from_state(gate);
         declined
@@ -1041,7 +1097,12 @@ mod tests {
             unreachable!()
         };
         context.accepting_player = Some(P0);
-        assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 1 });
+        assert_counter_refuses_intact(
+            hostile,
+            P0,
+            GameAction::ChooseBranch { index: 1 },
+            "AnyOpponent accepting controller",
+        );
         settle_latched_three(runner, P0, P0, source, recipient, 20);
         let mut declined = GameRunner::from_state(gate);
         declined
@@ -1121,7 +1182,12 @@ mod tests {
             } else {
                 context.optional_effect_performed = false;
             }
-            assert_counter_refuses_intact(hostile, actor, GameAction::ChooseBranch { index: 1 });
+            assert_counter_refuses_intact(
+                hostile,
+                actor,
+                GameAction::ChooseBranch { index: 1 },
+                &format!("nested scoped={scoped}"),
+            );
             settle_latched_three(runner, actor, P0, source, recipient, 20);
         }
     }
@@ -1152,6 +1218,31 @@ mod tests {
                 runner.state().waiting_for,
                 WaitingFor::UnlessPayment { player: P1, .. }
             ));
+            let WaitingFor::UnlessPayment {
+                return_result_occurrence: Some(occurrence),
+                pending_effect,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("sibling={sibling}: actual owned payment prompt")
+            };
+            let expected_frame = runner.state().return_result_frames[occurrence].clone();
+            assert!(expected_frame
+                .admitted_program
+                .as_ref()
+                .unwrap()
+                .unless_pay
+                .is_some());
+            assert_eq!(expected_frame.process, pending_effect.return_result_process);
+            assert!(runner.state().resolving_stack_entry.is_some());
+            for ingress in 0..3 {
+                let restored = restore_counter_input(runner.state(), ingress);
+                assert_eq!(
+                    restored.return_result_frames[occurrence], expected_frame,
+                    "sibling={sibling}, payment ingress={ingress}: retain the full payment owner"
+                );
+                assert_eq!(restored.waiting_for, runner.state().waiting_for);
+            }
             let gate = restore_counter_input(runner.state(), 0);
             let before = runner.state().clone();
             assert!(apply(
@@ -1167,23 +1258,28 @@ mod tests {
                 .unwrap();
             assert!(counter_prompt_root(runner.state()).unless_pay.is_some());
             assert_complete_counter_prompt(runner.state(), P0, source, recipient);
-            let mut missing_owner = runner.state().clone();
-            let WaitingFor::ChooseOneOfBranch { context, .. } = &missing_owner.waiting_for else {
-                unreachable!()
-            };
-            let occurrence = context.counter_removal_result.as_ref().unwrap().occurrence;
-            missing_owner
-                .return_result_frames
-                .get_mut(&occurrence)
-                .unwrap()
-                .admitted_program = None;
-            assert_counter_refuses_intact(missing_owner, P0, GameAction::ChooseBranch { index: 1 });
+            for ingress in 0..3 {
+                let recovered = restore_counter_without_cached_snapshot(runner.state(), ingress);
+                settle_latched_three(
+                    GameRunner::from_state(recovered),
+                    P0,
+                    P0,
+                    source,
+                    recipient,
+                    if sibling { 19 } else { 20 },
+                );
+            }
             let mut hostile = runner.state().clone();
             let WaitingFor::ChooseOneOfBranch { context, .. } = &mut hostile.waiting_for else {
                 unreachable!()
             };
             context.optional_effect_performed = !context.optional_effect_performed;
-            assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 1 });
+            assert_counter_refuses_intact(
+                hostile,
+                P0,
+                GameAction::ChooseBranch { index: 1 },
+                &format!("unless sibling={sibling}: performed"),
+            );
             settle_latched_three(
                 runner,
                 P0,
@@ -1297,7 +1393,12 @@ mod tests {
                 2 => *source_id = recipient,
                 _ => context.counter_removal_result.as_mut().unwrap().recipient = None,
             }
-            assert_counter_refuses_intact(hostile, P1, GameAction::ChooseBranch { index: 1 });
+            assert_counter_refuses_intact(
+                hostile,
+                P1,
+                GameAction::ChooseBranch { index: 1 },
+                &format!("scoped corruption={corruption}"),
+            );
         }
         settle_latched_three(runner, P1, P1, source, recipient, 20);
     }
@@ -1321,17 +1422,31 @@ mod tests {
             &producer,
             ReturnResultId(7)
         ));
+        assert_eq!(runner.state().players[0].hand.len(), 3);
+        for n in 0..4 {
+            create_object(
+                runner.state_mut(),
+                CardId(96_000 + n),
+                P0,
+                format!("Later readerless input {n}"),
+                Zone::Hand,
+            );
+        }
+        // CR 608.2h: restoring the original latch cannot consult this later hand.
+        assert_eq!(runner.state().players[0].hand.len(), 7);
         for ingress in 0..3 {
             restore_counter_input(runner.state(), ingress);
         }
-        for corruption in 0..6 {
+        let recovered_prompts: Vec<_> = (0..3)
+            .map(|ingress| restore_counter_without_cached_snapshot(runner.state(), ingress))
+            .collect();
+        for corruption in 1..6 {
             let mut hostile = runner.state().clone();
             let frame = hostile
                 .return_result_frames
                 .get_mut(&ticket.occurrence)
                 .unwrap();
             match corruption {
-                0 => frame.admitted_program = None,
                 1 => frame.declarations.as_mut().unwrap().clear(),
                 2 => frame.admitted_program.as_mut().unwrap().source_id = recipient,
                 3 => {
@@ -1355,38 +1470,147 @@ mod tests {
                     .unwrap()
                     .bind_return_result_process(None),
             }
-            assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 0 });
+            assert_counter_refuses_intact(
+                hostile,
+                P0,
+                GameAction::ChooseBranch { index: 0 },
+                &format!("readerless corruption={corruption}"),
+            );
         }
-        runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::ReplacementChoice { .. }
-        ));
-        let queue = runner
-            .state()
-            .active_counter_removals()
-            .expect("actual removal queue");
-        assert_eq!(queue.source_ability_id, source);
-        assert_eq!(queue.result_binding.as_ref(), Some(&ticket));
-        assert!(queue.in_flight.is_some());
-        assert!(
-            matches!(runner.state().pending_replacement.as_ref().map(|pending| &pending.proposed),
-            Some(crate::types::proposed_event::ProposedEvent::RemoveCounter { result_binding: Some(binding), .. }) if binding == &ticket)
-        );
-        let mut foreign = runner.state().clone();
-        foreign
-            .active_counter_removals_mut()
+        // Erase actual invocation custody as well as its cached snapshot. The
+        // ticket, declaration/result records and latched branches remain intact.
+        let mut lost = runner.state().clone();
+        lost.return_result_frames
+            .get_mut(&ticket.occurrence)
             .unwrap()
-            .source_ability_id = recipient;
-        assert_counter_refuses_intact(foreign, P0, GameAction::ChooseReplacement { index: 1 });
+            .admitted_program = None;
+        assert!(lost.resolving_stack_entry.take().is_some());
+        let continuation = lost.take_active_ability_continuation().unwrap().unwrap();
+        assert_eq!(
+            continuation.return_result_occurrence,
+            Some(ticket.occurrence)
+        );
+        assert_eq!(continuation.chain.return_result_process, ticket.process);
+        assert_eq!(continuation.chain.source_id, source);
+        let WaitingFor::ChooseOneOfBranch { continuation, .. } = &mut lost.waiting_for else {
+            unreachable!()
+        };
+        *continuation = None;
+        assert!(lost.stack.is_empty() && lost.resolution_stack.is_empty());
+        assert!(lost.pending_cast.is_none() && lost.pending_replacement.is_none());
+        assert!(lost.pending_triggered_mana_resume.is_none());
+        assert!(lost.pending_die_roll_instruction.is_none());
+        assert!(lost.pending_scoped_library_search.is_none());
+        assert!(lost.pending_player_scope_sacrifice_choice.is_none());
+        assert!(lost.pending_player_scope_unless_payment.is_none());
+        assert!(lost.pending_discard_batch.is_none());
+        assert!(lost.pending_library_search_delivery.is_none());
+        assert!(lost.pending_cost_move_resume.is_none());
+        assert!(lost.pending_deferred_life_cost_resume.is_none());
+        assert_eq!(
+            crate::types::game_state::retained_result_waits(&lost).len(),
+            1
+        );
+        assert!(lost.waiting_for.continued_mana_ability().is_none());
+        assert_eq!(lost.return_result_frames.len(), 1);
+        let lost_frame = &lost.return_result_frames[&ticket.occurrence];
+        let original_frame = &runner.state().return_result_frames[&ticket.occurrence];
+        assert_eq!(lost_frame.declarations, original_frame.declarations);
+        assert_eq!(lost_frame.results, original_frame.results);
+        assert_eq!(lost_frame.process, original_frame.process);
+        let WaitingFor::ChooseOneOfBranch {
+            branches,
+            context,
+            parent_occurrences,
+            ..
+        } = &lost.waiting_for
+        else {
+            unreachable!()
+        };
+        let WaitingFor::ChooseOneOfBranch {
+            branches: original_branches,
+            parent_occurrences: original_occurrences,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            unreachable!()
+        };
+        assert_eq!(branches, original_branches);
+        assert_eq!(parent_occurrences, original_occurrences);
+        assert_eq!(context.counter_removal_result.as_ref(), Some(&ticket));
+        let saved = serde_json::to_value(&lost).unwrap();
         for ingress in 0..3 {
-            let mut resumed =
-                GameRunner::from_state(restore_counter_input(runner.state(), ingress));
-            resumed
-                .act(GameAction::ChooseReplacement { index: 1 })
-                .unwrap();
-            resumed.advance_until_stack_empty();
-            assert_counter_complete(resumed.state(), recipient, 2, 20);
+            let error = match ingress {
+                0 => serde_json::from_value::<GameState>(saved.clone()).unwrap_err(),
+                1 => serde_json::from_value::<crate::types::game_state::TrustedGameStateEnvelope>(
+                    serde_json::to_value(
+                        crate::types::game_state::TrustedGameStateEnvelope::capture(lost.clone()),
+                    )
+                    .unwrap(),
+                )
+                .unwrap_err(),
+                _ => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(
+                            lost.clone(),
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .unwrap_err(),
+            };
+            assert!(
+                error.to_string().contains(
+                    "unrecoverable full program origin after retained authority recovery"
+                ),
+                "ingress {ingress}: precise full-origin loss: {error}"
+            );
+        }
+        assert_eq!(serde_json::to_value(&lost).unwrap(), saved);
+        assert_counter_refuses_intact(
+            lost,
+            P0,
+            GameAction::ChooseBranch { index: 0 },
+            "full origin erased",
+        );
+        for prompt in std::iter::once(runner.state().clone()).chain(recovered_prompts) {
+            runner = GameRunner::from_state(prompt);
+            runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            let queue = runner
+                .state()
+                .active_counter_removals()
+                .expect("actual removal queue");
+            assert_eq!(queue.source_ability_id, source);
+            assert_eq!(queue.result_binding.as_ref(), Some(&ticket));
+            assert!(queue.in_flight.is_some());
+            assert!(
+                matches!(runner.state().pending_replacement.as_ref().map(|pending| &pending.proposed),
+            Some(crate::types::proposed_event::ProposedEvent::RemoveCounter { result_binding: Some(binding), .. }) if binding == &ticket)
+            );
+            let mut foreign = runner.state().clone();
+            foreign
+                .active_counter_removals_mut()
+                .unwrap()
+                .source_ability_id = recipient;
+            assert_counter_refuses_intact(
+                foreign,
+                P0,
+                GameAction::ChooseReplacement { index: 1 },
+                "foreign actual removal queue source",
+            );
+            for ingress in 0..3 {
+                let mut resumed =
+                    GameRunner::from_state(restore_counter_input(runner.state(), ingress));
+                resumed
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                resumed.advance_until_stack_empty();
+                assert_counter_complete(resumed.state(), recipient, 2, 20);
+            }
         }
     }
 
@@ -1435,7 +1659,12 @@ mod tests {
                     unreachable!()
                 };
                 *continuation = None;
-                assert_counter_refuses_intact(hostile, P0, GameAction::ChooseBranch { index: 0 });
+                assert_counter_refuses_intact(
+                    hostile,
+                    P0,
+                    GameAction::ChooseBranch { index: 0 },
+                    "true reader erased at generated prompt",
+                );
                 runner.act(GameAction::ChooseBranch { index: 0 }).unwrap();
             }
             assert!(matches!(
@@ -1446,7 +1675,12 @@ mod tests {
             let queue = erased.take_active_counter_removals().unwrap().unwrap();
             assert!(erased.take_active_ability_continuation().unwrap().is_some());
             erased.push_counter_removals(queue);
-            assert_counter_refuses_intact(erased, P0, GameAction::ChooseReplacement { index: 1 });
+            assert_counter_refuses_intact(
+                erased,
+                P0,
+                GameAction::ChooseReplacement { index: 1 },
+                &format!("true reader erased below queue: generated={generated}"),
+            );
             for ingress in 0..3 {
                 let mut resumed =
                     GameRunner::from_state(restore_counter_input(runner.state(), ingress));
@@ -1524,7 +1758,12 @@ mod tests {
             unreachable!()
         };
         *expected_return_result_process = Some(ReturnResultProcessId(99));
-        assert_counter_refuses_intact(wrong_process, P0, GameAction::ChooseBranch { index: 1 });
+        assert_counter_refuses_intact(
+            wrong_process,
+            P0,
+            GameAction::ChooseBranch { index: 1 },
+            "legacy None versus wrong expected Some process",
+        );
         for ingress in 0..3 {
             let mut resumed = restore_counter_input(&state, ingress);
             apply(&mut resumed, P0, GameAction::ChooseBranch { index: 1 }).unwrap();
@@ -1646,14 +1885,18 @@ mod tests {
                     execute.sub_ability.as_mut().unwrap().sub_link =
                         SubAbilityLink::SequentialSibling;
                 }
+                let replacement =
+                    ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::Draw)
+                        .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                        .execute(execute);
+                assert_eq!(
+                    replacement.draw_scope,
+                    Some(crate::types::ability::DrawReplacementScope::IndividualDraw)
+                );
+                replacement.validate_draw_scope().unwrap();
                 let source = scenario
                     .add_artifact_from_oracle(P0, "Supplemental draw counter replacement", "")
-                    .with_replacement_definition(
-                        ReplacementDefinition::new(
-                            crate::types::replacements::ReplacementEvent::Draw,
-                        )
-                        .execute(execute),
-                    )
+                    .with_replacement_definition(replacement)
                     .id();
                 let recipient = source;
                 scenario.with_counter(recipient, CounterType::Generic("charge".into()), 5);
