@@ -16996,6 +16996,12 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                             ),
                         )
                     })?;
+                    crate::game::effects::owned_cursor_declarations(
+                        state,
+                        frame.pending.return_result_occurrence,
+                        &frame.pending.chain,
+                    )
+                    .map_err(|error| error.to_string())?;
                 }
                 validate_retained_result_readers(
                     state,

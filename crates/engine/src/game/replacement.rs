@@ -12232,8 +12232,9 @@ fn chained_enter_tapped_commute_class(def: &AbilityDefinition) -> Option<Commute
 /// guaranteed no-op — it can carry an event-modifying side field
 /// (`quantity_modification` / `mana_modification` / `damage_modification`) that
 /// mutates the event's count, mana type, or damage amount (Doubling Season,
-/// Hardened Scales, Contamination, Furnace of Rath). When `execute` is present,
-/// inspects the root `Effect` and walks `sub_ability` directly —
+/// Hardened Scales, Contamination, Furnace of Rath). Combined side fields and
+/// `execute` are conservatively material. Without side fields, inspects the root
+/// `Effect` and walks `sub_ability` directly —
 /// `first_non_modifier_ability` skips over `ChangeZone` links, so it cannot
 /// surface the material redirect case. Unrecognized effect shapes default to
 /// `Unconditional` (conservative — never auto-resolve a possibly order-sensitive
@@ -12344,6 +12345,16 @@ fn candidate_materiality(
     // `choosable_replacement_candidates` limits its competitors to other CR 616.1b
     // candidates, so this arm decides that two such overrides are offered as a choice.
     if repl_def.enters_under.is_some() {
+        return CandidateMateriality::Unconditional;
+    }
+    // CR 616.1: a side-field modifier remains operative when an execute body
+    // also runs. The combined effect is not proved to be a single commuting
+    // write, even when that body alone is an as-enters disjoint choice.
+    if repl_def.execute.is_some()
+        && (repl_def.quantity_modification.is_some()
+            || repl_def.mana_modification.is_some()
+            || repl_def.damage_modification.is_some())
+    {
         return CandidateMateriality::Unconditional;
     }
     // CR 616.1 + CR 614.12a: an as-enters life payment writes NO event field —
