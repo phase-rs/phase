@@ -2331,6 +2331,14 @@ pub(crate) fn clear_return_result_frames_if_idle(state: &mut GameState) {
 }
 
 fn retire_unreferenced_return_result_frames(state: &mut GameState) {
+    if state.return_result_frames.is_empty()
+        || crate::types::game_state::validate_retained_zone_result_owners(state).is_err()
+    {
+        // Failed actual-carrier validation is a refusal to retire, not proof
+        // of deadness. Preserve the held owner so public/canonical admission
+        // can return its original error before any prompt is consumed.
+        return;
+    }
     let live = crate::types::game_state::live_return_result_occurrences(state);
     state.return_result_frames.retain(|id, _| live.contains(id));
 }
@@ -64674,11 +64682,11 @@ mod tests {
         );
         let mut ability = build_resolved_from_def(&definition, source, P0);
         ability.declares_return_result = Some(ReturnResultId(17));
-        with_instruction_result_entry(&mut state, &ability, InstructionResultEntry::Independent, |state, body, _declarations| {
+        with_instruction_result_entry(&mut state, &ability, InstructionResultEntry::Independent, |state, body, declarations| {
             let occurrence = state.active_return_result_occurrence.unwrap();
             assert!(!state.return_result_frames[&occurrence].results.contains_key(&ReturnResultId(17)));
             assert!(optional_effect_is_infeasible(state, body));
-            resolve_chain_body(state, body, &mut Vec::new(), 1, None)?;
+            resolve_owned_chain_body(state, body, &mut Vec::new(), 1, None, declarations)?;
             assert!(matches!(state.return_result_frames[&occurrence].results.get(&ReturnResultId(17)), Some(InstructionResult::ZoneChanges(records)) if records.is_empty()));
             assert_eq!(state.objects[&drawn].zone, Zone::Hand);
             assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
