@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 #[cfg(test)]
 use crate::types::ability::TapStateChange;
 

@@ -1,6 +1,7 @@
 //! Source-identified chosen-target groups, exercised through cast and resolution.
 
 use engine::game::ability_utils::build_resolved_from_def_with_targets;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_zone;
 use engine::parser::oracle::parse_oracle_text;

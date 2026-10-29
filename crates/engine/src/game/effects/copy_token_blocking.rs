@@ -1,4 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::{combat, targeting};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,

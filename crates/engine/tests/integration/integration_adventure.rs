@@ -8,7 +8,7 @@
 //! - Full Bonecrusher Giant lifecycle
 
 use engine::ai_support::legal_actions;
-use engine::game::game_object::BackFaceData;
+use engine::game::game_object::{BackFaceData, ObjectIncarnationRefExt};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
 use engine::types::ability::{

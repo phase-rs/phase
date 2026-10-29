@@ -5,6 +5,7 @@ use engine::game::combat::{
     CombatRequirement, CombatState, DamageAssignment, DamageTarget,
 };
 use engine::game::dungeon::DungeonProgress;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::game_object::{BackFaceData, GameObject, ProtectionStartSnapshot};
 use engine::game::printed_cards::intrinsic_copiable_values;
 use engine::types::ability::{

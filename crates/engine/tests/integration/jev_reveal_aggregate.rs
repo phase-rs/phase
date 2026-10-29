@@ -1,6 +1,7 @@
 //! Ordinary instruction-wide reveal membership. All synthetic texts are explicit
 //! consumer fixtures; printed siblings retain their complete pinned Oracle text.
 use engine::game::derived_views::ClientGameStateRef;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::parser::parse_oracle_text;

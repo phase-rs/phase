@@ -1,4 +1,5 @@
 //! U12 mandatory adjustment and U13 exact actual-removal reflexive delivery.
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CounterAdjustment, Effect, EffectKind, ObjectScope,

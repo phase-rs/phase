@@ -1,4 +1,5 @@
 use engine::game::game_object::AttachTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};

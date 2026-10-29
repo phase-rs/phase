@@ -2,7 +2,7 @@
 use super::jev_spell_history_context::printed_db;
 use super::support::shared_card_export_json;
 use engine::database::card_db::CardDatabase;
-use engine::game::game_object::BackFaceData;
+use engine::game::game_object::{BackFaceData, ObjectIncarnationRefExt};
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;

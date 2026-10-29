@@ -35,6 +35,7 @@
 //!   (CR 603.7d) over the exact token IDs created here, rather than Myriad's
 //!   end-of-combat exile.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::players;
 use crate::types::ability::{
     ContinuousModification, DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect,

@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
     CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
@@ -10681,6 +10682,7 @@ mod tests {
             resolve_next_with_limit, resolve_proven_inert_trigger_batch_with_proof_hook,
             resolve_top, run_member_abilities, self_counter_run_len,
         };
+        use crate::game::game_object::ObjectIncarnationRefExt;
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
         use crate::game::triggers;

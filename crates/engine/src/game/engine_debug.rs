@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     ContinuousModification, Effect, EntryAttackDestination, LibraryPosition, QuantityExpr,
     ResolvedAbility, TargetFilter, TargetRef, TokenAttackDestination,

@@ -4,6 +4,7 @@ use crate::game::effects::deal_damage::{
 };
 use crate::game::effects::life::ReplacementDeferred;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement;
 use crate::game::sba;
 use crate::game::triggers;

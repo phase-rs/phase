@@ -1,5 +1,6 @@
 use super::super::engine::apply_as_current;
 use super::*;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::zones;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;

@@ -25,6 +25,7 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::effects::deal_damage;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::{filter_state_for_unseated_viewer, filter_state_for_viewer};
 use engine::types::ability::{

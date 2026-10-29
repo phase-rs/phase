@@ -1,4 +1,5 @@
 use crate::game::filter::FilterContext;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting;
 use crate::types::ability::{
     Chooser, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,

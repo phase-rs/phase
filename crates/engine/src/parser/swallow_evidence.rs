@@ -545,6 +545,22 @@ impl UnitEvidence {
         })
     }
 
+    /// How many nodes deserialize as `T` and satisfy `pred`?
+    ///
+    /// Same tagging contract as [`Self::any`]. For detectors that must match each
+    /// Oracle clause to its own representation, so one represented clause can't
+    /// vouch for a second clause of the same shape.
+    pub(super) fn count<T: DeserializeOwned>(&self, pred: impl Fn(&T) -> bool) -> usize {
+        let mut found = 0;
+        Self::visit(&self.root, None, &mut |node, _| {
+            if T::deserialize(node).is_ok_and(|value| pred(&value)) {
+                found += 1;
+            }
+            false
+        });
+        found
+    }
+
     /// Does any node stored at one of `keys` deserialize as `T` and satisfy `pred`?
     ///
     /// Key anchoring is **mandatory** for externally tagged enums, whose unit variants are

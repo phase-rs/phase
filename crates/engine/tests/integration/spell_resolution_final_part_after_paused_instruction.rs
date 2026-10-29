@@ -47,6 +47,7 @@
 //!   stack, and leaves the game with its departing owner.
 
 use engine::game::engine::apply;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;

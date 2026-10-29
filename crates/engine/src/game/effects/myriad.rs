@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::{combat, players};
 use crate::types::ability::{
     DelayedTriggerCondition, DelayedTriggerKind, Effect, EffectError, QuantityExpr,

@@ -82,6 +82,7 @@ pub(crate) fn goad_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TargetRef,

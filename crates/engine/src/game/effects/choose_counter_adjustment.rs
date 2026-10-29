@@ -16,6 +16,7 @@
 use super::counters::{
     preview_counter_addition, remove_counter_optional_is_infeasible, CounterAdditionPreview,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::{
     quantity_expr_uses_recipient, resolve_quantity_with_targets,
     resolve_quantity_with_targets_and_recipient,

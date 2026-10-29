@@ -3,6 +3,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+use crate::game::cost_payability::AbilityCostPayability;
+use crate::game::filter::ReplacementDefinitionFilterExt;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     filter_contains, AbilityCost, AbilityDefinition, CastingPermission, ChoiceType,
     ChosenAttribute, CoinFlipRun, CombatDamageScope, ContinuousModification, ControllerRef,

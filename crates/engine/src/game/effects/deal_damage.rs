@@ -8,6 +8,7 @@ use crate::game::effects::{
     append_to_pending_continuation_owned, mark_pending_continuation_parent,
 };
 use crate::game::filter;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::keywords;
 use crate::game::quantity::{
     quantity_expr_uses_recipient, resolve_quantity_with_targets,

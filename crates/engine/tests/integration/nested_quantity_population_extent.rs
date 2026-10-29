@@ -1,4 +1,5 @@
 //! Complete relative populations at their ordinary modal spell consumer.
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;

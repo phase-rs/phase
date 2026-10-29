@@ -2,6 +2,7 @@
 //! Completed creation results feed ordinary delayed instructions.
 
 use engine::game::combat::AttackTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ShieldKind, TargetRef};
 use engine::types::actions::GameAction;

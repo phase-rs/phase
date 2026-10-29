@@ -8452,6 +8452,7 @@ fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usiz
 
 #[cfg(test)]
 mod tests {
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class

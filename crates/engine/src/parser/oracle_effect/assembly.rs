@@ -32,7 +32,7 @@ use crate::types::ability::{
     SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
     TapStateChange, TargetFilter, TypedFilter,
 };
-use crate::types::game_state::TargetSelectionConstraint;
+use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
 
 use super::conditions::ability_condition_to_static_condition;

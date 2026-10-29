@@ -23,7 +23,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerRelation, PlayerScope, PtValue, QuantityExpr, SiblingCondition,
     StaticCondition, StaticDefinition, SubAbilityLink, TargetFilter, TargetReadOrigin, TypedFilter,
 };
-use crate::types::game_state::DayNight;
+use crate::types::game_state_kinds::DayNight;
 use crate::types::keywords::Keyword;
 use crate::types::phase::Phase;
 use crate::types::statics::{ProhibitionScope, StaticMode};

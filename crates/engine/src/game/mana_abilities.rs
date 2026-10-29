@@ -1,10 +1,14 @@
+use crate::game::cost_payability::AbilityCostLegPayability;
+use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::functioning_abilities::static_kind_present;
+use crate::game::game_object::ObjectIncarnationRefExt;
+pub use crate::types::ability::is_mana_ability;
 use crate::types::ability::{
-    chain_moves_card_to_or_from_library, cost_has_component, cost_moves_card_to_or_from_library,
-    is_chosen_remove_counter_cost_count, AbilityCondition, AbilityCost, AbilityDefinition,
-    CardSelectionMode, ChoiceValue, ChosenAttribute, ContinuousModification,
-    CostPaidObjectSnapshot, Effect, ManaProduction, QuantityExpr, QuantityRef, ResolvedAbility,
-    TapCreaturesSelectionMode, TargetFilter, REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
+    cost_has_component, is_chosen_remove_counter_cost_count, produces_mana_on_activation,
+    AbilityCondition, AbilityCost, AbilityDefinition, CardSelectionMode, ChoiceValue,
+    ChosenAttribute, ContinuousModification, CostPaidObjectSnapshot, Effect, ManaProduction,
+    QuantityExpr, QuantityRef, ResolvedAbility, TapCreaturesSelectionMode, TargetFilter,
+    REMOVE_COUNTER_COST_ALL, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::{ActivatedAbilityKind, BoundActivationCost, GameEvent, ManaTapState};
@@ -60,105 +64,6 @@ pub(crate) enum ManaPayabilityMode {
     Current,
     /// Planning mode: mana sub-costs are deferred; other costs checked now.
     Planning,
-}
-
-/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
-/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
-/// fourth criterion ("its cost and effect don't move any card to or from a
-/// library"), which is why this is NOT the mana-ability test and must never be
-/// used for activation routing — use [`is_mana_ability`] for that.
-///
-/// This exists because [`is_renewable_mana_ability`] asks a different question:
-/// "is this permanent part of a standing manabase?" A Millikin
-/// ("{T}, Mill a card: Add {C}") stops being a rules mana ability under the
-/// library clause but does not stop being a manabase permanent. Composing the
-/// development predicate on the rules predicate would delete Millikin, Deranged
-/// Assistant, and Codie from `phase-ai`'s `is_intrinsic_mana_source` ->
-/// `card_value::mana_role` -> mulligan `keep_tier`, for a reason unrelated to
-/// manabase development.
-///
-/// CR 605.3b: Mana abilities produce mana and resolve immediately without using
-/// the stack.
-/// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
-/// `ManaTargetRole` naming its recipient and/or count-source player targets;
-/// any declared role means the ability targets and must use the stack. The
-/// `multi_target` mechanism is checked alongside it.
-fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
-    // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
-    // declared filters: ANY declared role — recipient or count source — means
-    // the ability names a target and therefore uses the stack (Jeska's Will
-    // mode 1: "Add {R} for each card in target opponent's hand").
-    // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
-    // makes this not-a-mana-ability under today's behavior, and this change
-    // must not widen mana-ability status for any shipping card.
-    let target_attached = match &*ability_def.effect {
-        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
-        _ => return false,
-    };
-    // CR 605.1a: A targeted mana-producing ability is not a mana ability.
-    // Reject both the explicit `multi_target` mechanism and the embedded
-    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
-    // card in target opponent's hand" — the spell targets, so it must use the
-    // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
-        return false;
-    }
-    // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
-    // that happens to add mana — e.g. Chandra, Bold Pyromancer's `[+1]: Add
-    // {R}{R}` — is NOT a mana ability: it uses the stack and obeys loyalty-ability
-    // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
-    // off the instant-speed mana-ability path.
-    // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
-    if cost_has_component(&ability_def.cost, |c| {
-        matches!(c, AbilityCost::Loyalty { .. })
-    }) {
-        return false;
-    }
-    true
-}
-
-/// CR 605.1a: the single authority for "is this activated ability a mana
-/// ability?" — all four criteria.
-///
-/// CR 605.1a (final sentence): "Do not take into account replacement effects
-/// that may apply, other than self-replacement effects, when evaluating these
-/// criteria." This function is a pure function of the printed
-/// `AbilityDefinition` AST — it takes no `&GameState` and therefore CANNOT
-/// observe a replacement effect. That purity IS the implementation of the
-/// clause, not an accident of the signature: do NOT add a `&GameState`
-/// parameter or consult the replacement registry here. Self-replacement effects
-/// (CR 614.15), which the rule DOES admit, are printed on the ability itself and
-/// so are already in the AST this function reads — see the
-/// `Effect::Counter { countered_spell_zone }` arm of
-/// `Effect::moves_card_to_or_from_library`, which counts Memory Lapse's
-/// "instead" precisely because it is a self-replacement effect.
-///
-/// CR 605.2 is the second reason the signature must stay pure: "A mana ability
-/// remains a mana ability even if the game state doesn't allow it to produce
-/// mana." A classification that could read game state would invite exactly the
-/// state-dependent answer CR 605.2 forbids. (This is also why `Effect::Dig` is
-/// unconditionally true: its only non-moving configuration is state-dependent.)
-pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    produces_mana_on_activation(ability_def)
-        // CR 605.1a: "...and its cost and effect don't move any card to or from
-        // a library." Chromatic Sphere ("{1}, {T}, Sacrifice this artifact: Add
-        // one mana of any color. Draw a card.") is the canonical effect case;
-        // Millikin ("{T}, Mill a card: Add {C}") is the cost-side case.
-        //
-        // The cost axis runs off its OWN walk, not the root cost alone: CR
-        // 602.1a scopes "its cost" to the activation cost, but CR 118.12a ->
-        // CR 118.12 makes an `unless [player] pays` action a cost paid AT
-        // RESOLUTION, which CR 608.2c places under "its effect" — as are the
-        // costs on chain links.
-        //
-        // NOT reclassified, and each for a different CR reason:
-        //  - Chromatic Star  — the draw is a separate ChangesZone trigger.
-        //  - Barbed Sextant  — CR 603.7a, a delayed triggered ability.
-        //  - Shaun & Rebecca — CR 603.12, a reflexive triggered ability.
-        //  - Gilanra         — CR 603.3, a TriggerOnSpend mana-spend grant.
-        //  - The Secret Lair — CR 701.22a, Scry reorders WITHIN a library.
-        && !cost_moves_card_to_or_from_library(ability_def)
-        && !chain_moves_card_to_or_from_library(ability_def)
 }
 
 /// CR 701.21a: Detects when this ability's cost sacrifices **the source itself**.

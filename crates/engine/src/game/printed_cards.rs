@@ -1180,7 +1180,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // The reusable visitor this file's TODO asked for now exists:
 // `crate::types::ability_visit`. `game/coverage.rs` is still NOT migrated — its
 // pass builds `ParsedItem` trees rather than yielding `Effect`s, and
-// `coverage::ability_tree_any` is deliberately narrower (it has a `_ => {}`
+// `types::ability_visit::ability_tree_any` is deliberately narrower (it has a `_ => {}`
 // wildcard); broadening it would change the coverage report. See the
 // `types::ability_visit` module doc.
 // ---------------------------------------------------------------------------

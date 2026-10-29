@@ -173,6 +173,7 @@ mod prior_controller_filter_tests {
 use crate::game::combat;
 use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::keywords::HeldObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
@@ -187,8 +188,8 @@ use crate::types::ability::{
     CardTypeSetSource, CastManaSpentMetric, ChoiceValue, ChosenAttribute, CombatRelation,
     CombatRelationSubject, ContinuousModification, ControllerRef, CountScope, CrewRelation,
     FilterGrammarNode, FilterProp, Parity, ParitySource, PlayerFilter, PtStat, PtValueScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality, SharedQualityRelation, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -2051,6 +2052,33 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
         }
+    }
+}
+
+/// The [`FilterContext`] a [`ReplacementDefinition`]'s `valid_card` is read in.
+/// It reads the live game state, so it is defined here beside `FilterContext`.
+pub(crate) trait ReplacementDefinitionFilterExt {
+    /// CR 201.5a: the context `valid_card` is read in, naming this replacement's granter.
+    fn valid_card_context(
+        &self,
+        state: &crate::types::game_state::GameState,
+        source_id: ObjectId,
+        controller: Option<PlayerId>,
+    ) -> FilterContext<'static>;
+}
+
+impl ReplacementDefinitionFilterExt for ReplacementDefinition {
+    fn valid_card_context(
+        &self,
+        state: &crate::types::game_state::GameState,
+        source_id: ObjectId,
+        controller: Option<PlayerId>,
+    ) -> FilterContext<'static> {
+        match controller {
+            Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
+            None => FilterContext::from_source(state, source_id),
+        }
+        .with_granting_object(self.granting_object)
     }
 }
 
@@ -6594,6 +6622,9 @@ fn matches_target_filter_on_exact_snapshot(
             |source| source.is_token,
         ),
         combat_status: subject.map_or_else(Default::default, |source| source.combat_status),
+        // The LKI snapshot carries no block pairings; the record-side
+        // current-pairing arms fail closed regardless.
+        block_pairs: Vec::new(),
         co_departed: Vec::new(),
         attached_to: subject.and_then(|source| source.attached_to),
         entered_incarnation,
@@ -10077,16 +10108,6 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
     })
 }
 
-fn combat_relation_subject_id(
-    subject: CombatRelationSubject,
-    source: &SourceContext<'_>,
-) -> Option<ObjectId> {
-    match subject {
-        CombatRelationSubject::Source => Some(source.id),
-        CombatRelationSubject::ParentTarget => source.ability.and_then(first_object_target),
-    }
-}
-
 /// CR 400.7 + CR 608.2h: The exact incarnation `subject` names. A triggered
 /// source is named by the identity its trigger captured — for a
 /// leaves-the-battlefield trigger, the incarnation that left (CR 603.10a). An
@@ -10143,37 +10164,107 @@ fn combat_relation_subject_ref(
 
 fn matches_combat_relation(
     state: &GameState,
-    object_id: ObjectId,
     candidate: ObjectIncarnationRef,
     relation: CombatRelation,
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
 ) -> bool {
+    let Some(subject) = combat_relation_subject_ref(state, subject, source) else {
+        return false;
+    };
     match relation {
+        // CR 509.1g + CR 509.1h: the candidate blocks the subject, or the
+        // subject blocks the candidate — the current pairing, either way.
         CombatRelation::BlockingOrBlockedBy => {
-            let Some(subject_id) = combat_relation_subject_id(subject, source) else {
-                return false;
-            };
-            state.combat.as_ref().is_some_and(|combat| {
-                let candidate_blocks_subject = combat
-                    .blocker_to_attacker
-                    .get(&object_id)
-                    .is_some_and(|attackers| attackers.contains(&subject_id));
-                let subject_blocks_candidate = combat
-                    .blocker_to_attacker
-                    .get(&subject_id)
-                    .is_some_and(|attackers| attackers.contains(&object_id));
-                candidate_blocks_subject || subject_blocks_candidate
-            })
+            current_block_pair_holds(
+                state,
+                subject,
+                combat::BlockHistoryPair {
+                    blocker: candidate,
+                    attacker: subject,
+                },
+            ) || current_block_pair_holds(
+                state,
+                subject,
+                combat::BlockHistoryPair {
+                    blocker: subject,
+                    attacker: candidate,
+                },
+            )
         }
+        // CR 509.1g: "blocked by <subject>" — the current pairing, in the one
+        // orientation where the subject is the blocker.
+        CombatRelation::BlockedBySubject { scope: None } => current_block_pair_holds(
+            state,
+            subject,
+            combat::BlockHistoryPair {
+                blocker: subject,
+                attacker: candidate,
+            },
+        ),
         // CR 509.1g + CR 400.7: answered from the block-history ledgers, which
         // CR 506.4 does not prune, by the exact subject and candidate
         // incarnations.
-        CombatRelation::BlockedBySubject { scope } => {
-            combat_relation_subject_ref(state, subject, source)
-                .is_some_and(|blocker| state.creature_blocked_attacker(blocker, candidate, scope))
+        CombatRelation::BlockedBySubject { scope: Some(scope) } => {
+            state.creature_blocked_attacker(subject, candidate, scope)
         }
     }
+}
+
+/// CR 509.1g + CR 506.4 + CR 608.2h: does the current block pairing `pair`,
+/// one side of which is `subject`, hold for a combat-relation filter?
+///
+/// * Subject still the exact live incarnation on the battlefield: read live
+///   combat (`combat::is_live_block_pair`).
+/// * Subject has left the battlefield (a dies trigger, or an end-of-combat
+///   trigger whose source was removed in response): CR 608.2h + CR 113.7a —
+///   the effect uses the subject's last known information, the pairings it had
+///   immediately before it left (`ZoneChangeRecord::block_pairs` on its exact
+///   departure row, CR 603.10a). A pairing the subject had is still only a
+///   CURRENT pairing for a candidate that remains the exact live incarnation in
+///   its own combat role — still blocking, or still attacking. CR 506.4: a
+///   candidate removed from combat (or from the battlefield, a new object per
+///   CR 400.7) since is no longer blocking or blocked by anything.
+/// * Neither (no departure row this turn): fails closed.
+fn current_block_pair_holds(
+    state: &GameState,
+    subject: ObjectIncarnationRef,
+    pair: combat::BlockHistoryPair,
+) -> bool {
+    let subject_on_battlefield = subject.is_current(state)
+        && state
+            .objects
+            .get(&subject.object_id)
+            .is_some_and(|object| object.zone == Zone::Battlefield);
+    if subject_on_battlefield {
+        return combat::is_live_block_pair(state, pair);
+    }
+    let Some(row) = crate::types::game_state::exact_battlefield_departure_row(state, subject)
+    else {
+        return false;
+    };
+    if !row.block_pairs.contains(&pair) {
+        return false;
+    }
+    let candidate_is_blocker = pair.attacker == subject;
+    let candidate = if candidate_is_blocker {
+        pair.blocker
+    } else {
+        pair.attacker
+    };
+    candidate.is_current(state)
+        && state.combat.as_ref().is_some_and(|combat| {
+            if candidate_is_blocker {
+                combat
+                    .blocker_to_attacker
+                    .contains_key(&candidate.object_id)
+            } else {
+                combat
+                    .attackers
+                    .iter()
+                    .any(|attacker| attacker.object_id == candidate.object_id)
+            }
+        })
 }
 
 /// CR 702.122b + CR 702.122c + CR 400.7: does the per-turn crew ledger pair the
@@ -10637,7 +10728,6 @@ fn matches_filter_prop_known(
         }),
         FilterProp::CombatRelation { relation, subject } => matches_combat_relation(
             state,
-            object_id,
             ObjectIncarnationRef::from_object(obj),
             *relation,
             *subject,
@@ -11885,14 +11975,17 @@ fn zone_change_property_known(
         // relation, and this predicate reads live `combat.blocker_to_attacker`.
         FilterProp::BlockingSource => false,
         FilterProp::CombatRelation { relation, subject } => match relation {
-            // CR 506.4: the live map is pruned when either creature leaves
-            // combat, so there is nothing for a departed record to match.
-            CombatRelation::BlockingOrBlockedBy => false,
+            // CR 506.4: a departed candidate was removed from combat, so it is
+            // in no current pairing; candidate-side last known pairings are not
+            // consulted (no printed card reads them), so this fails closed.
+            CombatRelation::BlockingOrBlockedBy | CombatRelation::BlockedBySubject { scope: None } => {
+                false
+            }
             // CR 509.1g + CR 608.2i: answered from the same block-history
             // ledgers as the live leg, through GameState::creature_blocked_attacker.
             // CR 400.7: the record's exact departing incarnation is its own
             // pre-change authority; a record without one fails closed.
-            CombatRelation::BlockedBySubject { scope } => {
+            CombatRelation::BlockedBySubject { scope: Some(scope) } => {
                 let Some(candidate) = record
                     .trigger_source_context()
                     .map(|context| context.identity.reference)
@@ -18464,6 +18557,271 @@ mod tests {
         ));
     }
 
+    /// Two blocks: `subject` (P1) blocks `partner` (P0), and `other_blocker`
+    /// (P1) blocks `other_attacker` (P0); `bystander` (P1) is in no combat.
+    struct PairingFixture {
+        state: GameState,
+        subject: ObjectId,
+        partner: ObjectId,
+        other_blocker: ObjectId,
+        other_attacker: ObjectId,
+        bystander: ObjectId,
+    }
+
+    fn pairing_fixture() -> PairingFixture {
+        use crate::game::combat::{AttackerInfo, CombatState};
+
+        let mut state = setup();
+        let subject = add_creature(&mut state, PlayerId(1), "Subject");
+        let partner = add_creature(&mut state, PlayerId(0), "Partner");
+        let other_blocker = add_creature(&mut state, PlayerId(1), "Other Blocker");
+        let other_attacker = add_creature(&mut state, PlayerId(0), "Other Attacker");
+        let bystander = add_creature(&mut state, PlayerId(1), "Bystander");
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(partner, PlayerId(1)),
+                AttackerInfo::attacking_player(other_attacker, PlayerId(1)),
+            ],
+            blocker_assignments: [
+                (partner, vec![subject]),
+                (other_attacker, vec![other_blocker]),
+            ]
+            .into(),
+            blocker_to_attacker: [
+                (subject, vec![partner]),
+                (other_blocker, vec![other_attacker]),
+            ]
+            .into(),
+            ..CombatState::default()
+        });
+        PairingFixture {
+            state,
+            subject,
+            partner,
+            other_blocker,
+            other_attacker,
+            bystander,
+        }
+    }
+
+    fn source_relation_filter(relation: CombatRelation) -> TargetFilter {
+        TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+                relation,
+                subject: CombatRelationSubject::Source,
+            }]),
+        )
+    }
+
+    /// An ability of `source` stamped with the source incarnation `incarnation`.
+    fn ability_of(source: ObjectId, incarnation: u64) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(1),
+        );
+        ability.source_incarnation = Some(incarnation);
+        ability
+    }
+
+    /// Moves `subject` to the graveyard through the zone-change authority and
+    /// returns the incarnation it left the battlefield as.
+    fn kill(state: &mut GameState, subject: ObjectId) -> u64 {
+        let departed = state.objects[&subject].incarnation;
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(state, subject, Zone::Graveyard, &mut events);
+        departed
+    }
+
+    /// CR 509.1g + CR 608.2h: a current-pairing relation whose subject has left
+    /// the battlefield answers from the subject's exact departure row — its
+    /// partner matches, every other combatant and the bystander do not, and an
+    /// ability naming the subject's NEW incarnation (no departure row) fails
+    /// closed. The live branch is gone (the subject is in the graveyard), so
+    /// the partner match is reachable only through the snapshot.
+    #[test]
+    fn current_pairing_departed_subject_answers_from_its_departure_row() {
+        let PairingFixture {
+            mut state,
+            subject,
+            partner,
+            other_blocker,
+            other_attacker,
+            bystander,
+        } = pairing_fixture();
+        let departed = kill(&mut state, subject);
+        assert!(
+            state.combat.as_ref().is_some_and(|combat| {
+                !combat.blocker_to_attacker.contains_key(&subject)
+                    && combat.blocker_to_attacker.contains_key(&other_blocker)
+            }),
+            "reach guard: CR 506.4 pruned the departed subject from the live pairing map"
+        );
+
+        let ability = ability_of(subject, departed);
+        let ctx = FilterContext::from_ability(&ability);
+        for relation in [
+            CombatRelation::BlockingOrBlockedBy,
+            CombatRelation::BlockedBySubject { scope: None },
+        ] {
+            let filter = source_relation_filter(relation);
+            assert!(
+                crate::game::filter::matches_target_filter(&state, partner, &filter, &ctx),
+                "{relation:?}: the departed subject's last known partner must match"
+            );
+            for other in [other_blocker, other_attacker, bystander] {
+                assert!(
+                    !crate::game::filter::matches_target_filter(&state, other, &filter, &ctx),
+                    "{relation:?}: {other:?} was never paired with the subject"
+                );
+            }
+        }
+
+        let current = state.objects[&subject].incarnation;
+        assert_ne!(current, departed, "reach guard: leaving bumped the subject");
+        let rebound = ability_of(subject, current);
+        let filter = source_relation_filter(CombatRelation::BlockingOrBlockedBy);
+        assert!(
+            !crate::game::filter::matches_target_filter(
+                &state,
+                partner,
+                &filter,
+                &FilterContext::from_ability(&rebound)
+            ),
+            "CR 400.7: the subject's later incarnation has no departure row and fails closed"
+        );
+
+        // CR 400.7: a partner that is no longer the incarnation the subject
+        // was paired with matches nothing.
+        state.objects.get_mut(&partner).unwrap().bump_incarnation();
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, partner, &filter, &ctx),
+            "a bumped partner is a new object"
+        );
+    }
+
+    /// CR 506.4 + CR 509.1g: a departed subject's last known pairing is still a
+    /// CURRENT pairing only for a candidate that remains in its combat role. The
+    /// partner the subject blocked, removed from combat afterwards, is no longer
+    /// blocked by anything.
+    #[test]
+    fn current_pairing_departed_subject_requires_the_candidate_still_in_combat() {
+        let PairingFixture {
+            mut state,
+            subject,
+            partner,
+            ..
+        } = pairing_fixture();
+        let departed = kill(&mut state, subject);
+        let ability = ability_of(subject, departed);
+        let ctx = FilterContext::from_ability(&ability);
+        let filter = source_relation_filter(CombatRelation::BlockingOrBlockedBy);
+        assert!(
+            crate::game::filter::matches_target_filter(&state, partner, &filter, &ctx),
+            "reach guard: before its removal the partner matches"
+        );
+
+        crate::game::effects::remove_from_combat::remove_object_from_combat(&mut state, partner);
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, partner, &filter, &ctx),
+            "a partner removed from combat is no longer blocked by the departed subject"
+        );
+    }
+
+    /// CR 509.1g: the live branch. `BlockedBySubject { scope: None }` is the one
+    /// orientation where the subject is the blocker; `BlockingOrBlockedBy` is
+    /// both. Read from the attacking side: the attacker's blocker is "blocking
+    /// or blocked by" it but not "blocked by" it.
+    #[test]
+    fn current_pairing_live_orientations() {
+        let PairingFixture {
+            state,
+            subject,
+            partner,
+            other_blocker,
+            ..
+        } = pairing_fixture();
+        let both = source_relation_filter(CombatRelation::BlockingOrBlockedBy);
+        let blocked_by = source_relation_filter(CombatRelation::BlockedBySubject { scope: None });
+
+        // The blocker as subject: its attacker matches both relations.
+        let blocker_ability = ability_of(subject, state.objects[&subject].incarnation);
+        let ctx = FilterContext::from_ability(&blocker_ability);
+        assert!(crate::game::filter::matches_target_filter(
+            &state, partner, &both, &ctx
+        ));
+        assert!(crate::game::filter::matches_target_filter(
+            &state,
+            partner,
+            &blocked_by,
+            &ctx
+        ));
+        assert!(!crate::game::filter::matches_target_filter(
+            &state,
+            other_blocker,
+            &both,
+            &ctx
+        ));
+
+        // The attacker as subject: its blocker is blocking it, not blocked by it.
+        let attacker_ability = ability_of(partner, state.objects[&partner].incarnation);
+        let ctx = FilterContext::from_ability(&attacker_ability);
+        assert!(crate::game::filter::matches_target_filter(
+            &state, subject, &both, &ctx
+        ));
+        assert!(
+            !crate::game::filter::matches_target_filter(&state, subject, &blocked_by, &ctx),
+            "the attacker does not block its blocker"
+        );
+    }
+
+    /// CR 509.1g: `live_block_pairs_of` reports every pairing of the object, as
+    /// the blocker and as the attacker, pinned to live incarnations and sorted.
+    #[test]
+    fn live_block_pairs_of_reports_both_orientations_sorted() {
+        use crate::game::combat::{
+            live_block_pairs_of, AttackerInfo, BlockHistoryPair, CombatState,
+        };
+
+        let mut state = setup();
+        let wall = add_creature(&mut state, PlayerId(1), "Wall");
+        let first = add_creature(&mut state, PlayerId(0), "First");
+        let second = add_creature(&mut state, PlayerId(0), "Second");
+        let helper = add_creature(&mut state, PlayerId(1), "Helper");
+        state.combat = Some(CombatState {
+            attackers: vec![
+                AttackerInfo::attacking_player(first, PlayerId(1)),
+                AttackerInfo::attacking_player(second, PlayerId(1)),
+            ],
+            blocker_assignments: [(first, vec![wall]), (second, vec![wall, helper])].into(),
+            blocker_to_attacker: [(wall, vec![second, first]), (helper, vec![second])].into(),
+            ..CombatState::default()
+        });
+        let at = |id: ObjectId| ObjectIncarnationRef::from_object(&state.objects[&id]);
+        let pair = |blocker, attacker| BlockHistoryPair {
+            blocker: at(blocker),
+            attacker: at(attacker),
+        };
+
+        let mut as_blocker = vec![pair(wall, first), pair(wall, second)];
+        as_blocker.sort_unstable();
+        assert_eq!(live_block_pairs_of(&state, wall), as_blocker);
+
+        let mut as_attacker = vec![pair(wall, second), pair(helper, second)];
+        as_attacker.sort_unstable();
+        assert_eq!(live_block_pairs_of(&state, second), as_attacker);
+
+        assert!(live_block_pairs_of(&state, helper)
+            .iter()
+            .all(|p| p.blocker == at(helper)));
+        state.combat = None;
+        assert!(live_block_pairs_of(&state, wall).is_empty());
+    }
+
     /// U1: `combat_relation_subject_ref`'s `ParentTarget` arm prefers a pinned
     /// incarnation over the live object, and `target_incarnations` (the
     /// delayed-trigger referent pin) over the occurrence pin (`target_pins`) when
@@ -18497,7 +18855,7 @@ mod tests {
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
                 relation: CombatRelation::BlockedBySubject {
-                    scope: CombatHistoryScope::ThisTurn,
+                    scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::ParentTarget,
             },
@@ -18606,7 +18964,7 @@ mod tests {
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
                 relation: CombatRelation::BlockedBySubject {
-                    scope: CombatHistoryScope::ThisTurn,
+                    scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
             },
@@ -18645,7 +19003,7 @@ mod tests {
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::CombatRelation {
                 relation: CombatRelation::BlockedBySubject {
-                    scope: CombatHistoryScope::ThisTurn,
+                    scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
             },
@@ -24724,6 +25082,7 @@ mod tests {
             linked_exile_snapshot: vec![],
             is_token: false,
             combat_status: Default::default(),
+            block_pairs: Vec::new(),
             co_departed: Vec::new(),
             attached_to: None,
             entered_incarnation: None,

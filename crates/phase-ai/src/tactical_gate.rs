@@ -2220,7 +2220,7 @@ mod tests {
     use engine::ai_support::{ActionMetadata, TacticalClass};
     use engine::game::combat::{AttackerInfo, CombatState};
     use engine::game::deck_loading::DeckEntry;
-    use engine::game::game_object::BackFaceData;
+    use engine::game::game_object::{BackFaceData, ObjectIncarnationRefExt};
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;

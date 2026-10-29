@@ -3,7 +3,7 @@
 //! spell face is affordable.
 
 use engine::game::casting::can_cast_object_now;
-use engine::game::game_object::BackFaceData;
+use engine::game::game_object::{BackFaceData, ObjectIncarnationRefExt};
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter};
 use engine::types::actions::GameAction;

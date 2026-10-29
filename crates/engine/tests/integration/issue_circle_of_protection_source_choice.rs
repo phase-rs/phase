@@ -4,6 +4,7 @@
 //! the color/type qualifier), not a bare/unconstrained shield. Verifies the real
 //! production parser path against verbatim Scryfall Oracle text.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{AbilityKind, Effect, FilterProp, TargetFilter, TypeFilter};
 use engine::types::keywords::Keyword;

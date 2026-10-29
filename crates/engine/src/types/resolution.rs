@@ -8579,6 +8579,7 @@ fn validate_shipped_post_replacement_draw_pair(
 mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::merge::MergeSide;
     use crate::game::scenario::GameScenario;
     use crate::types::ability::{

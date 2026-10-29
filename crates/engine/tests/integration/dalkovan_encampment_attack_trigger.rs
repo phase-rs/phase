@@ -18,6 +18,7 @@
 //! declare an attacker, and assert two tapped+attacking Warrior tokens appear.
 //! There is no synthetic `process_triggers` call.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{DelayedTriggerCondition, Effect, TargetFilter, TargetRef};
 use engine::types::actions::GameAction;

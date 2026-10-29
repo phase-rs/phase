@@ -50716,7 +50716,7 @@ fn perpetual_grant_ability_rejects_resolution_time_generic_effect_body() {
         classified.iter().any(|m| matches!(
             m,
             ContinuousModification::GrantAbility { definition }
-                if crate::game::coverage::ability_tree_any(definition, &|d| matches!(
+                if crate::types::ability_visit::ability_tree_any(definition, &|d| matches!(
                     &*d.effect,
                     Effect::GenericEffect { static_abilities, .. } if !static_abilities.is_empty()
                 ))
@@ -50791,7 +50791,7 @@ fn perpetual_grant_ability_rejects_boareskyr_tollkeeper_enters_tapped() {
         panic!("expected the quoted fallback to produce one granted ability, got {classified:?}");
     };
     assert!(
-        crate::game::coverage::ability_tree_any(definition, &|d| {
+        crate::types::ability_visit::ability_tree_any(definition, &|d| {
             matches!(&*d.effect, Effect::Unimplemented { .. })
         }),
         "the quoted fallback must retain its unimplemented inner effect"
@@ -52631,6 +52631,41 @@ fn parse_cast_spells_this_turn_as_though_flash() {
         assert_eq!(duration, Some(Duration::UntilEndOfTurn));
         assert_eq!(target, Some(TargetFilter::Controller));
     }
+}
+
+/// The duration form folds its type list through the same authority: with each leg repeating
+/// "spells", the artifact leg does not inherit "legendary" (CR 205.4a).
+#[test]
+fn parse_cast_spells_this_turn_as_though_flash_repeated_noun_legs() {
+    let def = parse_effect_chain(
+        "You may cast legendary spells and artifact spells this turn as though they had flash.",
+        AbilityKind::Activated,
+    );
+    let Effect::GenericEffect {
+        static_abilities, ..
+    } = *def.effect
+    else {
+        panic!("expected GenericEffect flash grant, got {:?}", def.effect);
+    };
+    let Some(ContinuousModification::GrantStaticAbility { definition }) =
+        static_abilities[0].modifications.first()
+    else {
+        panic!("expected a granted static, got {:?}", static_abilities[0]);
+    };
+    let Some(TargetFilter::Or { filters }) = &definition.affected else {
+        panic!("expected Or affected filter, got {:?}", definition.affected);
+    };
+    let legendary = FilterProp::HasSupertype {
+        value: crate::types::card_type::Supertype::Legendary,
+    };
+    assert!(
+        filters.iter().any(|leg| matches!(
+            leg,
+            TargetFilter::Typed(tf) if tf.type_filters == vec![TypeFilter::Artifact]
+                && !tf.properties.contains(&legendary)
+        )),
+        "the artifact leg must not be legendary-only, got {filters:?}"
+    );
 }
 
 #[test]
@@ -60109,7 +60144,7 @@ fn cast_this_way_gains_rider_prefix_and_body_grammar() {
         modifications.iter().any(|modification| matches!(
             modification,
             ContinuousModification::GrantAbility { definition }
-                if crate::game::coverage::ability_tree_any(
+                if crate::types::ability_visit::ability_tree_any(
                     definition,
                     &|node| matches!(&*node.effect, Effect::Unimplemented { .. })
                 )

@@ -50,7 +50,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::game::game_object::DisplayIdentity;
+use crate::game::game_object::{DisplayIdentity, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};

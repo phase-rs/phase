@@ -1665,6 +1665,7 @@ mod tests {
         }
     }
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
     use crate::types::game_state::{ActivationTargetSelection, TransientContinuousEffectBindings};
