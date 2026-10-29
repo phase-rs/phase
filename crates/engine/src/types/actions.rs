@@ -1275,7 +1275,7 @@ pub enum DebugAction {
     /// controller.
     Sacrifice { object_id: ObjectId },
     /// CR 701.9a: Discard a card from its owner's hand through the single
-    /// discard authority, as an effect-caused discard (CR 614.6), with no
+    /// discard authority, as an effect-caused discard (CR 614.1a), with no
     /// source object. Replacements and discard triggers (CR 603.2) apply. The
     /// discarding player is the card's owner. Admitted only at a settled
     /// Priority window.

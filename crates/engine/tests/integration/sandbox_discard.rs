@@ -395,8 +395,10 @@ fn r10_rejections_leave_state_unchanged() {
         .find(|p| p.id == P0)
         .expect("P0 exists")
         .is_eliminated = true;
+    // P1 submits, so only the new owner check can reject the action.
+    runner.state_mut().debug_permitted = BTreeSet::from([P0, P1]);
     let before = digest(&runner);
-    assert!(runner.act(discard(hand)).is_err());
+    assert!(apply(runner.state_mut(), P1, discard(hand)).is_err());
     assert_eq!(digest(&runner), before);
     runner
         .state_mut()
