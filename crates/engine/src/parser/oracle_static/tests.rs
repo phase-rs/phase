@@ -37846,21 +37846,18 @@ fn inverted_bare_self_declines_compound_effect() {
 
 /// 5.3a #7 — NEGATIVE: the combined two-mode form ("attacks or blocks each combat
 /// if able") is a documented ZERO-CARD shape; it is not a single
-/// RuleStaticPredicate, so the branch declines and today's compound-splitter path
-/// keeps it. Asserts CURRENT behavior, not the fixed shape.
+/// RuleStaticPredicate. The compound splitter cannot recover a represented
+/// first effect from the orphaned "it", so the whole source remains unsupported.
 #[test]
 fn inverted_bare_self_declines_combined_two_mode_form() {
-    let defs = parse_static_line_multi(
-        "As long as ~ is your Ring-bearer, it attacks or blocks each combat if able.",
-    );
-    // Anti-vacuous reach-guard: the negative below is a `!any` shape that is
-    // trivially true on an empty `defs`. This asserts CURRENT behavior — the
-    // compound-splitter path still keeps this line — so a zero-def regression
-    // fails here rather than silently passing an empty assertion.
+    use crate::parser::oracle::{lower_oracle_ir, parse_oracle_ir};
+    use crate::parser::oracle_ir::doc::{OracleNodeIr, OracleSourceSpan};
+
+    let source = "As long as ~ is your Ring-bearer, it attacks or blocks each combat if able.";
+    let defs = parse_static_line_multi(source);
     assert!(
-        !defs.is_empty(),
-        "line must still produce defs via today's compound-splitter path; zero \
-         defs would make the negative below vacuous"
+        defs.is_empty(),
+        "an unrepresented combined effect cannot publish a phantom static: {defs:#?}"
     );
     assert!(
         !defs
@@ -37870,6 +37867,78 @@ fn inverted_bare_self_declines_combined_two_mode_form() {
                 && matches!(d.mode, StaticMode::MustAttack | StaticMode::MustBlock)),
         "the combined two-mode form must not be claimed by this branch: {defs:#?}"
     );
+
+    // Refusal must preserve the complete instruction and its source geometry,
+    // while the independent next line still reaches its own keyword owner.
+    let complete = format!("{source}\nFlying");
+    let mut doc = parse_oracle_ir(
+        &complete,
+        "Combined requirement refusal",
+        &["Flying".into()],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, complete);
+    assert_eq!(doc.items.len(), 2);
+    let refused = &doc.items[0];
+    assert_eq!(refused.source.fragment(), Some(source));
+    assert_eq!(
+        refused.source.span(),
+        &OracleSourceSpan::exact(0, 0, 0, source.len(), 0)
+    );
+    assert!(matches!(
+        refused.node,
+        OracleNodeIr::Unsupported { .. } | OracleNodeIr::Spell(_)
+    ));
+    let flying = &doc.items[1];
+    assert_ne!(refused.id, flying.id);
+    assert_eq!(flying.source.fragment(), Some("Flying"));
+    assert_eq!(
+        flying.source.span(),
+        &OracleSourceSpan::exact(1, 1, source.len() + 1, complete.len(), 0)
+    );
+    let parsed = lower_oracle_ir(&mut doc);
+    assert!(parsed.statics.is_empty());
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+    assert_eq!(parsed.abilities.len(), 1);
+    let refused = &parsed.abilities[0];
+    assert!(matches!(*refused.effect, Effect::Unimplemented { .. }));
+    assert_eq!(refused.description.as_deref(), Some(source));
+    assert_eq!(
+        refused
+            .effect
+            .unimplemented_description()
+            .map(|text| text.trim_end_matches('.')),
+        Some(source.trim_end_matches('.'))
+    );
+    assert!(refused.sub_ability.is_none());
+
+    // Positive reach guards: each represented single requirement uses the same
+    // document router and live gate, without admitting the combined grammar.
+    for (predicate, mode) in [
+        ("attacks each combat if able", StaticMode::MustAttack),
+        ("blocks each combat if able", StaticMode::MustBlock),
+    ] {
+        let known = format!("As long as ~ is your Ring-bearer, it {predicate}.\nFlying");
+        let mut doc = parse_oracle_ir(
+            &known,
+            "Single requirement control",
+            &["Flying".into()],
+            &["Creature".into()],
+            &[],
+        );
+        let parsed = lower_oracle_ir(&mut doc);
+        assert!(parsed.abilities.is_empty(), "for {predicate}");
+        assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+        assert_eq!(parsed.statics.len(), 1, "for {predicate}");
+        assert_eq!(parsed.statics[0].mode, mode, "for {predicate}");
+        assert_eq!(
+            parsed.statics[0].condition,
+            Some(StaticCondition::IsRingBearer),
+            "for {predicate}"
+        );
+        assert_eq!(parsed.statics[0].affected, Some(TargetFilter::SelfRef));
+    }
 }
 
 /// 5.3a #9 — NEGATIVE, fail-closed (CR 611.3a): an untypeable condition must never
