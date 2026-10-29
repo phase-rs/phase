@@ -26,6 +26,7 @@ use crate::game::engine::{
     pinned_decisions_to_points, proliferate_pins, replay_bounded_offer, PeriodSign,
     SimulationProbeGuard,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::mana_payment::{select_convoke_taps, ConvokeTapOrder};
 use crate::game::play_trace::{
     self, AnswerOptionality, CostChoices, CostMove, EntryKind, NamedSpan, PeriodReach, PlayLocus,

@@ -69,9 +69,9 @@ use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
 use crate::types::card_type::Supertype;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
-use crate::types::proposed_event::TokenAttackRequest;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::CastFrequency;
+use crate::types::token_spec::TokenAttackRequest;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -12585,7 +12585,7 @@ enum TokenReplacementShape {
     Half,
     /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
     PlusSpec {
-        spec: Box<crate::types::proposed_event::TokenSpec>,
+        spec: Box<crate::types::token_spec::TokenSpec>,
     },
     /// "that many [spec] are created instead" — full token substitution
     /// (Divine Visitation). The substitute characteristics are carried as an
@@ -12664,7 +12664,7 @@ fn scan_token_multiplier_factor(lower: &str) -> Option<u32> {
 /// CR 614.1a + CR 111.1: Extract the "those tokens plus <spec> (is|are) created
 /// instead" appended-token spec (Chatterfang / Donatello). Returns the parsed
 /// `TokenSpec` for the appended token, or `None` if the phrase is absent.
-fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::proposed_event::TokenSpec> {
+fn parse_token_plus_spec_shape(lower: &str) -> Option<crate::types::token_spec::TokenSpec> {
     // Extract the spec descriptor between "those tokens plus " and the trailing
     // "are/is created instead" clause using nom combinators.
     let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
@@ -12970,7 +12970,7 @@ fn parse_generic_additional_token_replacement(
 /// Tippy-Toe-class replacement effects.
 fn parse_instead_create_those_tokens_plus_spec(
     lower: &str,
-) -> Option<crate::types::proposed_event::TokenSpec> {
+) -> Option<crate::types::token_spec::TokenSpec> {
     let total_len = lower.len();
     let ((descriptor_start, descriptor_len), _) = nom_on_lower(lower, lower, |i| {
         let (i, _) =
@@ -13051,8 +13051,7 @@ fn parse_manufactor_ensure_all_token_replacement(
 
     let condition_subtypes: Vec<String> =
         subtypes.iter().map(|s| canonicalize_subtype(s)).collect();
-    let mut specs: Vec<crate::types::proposed_event::TokenSpec> =
-        Vec::with_capacity(subtypes.len());
+    let mut specs: Vec<crate::types::token_spec::TokenSpec> = Vec::with_capacity(subtypes.len());
     for sub in &subtypes {
         let descriptor = format!("a {sub} token");
         let token = super::oracle_effect::parse_token_description(&descriptor)?;
@@ -13110,10 +13109,10 @@ fn split_subtype_list(s: &str) -> Vec<String> {
 /// spec is not a pattern any known card uses.
 fn token_description_to_spec(
     token: &crate::parser::oracle_ir::ast::TokenDescription,
-) -> Option<crate::types::proposed_event::TokenSpec> {
+) -> Option<crate::types::token_spec::TokenSpec> {
     use crate::types::ability::PtValue;
     use crate::types::card_type::CoreType;
-    use crate::types::proposed_event::TokenSpec;
+    use crate::types::token_spec::TokenSpec;
 
     // Split parsed `types` into core_types vs subtypes by checking CoreType::from_str.
     let mut core_types: Vec<CoreType> = Vec::new();
@@ -13148,7 +13147,7 @@ fn token_description_to_spec(
     }
 
     Some(TokenSpec {
-        characteristics: crate::types::proposed_event::TokenCharacteristics {
+        characteristics: crate::types::token_spec::TokenCharacteristics {
             display_name: token.name.clone(),
             power,
             toughness,
@@ -13173,7 +13172,7 @@ fn token_description_to_spec(
         controller: crate::types::player::PlayerId(0),
         // Replacement-created tokens ("instead, create a token") are not the
         // "attached to" Aura/Role class; that path flows through `Effect::Token`.
-        attach_to: crate::types::proposed_event::TokenHostRequest::NotRequested,
+        attach_to: crate::types::token_spec::TokenHostRequest::NotRequested,
     })
 }
 

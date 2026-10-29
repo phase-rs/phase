@@ -14,6 +14,7 @@
 //! stack in the postcombat main phase.
 
 use engine::game::combat::{AttackTarget, BlockHistoryPair};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;

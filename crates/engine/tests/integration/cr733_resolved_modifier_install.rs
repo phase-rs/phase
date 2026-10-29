@@ -26,6 +26,7 @@
 //! Both tests drive the REAL pipeline: a verbatim-Oracle spell cast from hand and
 //! resolved off the stack, never a direct call to the authority.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::DelayedTriggerCondition;
 use engine::types::mana::ManaCost;

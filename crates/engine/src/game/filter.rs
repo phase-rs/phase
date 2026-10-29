@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::game::combat;
 use crate::game::crew_payment::CrewHistoryPair;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::keywords::HeldObject;
 use crate::game::quantity::{
     counter_count_from_map, quantity_expr_characteristic_reads_at, resolve_quantity,
@@ -21,8 +22,8 @@ use crate::types::ability::{
     AttachmentReferent, AttackerBlockStatus, CardTypeSetSource, CastManaSpentMetric, ChoiceValue,
     ChosenAttribute, CombatRelation, CombatRelationSubject, ContinuousModification, ControllerRef,
     CountScope, CrewRelation, FilterGrammarNode, FilterProp, Parity, ParitySource, PlayerFilter,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, ResolvedAbility, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    PtStat, PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
@@ -1790,6 +1791,33 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
         }
+    }
+}
+
+/// The [`FilterContext`] a [`ReplacementDefinition`]'s `valid_card` is read in.
+/// It reads the live game state, so it is defined here beside `FilterContext`.
+pub(crate) trait ReplacementDefinitionFilterExt {
+    /// CR 201.5a: the context `valid_card` is read in, naming this replacement's granter.
+    fn valid_card_context(
+        &self,
+        state: &crate::types::game_state::GameState,
+        source_id: ObjectId,
+        controller: Option<PlayerId>,
+    ) -> FilterContext<'static>;
+}
+
+impl ReplacementDefinitionFilterExt for ReplacementDefinition {
+    fn valid_card_context(
+        &self,
+        state: &crate::types::game_state::GameState,
+        source_id: ObjectId,
+        controller: Option<PlayerId>,
+    ) -> FilterContext<'static> {
+        match controller {
+            Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
+            None => FilterContext::from_source(state, source_id),
+        }
+        .with_granting_object(self.granting_object)
     }
 }
 

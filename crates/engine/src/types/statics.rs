@@ -9,7 +9,7 @@ use super::ability::{
     AbilityCost, AbilityTag, CardPlayMode, CastTimingPermission, CostCategory, PlayerFilter,
     QuantityExpr, QuantityRef, TargetFilter,
 };
-use super::events::ActivatedAbilityKind;
+use super::event_kinds::ActivatedAbilityKind;
 use super::identifiers::ObjectIncarnationRef;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, SpecialAction, StepEndManaAction};
@@ -314,22 +314,6 @@ pub enum GraveyardPermissionPool {
 impl GraveyardPermissionPool {
     pub fn is_own_graveyard(&self) -> bool {
         matches!(self, GraveyardPermissionPool::OwnGraveyard)
-    }
-
-    /// Whether `card` is in this pool for `caster`: "your graveyard" is the
-    /// graveyard container the caster reads (CR 400.1 + CR 109.5).
-    pub fn admits(
-        self,
-        state: &crate::types::game_state::GameState,
-        card: &crate::game::game_object::GameObject,
-        caster: PlayerId,
-    ) -> bool {
-        match self {
-            GraveyardPermissionPool::OwnGraveyard => {
-                state.object_in_players_zone(card, Zone::Graveyard, caster)
-            }
-            GraveyardPermissionPool::AnyGraveyard => true,
-        }
     }
 }
 

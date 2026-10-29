@@ -42,6 +42,8 @@
 
 use std::collections::HashSet;
 
+use crate::game::cost_payability::AbilityCostPayability;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     is_direct_resolution_optional_payment_branch, supported_at_resolution, AbilityCost, EffectKind,
     PlayerScope, QuantityExpr, QuantityRef, TargetFilter, TurnUpCostSource, TypedFilter,

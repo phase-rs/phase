@@ -15,6 +15,7 @@ use crate::game::engine::{
     apply_actionless_priority_pass_for_prospective, apply_interaction_for_prospective_simulation,
     apply_interaction_for_simulation, ProspectiveSimulationOutcome,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::turn_control::authorized_submitter_for_player;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect,

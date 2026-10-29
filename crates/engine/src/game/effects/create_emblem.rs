@@ -150,6 +150,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::types::ability::{
         BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
         StaticDefinition, TargetFilter, TypedFilter,

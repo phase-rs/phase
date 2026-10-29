@@ -475,6 +475,7 @@ fn repeated_single_put_definition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::scenario::{GameScenario, P0};
     use crate::game::stickers::set_player_sticker_sheets;
     use crate::game::zones::move_to_zone;

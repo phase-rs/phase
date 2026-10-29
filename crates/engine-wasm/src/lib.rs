@@ -3670,7 +3670,7 @@ mod restored_card_db_requirements_tests {
             .expect_err("host automation must return the life-counter overflow");
         assert_eq!(
             error,
-            "Life change is not representable for player PlayerId(0)"
+            "Player-resource change is not representable for player PlayerId(0)"
         );
         assert!(
             !game_state_present(),
