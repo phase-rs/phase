@@ -14608,6 +14608,128 @@ fn static_as_long_as_attacking_pure_must_be_blocked_models_requirement() {
     );
 }
 
+/// SHAPE: synthetic attachment/combat axes share the outer requirement owner.
+/// CR 509.1c + CR 611.3a: the requirement follows the live attached recipient.
+#[test]
+fn attached_combat_bare_requirement_shape_preserves_outer_and_quoted_owners() {
+    for (subject, affected) in [
+        ("equipped", equipped_creature_filter()),
+        (
+            "enchanted",
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+        ),
+    ] {
+        for (state, property) in [
+            ("attacking", FilterProp::Attacking { defender: None }),
+            ("blocking", FilterProp::Blocking),
+        ] {
+            let gate = StaticCondition::RecipientMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![property])),
+            };
+            for prefix in ["", "has first strike and "] {
+                let text = format!(
+                    "As long as {subject} creature is {state}, it {prefix}must be blocked if able."
+                );
+                let definitions = parse_static_line_multi(&text);
+                assert_eq!(
+                    definitions.len(),
+                    if prefix.is_empty() { 1 } else { 2 },
+                    "{text}: {definitions:?}"
+                );
+                let requirement = definitions.last().unwrap();
+                assert_eq!(requirement.mode, StaticMode::MustBeBlocked { by: None });
+                for definition in &definitions {
+                    assert_eq!(definition.affected, Some(affected.clone()));
+                    assert_eq!(definition.condition, Some(gate.clone()));
+                }
+                if !prefix.is_empty() {
+                    assert_eq!(definitions[0].mode, StaticMode::Continuous);
+                    assert_eq!(
+                        definitions[0].modifications,
+                        vec![ContinuousModification::AddKeyword {
+                            keyword: Keyword::FirstStrike
+                        }]
+                    );
+                }
+            }
+            let quoted = format!("As long as {subject} creature is {state}, it has \"This creature must be blocked if able.\".");
+            let definitions = parse_static_line_multi(&quoted);
+            assert_eq!(
+                definitions.len(),
+                1,
+                "complete acquired static: {definitions:?}"
+            );
+            assert_eq!(definitions[0].mode, StaticMode::Continuous);
+            assert_eq!(definitions[0].affected, Some(affected.clone()));
+            assert_eq!(definitions[0].condition, Some(gate.clone()));
+            assert_eq!(
+                definitions[0].modifications,
+                vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustBeBlocked { by: None }
+                }]
+            );
+            assert!(!definitions
+                .iter()
+                .any(|definition| matches!(definition.mode, StaticMode::MustBeBlocked { .. })));
+            let combined = format!("As long as {subject} creature is {state}, it has \"This creature must be blocked if able.\" and must be blocked if able.");
+            let definitions = parse_static_line_multi(&combined);
+            assert_eq!(
+                definitions.len(),
+                2,
+                "outer requirement after complete quote: {definitions:?}"
+            );
+            assert_eq!(
+                definitions[0].modifications,
+                vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustBeBlocked { by: None }
+                }]
+            );
+            assert_eq!(definitions[1].mode, StaticMode::MustBeBlocked { by: None });
+            assert_eq!(definitions[1].affected, Some(affected.clone()));
+            assert_eq!(definitions[1].condition, Some(gate));
+            for prefix in ["has first strike unexplained", "gets +3/unknown"] {
+                let invalid = format!("As long as {subject} creature is {state}, it {prefix} and must be blocked if able.");
+                let lower = invalid.to_lowercase();
+                let split =
+                    super::shared::try_split_inverted_as_long_as(&TextPair::new(&invalid, &lower))
+                        .unwrap();
+                assert!(
+                    super::shared::try_parse_inverted_attached_combat_grant(&split, &invalid)
+                        .is_empty(),
+                    "incomplete prefix cannot enter residual salvage: {invalid}"
+                );
+                assert!(
+                    parse_static_line_multi(&invalid).is_empty(),
+                    "the incumbent caller must retain the whole refusal: {invalid}"
+                );
+                let document = crate::parser::oracle::parse_oracle_text(
+                    &format!("{invalid}\nDraw a card."),
+                    "Synthetic incomplete attached requirement",
+                    &[],
+                    &["Artifact".into()],
+                    &[],
+                );
+                assert!(document.statics.is_empty());
+                assert_eq!(
+                    document
+                        .abilities
+                        .iter()
+                        .filter_map(|ability| ability.effect.unimplemented_description())
+                        .collect::<Vec<_>>(),
+                    vec![invalid.as_str()]
+                );
+                assert!(
+                    document
+                        .abilities
+                        .iter()
+                        .any(|ability| matches!(*ability.effect, Effect::Draw { .. })),
+                    "a later independent instruction survives the owned refusal"
+                );
+            }
+        }
+    }
+}
+
 /// CR 613.1f: residual splitting must recognize already-verbed conjuncts
 /// ("gets", "has", "gains", etc.) and avoid false `Unimplemented` residuals.
 #[test]
@@ -46724,15 +46846,59 @@ fn undercover_skrull_public_live_gate_controller_transfer_and_mana() {
         let selection =
             crate::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
                 .into_iter()
-                .find(|selection| {
-                    selection.source.object_id == source && selection.mana_type == ManaType::Red
-                })
+                .find(|selection| selection.source.object_id == source)
                 .expect("independent any-color mana capability");
+        // CR 106.3 + CR 605.3: manual flexible output retains its color choice
+        // until activation; Colorless is the inert capability marker.
+        assert_eq!(selection.mana_type, ManaType::Colorless);
+        assert_eq!(
+            selection.output,
+            crate::types::mana::ManaSourceOutput::DeferredColorChoice {
+                quantity: crate::types::mana::ManaSourceQuantity::Fixed(1),
+            }
+        );
         runner
             .act(GameAction::ActivateManaSource { selection })
             .unwrap();
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: crate::types::game_state::ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("manual any-color activation must ask its controller for a color")
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(options.len(), 5);
+        for color in [
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ] {
+            assert!(options.contains(&color));
+        }
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: crate::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+            .unwrap();
         assert_eq!(runner.state().players[0].mana_pool.total(), 1);
+        assert_eq!(
+            runner.state().players[0]
+                .mana_pool
+                .count_color(ManaType::Red),
+            1
+        );
         assert!(runner.state().objects[&source].tapped);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ));
         if own_count == 2 {
             let raised = runner.cast(raise).target_object(own_grave[0]).resolve();
             raised.assert_zone(&[own_grave[0]], Zone::Hand);
@@ -46754,6 +46920,8 @@ fn undercover_skrull_public_live_gate_controller_transfer_and_mana() {
             assert_source(runner.state(), source, false);
         }
         runner.advance_to_combat();
+        // CR 106.4: unspent mana empties at the phase boundary.
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
         runner.declare_attackers(&[]).unwrap();
         for _ in 0..96 {
             if runner.state().active_player == P1 && runner.state().phase == Phase::PreCombatMain {
@@ -46869,6 +47037,250 @@ fn attached_lure_public_equip_combat_and_reattachment_follow_one_host() {
         assert!(reattached_combat.declare_blockers(&[(required, host), (ordinary, next_host)]).is_err());
         reattached_combat.declare_blockers(&[(required, next_host), (ordinary, host)]).unwrap();
     }
+
+    // CR 113.1a + CR 509.1c + CR 613.11: Masamune grants first strike, but
+    // its independent bare blocking requirement is carried by the Equipment.
+    const MASAMUNE: &str = "As long as equipped creature is attacking, it has first strike and must be blocked if able.\nEquipped creature has \"If a creature dying causes a triggered ability of this creature or an emblem you own to trigger, that ability triggers an additional time.\"\nEquip {2}";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "First Masamune host", 2, 3).id();
+    let next_host = scenario.add_creature(P0, "Second Masamune host", 4, 5).id();
+    let source = scenario
+        .add_artifact_from_oracle(P0, "The Masamune", MASAMUNE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let other = scenario
+        .add_artifact_from_oracle(P1, "The Masamune", MASAMUNE)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let ordinary = scenario
+        .add_creature(P1, "Ordinary Human blocker", 2, 8)
+        .with_subtypes(vec!["Human"])
+        .id();
+    scenario
+        .add_creature(P1, "Spare ordinary blocker", 2, 8)
+        .with_subtypes(vec!["Elf"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| crate::types::mana::ManaUnit::new(ManaType::Colorless, source, false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    let equip = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| {
+            ability.ability_tag == Some(AbilityTag::Equip)
+                && ability.cost
+                    == Some(AbilityCost::Mana {
+                        cost: ManaCost::generic(2),
+                    })
+        })
+        .unwrap();
+    // CR 702.6a: pay Equip publicly; the attachment selects the affected host.
+    runner.activate(source, equip).target_object(host).resolve();
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+    assert_eq!(
+        runner.state().objects[&source].attached_to,
+        Some(crate::game::game_object::AttachTarget::Object(host))
+    );
+    assert!(runner.state().objects[&other].attached_to.is_none());
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    for id in [host, next_host] {
+        assert!(!runner.state().objects[&id]
+            .keywords
+            .contains(&Keyword::FirstStrike));
+    }
+    let assert_requirement = |state: &crate::types::game_state::GameState,
+                              attached,
+                              detached,
+                              attacking| {
+        let requirements = crate::game::combat::collect_must_be_blocked_statics(state);
+        let owned = requirements
+            .iter()
+            .filter(|(carrier, definition)| {
+                *carrier == source && definition.mode == (StaticMode::MustBeBlocked { by: None })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(owned.len(), 1, "the actual Equipment, not a manufactured host SelfRef, owns the requirement: {requirements:?}");
+        let definition = &owned[0].1;
+        assert_eq!(definition.affected, Some(equipped_creature_filter()));
+        let gate = StaticCondition::RecipientMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::Attacking { defender: None }]),
+            ),
+        };
+        assert_eq!(definition.condition, Some(gate.clone()));
+        let context = crate::game::filter::FilterContext::from_source(state, source);
+        assert!(crate::game::filter::matches_target_filter(
+            state,
+            attached,
+            definition.affected.as_ref().unwrap(),
+            &context
+        ));
+        assert!(!crate::game::filter::matches_target_filter(
+            state,
+            detached,
+            definition.affected.as_ref().unwrap(),
+            &context
+        ));
+        // CR 611.3a: attachment and attacking predicates are read live.
+        assert_eq!(
+            crate::game::layers::evaluate_condition_with_recipient(
+                state, &gate, P0, source, attached
+            ),
+            attacking
+        );
+        assert!(!requirements
+            .iter()
+            .any(|(carrier, _)| *carrier == host || *carrier == next_host));
+        let opposing = requirements
+            .iter()
+            .find(|(carrier, _)| *carrier == other)
+            .expect("the independent opposing source also retains its own printed requirement");
+        let context = crate::game::filter::FilterContext::from_source(state, other);
+        for recipient in [host, next_host] {
+            assert!(!crate::game::filter::matches_target_filter(
+                state,
+                recipient,
+                opposing.1.affected.as_ref().unwrap(),
+                &context
+            ));
+        }
+    };
+    assert_requirement(runner.state(), host, next_host, false);
+    let mut combat = GameRunner::from_state(runner.state().clone());
+    crate::game::engine::apply(
+        combat.state_mut(),
+        P1,
+        GameAction::SetPhaseStops {
+            stops: vec![PhaseStop {
+                phase: Phase::DeclareBlockers,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        },
+    )
+    .unwrap();
+    combat.advance_to_combat();
+    combat
+        .declare_attackers(&[(host, crate::game::combat::AttackTarget::Player(P1))])
+        .unwrap();
+    for _ in 0..16 {
+        if matches!(
+            combat.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            combat.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        combat.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(combat.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == P1)
+    );
+    assert_requirement(combat.state(), host, next_host, true);
+    assert!(combat.state().objects[&host]
+        .keywords
+        .contains(&Keyword::FirstStrike));
+    assert!(!combat.state().objects[&next_host]
+        .keywords
+        .contains(&Keyword::FirstStrike));
+    assert_eq!(combat.state().players[0].mana_pool.total(), 0);
+    assert!(combat.state().stack.is_empty());
+    // CR 509.1c: one ordinary blocker suffices; the spare need not block.
+    assert!(combat.declare_blockers(&[]).is_err());
+    combat.declare_blockers(&[(ordinary, host)]).unwrap();
+
+    runner
+        .activate(source, equip)
+        .target_object(next_host)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&source].attached_to,
+        Some(crate::game::game_object::AttachTarget::Object(next_host))
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    assert_eq!(
+        (
+            runner.state().objects[&host].power,
+            runner.state().objects[&host].toughness
+        ),
+        (Some(2), Some(3))
+    );
+    assert_eq!(
+        (
+            runner.state().objects[&next_host].power,
+            runner.state().objects[&next_host].toughness
+        ),
+        (Some(4), Some(5))
+    );
+    assert_requirement(runner.state(), next_host, host, false);
+    for id in [host, next_host] {
+        assert!(!runner.state().objects[&id]
+            .keywords
+            .contains(&Keyword::FirstStrike));
+    }
+    let mut reattached = GameRunner::from_state(runner.state().clone());
+    crate::game::engine::apply(
+        reattached.state_mut(),
+        P1,
+        GameAction::SetPhaseStops {
+            stops: vec![PhaseStop {
+                phase: Phase::DeclareBlockers,
+                scope: PhaseStopScope::AllTurns,
+            }],
+        },
+    )
+    .unwrap();
+    reattached.advance_to_combat();
+    reattached
+        .declare_attackers(&[
+            (host, crate::game::combat::AttackTarget::Player(P1)),
+            (next_host, crate::game::combat::AttackTarget::Player(P1)),
+        ])
+        .unwrap();
+    for _ in 0..16 {
+        if matches!(
+            reattached.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        assert!(matches!(
+            reattached.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        reattached.act(GameAction::PassPriority).unwrap();
+    }
+    assert!(
+        matches!(reattached.state().waiting_for, WaitingFor::DeclareBlockers { player, .. } if player == P1)
+    );
+    assert_requirement(reattached.state(), next_host, host, true);
+    assert!(!reattached.state().objects[&host]
+        .keywords
+        .contains(&Keyword::FirstStrike));
+    assert!(reattached.state().objects[&next_host]
+        .keywords
+        .contains(&Keyword::FirstStrike));
+    assert_eq!(reattached.state().players[0].mana_pool.total(), 0);
+    assert!(reattached.state().stack.is_empty());
+    assert!(reattached.declare_blockers(&[(ordinary, host)]).is_err());
+    reattached
+        .declare_blockers(&[(ordinary, next_host)])
+        .unwrap();
 }
 
 #[test]

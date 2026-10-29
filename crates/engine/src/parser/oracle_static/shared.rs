@@ -581,6 +581,31 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
         filter: TargetFilter::Typed(TypedFilter::creature().properties(vec![combat_prop])),
     };
     let mut defs = Vec::new();
+    // CR 113.1a + CR 509.1c + CR 613.11: an outer blocking requirement
+    // changes combat rules; it is not an ability acquired by the host. Claim
+    // that typed predicate before the generic complete grant can absorb it.
+    // Quotes retain their acquired-ability ownership, even when they contain
+    // the same rule-static predicate as the outer conjunct.
+    if let Some((prefix, rule)) = split_outer_bare_blocking_requirement(&predicate) {
+        if !prefix.trim().is_empty() {
+            // A recognized outer boundary owns the complete transaction.
+            // Refuse an incomplete prefix before token-level residual salvage.
+            let Some(modifications) =
+                super::keyword_grant::parse_complete_continuous_modifications(prefix)
+            else {
+                return Vec::new();
+            };
+            defs.push(
+                StaticDefinition::continuous()
+                    .affected(affected.clone())
+                    .modifications(modifications)
+                    .condition(gate.clone())
+                    .description(description.to_string()),
+            );
+        }
+        defs.push(lower_rule_static(rule, None, affected, description).condition(gate));
+        return defs;
+    }
     if let Some(modifications) =
         super::keyword_grant::parse_complete_continuous_modifications(predicate_body)
     {
@@ -681,6 +706,35 @@ pub(crate) fn try_parse_inverted_attached_combat_grant(
     }
 
     defs
+}
+
+/// Recognize only a complete, outer bare requirement, retaining its entire
+/// optional grant prefix. Shared with the caller so an owned refusal cannot
+/// fall through to a more permissive conjunction splitter.
+fn split_outer_bare_blocking_requirement<'a>(
+    predicate: &TextPair<'a>,
+) -> Option<(&'a str, RuleStaticPredicate)> {
+    all_consuming(terminated(parse_rule_static_predicate_nom, opt(tag("."))))
+        .parse(predicate.lower.trim())
+        .ok()
+        .filter(|(_, rule)| matches!(rule, RuleStaticPredicate::MustBeBlocked))
+        .map(|(_, rule)| ("", rule))
+        .or_else(|| {
+            predicate.scan_around_outside_quotes(
+                |input| {
+                    preceded(
+                        tag(" and "),
+                        terminated(parse_rule_static_predicate_nom, opt(tag("."))),
+                    )
+                    .parse(input)
+                },
+                |prefix, rule, tail| {
+                    (tail.original.trim().is_empty()
+                        && matches!(rule, RuleStaticPredicate::MustBeBlocked))
+                    .then_some((prefix.original, rule))
+                },
+            )
+        })
 }
 
 /// CR 506.5 + CR 509.1b + CR 611.3a: Inverted attached-subject evasion gated
@@ -3372,6 +3426,24 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         let defs = try_parse_inverted_attached_combat_grant(&split, &stripped);
         if !defs.is_empty() {
             return defs;
+        }
+        // An attached combat-gated bare transaction with an incomplete grant
+        // prefix was refused above. Keep that full source unimplemented rather
+        // than salvage its requirement through a later conjunction splitter.
+        let condition_lower = split.condition_text.to_lowercase();
+        if all_consuming(nom_condition::parse_attached_subject_combat_state)
+            .parse(condition_lower.as_str())
+            .is_ok()
+        {
+            let effect_lower = split.effect_text.to_lowercase();
+            let effect = TextPair::new(&split.effect_text, &effect_lower);
+            if nom_tag_tp(&effect, "it ")
+                .or_else(|| nom_tag_tp(&effect, "they "))
+                .and_then(|predicate| split_outer_bare_blocking_requirement(&predicate))
+                .is_some()
+            {
+                return defs;
+            }
         }
         // CR 702.11 + CR 702.18 + CR 611.3a: Inverted player+object compound
         // keyword grants ("As long as <cond>, you and <objects> have hexproof")
