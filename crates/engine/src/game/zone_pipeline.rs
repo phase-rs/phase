@@ -8103,8 +8103,9 @@ mod sought_completion_order_tests {
     use super::*;
     #[test]
     fn sought_batch_result_is_unpublished_through_repeated_and_final_pause() {
-        let (mut runner, cards, _) = crate::game::effects::seek::tests::sought_pause_fixture();
+        let (mut runner, cards, source) = crate::game::effects::seek::tests::sought_pause_fixture();
         let mut observed_remaining = Vec::new();
+        let mut cleanup_prompts = 0;
         for pause in 0..16 {
             if !matches!(
                 runner.state().waiting_for,
@@ -8112,48 +8113,88 @@ mod sought_completion_order_tests {
             ) {
                 break;
             }
-            let batch = runner.state().active_batch_delivery().unwrap_or_else(|| {
-                panic!(
-                    "parked named batch pause={pause}; wait={:?}; frames={:?}",
-                    runner.state().waiting_for,
-                    runner.state().resolution_stack
-                )
-            });
-            let Some(BatchCompletion::RecordInstructionZoneResult {
-                occurrence_id,
-                return_result_process,
-                result_id,
-                settled_records,
-            }) = &batch.completion
-            else {
-                panic!("missing named completion")
-            };
-            assert!(settled_records.is_none());
-            assert_eq!(
-                runner.state().return_result_frames[occurrence_id].process,
-                *return_result_process
-            );
-            assert!(!runner.state().return_result_frames[occurrence_id]
-                .results
-                .contains_key(result_id));
-            let remaining = batch.remaining.len();
-            assert!(
-                remaining <= 1,
-                "only the two selected members belong to this batch"
-            );
-            if let Some(previous) = observed_remaining.last() {
-                assert!(
-                    remaining <= *previous,
-                    "repeated replacements cannot replenish the batch"
-                );
+            let pending = runner.state().pending_replacement.as_ref().unwrap();
+            match pending.delivery_boundary_event() {
+                ProposedEvent::ZoneChange {
+                    object_id,
+                    from: Zone::Library,
+                    to: Zone::Graveyard,
+                    cause: Some(cause),
+                    ..
+                } if cards.contains(object_id) && *cause == source => {
+                    let batch = runner.state().active_batch_delivery().unwrap_or_else(|| {
+                        panic!(
+                            "parked named batch pause={pause}; wait={:?}; frames={:?}",
+                            runner.state().waiting_for,
+                            runner.state().resolution_stack
+                        )
+                    });
+                    let Some(BatchCompletion::RecordInstructionZoneResult {
+                        occurrence_id,
+                        return_result_process,
+                        result_id,
+                        settled_records,
+                    }) = &batch.completion
+                    else {
+                        panic!("missing named completion")
+                    };
+                    assert!(settled_records.is_none());
+                    assert_eq!(
+                        runner.state().return_result_frames[occurrence_id].process,
+                        *return_result_process
+                    );
+                    assert!(!runner.state().return_result_frames[occurrence_id]
+                        .results
+                        .contains_key(result_id));
+                    let remaining = batch.remaining.len();
+                    assert!(
+                        remaining <= 1,
+                        "only the two selected members belong to this batch"
+                    );
+                    if let Some(previous) = observed_remaining.last() {
+                        assert!(
+                            remaining <= *previous,
+                            "repeated replacements cannot replenish the batch"
+                        );
+                    }
+                    observed_remaining.push(remaining);
+                    assert!(batch.paused_current.is_some());
+                    assert_eq!(
+                        runner.state().players[0].life,
+                        20,
+                        "independent life tail waits at EVERY replacement pause"
+                    );
+                }
+                ProposedEvent::ZoneChange {
+                    object_id,
+                    from: Zone::Stack,
+                    to: Zone::Graveyard,
+                    cause: Some(cause),
+                    ..
+                } if *object_id == source && *cause == source => {
+                    // CR 608.2n: the spell's cleanup follows its complete instructions.
+                    cleanup_prompts += 1;
+                    assert!(runner.state().active_batch_delivery().is_none());
+                    assert_eq!(runner.state().players[0].life, 27);
+                    assert_eq!(runner.state().objects[&source].zone, Zone::Stack);
+                    assert!(runner.state().resolving_stack_entry.as_ref().is_some_and(
+                        |entry| entry.id == source
+                            && entry.source_id == source
+                            && matches!(
+                                entry.kind,
+                                crate::types::game_state::StackEntryKind::Spell { .. }
+                            )
+                    ));
+                    for card in &cards {
+                        assert_eq!(runner.state().objects[card].zone, Zone::Exile);
+                        crate::game::effects::seek::tests::assert_sought_generic_one_grant(
+                            runner.state(),
+                            *card,
+                        );
+                    }
+                }
+                other => panic!("foreign sought boundary at pause {pause}: {other:?}"),
             }
-            observed_remaining.push(remaining);
-            assert!(batch.paused_current.is_some());
-            assert_eq!(
-                runner.state().players[0].life,
-                20,
-                "independent life tail waits at EVERY replacement pause"
-            );
             let action = crate::ai_support::legal_actions(runner.state())
                 .into_iter()
                 .find(|action| {
@@ -8169,6 +8210,7 @@ mod sought_completion_order_tests {
             observed_remaining.contains(&1) && observed_remaining.contains(&0),
             "both first and final member pauses were reached: {observed_remaining:?}"
         );
+        assert_eq!(cleanup_prompts, 1);
         assert!(
             !matches!(
                 runner.state().waiting_for,
@@ -8192,7 +8234,10 @@ mod sought_completion_order_tests {
         }
         for card in cards {
             assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
-            assert_eq!(runner.state().objects[&card].perpetual_mods.len(), 1);
+            crate::game::effects::seek::tests::assert_sought_generic_one_grant(
+                runner.state(),
+                card,
+            );
         }
         assert_eq!(
             runner.state().players[0].life,
@@ -8200,6 +8245,16 @@ mod sought_completion_order_tests {
             "independent tail executes once after the batch"
         );
         assert!(runner.state().active_batch_delivery().is_none());
+        assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().active_return_result_occurrence.is_none());
+        assert!(runner.state().resolving_stack_entry.is_none());
+        assert!(runner.state().pending_resolution_completion.is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ));
         assert!(
             runner.state().return_result_frames.is_empty(),
             "completed occurrence retires normally"

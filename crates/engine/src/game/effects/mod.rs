@@ -2686,34 +2686,8 @@ pub(crate) fn owned_cursor_declarations(
         state.validate_replacement_program(ability)?;
         return Ok((ability.clone(), Default::default()));
     }
-    let frame = crate::types::game_state::checked_return_result_frame(
-        state,
-        occurrence,
-        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
-            ability.return_result_process,
-        ),
-    )
-    .map_err(EffectError::InvalidParam)?;
-    let declarations = frame.declarations.clone().ok_or_else(|| {
-        EffectError::InvalidParam(
-            "instruction-result cursor has no recovered declaration origin".into(),
-        )
-    })?;
-    let program = frame.admitted_program.as_deref().ok_or_else(|| {
-        EffectError::InvalidParam(
-            "instruction-result cursor has no recovered admitted program".into(),
-        )
-    })?;
-    let (_, actual) = crate::types::ability::classify_instruction_result_invocation(
-        program,
-        crate::types::ability::InstructionResultEntry::Independent,
-        None,
-    )?;
-    if actual != declarations || program.return_result_process != frame.process {
-        return Err(EffectError::InvalidParam(
-            "instruction-result admitted program declaration mismatch".into(),
-        ));
-    }
+    let (program, declarations) = instruction_result_cursor_origin(state, ability, occurrence)?;
+    let declarations = declarations.clone();
     state.validate_replacement_program(ability)?;
     if !crate::types::game_state::is_retained_instruction_result_carrier(state, occurrence, ability)
         && !(state
@@ -2753,6 +2727,42 @@ pub(crate) fn owned_cursor_declarations(
         // no-reader instruction under the existing empty-namespace policy.
         Ok((ability.clone(), Default::default()))
     }
+}
+
+fn instruction_result_cursor_origin<'a>(
+    state: &'a GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+) -> Result<AdmittedInstructionResult<'a>, EffectError> {
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        occurrence,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+            ability.return_result_process,
+        ),
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let declarations = frame.declarations.as_ref().ok_or_else(|| {
+        EffectError::InvalidParam(
+            "instruction-result cursor has no recovered declaration origin".into(),
+        )
+    })?;
+    let program = frame.admitted_program.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam(
+            "instruction-result cursor has no recovered admitted program".into(),
+        )
+    })?;
+    let (_, actual) = crate::types::ability::classify_instruction_result_invocation(
+        program,
+        crate::types::ability::InstructionResultEntry::Independent,
+        None,
+    )?;
+    if &actual != declarations || program.return_result_process != frame.process {
+        return Err(EffectError::InvalidParam(
+            "instruction-result admitted program declaration mismatch".into(),
+        ));
+    }
+    Ok((program, declarations))
 }
 
 fn completed_instruction_result_declarations(
@@ -2795,6 +2805,31 @@ fn validate_owned_instruction_result_cursor(
     occurrence: Option<ReturnResultOccurrenceId>,
     declarations: AdmittedInstructionResult<'_>,
 ) -> Result<crate::types::ability::InstructionResultProcess, EffectError> {
+    validate_instruction_result_cursor_origin(state, ability, occurrence, declarations)?;
+    let completed =
+        completed_instruction_result_declarations(state, ability, occurrence, declarations.1)?;
+    crate::types::ability::classify_instruction_result_invocation(
+        ability,
+        crate::types::ability::InstructionResultEntry::ResumeOwned,
+        Some((declarations.1, &completed)),
+    )
+    .map(|(summary, _)| summary)
+}
+
+fn validate_instruction_result_cursor_origin(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<(), EffectError> {
+    if !declarations.1.is_empty() {
+        let (program, actual) = instruction_result_cursor_origin(state, ability, occurrence)?;
+        if actual != declarations.1 || !instruction_result_projection_eq(program, declarations.0) {
+            return Err(EffectError::InvalidParam(
+                "instruction-result admitted program declaration mismatch".into(),
+            ));
+        }
+    }
     if !declarations.1.is_empty()
         && !instruction_result_owned_program_projects_to(state, occurrence, declarations.0, ability)
     {
@@ -2803,12 +2838,71 @@ fn validate_owned_instruction_result_cursor(
                 .into(),
         ));
     }
-    let completed =
+    state.validate_replacement_program(ability)?;
+    Ok(())
+}
+
+/// Pending zone results are dependencies for parking only. They remain absent
+/// from the completed environment used by every executable cursor.
+fn validate_continuation_instruction_result_cursor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<crate::types::ability::InstructionResultProcess, EffectError> {
+    validate_instruction_result_cursor_origin(state, ability, occurrence, declarations)?;
+    let mut predecessors =
         completed_instruction_result_declarations(state, ability, occurrence, declarations.1)?;
+    let parent = state.resolution_stack.iter().position(|frame| {
+        matches!(frame, crate::types::resolution::ResolutionFrame::AbilityContinuation(frame)
+            if frame.pending.return_result_occurrence == occurrence
+                && frame.pending.chain.return_result_process == ability.return_result_process
+                && instruction_result_projection_eq(&frame.pending.chain, ability))
+    });
+    for (index, frame) in state.resolution_stack.iter().enumerate() {
+        let crate::types::resolution::ResolutionFrame::BatchDelivery(batch) = frame else {
+            continue;
+        };
+        let Some(crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+            occurrence_id,
+            result_id,
+            return_result_process,
+            ..
+        }) = &batch.completion
+        else {
+            continue;
+        };
+        if Some(*occurrence_id) != occurrence
+            || *return_result_process != ability.return_result_process
+            || parent.is_some_and(|parent| index <= parent)
+            || (parent.is_none() && state.active_return_result_occurrence != occurrence)
+        {
+            continue;
+        }
+        // The actual publisher must belong to the admitted predecessor of this
+        // exact tail, rather than merely sharing the invocation's namespace.
+        let predecessor = visit_instruction_result_program_projections_for_cursor(
+            declarations.0,
+            ability,
+            &mut |producer| {
+                producer.declares_return_result == Some(*result_id)
+                    && producer.return_result_process == *return_result_process
+                    && producer
+                        .sub_ability
+                        .as_deref()
+                        .is_some_and(|tail| instruction_result_program_projects_to(tail, ability))
+            },
+        );
+        if predecessor {
+            if let Some(zones) = declarations.1.get(result_id) {
+                predecessors.insert(*result_id, *zones);
+            }
+        }
+    }
     crate::types::ability::classify_instruction_result_invocation(
         ability,
         crate::types::ability::InstructionResultEntry::ResumeOwned,
-        Some((declarations.1, &completed)),
+        Some((declarations.1, &predecessors)),
     )
     .map(|(summary, _)| summary)
 }
@@ -4342,40 +4436,80 @@ pub(crate) fn retained_return_result_occurrence(
     ability: &ResolvedAbility,
     declarations: AdmittedInstructionResult<'_>,
 ) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
-    use crate::types::ability::InstructionResultProcess;
-    match validate_owned_instruction_result_cursor(
+    let summary = validate_owned_instruction_result_cursor(
         state,
         ability,
         state.active_return_result_occurrence,
         declarations,
-    )? {
+    )?;
+    validated_return_result_occurrence(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        summary,
+    )
+}
+
+pub(crate) fn continuation_return_result_occurrence(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    declarations: AdmittedInstructionResult<'_>,
+) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
+    let summary =
+        validate_continuation_instruction_result_cursor(state, ability, occurrence, declarations)?;
+    validated_return_result_occurrence(state, ability, occurrence, summary)
+}
+
+pub(crate) fn validate_retained_instruction_result_continuation(
+    state: &GameState,
+    pending: &PendingContinuation,
+) -> Result<(), EffectError> {
+    if !crate::types::game_state::has_return_result_metadata(&pending.chain) {
+        return state.validate_replacement_program(&pending.chain);
+    }
+    let declarations =
+        instruction_result_cursor_origin(state, &pending.chain, pending.return_result_occurrence)?;
+    continuation_return_result_occurrence(
+        state,
+        &pending.chain,
+        pending.return_result_occurrence,
+        declarations,
+    )?;
+    Ok(())
+}
+
+fn validated_return_result_occurrence(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    summary: crate::types::ability::InstructionResultProcess,
+) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
+    use crate::types::ability::InstructionResultProcess;
+    match summary {
         InstructionResultProcess::Unused => Ok(None),
         InstructionResultProcess::Local { .. } => {
             (if ability.has_addressed_zone_result_read() {
                 crate::types::game_state::checked_owned_return_result_frame(
                     state,
-                    state.active_return_result_occurrence,
+                    occurrence,
                     ability.return_result_process,
                 )
             } else {
                 crate::types::game_state::checked_return_result_frame(
                     state,
-                    state.active_return_result_occurrence,
+                    occurrence,
                     crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
                         ability.return_result_process,
                     ),
                 )
             })
             .map_err(EffectError::InvalidParam)?;
-            Ok(state.active_return_result_occurrence)
+            Ok(occurrence)
         }
         InstructionResultProcess::Imported { .. } => {
-            validate_selected_instruction_result_owner(
-                state,
-                ability,
-                state.active_return_result_occurrence,
-            )?;
-            Ok(state.active_return_result_occurrence)
+            validate_selected_instruction_result_owner(state, ability, occurrence)?;
+            Ok(occurrence)
         }
     }
 }

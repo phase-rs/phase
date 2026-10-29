@@ -248,7 +248,75 @@ pub(crate) mod tests {
             .any(|frame| frame.results.values().any(|records| records
                 .zone_changes()
                 .is_some_and(|records| !records.is_empty()))));
+        let batch = runner.state().active_batch_delivery().unwrap();
+        assert_eq!(batch.remaining.len(), 1);
+        assert!(batch.paused_current.is_some());
+        assert_eq!(
+            batch
+                .logical_zone_change_group
+                .instruction_deliveries
+                .as_ref()
+                .unwrap()
+                .len(),
+            2
+        );
+        let Some(crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+            occurrence_id,
+            result_id,
+            return_result_process,
+            ..
+        }) = &batch.completion
+        else {
+            panic!("actual second named producer")
+        };
+        assert_eq!(*result_id, crate::types::ability::ReturnResultId(2));
+        let owner = &runner.state().return_result_frames[occurrence_id];
+        assert_eq!(owner.process, *return_result_process);
+        assert_eq!(
+            owner
+                .admitted_program
+                .as_deref()
+                .unwrap()
+                .return_result_process,
+            *return_result_process
+        );
+        assert!(owner
+            .results
+            .contains_key(&crate::types::ability::ReturnResultId(0)));
+        assert!(!owner.results.contains_key(result_id));
+        let pending = runner
+            .state()
+            .resolution_stack
+            .ability_continuations()
+            .find(|pending| {
+                matches!(
+                    pending.chain.effect,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 7 },
+                        ..
+                    }
+                )
+            })
+            .expect("the entire independent-life then dependent-reader tail is parked");
+        assert_eq!(pending.return_result_occurrence, Some(*occurrence_id));
+        assert_eq!(pending.chain.return_result_process, *return_result_process);
+        assert_eq!(pending.chain.source_id, source);
+        let reader = pending.chain.sub_ability.as_deref().unwrap();
+        assert_eq!(reader.reads_return_result.as_ref().unwrap().0, *result_id);
+        assert!(reader.sub_ability.is_none());
+        assert_eq!(runner.state().players[0].life, 20);
+        assert_sought_generic_one_grant(runner.state(), prior);
         (runner, cards, source)
+    }
+
+    pub(crate) fn assert_sought_generic_one_grant(state: &GameState, card: ObjectId) {
+        assert_eq!(
+            state.objects[&card].perpetual_mods,
+            vec![crate::types::ability::PerpetualModification::ModifyCost {
+                mode: crate::types::statics::CostModifyMode::Reduce,
+                amount: crate::types::mana::ManaCost::generic(1),
+            }]
+        );
     }
 
     pub(crate) fn finish_sought_pause(
@@ -268,6 +336,23 @@ pub(crate) mod tests {
         assert!(matches!(source.kind, StackEntryKind::Spell { .. }));
         assert_eq!(source.id, source.source_id);
         let source = source.id;
+        let prior = runner
+            .state()
+            .return_result_frames
+            .values()
+            .find_map(|frame| frame.results.get(&crate::types::ability::ReturnResultId(0)))
+            .and_then(|result| result.zone_changes())
+            .unwrap();
+        assert_eq!(prior.len(), 1);
+        let prior = prior[0].object_id;
+        assert_sought_generic_one_grant(runner.state(), prior);
+        let other_grants = runner
+            .state()
+            .objects
+            .iter()
+            .filter(|(id, _)| !cards.contains(id))
+            .map(|(id, object)| (*id, object.perpetual_mods.clone()))
+            .collect::<Vec<_>>();
         let mut member_prompts = 0;
         let mut cleanup_prompts = 0;
         let mut pending_prefixes = [false; 2];
@@ -330,7 +415,7 @@ pub(crate) mod tests {
                             ));
                             assert_eq!(runner.state().players[0].life, life + 7);
                             for card in cards {
-                                assert_eq!(runner.state().objects[card].perpetual_mods.len(), 1);
+                                assert_sought_generic_one_grant(runner.state(), *card);
                             }
                         }
                         other => panic!(
@@ -441,10 +526,15 @@ pub(crate) mod tests {
             "the grant precedes spell cleanup"
         );
         assert_eq!(runner.state().objects[&source].zone, Zone::Exile);
+        assert!(runner.state().objects[&source].perpetual_mods.is_empty());
+        assert_sought_generic_one_grant(runner.state(), prior);
+        for (id, grants) in other_grants {
+            assert_eq!(runner.state().objects[&id].perpetual_mods, grants);
+        }
         assert_eq!(runner.state().players[0].life, life + 7);
         for card in cards {
             assert_eq!(runner.state().objects[card].zone, Zone::Exile);
-            assert_eq!(runner.state().objects[card].perpetual_mods.len(), 1);
+            assert_sought_generic_one_grant(runner.state(), *card);
         }
         assert!(runner.state().stack.is_empty());
         assert!(runner.state().resolution_stack.is_empty());
@@ -461,6 +551,133 @@ pub(crate) mod tests {
     #[test]
     fn sought_completed_result_waits_for_first_and_final_member() {
         let (mut runner, cards, _) = sought_pause_fixture();
+        let state = runner.state();
+        let pending = state
+            .resolution_stack
+            .ability_continuations()
+            .find(|pending| matches!(pending.chain.effect, Effect::GainLife { .. }))
+            .unwrap()
+            .clone();
+        super::super::validate_retained_instruction_result_continuation(state, &pending).unwrap();
+        let owner = &state.return_result_frames[&pending.return_result_occurrence.unwrap()];
+        let program = owner.admitted_program.as_deref().unwrap();
+        let declarations = owner.declarations.as_ref().unwrap();
+        let mut premature = state.clone();
+        premature.active_return_result_occurrence = pending.return_result_occurrence;
+        let before = serde_json::to_value(&premature).unwrap();
+        let mut events = Vec::new();
+        let error = super::super::resolve_carrier_owned_ability_chain(
+            &mut premature,
+            &pending.chain,
+            &mut events,
+            0,
+            (program, declarations),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("read precedes producer"));
+        assert!(events.is_empty());
+        assert_eq!(serde_json::to_value(&premature).unwrap(), before);
+        for fault in 0..10 {
+            let mut bad = state.clone();
+            let mut tail = pending.clone();
+            match fault {
+                0 => {
+                    tail.return_result_occurrence =
+                        Some(crate::types::game_state::ReturnResultOccurrenceId(u64::MAX))
+                }
+                1 => {
+                    tail.chain.return_result_process =
+                        Some(crate::types::game_state::ReturnResultProcessId(u64::MAX))
+                }
+                2 => bad.active_batch_delivery_mut().unwrap().completion = None,
+                3 => tail.chain.source_id = ObjectId(u64::MAX),
+                4 => tail.chain.controller = crate::game::scenario::P1,
+                5 => {
+                    tail.chain.effect = Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 8 },
+                        player: TargetFilter::Controller,
+                    }
+                }
+                6 => {
+                    let mut frames = bad.resolution_stack.iter().cloned().collect::<Vec<_>>();
+                    let parent = frames
+                        .iter()
+                        .position(|frame| {
+                            matches!(frame,
+                        crate::types::resolution::ResolutionFrame::AbilityContinuation(frame)
+                            if frame.pending == pending)
+                        })
+                        .unwrap();
+                    let publisher = frames
+                        .iter()
+                        .position(|frame| {
+                            matches!(
+                                frame,
+                                crate::types::resolution::ResolutionFrame::BatchDelivery(_)
+                            )
+                        })
+                        .unwrap();
+                    assert!(parent < publisher);
+                    frames.swap(parent, publisher);
+                    bad.resolution_stack = Default::default();
+                    for frame in frames {
+                        bad.resolution_stack.push_inner(frame);
+                    }
+                }
+                7..=9 => {
+                    let Some(
+                        crate::types::game_state::BatchCompletion::RecordInstructionZoneResult {
+                            occurrence_id,
+                            return_result_process,
+                            result_id,
+                            ..
+                        },
+                    ) = &mut bad.active_batch_delivery_mut().unwrap().completion
+                    else {
+                        panic!()
+                    };
+                    match fault {
+                        7 => {
+                            *occurrence_id =
+                                crate::types::game_state::ReturnResultOccurrenceId(u64::MAX)
+                        }
+                        8 => {
+                            *return_result_process =
+                                Some(crate::types::game_state::ReturnResultProcessId(u64::MAX))
+                        }
+                        9 => *result_id = crate::types::ability::ReturnResultId(0),
+                        _ => unreachable!(),
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&bad).unwrap();
+            assert!(
+                super::super::validate_retained_instruction_result_continuation(&bad, &tail)
+                    .is_err(),
+                "fault {fault}"
+            );
+            assert_eq!(serde_json::to_value(&bad).unwrap(), before);
+        }
+        let mut backwards = pending.chain.clone();
+        let producer = std::iter::successors(Some(program), |node| node.sub_ability.as_deref())
+            .find(|node| {
+                node.declares_return_result == Some(crate::types::ability::ReturnResultId(2))
+            })
+            .unwrap();
+        let mut late_producer = producer.clone();
+        late_producer.sub_ability = None;
+        backwards.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(late_producer));
+        assert!(
+            crate::types::ability::classify_instruction_result_invocation(
+                &backwards,
+                crate::types::ability::InstructionResultEntry::ResumeOwned,
+                Some((declarations, declarations)),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("read precedes producer")
+        );
         finish_sought_pause(&mut runner, &cards);
     }
 

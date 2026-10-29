@@ -3357,8 +3357,12 @@ impl PendingContinuation {
         state: &GameState,
         declarations: crate::game::effects::AdmittedInstructionResult<'_>,
     ) -> Result<Self, crate::types::ability::EffectError> {
-        let occurrence =
-            crate::game::effects::retained_return_result_occurrence(state, &chain, declarations)?;
+        let occurrence = crate::game::effects::continuation_return_result_occurrence(
+            state,
+            &chain,
+            state.active_return_result_occurrence,
+            declarations,
+        )?;
         let mut pending = Self::new(chain, state);
         pending.return_result_occurrence = occurrence;
         Ok(pending)
@@ -17262,10 +17266,9 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
                             ),
                         )
                     })?;
-                    crate::game::effects::owned_cursor_declarations(
+                    crate::game::effects::validate_retained_instruction_result_continuation(
                         state,
-                        frame.pending.return_result_occurrence,
-                        &frame.pending.chain,
+                        &frame.pending,
                     )
                     .map_err(|error| error.to_string())?;
                 }
@@ -17367,8 +17370,26 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                     .map_err(|error| error.to_string())?;
                 continue;
             }
-            crate::game::effects::owned_cursor_declarations(state, occurrence, body)
+            if let Some(pending) = state
+                .resolution_stack
+                .ability_continuations()
+                .find(|pending| {
+                    pending.return_result_occurrence == occurrence
+                        && pending.chain.return_result_process == body.return_result_process
+                        && crate::game::effects::instruction_result_projection_eq(
+                            &pending.chain,
+                            body,
+                        )
+                })
+            {
+                crate::game::effects::validate_retained_instruction_result_continuation(
+                    state, pending,
+                )
                 .map_err(|error| error.to_string())?;
+            } else {
+                crate::game::effects::owned_cursor_declarations(state, occurrence, body)
+                    .map_err(|error| error.to_string())?;
+            }
         }
     }
     for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
@@ -62633,7 +62654,15 @@ mod sought_result_current_tests {
             &serde_json::to_vec(&PersistedGameState::capture(state.clone())).unwrap(),
         )
         .unwrap();
-        for loaded in [raw, trusted.into_game_state().unwrap()] {
+        let wire: ResolutionStateWire = serde_json::from_slice(
+            &serde_json::to_vec(&ResolutionStateWire::from_game_state(state.clone())).unwrap(),
+        )
+        .unwrap();
+        for loaded in [
+            raw,
+            trusted.into_game_state().unwrap(),
+            wire.into_game_state(),
+        ] {
             assert_eq!(loaded.return_result_frames, state.return_result_frames);
             assert_eq!(
                 loaded.next_return_result_occurrence_id,
@@ -62692,6 +62721,20 @@ mod sought_result_current_tests {
             assert!(
                 serde_json::from_slice::<GameState>(&serde_json::to_vec(&bad).unwrap()).is_err(),
                 "malformed current mutation {mutation}"
+            );
+            assert!(
+                serde_json::from_slice::<PersistedGameState>(
+                    &serde_json::to_vec(&PersistedGameState::capture(bad.clone())).unwrap(),
+                )
+                .is_err(),
+                "malformed trusted mutation {mutation}"
+            );
+            assert!(
+                serde_json::from_slice::<ResolutionStateWire>(
+                    &serde_json::to_vec(&ResolutionStateWire::from_game_state(bad)).unwrap(),
+                )
+                .is_err(),
+                "malformed explicit wire mutation {mutation}"
             );
         }
         let historical = GameState::new_two_player(42);
