@@ -49777,9 +49777,10 @@ fn perpetual_parser_maps_modify_pt() {
         }
     ));
 
+    // The subject binder refuses an unbound pronoun before the perpetual owner.
     assert_eq!(
         parse_effect("it perpetually gets +3/+0."),
-        Effect::unimplemented("perpetual_modify_pt", "it perpetually gets +3/+0")
+        Effect::unimplemented("unbound_subject", "it perpetually gets +3/+0")
     );
 
     let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
@@ -87164,8 +87165,8 @@ fn perpetual_conjunct_after_life_gain_keeps_the_life_gain() {
 /// letting the generic pump drop "perpetually" and turn a permanent edit into an
 /// until-end-of-turn one.
 ///
-/// The unbound bare "it" retains its exact gap; the comma-joined return sibling
-/// supplies the identity and still reaches a real `ApplyPerpetual`.
+/// The unbound bare "it" retains its exact subject-binding gap; the comma-joined
+/// return sibling supplies the identity and still reaches a real `ApplyPerpetual`.
 #[test]
 fn a_perpetual_pt_clause_never_lowers_to_a_plain_pump() {
     for text in [
@@ -87194,7 +87195,7 @@ fn a_perpetual_pt_clause_never_lowers_to_a_plain_pump() {
     let unbound = parse_effect_chain("it perpetually gets +1/+1", AbilityKind::Spell);
     assert_eq!(
         unbound.effect.as_ref(),
-        &Effect::unimplemented("perpetual_modify_pt", "it perpetually gets +1/+1")
+        &Effect::unimplemented("unbound_subject", "it perpetually gets +1/+1")
     );
     assert!(unbound.sub_ability.is_none());
     for text in ["return ~ to the battlefield, and it perpetually gets +1/+1"] {
@@ -97559,13 +97560,19 @@ fn duration_repair_conditional_members_keep_local_windows_in_both_chain_modes() 
         );
         assert_eq!(nodes[1].duration, Some(Duration::UntilEndOfTurn));
         assert!(nodes[0].condition.is_none());
+        // CR 109.2: the creature in this presence gate is on the battlefield.
         let gate = StaticCondition::IsPresent {
             filter: Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::WithKeyword {
-                        value: Keyword::Flying,
-                    }]),
+                    .properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
             )),
         };
         for (index, node) in nodes.into_iter().enumerate() {
