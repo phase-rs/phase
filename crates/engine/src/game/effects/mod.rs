@@ -2692,6 +2692,13 @@ fn visit_instruction_result_program_projections_inner(
         }
     }
     if let Some(current) = current {
+        if let Some(projected) = choose_counter_adjustment::project_latched_choice(program, current)
+            .or_else(|| choose_counter_adjustment::project_latched_operation(program, current))
+        {
+            if visit(&projected) {
+                return true;
+            }
+        }
         if program.target_choice_timing == crate::types::ability::TargetChoiceTiming::Resolution
             && program.targets.is_empty()
             && !current.targets.is_empty()
@@ -2921,6 +2928,65 @@ fn visit_instruction_result_program_projections_inner(
     for (_, body) in &program.coin_branch_target_abilities {
         if visit_instruction_result_program_projections_inner(body, scoped_player, current, visit) {
             return true;
+        }
+    }
+    if let Some(current) = current {
+        if let Effect::Vote {
+            per_choice_effect,
+            subject,
+            ..
+        } = &program.effect
+        {
+            let (templates, winner): (Vec<_>, _) = match subject {
+                crate::types::ability::VoteSubject::Named => {
+                    (per_choice_effect.iter().map(Box::as_ref).collect(), None)
+                }
+                crate::types::ability::VoteSubject::Objects {
+                    outcome_template, ..
+                } => (
+                    vec![outcome_template.as_ref()],
+                    current.targets.iter().find_map(|target| {
+                        if let TargetRef::Object(id) = target {
+                            Some(*id)
+                        } else {
+                            None
+                        }
+                    }),
+                ),
+            };
+            for definition in templates {
+                let selected = vote::build_vote_outcome(
+                    definition,
+                    program.source_id,
+                    program.controller,
+                    &program.context.chain_root_targets,
+                    program.return_result_process,
+                    winner,
+                    current.scoped_player,
+                    Some(program),
+                );
+                if visit_instruction_result_program_projections_inner(
+                    &selected,
+                    scoped_player,
+                    Some(current),
+                    visit,
+                ) {
+                    return true;
+                }
+            }
+        }
+        if let Effect::RollDie { results, .. } = &program.effect {
+            for row in results {
+                let selected = roll_die::build_die_result(&row.effect, program);
+                if visit_instruction_result_program_projections_inner(
+                    &selected,
+                    scoped_player,
+                    Some(current),
+                    visit,
+                ) {
+                    return true;
+                }
+            }
         }
     }
     let mut found = false;
@@ -3314,6 +3380,12 @@ pub(crate) fn validate_definition_waiting_for_result_owner(
     state: &GameState,
     waiting: &WaitingFor,
 ) -> Result<(), EffectError> {
+    if matches!(waiting, WaitingFor::VoteChoice { .. }) {
+        return vote_waiting_admitted_program(state, waiting).map(|_| ());
+    }
+    if matches!(waiting, WaitingFor::ChooseOneOfBranch { .. }) {
+        choose_one_of::validate_waiting_result_owner(state, waiting)?;
+    }
     if matches!(waiting, WaitingFor::ChooseFromZoneChoice { .. }) {
         if let Some(pending) = state.active_per_player_zone_choice() {
             validate_selected_instruction_result_owner(
@@ -3471,6 +3543,196 @@ pub(crate) fn validate_definition_waiting_for_result_owner(
         validate_selected_instruction_result_owner(state, &body, occurrence)?;
     }
     Ok(())
+}
+
+/// Authenticate a captured input at its actual operation owner. A complete
+/// Unused input needs no result frame; it still needs checked rider payloads.
+pub(crate) fn retained_operation_admitted_program(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+    input: &ResolvedAbility,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    state.validate_replacement_program(input)?;
+    if input.return_result_process != expected {
+        return Err(EffectError::InvalidParam(
+            "retained operation process mismatch".into(),
+        ));
+    }
+    if !crate::types::game_state::has_return_result_metadata(input) {
+        let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
+            input,
+            crate::types::ability::InstructionResultEntry::SelectedBody,
+            None,
+        )?;
+        if !matches!(
+            summary,
+            crate::types::ability::InstructionResultProcess::Unused
+        ) || occurrence.is_some()
+            || expected.is_some()
+        {
+            return Err(EffectError::InvalidParam(
+                "unused retained operation has a foreign owner".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    owned_cursor_declarations(state, occurrence, input).map(Some)
+}
+
+pub(crate) fn vote_waiting_admitted_program(
+    state: &GameState,
+    waiting: &WaitingFor,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    let WaitingFor::VoteChoice {
+        retained_input,
+        return_result_occurrence,
+        expected_return_result_process,
+        source_id,
+        controller,
+        options,
+        option_labels,
+        candidate_objects,
+        per_choice_effect,
+        outcome_template,
+        tally_mode,
+        visibility,
+        chain_root_targets,
+        remaining_votes,
+        tallies,
+        actor,
+        ..
+    } = waiting
+    else {
+        return Err(EffectError::InvalidParam("not a held Vote input".into()));
+    };
+    if retained_input.is_none()
+        && return_result_occurrence.is_none()
+        && expected_return_result_process.is_none()
+        && per_choice_effect.is_empty()
+        && outcome_template.is_none()
+    {
+        // Old presentation-only/no-outcome carriers have no operative input to
+        // recover. New real Vote writers always retain their complete input.
+        return Ok(None);
+    }
+    let input = retained_input.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam("vote has unrecoverable operative input origin".into())
+    })?;
+    let Effect::Vote {
+        choices,
+        per_choice_effect: original,
+        subject,
+        tally_mode: mode,
+        visibility: original_visibility,
+        voter_scope,
+        ..
+    } = &input.effect
+    else {
+        return Err(EffectError::InvalidParam(
+            "retained vote input is not Vote".into(),
+        ));
+    };
+    let subject_matches = match subject {
+        crate::types::ability::VoteSubject::Named => {
+            choices == options
+                && original == per_choice_effect
+                && candidate_objects.is_empty()
+                && outcome_template.is_none()
+                && option_labels
+                    == &choices
+                        .iter()
+                        .map(|choice| vote::title_case_word(choice))
+                        .collect::<Vec<_>>()
+        }
+        crate::types::ability::VoteSubject::Objects {
+            outcome_template: template,
+            ..
+        } => {
+            outcome_template.as_deref() == Some(template.as_ref())
+                && per_choice_effect.is_empty()
+                && candidate_objects.len() == options.len()
+                && option_labels.len() == options.len()
+        }
+    };
+    let expected_actor = match voter_scope {
+        crate::types::ability::VoterScope::ControllerLabels => {
+            crate::types::game_state::VoteActor::Delegated(*controller)
+        }
+        _ => crate::types::game_state::VoteActor::SubjectActs,
+    };
+    if !subject_matches
+        || input.source_id != *source_id
+        || input.controller != *controller
+        || input.context.chain_root_targets != *chain_root_targets
+        || mode != tally_mode
+        || original_visibility != visibility
+        || *remaining_votes == 0
+        || tallies.len() != options.len()
+        || *actor != expected_actor
+    {
+        return Err(EffectError::InvalidParam(
+            "vote carrier disagrees with its complete retained input".into(),
+        ));
+    }
+    retained_operation_admitted_program(
+        state,
+        *return_result_occurrence,
+        *expected_return_result_process,
+        input,
+    )
+}
+
+pub(crate) fn vote_carrier_admitted_program(
+    state: &GameState,
+    pending: &crate::types::game_state::PendingVoteBallotIteration,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    let input = pending.retained_input.as_deref().ok_or_else(|| {
+        EffectError::InvalidParam("vote ballot has unrecoverable operative input origin".into())
+    })?;
+    let Effect::Vote {
+        per_choice_effect, ..
+    } = &input.effect
+    else {
+        return Err(EffectError::InvalidParam(
+            "retained ballot input is not Vote".into(),
+        ));
+    };
+    if input.source_id != pending.source_id
+        || input.controller != pending.controller
+        || input.context.chain_root_targets != pending.chain_root_targets
+        || !per_choice_effect
+            .iter()
+            .any(|template| template.as_ref() == pending.ability_template.as_ref())
+    {
+        return Err(EffectError::InvalidParam(
+            "ballot carrier disagrees with its complete Vote input".into(),
+        ));
+    }
+    retained_operation_admitted_program(
+        state,
+        pending.return_result_occurrence,
+        pending.expected_return_result_process,
+        input,
+    )
 }
 
 pub(crate) fn retained_return_result_occurrence(
@@ -15341,7 +15603,7 @@ fn resolve_owned_effect_step(
     validate_addressed_quantity_reads(state, ability)?;
     match &ability.effect {
         Effect::RollDie { .. } => Ok(EffectStep {
-            progress: roll_die::resolve_step(state, ability, events)?,
+            progress: roll_die::resolve_step_owned(state, ability, events, declarations)?,
             result: None,
             tail: TailOwnership::Caller,
             damage_opportunity: None,
@@ -23470,6 +23732,16 @@ pub(crate) fn resolve_parent_selected_ability_chain(
     depth: u32,
     parent: AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
+    resolve_parent_selected_ability_chain_step(state, ability, events, depth, parent).map(|_| ())
+}
+
+pub(crate) fn resolve_parent_selected_ability_chain_step(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    parent: AdmittedInstructionResult<'_>,
+) -> Result<ResolutionProgress, EffectError> {
     let (summary, _) = crate::types::ability::classify_instruction_result_invocation(
         ability,
         crate::types::ability::InstructionResultEntry::SelectedBody,
@@ -23477,11 +23749,17 @@ pub(crate) fn resolve_parent_selected_ability_chain(
     )?;
     match summary {
         crate::types::ability::InstructionResultProcess::Imported { .. } => {
-            resolve_carrier_owned_ability_chain(state, ability, events, depth, parent)
+            validate_owned_instruction_result_cursor(
+                state,
+                ability,
+                state.active_return_result_occurrence,
+                parent,
+            )?;
+            resolve_owned_ability_chain_step(state, ability, events, depth, parent)
         }
         crate::types::ability::InstructionResultProcess::Local { .. }
         | crate::types::ability::InstructionResultProcess::Unused => {
-            resolve_selected_ability_chain(state, ability, events, depth)
+            resolve_selected_ability_chain_step(state, ability, events, depth)
         }
     }
 }
@@ -66313,6 +66591,7 @@ mod entry_observation_settlement_tests {
             state
                 .resolution_stack
                 .push_inner(ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+                    retained_input: None,
                     return_result_occurrence: None,
                     expected_return_result_process: None,
                     source_id: ObjectId(100),

@@ -7416,6 +7416,9 @@ pub struct PendingPerCategoryZoneChoice {
 /// after each choice resolves until all voters are processed.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingVoteBallotIteration {
+    /// Complete input of the original Vote; never scheduled as executable work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_input: Option<Box<ResolvedAbility>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<ReturnResultOccurrenceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -15163,8 +15166,33 @@ fn retained_instruction_result_carriers(
             })?;
         }
     }
+    for waiting in retained_result_waits(state) {
+        if let WaitingFor::VoteChoice {
+            retained_input: Some(input),
+            return_result_occurrence,
+            ..
+        } = waiting
+        {
+            out.push((*return_result_occurrence, input));
+        }
+    }
+    if let Some(pending) = &state.pending_die_roll_instruction {
+        if let Some(input) = &pending.retained_input {
+            out.push((pending.return_result_occurrence, input));
+        }
+    }
     for frame in state.resolution_stack.iter() {
         match frame {
+            ResolutionFrame::VoteBallot(pending) => {
+                if let Some(input) = &pending.retained_input {
+                    out.push((pending.return_result_occurrence, input));
+                }
+            }
+            ResolutionFrame::DieRoll(pending) => {
+                if let Some(input) = &pending.retained_input {
+                    out.push((pending.return_result_occurrence, input));
+                }
+            }
             ResolutionFrame::OptionalEffect(pending) => {
                 out.push((pending.return_result_occurrence, &pending.ability))
             }
@@ -15390,13 +15418,57 @@ pub(crate) fn recover_return_result_programs(state: &mut GameState) -> Result<()
             .as_ref()
             .and_then(|entry| entry.ability())
         {
-            if carriers
-                .iter()
-                .any(|body| same_instruction_result_invocation_inputs(root, body))
+            let mut bound = root.clone();
+            bound.bind_return_result_process(frame.process);
+            let counter_prompt = retained_result_waits(state).into_iter().any(|waiting| {
+                let WaitingFor::ChooseOneOfBranch {
+                    return_result_occurrence,
+                    expected_return_result_process,
+                    context,
+                    branches,
+                    parent_occurrences,
+                    source_id,
+                    controller,
+                    continuation,
+                    replacement_applied,
+                    ..
+                } = waiting
+                else {
+                    return false;
+                };
+                let Some(ticket) = &context.counter_removal_result else {
+                    return false;
+                };
+                if *return_result_occurrence != Some(*occurrence)
+                    || ticket.occurrence != *occurrence
+                    || *expected_return_result_process != frame.process
+                    || ticket.process != frame.process
+                    || !crate::game::effects::counter_removal_binding_is_valid(state, ticket)
+                {
+                    return false;
+                }
+                let mut cursor = bound.clone();
+                cursor.effect = crate::types::ability::Effect::ChooseOneOf {
+                    kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+                    chooser: crate::types::ability::PlayerFilter::Controller,
+                    branches: branches.clone(),
+                };
+                cursor.declares_return_result = None;
+                cursor.else_ability = None;
+                cursor.sub_ability = continuation.clone();
+                cursor.context = context.clone();
+                cursor.source_id = *source_id;
+                cursor.controller = *controller;
+                cursor.replace_target_occurrences(parent_occurrences.occurrences());
+                cursor.replacement_applied = replacement_applied.clone();
+                crate::game::effects::instruction_result_program_projects_to(&bound, &cursor)
+            });
+            if counter_prompt
+                || carriers
+                    .iter()
+                    .any(|body| same_instruction_result_invocation_inputs(root, body))
             {
-                let mut root = root.clone();
-                root.bind_return_result_process(frame.process);
-                candidates.push(root);
+                candidates.push(bound);
             }
         }
         for body in &carriers {
@@ -15505,7 +15577,253 @@ pub(crate) fn recover_return_result_programs(state: &mut GameState) -> Result<()
         frame.admitted_program = Some(Box::new(program));
         frame.declarations = Some(declarations);
     }
+    recover_retained_operation_inputs(state)?;
     Ok(())
+}
+
+/// Recover only from surviving typed invocation custody. The input snapshot
+/// does not become work, and a missing historical input never comes from a
+/// later board scan or an unrelated source definition.
+pub(crate) fn recover_retained_operation_input(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    expected: Option<ReturnResultProcessId>,
+    source: ObjectId,
+    controller: PlayerId,
+    matches: impl Fn(&ResolvedAbility) -> bool,
+) -> Result<Box<ResolvedAbility>, String> {
+    let carriers = retained_instruction_result_carriers(state)?;
+    let mut roots: Vec<&ResolvedAbility> = carriers
+        .iter()
+        .filter(|(owner, body)| *owner == occurrence && body.return_result_process == expected)
+        .map(|(_, body)| *body)
+        .collect();
+    roots.extend(
+        state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability()),
+    );
+    roots.extend(
+        occurrence
+            .and_then(|id| state.return_result_frames.get(&id))
+            .and_then(|frame| frame.admitted_program.as_deref()),
+    );
+    let mut meanings = Vec::new();
+    for root in &roots {
+        if root.source_id != source || root.controller != controller {
+            continue;
+        }
+        let witnesses: Vec<_> = roots
+            .iter()
+            .filter(|witness| same_instruction_result_invocation_inputs(root, witness))
+            .copied()
+            .collect();
+        for witness in witnesses {
+            crate::game::effects::visit_instruction_result_program_projections_for_cursor(
+                root,
+                witness,
+                &mut |candidate| {
+                    if candidate.return_result_process != expected || !matches(candidate) {
+                        return false;
+                    }
+                    let mut needs_choice = false;
+                    crate::game::effects::visit_instruction_result_program_projections(
+                        candidate,
+                        None,
+                        &mut |node| {
+                            needs_choice |= matches!(
+                                &node.effect,
+                                crate::types::ability::Effect::PreventDamage {
+                                    damage_source_filter: Some(
+                                        crate::types::ability::TargetFilter::ChosenDamageSource {
+                                            chooser: None,
+                                            ..
+                                        }
+                                    ),
+                                    ..
+                                } | crate::types::ability::Effect::CreateDamageReplacement {
+                                    source_filter: Some(
+                                        crate::types::ability::TargetFilter::ChosenDamageSource {
+                                            chooser: None,
+                                            ..
+                                        }
+                                    ),
+                                    ..
+                                }
+                            );
+                            false
+                        },
+                    );
+                    if needs_choice && candidate.context.damage_source_choice.is_none() {
+                        return false;
+                    }
+                    if !meanings.iter().any(|known| {
+                        crate::game::effects::instruction_result_projection_eq(known, candidate)
+                    }) {
+                        meanings.push(candidate.clone());
+                    }
+                    false
+                },
+            );
+        }
+    }
+    if meanings.len() != 1 {
+        return Err(if meanings.is_empty() {
+            "retained operation has unrecoverable operative input origin"
+        } else {
+            "retained operation has ambiguous surviving operative inputs"
+        }
+        .into());
+    }
+    Ok(Box::new(
+        meanings.pop().expect("one proved operative input"),
+    ))
+}
+
+fn recover_retained_operation_inputs(state: &mut GameState) -> Result<(), String> {
+    fn waiting(evidence: &GameState, waiting: &mut WaitingFor) -> Result<(), String> {
+        let WaitingFor::VoteChoice {
+            retained_input,
+            return_result_occurrence,
+            expected_return_result_process,
+            source_id,
+            controller,
+            per_choice_effect,
+            outcome_template,
+            options,
+            tally_mode,
+            visibility,
+            chain_root_targets,
+            ..
+        } = waiting
+        else {
+            return Ok(());
+        };
+        if retained_input.is_some() {
+            return Ok(());
+        }
+        if return_result_occurrence.is_none()
+            && expected_return_result_process.is_none()
+            && per_choice_effect.is_empty()
+            && outcome_template.is_none()
+        {
+            return Ok(());
+        }
+        *retained_input = Some(recover_retained_operation_input(
+            evidence,
+            *return_result_occurrence,
+            *expected_return_result_process,
+            *source_id,
+            *controller,
+            |candidate| {
+                if candidate.source_id != *source_id
+                    || candidate.controller != *controller
+                    || candidate.context.chain_root_targets != *chain_root_targets
+                {
+                    return false;
+                }
+                match &candidate.effect {
+                    crate::types::ability::Effect::Vote {
+                        choices,
+                        per_choice_effect: original,
+                        subject,
+                        tally_mode: mode,
+                        visibility: original_visibility,
+                        ..
+                    } if mode == tally_mode && original_visibility == visibility => match subject {
+                        crate::types::ability::VoteSubject::Named => {
+                            choices == options
+                                && original == per_choice_effect
+                                && outcome_template.is_none()
+                        }
+                        crate::types::ability::VoteSubject::Objects {
+                            outcome_template: template,
+                            ..
+                        } => {
+                            outcome_template.as_deref() == Some(template.as_ref())
+                                && per_choice_effect.is_empty()
+                        }
+                    },
+                    _ => false,
+                }
+            },
+        )?);
+        Ok(())
+    }
+    if state.viewer_projection.is_some() {
+        return Ok(());
+    }
+    let missing = retained_result_waits(state).iter().any(|waiting| {
+        matches!(
+            waiting,
+            WaitingFor::VoteChoice {
+                retained_input: None,
+                ..
+            }
+        )
+    }) || state
+        .pending_die_roll_instruction
+        .as_deref()
+        .is_some_and(|pending| {
+            pending.retained_input.is_none()
+                && pending.continuation == crate::types::resolution::DieRollContinuation::Resolution
+        })
+        || state.resolution_stack.iter().any(|frame| match frame {
+            ResolutionFrame::VoteBallot(pending) => {
+                pending.retained_input.is_none() && !pending.remaining_voters.is_empty()
+            }
+            ResolutionFrame::DieRoll(pending) => pending.retained_input.is_none(),
+            _ => false,
+        });
+    if !missing {
+        return Ok(());
+    }
+    let evidence = state.clone();
+    waiting(&evidence, &mut state.waiting_for)?;
+    if let Some(wait) = state
+        .pending_trigger_order
+        .as_mut()
+        .and_then(|order| order.resume_after_ordering.as_deref_mut())
+    {
+        waiting(&evidence, wait)?;
+    }
+    if let Some(transaction) = state.payment_transaction.as_mut() {
+        waiting(&evidence, &mut transaction.base_waiting_for)?;
+    }
+    if let Some(PendingCostMoveResume::Cast { completion, .. }) =
+        &mut state.pending_cost_move_resume
+    {
+        match completion {
+            PendingCostMoveCompletion::FinalizeCast {
+                resolution_success_waiting_for,
+                ..
+            } => {
+                if let Some(wait) = resolution_success_waiting_for.as_deref_mut() {
+                    waiting(&evidence, wait)?;
+                }
+            }
+            PendingCostMoveCompletion::FinalizeDelvedCast {
+                pre_payment_checks: Some(checks),
+                ..
+            } => {
+                for wait in checks
+                    .early_waiting_for
+                    .iter_mut()
+                    .chain(checks.resolution_success_waiting_for.iter_mut())
+                {
+                    waiting(&evidence, wait)?;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(pending) = state.pending_die_roll_instruction.as_deref_mut() {
+        crate::game::effects::roll_die::recover_instruction_input(&evidence, pending)?;
+    }
+    state
+        .resolution_stack
+        .recover_retained_operation_inputs(&evidence)
 }
 
 fn same_instruction_result_invocation_inputs(a: &ResolvedAbility, b: &ResolvedAbility) -> bool {
@@ -16755,6 +17073,9 @@ pub(crate) fn validate_retained_zone_result_owners(state: &GameState) -> Result<
 
 pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> Result<(), String> {
     for (occurrence, body) in retained_instruction_result_carriers(state)? {
+        state
+            .validate_replacement_program(body)
+            .map_err(|error| error.to_string())?;
         if has_return_result_metadata(body) {
             if occurrence.is_none()
                 && matches!(
@@ -17507,6 +17828,8 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 }
             }
             ResolutionFrame::VoteBallot(pending) => {
+                crate::game::effects::vote::validate_pending_result_owner(state, pending)
+                    .map_err(|error| error.to_string())?;
                 validate_carrier(pending.return_result_occurrence, None)?;
                 validate_selected_body(
                     &pending.ability_template,
@@ -22664,6 +22987,9 @@ pub enum WaitingFor {
     /// the per-choice tally sub-effects. Lives in the engine — frontend just
     /// renders the modal.
     VoteChoice {
+        /// Private operative input retained independently of result ownership.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retained_input: Option<Box<ResolvedAbility>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         return_result_occurrence: Option<ReturnResultOccurrenceId>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48504,6 +48830,7 @@ mod tests {
                 state.zone_changes_this_turn.push_back(record.clone());
                 let event = persisted_zone_change_event(record);
                 state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+                    retained_input: None,
                     return_result_occurrence: None,
                     expected_return_result_process: None,
                     source_id: ObjectId(9_801),
@@ -54210,6 +54537,7 @@ mod tests {
             };
             if kind >= 6 {
                 state.pending_die_roll_instruction = Some(Box::new(PendingDieRollInstruction {
+                    retained_input: None,
                     return_result_occurrence: None,
                     expected_return_result_process: None,
                     source_id: ObjectId(5),
@@ -54242,6 +54570,7 @@ mod tests {
                         trigger_context: Some(context),
                     }),
                     4 | 5 => ResolutionFrame::DieRoll(Box::new(PendingDieRoll {
+                        retained_input: None,
                         return_result_occurrence: None,
                         expected_return_result_process: None,
                         source_id: ObjectId(5),

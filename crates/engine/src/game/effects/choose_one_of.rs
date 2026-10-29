@@ -65,8 +65,19 @@ pub(crate) fn resolve_owned(
     // context ONCE at prompt time — the pause below destroys
     // resolution-scoped context, and at branch time the event is already None.
     let trigger_context = ResolvingTriggerContext::capture(state);
-    let return_result_occurrence =
-        super::retained_return_result_occurrence(state, ability, declarations)?;
+    let return_result_occurrence = if let Some(ticket) = &ability.context.counter_removal_result {
+        if !super::counter_removal_binding_is_valid(state, ticket)
+            || ticket.process != ability.return_result_process
+            || !super::instruction_result_program_projects_to(declarations.0, ability)
+        {
+            return Err(EffectError::InvalidParam(
+                "generated counter choice producer authority".into(),
+            ));
+        }
+        Some(ticket.occurrence)
+    } else {
+        super::retained_return_result_occurrence(state, ability, declarations)?
+    };
     prompt_next(
         state,
         PromptRequest {
@@ -155,6 +166,28 @@ pub(crate) fn validate_pending_result_owner(
     state: &GameState,
     pending: &PendingChooseOneOf,
 ) -> Result<(), EffectError> {
+    selection_program_owner(
+        state,
+        &BranchSelection {
+            return_result_occurrence: pending.return_result_occurrence,
+            expected_return_result_process: pending.expected_return_result_process,
+            player: pending
+                .remaining_players
+                .first()
+                .copied()
+                .unwrap_or(pending.controller),
+            controller: pending.controller,
+            source_id: pending.source_id,
+            branches: pending.branches.clone(),
+            parent_occurrences: pending.parent_occurrences.clone(),
+            context: (*pending.context).clone(),
+            continuation: pending.continuation.clone(),
+            replacement_applied: pending.replacement_applied.clone(),
+            remaining_players: pending.remaining_players.clone(),
+            trigger_context: pending.trigger_context.clone(),
+            index: 0,
+        },
+    )?;
     for branch in &pending.branches {
         let mut body = build_resolved_from_def(branch, pending.source_id, pending.controller);
         body.bind_return_result_process(pending.expected_return_result_process);
@@ -165,6 +198,49 @@ pub(crate) fn validate_pending_result_owner(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn validate_waiting_result_owner(
+    state: &GameState,
+    waiting: &WaitingFor,
+) -> Result<(), EffectError> {
+    let WaitingFor::ChooseOneOfBranch {
+        return_result_occurrence,
+        expected_return_result_process,
+        player,
+        controller,
+        source_id,
+        branches,
+        parent_occurrences,
+        context,
+        continuation,
+        replacement_applied,
+        remaining_players,
+        trigger_context,
+        ..
+    } = waiting
+    else {
+        return Ok(());
+    };
+    selection_program_owner(
+        state,
+        &BranchSelection {
+            return_result_occurrence: *return_result_occurrence,
+            expected_return_result_process: *expected_return_result_process,
+            player: *player,
+            controller: *controller,
+            source_id: *source_id,
+            branches: branches.clone(),
+            parent_occurrences: parent_occurrences.clone(),
+            context: context.clone(),
+            continuation: continuation.clone(),
+            replacement_applied: replacement_applied.clone(),
+            remaining_players: remaining_players.clone(),
+            trigger_context: trigger_context.clone(),
+            index: 0,
+        },
+    )
+    .map(|_| ())
 }
 
 pub(crate) fn resume_pending(state: &mut GameState, _events: &mut Vec<GameEvent>) {
@@ -275,7 +351,7 @@ pub(crate) fn project_selected_branch(
     resolved
 }
 
-fn selection_program_owner(
+pub(crate) fn selection_program_owner(
     state: &GameState,
     selection: &BranchSelection,
 ) -> Result<
@@ -286,25 +362,54 @@ fn selection_program_owner(
     )>,
     EffectError,
 > {
-    let needs_owner = selection.branches.iter().any(|definition| {
-        let body = build_resolved_from_def(definition, selection.source_id, selection.controller);
-        matches!(
-            crate::types::ability::classify_instruction_result_invocation(
-                &body,
-                crate::types::ability::InstructionResultEntry::SelectedBody,
-                None
-            ),
-            Ok((
-                crate::types::ability::InstructionResultProcess::Imported { .. },
-                _
-            ))
-        )
-    }) || selection
-        .continuation
-        .as_deref()
-        .is_some_and(crate::types::game_state::has_return_result_metadata);
+    let held = crate::types::game_state::retained_result_waits(state).into_iter().any(|waiting| {
+        matches!(waiting, WaitingFor::ChooseOneOfBranch {
+            return_result_occurrence, expected_return_result_process, player, controller,
+            source_id, branches, parent_occurrences, context, continuation,
+            replacement_applied, remaining_players, trigger_context, ..
+        } if *return_result_occurrence == selection.return_result_occurrence
+            && *expected_return_result_process == selection.expected_return_result_process
+            && *player == selection.player && *controller == selection.controller && *source_id == selection.source_id
+            && *branches == selection.branches && *parent_occurrences == selection.parent_occurrences
+            && *context == selection.context && *continuation == selection.continuation
+            && *replacement_applied == selection.replacement_applied
+            && *remaining_players == selection.remaining_players && *trigger_context == selection.trigger_context)
+    }) || state.resolution_stack.iter().any(|frame| matches!(frame,
+        crate::types::resolution::ResolutionFrame::ChooseOneOf(pending)
+            if pending.return_result_occurrence == selection.return_result_occurrence
+                && pending.expected_return_result_process == selection.expected_return_result_process
+                && pending.source_id == selection.source_id && pending.controller == selection.controller
+                && pending.branches == selection.branches && pending.parent_occurrences == selection.parent_occurrences
+                && *pending.context == selection.context && pending.continuation == selection.continuation
+                && pending.replacement_applied == selection.replacement_applied
+                && pending.remaining_players == selection.remaining_players && pending.trigger_context == selection.trigger_context));
+    let needs_owner = selection.context.counter_removal_result.is_some()
+        || selection.branches.iter().any(|definition| {
+            let body =
+                build_resolved_from_def(definition, selection.source_id, selection.controller);
+            matches!(
+                crate::types::ability::classify_instruction_result_invocation(
+                    &body,
+                    crate::types::ability::InstructionResultEntry::SelectedBody,
+                    None
+                ),
+                Ok((
+                    crate::types::ability::InstructionResultProcess::Imported { .. },
+                    _
+                ))
+            )
+        })
+        || selection
+            .continuation
+            .as_deref()
+            .is_some_and(crate::types::game_state::has_return_result_metadata);
     if !needs_owner {
         return Ok(None);
+    }
+    if !held {
+        return Err(EffectError::InvalidParam(
+            "selected candidate disagrees with its actual held branch latch".into(),
+        ));
     }
     let frame = crate::types::game_state::checked_return_result_frame(
         state,
@@ -332,9 +437,24 @@ fn selection_program_owner(
         ));
     }
     let mut parent = None;
-    super::visit_instruction_result_program_projections(
+    let mut cursor = ResolvedAbility::new(
+        Effect::ChooseOneOf {
+            kind: ChooseOneOfKind::Ordinary,
+            chooser: crate::types::ability::PlayerFilter::Controller,
+            branches: selection.branches.clone(),
+        },
+        Vec::new(),
+        selection.source_id,
+        selection.controller,
+    );
+    cursor.bind_return_result_process(selection.expected_return_result_process);
+    cursor.context = selection.context.clone();
+    cursor.replace_target_occurrences(selection.parent_occurrences.occurrences());
+    cursor.sub_ability = selection.continuation.clone();
+    cursor.replacement_applied = selection.replacement_applied.clone();
+    super::visit_instruction_result_program_projections_for_cursor(
         program,
-        Some(selection.player),
+        &cursor,
         &mut |candidate| {
             let Effect::ChooseOneOf {
                 chooser, branches, ..
@@ -386,13 +506,14 @@ pub(crate) fn resolve_branch(
         )?;
     }
     let owner = selection_program_owner(state, &selection)?;
+    let input = selected_operation_input(state, &selection)?;
     state.waiting_for = WaitingFor::Priority {
         player: selection.player,
     };
     state.priority_player = selection.player;
     let occurrence = selection.return_result_occurrence;
     super::with_inherited_return_result_occurrence(state, occurrence, |state| {
-        resolve_branch_in_occurrence(state, selection, events, owner)
+        resolve_branch_in_occurrence(state, selection, events, owner, input)
     })
 }
 
@@ -405,6 +526,7 @@ fn resolve_branch_in_occurrence(
         crate::types::ability::ResultProducerEnvironment,
         ResolvedAbility,
     )>,
+    input: Option<ResolvedAbility>,
 ) -> Result<(), EffectError> {
     let BranchSelection {
         return_result_occurrence,
@@ -485,9 +607,8 @@ fn resolve_branch_in_occurrence(
         });
     }
 
-    let mut parent = owner
-        .as_ref()
-        .map(|(_, _, parent)| parent.clone())
+    let mut parent = input
+        .or_else(|| owner.as_ref().map(|(_, _, parent)| parent.clone()))
         .unwrap_or_else(|| {
             let mut parent = ResolvedAbility::new(Effect::NoOp, Vec::new(), source_id, controller);
             parent.bind_return_result_process(expected_return_result_process);
@@ -592,6 +713,102 @@ fn resolve_branch_in_occurrence(
     // seed is cleared at true full-drain in `drain_pending_continuation`
     // (Priority + no ability-continuation or repeat-for frame).
     Ok(())
+}
+
+/// A selected row can be Unused yet still carry X, cast or source inputs.
+/// Its immediate typed iteration parent retains those inputs independently of
+/// result ownership; no ambient result frame is borrowed for this purpose.
+fn selected_operation_input(
+    state: &GameState,
+    selection: &BranchSelection,
+) -> Result<Option<ResolvedAbility>, EffectError> {
+    let ballot = state
+        .active_vote_ballot()
+        .map(|vote| {
+            super::vote_carrier_admitted_program(state, vote)?;
+            super::vote::current_ballot_body(state, vote)
+        })
+        .transpose()?;
+    let parent = if let Some(die) = state.resolution_stack.active_die_roll() {
+        super::roll_die::pending_die_admitted_program(state, die)?;
+        die.retained_input
+            .as_deref()
+            .map(|input| (die.return_result_occurrence, input))
+    } else {
+        ballot
+            .as_ref()
+            .zip(state.active_vote_ballot())
+            .map(|(body, vote)| (vote.return_result_occurrence, body))
+    };
+    let Some((occurrence, parent)) = parent else {
+        return Ok(None);
+    };
+    if parent.source_id != selection.source_id {
+        return Ok(None);
+    }
+    if (occurrence != selection.return_result_occurrence
+        || parent.return_result_process != selection.expected_return_result_process)
+        && (selection.return_result_occurrence.is_some()
+            || selection.expected_return_result_process.is_some())
+    {
+        return Ok(None);
+    }
+    let mut cursor = ResolvedAbility::new(
+        Effect::ChooseOneOf {
+            kind: ChooseOneOfKind::Ordinary,
+            chooser: crate::types::ability::PlayerFilter::Controller,
+            branches: selection.branches.clone(),
+        },
+        Vec::new(),
+        selection.source_id,
+        selection.controller,
+    );
+    cursor.context = selection.context.clone();
+    cursor.scoped_player = Some(selection.player);
+    let mut candidates = Vec::new();
+    super::visit_instruction_result_program_projections_for_cursor(
+        parent,
+        &cursor,
+        &mut |candidate| {
+            let mut candidate = candidate.clone();
+            if selection.return_result_occurrence.is_none()
+                && selection.expected_return_result_process.is_none()
+            {
+                if !matches!(
+                    crate::types::ability::classify_instruction_result_invocation(
+                        &candidate,
+                        crate::types::ability::InstructionResultEntry::SelectedBody,
+                        None
+                    ),
+                    Ok((crate::types::ability::InstructionResultProcess::Unused, _))
+                ) {
+                    return false;
+                }
+                candidate.bind_return_result_process(None);
+            }
+            if matches!(&candidate.effect, Effect::ChooseOneOf { chooser, branches, .. }
+            if branches == &selection.branches && choosing_players(state, &candidate, chooser).contains(&selection.player))
+                && candidate.source_id == selection.source_id
+                && candidate.controller == selection.controller
+                && candidate.context == selection.context
+                && candidate.target_occurrences() == selection.parent_occurrences.occurrences()
+                && candidate.sub_ability == selection.continuation
+                && candidate.replacement_applied == selection.replacement_applied
+                && !candidates
+                    .iter()
+                    .any(|known| super::instruction_result_projection_eq(known, &candidate))
+            {
+                candidates.push(candidate);
+            }
+            false
+        },
+    );
+    if candidates.len() > 1 {
+        return Err(EffectError::InvalidParam(
+            "selected operation has conflicting retained inputs".into(),
+        ));
+    }
+    Ok(candidates.pop())
 }
 
 fn choosing_players(

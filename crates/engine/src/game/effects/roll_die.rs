@@ -18,7 +18,244 @@ use crate::types::resolution::{
 
 use super::{resolve_selected_ability_chain_step, ResolutionProgress};
 use crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root;
-use crate::game::ability_utils::inherit_result_branch_source_identity;
+
+/// The row inherits the complete input of the rolling instruction. Its own
+/// target/scope axes remain those of the definition constructor.
+pub(crate) fn build_die_result(
+    definition: &crate::types::ability::AbilityDefinition,
+    input: &ResolvedAbility,
+) -> ResolvedAbility {
+    let mut row = build_resolved_from_def_with_targets_and_chain_root(
+        definition,
+        input.source_id,
+        input.controller,
+        input.targets.clone(),
+        input.context.chain_root_targets.clone(),
+    );
+    row.inherit_coin_target_inputs(input);
+    row.replace_target_occurrences(input.target_occurrences());
+    row.bind_return_result_process(input.return_result_process);
+    row
+}
+
+#[allow(clippy::too_many_arguments)]
+fn captured_die_input<'a>(
+    input: Option<&'a ResolvedAbility>,
+    source: ObjectId,
+    controller: PlayerId,
+    targets: &[crate::types::ability::TargetRef],
+    chain_root: &[crate::types::ability::TargetRef],
+    results: &[crate::types::ability::DieResultBranch],
+    modifier: Option<&DieRollModifier>,
+) -> Result<&'a ResolvedAbility, EffectError> {
+    let input = input.ok_or_else(|| {
+        EffectError::InvalidParam("die roll has unrecoverable operative input origin".into())
+    })?;
+    let Effect::RollDie {
+        results: table,
+        modifier: original,
+        ..
+    } = &input.effect
+    else {
+        return Err(EffectError::InvalidParam(
+            "retained die input is not RollDie".into(),
+        ));
+    };
+    if input.source_id != source
+        || input.controller != controller
+        || input.targets != targets
+        || input.context.chain_root_targets != chain_root
+        || table != results
+        || original.as_ref() != modifier
+    {
+        return Err(EffectError::InvalidParam(
+            "die carrier disagrees with its complete retained input".into(),
+        ));
+    }
+    Ok(input)
+}
+
+pub(crate) fn die_instruction_admitted_program(
+    state: &GameState,
+    pending: &PendingDieRollInstruction,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    if pending.continuation == DieRollContinuation::RollToVisitAttractions {
+        if pending.retained_input.is_some()
+            || pending.return_result_occurrence.is_some()
+            || pending.expected_return_result_process.is_some()
+            || pending.source_id != ObjectId(0)
+            || !pending.results_table.is_empty()
+            || pending.modifier.is_some()
+            || !pending.targets.is_empty()
+        {
+            return Err(EffectError::InvalidParam(
+                "turn-based die roll has resolution input".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    let input = captured_die_input(
+        pending.retained_input.as_deref(),
+        pending.source_id,
+        pending.controller,
+        &pending.targets,
+        &pending.chain_root_targets,
+        &pending.results_table,
+        pending.modifier.as_ref(),
+    )?;
+    super::retained_operation_admitted_program(
+        state,
+        pending.return_result_occurrence,
+        pending.expected_return_result_process,
+        input,
+    )
+}
+
+pub(crate) fn pending_die_admitted_program(
+    state: &GameState,
+    pending: &PendingDieRoll,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    let input = captured_die_input(
+        pending.retained_input.as_deref(),
+        pending.source_id,
+        pending.controller,
+        &pending.targets,
+        &pending.chain_root_targets,
+        &pending.results_table,
+        pending.modifier.as_ref(),
+    )?;
+    if pending.next_index > pending.results.len()
+        || pending.sides == 0
+        || pending
+            .results
+            .iter()
+            .any(|natural| *natural == 0 || *natural > pending.sides)
+        || pending
+            .forced_ignored
+            .iter()
+            .any(|index| *index >= pending.results.len())
+    {
+        return Err(EffectError::InvalidParam(
+            "invalid retained die progress".into(),
+        ));
+    }
+    super::retained_operation_admitted_program(
+        state,
+        pending.return_result_occurrence,
+        pending.expected_return_result_process,
+        input,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_die_input(
+    state: &GameState,
+    occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    expected: Option<crate::types::game_state::ReturnResultProcessId>,
+    source: ObjectId,
+    controller: PlayerId,
+    targets: &[crate::types::ability::TargetRef],
+    chain_root: &[crate::types::ability::TargetRef],
+    table: &[crate::types::ability::DieResultBranch],
+    modifier: Option<&DieRollModifier>,
+) -> Result<Box<ResolvedAbility>, String> {
+    match crate::types::game_state::recover_retained_operation_input(
+        state,
+        occurrence,
+        expected,
+        source,
+        controller,
+        |candidate| {
+            captured_die_input(
+                Some(candidate),
+                source,
+                controller,
+                targets,
+                chain_root,
+                table,
+                modifier,
+            )
+            .is_ok()
+        },
+    ) {
+        Ok(input) => Ok(input),
+        Err(_)
+            if occurrence.is_none()
+                && expected.is_none()
+                && table.is_empty()
+                && modifier.is_none() =>
+        {
+            // No row or modifier can consume an erased input. The modified event
+            // already owns count/sides, so this old operation has one remaining meaning.
+            let mut input = ResolvedAbility::new(
+                Effect::RollDie {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
+                    sides: 1,
+                    results: Vec::new(),
+                    modifier: None,
+                },
+                targets.to_vec(),
+                source,
+                controller,
+            );
+            input.context.chain_root_targets = chain_root.to_vec();
+            Ok(Box::new(input))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn recover_instruction_input(
+    state: &GameState,
+    pending: &mut PendingDieRollInstruction,
+) -> Result<(), String> {
+    if pending.retained_input.is_none() && pending.continuation == DieRollContinuation::Resolution {
+        pending.retained_input = Some(recover_die_input(
+            state,
+            pending.return_result_occurrence,
+            pending.expected_return_result_process,
+            pending.source_id,
+            pending.controller,
+            &pending.targets,
+            &pending.chain_root_targets,
+            &pending.results_table,
+            pending.modifier.as_ref(),
+        )?);
+    }
+    Ok(())
+}
+
+pub(crate) fn recover_pending_input(
+    state: &GameState,
+    pending: &mut PendingDieRoll,
+) -> Result<(), String> {
+    if pending.retained_input.is_none() {
+        pending.retained_input = Some(recover_die_input(
+            state,
+            pending.return_result_occurrence,
+            pending.expected_return_result_process,
+            pending.source_id,
+            pending.controller,
+            &pending.targets,
+            &pending.chain_root_targets,
+            &pending.results_table,
+            pending.modifier.as_ref(),
+        )?);
+    }
+    Ok(())
+}
 
 /// CR 706.2: Draw one natural result from the game's seeded RNG — "the number
 /// indicated on the top face of the die before any modifiers."
@@ -96,6 +333,7 @@ pub(crate) fn validate_die_instruction_result_owner(
     state: &GameState,
     pending: &PendingDieRollInstruction,
 ) -> Result<(), EffectError> {
+    die_instruction_admitted_program(state, pending)?;
     validate_die_result_owner(
         state,
         pending.return_result_occurrence,
@@ -111,6 +349,7 @@ pub(crate) fn validate_pending_die_result_owner(
     state: &GameState,
     pending: &PendingDieRoll,
 ) -> Result<(), EffectError> {
+    pending_die_admitted_program(state, pending)?;
     validate_die_result_owner(
         state,
         pending.return_result_occurrence,
@@ -262,6 +501,20 @@ pub(crate) fn resolve_step(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionProgress, EffectError> {
+    super::with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, executable, parent| resolve_step_owned(state, executable, events, parent),
+    )
+}
+
+pub(crate) fn resolve_step_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    parent: super::AdmittedInstructionResult<'_>,
+) -> Result<ResolutionProgress, EffectError> {
     let (count_expr, sides, results, modifier) = match &ability.effect {
         Effect::RollDie {
             count,
@@ -277,10 +530,11 @@ pub(crate) fn resolve_step(
     // independently with the same sides/modifier/results table.
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as u32;
 
-    let expected_return_result_process = ability.return_result_process;
+    let occurrence = super::retained_return_result_occurrence(state, ability, parent)?;
+    let expected_return_result_process = occurrence.and(ability.return_result_process);
     validate_die_result_owner(
         state,
-        state.active_return_result_occurrence,
+        occurrence,
         expected_return_result_process,
         ability.source_id,
         ability.controller,
@@ -288,7 +542,8 @@ pub(crate) fn resolve_step(
         modifier,
     )?;
     let instruction = PendingDieRollInstruction {
-        return_result_occurrence: state.active_return_result_occurrence,
+        retained_input: Some(Box::new(ability.clone())),
+        return_result_occurrence: occurrence,
         expected_return_result_process,
         source_id: ability.source_id,
         controller: ability.controller,
@@ -339,7 +594,7 @@ pub(crate) fn resolve_step(
         .take()
         .expect("the just-proposed die instruction remains parked until execution");
 
-    execute_roll(state, instruction, sides, proposal, events)
+    execute_roll(state, instruction, sides, proposal, events, Some(parent))
 }
 
 /// CR 706.1 + CR 706.6: Carry out a die-roll instruction once its replacement
@@ -357,12 +612,12 @@ fn execute_roll(
     sides: u8,
     proposal: RollProposal,
     events: &mut Vec<GameEvent>,
+    parent: Option<super::AdmittedInstructionResult<'_>>,
 ) -> Result<ResolutionProgress, EffectError> {
-    validate_die_instruction_result_owner(state, &instruction)?;
     super::with_inherited_return_result_occurrence(
         state,
         instruction.return_result_occurrence,
-        |state| execute_roll_in_occurrence(state, instruction, sides, proposal, events),
+        |state| execute_roll_in_occurrence(state, instruction, sides, proposal, events, parent),
     )
 }
 
@@ -372,6 +627,7 @@ fn execute_roll_in_occurrence(
     sides: u8,
     proposal: RollProposal,
     events: &mut Vec<GameEvent>,
+    parent: Option<super::AdmittedInstructionResult<'_>>,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 706.1: a die roll is defined by its kind ("roll a d20"); a zero-sided
     // die names no distribution, so there is nothing to roll. This is not a
@@ -426,6 +682,7 @@ fn execute_roll_in_occurrence(
     let outcome = DieRollIgnoreRule::ignore_outcome_for_rules(&ignore_rules, &naturals);
 
     let PendingDieRollInstruction {
+        retained_input,
         return_result_occurrence,
         expected_return_result_process,
         source_id,
@@ -445,6 +702,7 @@ fn execute_roll_in_occurrence(
     } = instruction;
 
     let pending = PendingDieRoll {
+        retained_input,
         return_result_occurrence,
         expected_return_result_process,
         source_id,
@@ -474,7 +732,7 @@ fn execute_roll_in_occurrence(
     // replacement in play), "a unique lowest per rule", and the stacked-Lowest
     // run whose N lowest rolls are distinct.
     if !outcome.needs_choice() {
-        return resume_after_ignore(state, pending, outcome.forced, events);
+        return resume_after_ignore_owned(state, pending, outcome.forced, events, parent);
     }
 
     // CR 706.6, 2nd sentence: "if multiple results are tied for the lowest, the
@@ -514,9 +772,12 @@ pub(crate) fn resume_roll_dice_after_replacement(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionProgress, EffectError> {
-    if let Some(instruction) = state.pending_die_roll_instruction.as_deref() {
-        validate_die_instruction_result_owner(state, instruction)?;
-    }
+    let owner = state
+        .pending_die_roll_instruction
+        .as_deref()
+        .map(|instruction| die_instruction_admitted_program(state, instruction))
+        .transpose()?
+        .flatten();
     let Some(instruction) = state.pending_die_roll_instruction.take() else {
         // No parked instruction: nothing proposed this roll through a path that
         // owns a continuation. Both production origins (`Effect::RollDie` and
@@ -561,7 +822,16 @@ pub(crate) fn resume_roll_dice_after_replacement(
         .as_ref()
         .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = instruction.die_result;
-    let result = execute_roll(state, *instruction, sides, proposal, events);
+    let result = execute_roll(
+        state,
+        *instruction,
+        sides,
+        proposal,
+        events,
+        owner
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    );
     let exit_die = if result.is_ok() {
         state.die_result_this_resolution
     } else {
@@ -617,6 +887,15 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
     if !resumable {
         return;
     }
+    let owner = match state
+        .resolution_stack
+        .active_die_roll()
+        .map(|pending| pending_die_admitted_program(state, pending))
+        .transpose()
+    {
+        Ok(owner) => owner.flatten(),
+        Err(_) => return,
+    };
     let Ok(Some(pending)) = state.take_active_die_roll_frame() else {
         return;
     };
@@ -630,7 +909,15 @@ pub(crate) fn drain_active_die_roll(state: &mut GameState, events: &mut Vec<Game
         .map(|context| crate::game::triggers::push_resolving_trigger_context(state, context));
     state.die_result_this_resolution = pending.die_result;
     let ignore_indices = pending.forced_ignored.clone();
-    match resume_after_ignore(state, pending, ignore_indices, events) {
+    match resume_after_ignore_owned(
+        state,
+        pending,
+        ignore_indices,
+        events,
+        owner
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    ) {
         // Re-suspended on yet another branch choice: the frame re-parked itself
         // with the cursor advanced, so leave the restored context in place for
         // that continuation to read.
@@ -680,7 +967,25 @@ pub(crate) fn resume_after_ignore(
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ResolutionProgress, EffectError> {
-    validate_pending_die_result_owner(state, &pending)?;
+    let owner = pending_die_admitted_program(state, &pending)?;
+    resume_after_ignore_owned(
+        state,
+        pending,
+        ignore_indices,
+        events,
+        owner
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    )
+}
+
+pub(crate) fn resume_after_ignore_owned(
+    state: &mut GameState,
+    pending: PendingDieRoll,
+    ignore_indices: Vec<usize>,
+    events: &mut Vec<GameEvent>,
+    parent: Option<super::AdmittedInstructionResult<'_>>,
+) -> Result<ResolutionProgress, EffectError> {
     super::with_inherited_return_result_occurrence(
         state,
         pending.return_result_occurrence,
@@ -702,7 +1007,7 @@ pub(crate) fn resume_after_ignore(
                     "unavailable addressed die modifier".into(),
                 ));
             }
-            resume_after_ignore_in_occurrence(state, pending, ignore_indices, events)
+            resume_after_ignore_in_occurrence(state, pending, ignore_indices, events, parent)
         },
     )
 }
@@ -712,9 +1017,11 @@ fn resume_after_ignore_in_occurrence(
     pending: PendingDieRoll,
     ignore_indices: Vec<usize>,
     events: &mut Vec<GameEvent>,
+    parent: Option<super::AdmittedInstructionResult<'_>>,
 ) -> Result<ResolutionProgress, EffectError> {
     let PendingDieRoll {
-        return_result_occurrence: _,
+        retained_input,
+        return_result_occurrence,
         expected_return_result_process,
         source_id,
         controller,
@@ -746,18 +1053,9 @@ fn resume_after_ignore_in_occurrence(
         state.waiting_for = WaitingFor::Priority { player: controller };
     }
 
-    let mut modifier_view = ResolvedAbility::new(
-        Effect::RollDie {
-            count: crate::types::ability::QuantityExpr::Fixed { value: 0 },
-            sides,
-            results: Vec::new(),
-            modifier: None,
-        },
-        targets.clone(),
-        source_id,
-        controller,
-    );
-    modifier_view.context.chain_root_targets = chain_root_targets.clone();
+    let mut modifier_view = retained_input.as_deref().cloned().ok_or_else(|| {
+        EffectError::InvalidParam("die roll has unrecoverable operative input origin".into())
+    })?;
     modifier_view.bind_return_result_process(expected_return_result_process);
     let mut total_actual = running_total;
     let mut rolled_any = already_rolled_any;
@@ -818,19 +1116,14 @@ fn resume_after_ignore_in_occurrence(
             // sub_abilities, conditions, etc.). `ResolvedAbility::new` with only the
             // effect drops `player_scope`, so "each opponent loses N life" on a d20
             // table (Herald of Hadar) incorrectly hit the controller (#2026).
-            let mut sub = build_resolved_from_def_with_targets_and_chain_root(
-                &branch.effect,
-                source_id,
-                controller,
-                targets.clone(),
-                chain_root_targets.clone(),
-            );
-            sub.bind_return_result_process(expected_return_result_process);
-            // CR 706.3b + CR 400.7: the row is part of the ability that rolled, so
-            // it acts for the object that ability captured.
-            inherit_result_branch_source_identity(state, &mut sub);
+            let sub = build_die_result(&branch.effect, &modifier_view);
             let child_boundary = state.resolution_stack.capture_child_boundary();
-            let progress = resolve_selected_ability_chain_step(state, &sub, events, 0)?;
+            let progress = match parent {
+                Some(parent) => super::resolve_parent_selected_ability_chain_step(
+                    state, &sub, events, 0, parent,
+                )?,
+                None => resolve_selected_ability_chain_step(state, &sub, events, 0)?,
+            };
 
             // CR 608.2c + CR 706.3a: a branch may itself have paused for a
             // player choice. The instruction is NOT finished — every die after
@@ -847,7 +1140,8 @@ fn resume_after_ignore_in_occurrence(
                 ResolutionProgress::Queued | ResolutionProgress::Waiting
             ) {
                 let resumed = PendingDieRoll {
-                    return_result_occurrence: state.active_return_result_occurrence,
+                    retained_input: retained_input.clone(),
+                    return_result_occurrence,
                     expected_return_result_process,
                     source_id,
                     controller,
@@ -923,6 +1217,399 @@ mod tests {
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
+
+    fn restored_roll(state: &GameState, ingress: u8) -> GameState {
+        match ingress {
+            0 => serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap(),
+            1 => serde_json::from_value::<crate::types::game_state::TrustedGameStateEnvelope>(
+                serde_json::to_value(crate::types::game_state::TrustedGameStateEnvelope::capture(
+                    state.clone(),
+                ))
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            _ => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        }
+    }
+
+    #[test]
+    fn public_two_survivor_roll_retains_the_parent_through_both_row_choices() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::*;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::InstructionResult;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+        for empty in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            if !empty {
+                scenario.add_creature(P0, "Two", 2, 2);
+                scenario.add_creature(P0, "Three", 3, 3);
+            }
+            scenario.add_creature(P1, "Foreign seven", 7, 7);
+            scenario.add_enchantment_from_oracle(P0, "Barbarian Class", "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.");
+            let sum = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult {
+                        result: ReturnResultId(7),
+                    },
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Any,
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
+            };
+            let row = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    kind: ChooseOneOfKind::Ordinary,
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![
+                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Offset {
+                                    inner: Box::new(sum),
+                                    offset: 1,
+                                },
+                            },
+                        ),
+                    ],
+                },
+            );
+            let mut root = AbilityDefinition::new(AbilityKind::Activated, serde_json::from_value(serde_json::json!({
+                "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+                "target":TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))})).unwrap())
+                .cost(AbilityCost::Mana { cost: ManaCost::generic(1) })
+                .sub_ability(AbilityDefinition::new(AbilityKind::Spell, Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 2 }, sides: 1,
+                    results: vec![DieResultBranch { min: 1, max: 1, effect: Box::new(row) }], modifier: None,
+                }));
+            root.declares_return_result = Some(ReturnResultId(7));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental paid addressed dice", "")
+                .with_ability_definition(root)
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Black, source, false, Vec::new())],
+            );
+            let mut runner = scenario.build();
+            runner.activate(source, 0).resolve();
+            assert!(
+                matches!(&runner.state().waiting_for, WaitingFor::DieKeepChoice { results, ignore_count: 1, .. } if results == &vec![1, 1, 1])
+            );
+            let actual = runner.state().resolution_stack.active_die_roll().unwrap();
+            let original_input = actual.retained_input.clone();
+            assert!(original_input.is_some());
+            let occurrence = actual.return_result_occurrence.unwrap();
+            assert!(
+                matches!(&runner.state().return_result_frames[&occurrence].results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records)
+                if records.len() == if empty { 0 } else { 2 })
+            );
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            let paused = runner.state().clone();
+            for corruption in 0..4 {
+                let mut hostile = paused.clone();
+                // Mutate the actual held frame through its shipped serialized shape.
+                let mut value = serde_json::to_value(&hostile).unwrap();
+                let frames = value["resolution_stack"]["frames"].as_array_mut().unwrap();
+                let data = frames
+                    .iter_mut()
+                    .find(|frame| frame["type"] == "DieRoll")
+                    .unwrap()
+                    .get_mut("data")
+                    .unwrap();
+                match corruption {
+                    0 => data["expected_return_result_process"] = serde_json::json!(999),
+                    1 => data["source_id"] = serde_json::json!(0),
+                    2 => data["results_table"] = serde_json::json!([]),
+                    _ => data["next_index"] = serde_json::json!(99),
+                }
+                assert!(
+                    serde_json::from_value::<GameState>(value).is_err(),
+                    "actual die carrier corruption {corruption}"
+                );
+                // The corresponding live preflight is checked before taking the owner.
+                if corruption == 0 {
+                    let mut frame = hostile.take_active_die_roll_frame().unwrap().unwrap();
+                    frame.expected_return_result_process =
+                        Some(crate::types::game_state::ReturnResultProcessId(999));
+                    hostile.push_die_roll_frame(frame);
+                    let before = hostile.clone();
+                    assert!(crate::game::engine::apply(
+                        &mut hostile,
+                        P0,
+                        GameAction::SelectDieRolls {
+                            ignore_indices: vec![2]
+                        }
+                    )
+                    .is_err());
+                    assert_eq!(hostile, before);
+                }
+            }
+            for ingress in 0..3 {
+                let mut resumed = GameRunner::from_state(restored_roll(&paused, ingress));
+                let rng_position = resumed.state().rng_word_pos;
+                let mut emitted = resumed
+                    .act(GameAction::SelectDieRolls {
+                        ignore_indices: vec![2],
+                    })
+                    .unwrap()
+                    .events;
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ));
+                let held = resumed
+                    .state()
+                    .resolution_stack
+                    .iter()
+                    .find_map(|frame| match frame {
+                        ResolutionFrame::DieRoll(pending) => Some(pending),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(held.next_index, 1);
+                assert_eq!(held.forced_ignored, vec![2]);
+                assert_eq!(held.retained_input, original_input);
+                *resumed.state_mut() = restored_roll(resumed.state(), ingress);
+                emitted.extend(
+                    resumed
+                        .act(GameAction::ChooseBranch { index: 1 })
+                        .unwrap()
+                        .events,
+                );
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ));
+                *resumed.state_mut() = restored_roll(resumed.state(), ingress);
+                emitted.extend(
+                    resumed
+                        .act(GameAction::ChooseBranch { index: 1 })
+                        .unwrap()
+                        .events,
+                );
+                resumed.advance_until_stack_empty();
+                assert_eq!(resumed.state().players[0].life, if empty { 22 } else { 32 });
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::DieRolled { .. }))
+                        .count(),
+                    2
+                );
+                assert_eq!(
+                    emitted
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::DieRollIgnored { .. }))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    resumed.state().rng_word_pos,
+                    rng_position,
+                    "reload and rows never reroll"
+                );
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(resumed.state().stack.is_empty());
+                assert!(resumed.state().resolution_stack.is_empty());
+                assert!(resumed.state().return_result_frames.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn pre_roll_ordering_retains_full_x_and_source_input_through_ignore_and_row() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::*;
+        use crate::types::actions::GameAction;
+        use crate::types::phase::Phase;
+        for x in [3, 4] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_enchantment_from_oracle(P0, "Barbarian Class", "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.");
+            scenario.add_creature_from_oracle(P0, "Pixie Guide", 1, 3, "Flying\nGrant an Advantage — If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.");
+            let chosen = scenario
+                .add_artifact_from_oracle(P1, "Chosen original source", "")
+                .id();
+            scenario.add_artifact_from_oracle(P1, "Other source", "");
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Empty direct dice input", "")
+                .id();
+            let mut runner = scenario.build();
+            let row = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    kind: ChooseOneOfKind::Ordinary,
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![
+                        AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable { name: "X".into() },
+                                },
+                            },
+                        ),
+                    ],
+                },
+            );
+            let mut input = ResolvedAbility::new(
+                Effect::ChooseDamageSource {
+                    source_filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+                    ),
+                },
+                Vec::new(),
+                source,
+                P0,
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 1,
+                    results: vec![DieResultBranch {
+                        min: 1,
+                        max: 1,
+                        effect: Box::new(row),
+                    }],
+                    modifier: None,
+                },
+                Vec::new(),
+                source,
+                P0,
+            ));
+            input.chosen_x = Some(x);
+            super::super::resolve_ability_chain(runner.state_mut(), &input, &mut Vec::new(), 0)
+                .unwrap();
+            let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+                panic!("actual source prompt");
+            };
+            let selected = options
+                .iter()
+                .find(|option| option.identity.reference.object_id == chosen)
+                .unwrap()
+                .identity
+                .reference;
+            runner
+                .act(GameAction::ChooseDamageSource { source: selected })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice {
+                    candidate_count: 2,
+                    ..
+                }
+            ));
+            let early = runner
+                .state()
+                .pending_die_roll_instruction
+                .as_ref()
+                .unwrap();
+            let captured = early.retained_input.clone().unwrap();
+            assert_eq!(captured.chosen_x, Some(x));
+            assert_eq!(
+                captured
+                    .context
+                    .damage_source_choice
+                    .as_ref()
+                    .unwrap()
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .identity
+                    .reference,
+                selected
+            );
+            assert!(runner.state().objects[&source].abilities.is_empty());
+            assert!(runner.state().return_result_frames.is_empty());
+            let paused = runner.state().clone();
+            for ingress in 0..3 {
+                let mut resumed = GameRunner::from_state(restored_roll(&paused, ingress));
+                for view in [
+                    crate::game::visibility::filter_state_for_viewer(resumed.state(), P0),
+                    crate::game::visibility::filter_state_for_viewer(resumed.state(), P1),
+                    crate::game::visibility::filter_state_for_unseated_viewer(resumed.state()),
+                ] {
+                    assert!(view
+                        .pending_die_roll_instruction
+                        .as_ref()
+                        .unwrap()
+                        .retained_input
+                        .is_none());
+                    let _: GameState =
+                        serde_json::from_value(serde_json::to_value(view).unwrap()).unwrap();
+                }
+                resumed
+                    .act(GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+                assert!(
+                    matches!(&resumed.state().waiting_for, WaitingFor::DieKeepChoice { results, ignore_count: 2, .. } if results == &vec![1, 1, 1])
+                );
+                assert_eq!(
+                    resumed
+                        .state()
+                        .resolution_stack
+                        .active_die_roll()
+                        .unwrap()
+                        .retained_input
+                        .as_deref(),
+                    Some(captured.as_ref())
+                );
+                *resumed.state_mut() = restored_roll(resumed.state(), ingress);
+                let mut events = resumed
+                    .act(GameAction::SelectDieRolls {
+                        ignore_indices: vec![1, 2],
+                    })
+                    .unwrap()
+                    .events;
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { .. }
+                ));
+                *resumed.state_mut() = restored_roll(resumed.state(), ingress);
+                events.extend(
+                    resumed
+                        .act(GameAction::ChooseBranch { index: 1 })
+                        .unwrap()
+                        .events,
+                );
+                resumed.advance_until_stack_empty();
+                assert_eq!(resumed.state().players[0].life, 20 + x as i32);
+                assert_eq!(
+                    events
+                        .iter()
+                        .filter(|event| matches!(event, GameEvent::DieRolled { .. }))
+                        .count(),
+                    1
+                );
+                assert!(resumed.state().objects[&source].abilities.is_empty());
+                assert!(resumed.state().return_result_frames.is_empty());
+                assert!(resumed.state().resolution_stack.is_empty());
+                assert!(resumed.state().stack.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn roll_die_emits_event_and_resolves_branch() {
@@ -1749,6 +2436,17 @@ mod tests {
     fn ignored_rolls_emit_display_mirror_alongside_survivors() {
         let mut state = GameState::new_two_player(42);
         let pending = PendingDieRoll {
+            retained_input: Some(Box::new(ResolvedAbility::new(
+                Effect::RollDie {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                    sides: 20,
+                    results: Vec::new(),
+                    modifier: None,
+                },
+                Vec::new(),
+                ObjectId(1),
+                PlayerId(0),
+            ))),
             return_result_occurrence: None,
             expected_return_result_process: None,
             source_id: ObjectId(1),

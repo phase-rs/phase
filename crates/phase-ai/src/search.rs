@@ -13904,6 +13904,7 @@ mod tests {
     ) -> WaitingFor {
         let _ = state;
         WaitingFor::VoteChoice {
+            retained_input: None,
             return_result_occurrence: None,
             expected_return_result_process: None,
             player: subject,
@@ -14355,6 +14356,7 @@ mod tests {
         let mut state = make_state();
         let controller = PlayerId(0);
         state.waiting_for = WaitingFor::VoteChoice {
+            retained_input: None,
             return_result_occurrence: None,
             expected_return_result_process: None,
             player: controller,

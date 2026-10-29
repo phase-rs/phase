@@ -1979,6 +1979,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         fan_out.return_result_occurrence = None;
     }
     if let Some(pending) = filtered.pending_die_roll_instruction.as_deref_mut() {
+        pending.retained_input = None;
         pending.return_result_occurrence = None;
         pending.expected_return_result_process = None;
     }
@@ -2033,6 +2034,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             ..
         } => *return_result_occurrence = None,
         _ => {}
+    }
+    if let WaitingFor::VoteChoice { retained_input, .. } = &mut filtered.waiting_for {
+        *retained_input = None;
     }
     match &mut filtered.waiting_for {
         WaitingFor::VoteChoice {
@@ -2980,6 +2984,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // (the AI already sees full hidden state for its own search). Multiplayer
     // human↔human secrecy IS enforced here.
     if let WaitingFor::VoteChoice {
+        retained_input: _,
         return_result_occurrence: _,
         expected_return_result_process: _,
         player,
@@ -3002,6 +3007,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     {
         if visibility == crate::types::ability::VoteVisibility::Secret {
             filtered.waiting_for = WaitingFor::VoteChoice {
+                retained_input: None,
                 return_result_occurrence: None,
                 expected_return_result_process: None,
                 player,

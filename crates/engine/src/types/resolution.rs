@@ -366,6 +366,9 @@ pub struct PendingCoinFlip {
 /// `roll_die::resume_after_ignore`, which emits only for the survivors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDieRoll {
+    /// Original rolling input, not another executable invocation or liveness root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_input: Option<Box<ResolvedAbility>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -485,6 +488,9 @@ pub struct PendingDieRoll {
 /// either roll.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingDieRollInstruction {
+    /// Captured before replacement ordering can suspend the instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_input: Option<Box<ResolvedAbility>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4966,6 +4972,44 @@ impl ResolutionStack {
 
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &ResolutionFrame> {
         self.frames.iter()
+    }
+
+    /// Decode-time recovery uses surviving typed input evidence before ordinary
+    /// carrier coherence. It neither schedules nor discovers new work.
+    pub(crate) fn recover_retained_operation_inputs(
+        &mut self,
+        evidence: &GameState,
+    ) -> Result<(), String> {
+        for frame in self.frames.iter_mut() {
+            match frame {
+                ResolutionFrame::VoteBallot(pending)
+                    if pending.retained_input.is_none() && !pending.remaining_voters.is_empty() =>
+                {
+                    pending.retained_input = Some(
+                        crate::types::game_state::recover_retained_operation_input(
+                            evidence,
+                            pending.return_result_occurrence,
+                            pending.expected_return_result_process,
+                            pending.source_id,
+                            pending.controller,
+                            |candidate| {
+                                candidate.source_id == pending.source_id
+                                    && candidate.controller == pending.controller
+                                    && candidate.context.chain_root_targets
+                                        == pending.chain_root_targets
+                                    && matches!(&candidate.effect, crate::types::ability::Effect::Vote { per_choice_effect, .. }
+                                    if per_choice_effect.iter().any(|body| body.as_ref() == pending.ability_template.as_ref()))
+                            },
+                        )?,
+                    );
+                }
+                ResolutionFrame::DieRoll(pending) => {
+                    crate::game::effects::roll_die::recover_pending_input(evidence, pending)?
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// CR 104.4b: whether any parked frame is an unsettled delivery (a
@@ -11517,6 +11561,7 @@ mod tests {
         let mut vote = restore_v1_vote_ballot_fixture(
             vote,
             PendingVoteBallotIteration {
+                retained_input: None,
                 return_result_occurrence: None,
                 expected_return_result_process: None,
                 ability_template: Box::new(AbilityDefinition::new(
@@ -13079,6 +13124,7 @@ mod tests {
                 if die {
                     state.take_active_coin_flip_frame().unwrap();
                     state.push_die_roll_frame(PendingDieRoll {
+                        retained_input: None,
                         return_result_occurrence: None,
                         expected_return_result_process: None,
                         source_id: ObjectId(7),

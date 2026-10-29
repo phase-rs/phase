@@ -275,6 +275,182 @@ pub(crate) fn delegated_choice(
     delegated
 }
 
+/// CR 608.2h: authenticate the existing instruction-time amount latch without
+/// the later board. The ticket identifies the producer and recipient, not amount.
+pub(crate) fn project_latched_choice(
+    original: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    let Effect::ChooseCounterAdjustment {
+        adjustment,
+        counters,
+        count,
+        ..
+    } = &original.effect
+    else {
+        return None;
+    };
+    let Effect::ChooseOneOf {
+        kind: ChooseOneOfKind::Ordinary,
+        chooser: PlayerFilter::Controller,
+        branches,
+    } = &current.effect
+    else {
+        return None;
+    };
+    let occurrences = current.target_occurrences();
+    let [(TargetRef::Object(id), Some(pin))] = occurrences.as_slice() else {
+        return None;
+    };
+    let pin = *pin;
+    if *id != pin.object_id || branches.is_empty() {
+        return None;
+    }
+    let (authored, up_to) = count.peel_up_to();
+    let mut amount = None;
+    let mut previous = None;
+    for branch in branches {
+        let (kind, operand, remove) = match branch.effect.as_ref() {
+            Effect::RemoveCounter {
+                counter_type: Some(kind),
+                count,
+                target: TargetFilter::ParentTarget,
+            } if adjustment.allows_remove() => (kind, count, true),
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target: TargetFilter::ParentTarget,
+            } if adjustment.allows_add() => (counter_type, count, false),
+            _ => return None,
+        };
+        if !counters.matches(kind) {
+            return None;
+        }
+        let (inner, wrapped) = operand.peel_up_to();
+        let QuantityExpr::Fixed { value } = inner else {
+            return None;
+        };
+        if wrapped != up_to || amount.is_some_and(|amount| amount != *value) {
+            return None;
+        }
+        match authored {
+            QuantityExpr::Fixed { value: expected } if expected != value => return None,
+            QuantityExpr::Fixed { .. } => {}
+            _ if *value < 0 => return None,
+            _ => {}
+        }
+        amount = Some(*value);
+        let order = (kind.as_str().to_owned(), if remove { 0 } else { 1 });
+        if previous.as_ref().is_some_and(|previous| previous >= &order) {
+            return None;
+        }
+        previous = Some(order);
+        let description = if remove {
+            let amount = if up_to {
+                "any number of".into()
+            } else if *value < 0 {
+                "all".into()
+            } else {
+                value.to_string()
+            };
+            format!("remove {amount} {} counters", kind.display_phrase())
+        } else {
+            format!("put {} {} counters", (*value).max(0), kind.display_phrase())
+        };
+        let expected = AbilityDefinition {
+            description: Some(description),
+            ..AbilityDefinition::new(AbilityKind::Spell, branch.effect.as_ref().clone())
+        };
+        if branch != &expected {
+            return None;
+        }
+    }
+    let ticket = current.context.counter_removal_result.clone();
+    match (&ticket, original.declares_return_result) {
+        (Some(ticket), Some(result))
+            if ticket.result == result
+                && ticket.recipient == Some(pin)
+                && ticket.counters == *counters
+                && ticket.source.reference.object_id == original.source_id
+                && ticket.process == original.return_result_process => {}
+        (None, None) => {}
+        _ => return None,
+    }
+    let projected = delegated_choice(original, pin, ticket, branches.clone());
+    super::instruction_result_projection_eq(&projected, current).then_some(projected)
+}
+
+/// After selection the concrete operation is the latch. Its prompt no longer
+/// exists; replacement/cost pauses retain this actual operation and its ticket.
+pub(crate) fn project_latched_operation(
+    original: &ResolvedAbility,
+    current: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    let (kind, count, remove) = match &current.effect {
+        Effect::RemoveCounter {
+            counter_type: Some(kind),
+            count,
+            target: TargetFilter::ParentTarget,
+        } => (kind, count, true),
+        Effect::PutCounter {
+            counter_type,
+            count,
+            target: TargetFilter::ParentTarget,
+        } => (counter_type, count, false),
+        _ => return None,
+    };
+    let occurrences = current.target_occurrences();
+    let (id, pin) = occurrences
+        .first()
+        .and_then(|(target, pin)| match (target, pin) {
+            (TargetRef::Object(id), Some(pin)) => Some((*id, *pin)),
+            _ => None,
+        })?;
+    if id != pin.object_id
+        || occurrences
+            .iter()
+            .skip(1)
+            .any(|(target, pin)| *target != TargetRef::Player(original.controller) || pin.is_some())
+    {
+        return None;
+    }
+    let (inner, up_to) = count.peel_up_to();
+    let QuantityExpr::Fixed { value } = inner else {
+        return None;
+    };
+    let description = if remove {
+        let amount = if up_to {
+            "any number of".into()
+        } else if *value < 0 {
+            "all".into()
+        } else {
+            value.to_string()
+        };
+        format!("remove {amount} {} counters", kind.display_phrase())
+    } else {
+        format!("put {} {} counters", (*value).max(0), kind.display_phrase())
+    };
+    let branch = AbilityDefinition {
+        description: Some(description),
+        ..AbilityDefinition::new(AbilityKind::Spell, current.effect.clone())
+    };
+    let mut parent = original.clone();
+    // Additions do not consume or forward a removal receipt.
+    if !remove {
+        parent.declares_return_result = None;
+    }
+    let delegated = delegated_choice(
+        &parent,
+        pin,
+        current.context.counter_removal_result.clone(),
+        vec![branch.clone()],
+    );
+    project_latched_choice(&parent, &delegated)?;
+    let selected =
+        super::choose_one_of::project_selected_branch(&delegated, &branch, original.controller);
+    super::instruction_result_projection_eq(&selected, current).then_some(selected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +465,192 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn public_dynamic_counter_choice_keeps_three_when_later_input_is_seven() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::ability::{
+            PlayerScope, QuantityRef, ReplacementDefinition, ReplacementMode, ReturnResultId,
+        };
+        use crate::types::game_state::TrustedGameStateEnvelope;
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        use crate::types::replacements::ReplacementEvent;
+        for (index, replacement) in [(0, false), (1, false), (0, true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.with_cards_in_hand(P0, &["First input", "Second input", "Third input"]);
+            let recipient = scenario.add_creature(P0, "Counter recipient", 2, 2).id();
+            scenario.with_counter(recipient, CounterType::Charge, 5);
+            if replacement {
+                scenario
+                    .add_artifact_from_oracle(P0, "Supplemental counter replacement", "")
+                    .with_replacement_definition(
+                        ReplacementDefinition::new(ReplacementEvent::RemoveCounter)
+                            .mode(ReplacementMode::Optional { decline: None }),
+                    );
+            }
+            let mut definition = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::ChooseCounterAdjustment {
+                    adjustment: CounterAdjustment::AddOrRemove,
+                    counters: CounterMatch::OfType(CounterType::Charge),
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    target: TargetFilter::Typed(crate::types::ability::TypedFilter::creature()),
+                },
+            )
+            .cost(crate::types::ability::AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            })
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Fixed { value: 1 },
+                },
+            ));
+            definition.declares_return_result = Some(ReturnResultId(7));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental paid adjustment", "")
+                .with_ability_definition(definition)
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Black, source, false, Vec::new())],
+            );
+            let mut runner = scenario.build();
+            runner
+                .activate(source, 0)
+                .target_object(recipient)
+                .resolve();
+            let WaitingFor::ChooseOneOfBranch {
+                branches, context, ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("real generated counter prompt");
+            };
+            assert_eq!(branches.len(), 2);
+            assert!(context.counter_removal_result.is_some());
+            assert!(branches.iter().all(|branch| matches!(
+                branch.effect.count_expr(),
+                Some(QuantityExpr::Fixed { value: 3 })
+            )));
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            for n in 0..4 {
+                create_object(
+                    runner.state_mut(),
+                    CardId(90_000 + n),
+                    P0,
+                    format!("Later input {n}"),
+                    Zone::Hand,
+                );
+            }
+            assert_eq!(runner.state().players[0].hand.len(), 7);
+            let paused = runner.state().clone();
+            // A candidate is not its own amount authority: disagreeing siblings
+            // and fixed-parent/wrapper/recipient/ticket corruptions refuse first.
+            for corruption in 0..5 {
+                let mut hostile = paused.clone();
+                let WaitingFor::ChooseOneOfBranch {
+                    branches,
+                    context,
+                    source_id,
+                    ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!();
+                };
+                match corruption {
+                    0 => {
+                        let Effect::PutCounter { count, .. } = branches[1].effect.as_mut() else {
+                            unreachable!();
+                        };
+                        *count = QuantityExpr::Fixed { value: 7 };
+                    }
+                    1 => {
+                        branches[1].sub_ability = Some(Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Fixed { value: 999 },
+                            },
+                        )));
+                    }
+                    2 => {
+                        context.counter_removal_result.as_mut().unwrap().recipient = None;
+                    }
+                    3 => {
+                        context.counter_removal_result.as_mut().unwrap().result =
+                            ReturnResultId(99);
+                    }
+                    _ => {
+                        *source_id = recipient;
+                    }
+                }
+                assert!(serde_json::from_value::<GameState>(
+                    serde_json::to_value(&hostile).unwrap()
+                )
+                .is_err());
+                let before = hostile.clone();
+                assert!(apply(&mut hostile, P0, GameAction::ChooseBranch { index: 1 }).is_err());
+                assert_eq!(hostile, before);
+            }
+            for ingress in 0..3 {
+                let restored = match ingress {
+                    0 => serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap(),
+                    1 => serde_json::from_value::<TrustedGameStateEnvelope>(
+                        serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
+                            .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state(),
+                    _ => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                        serde_json::to_value(
+                            crate::types::resolution::ResolutionStateWire::from_game_state(
+                                paused.clone(),
+                            ),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .into_game_state(),
+                };
+                let mut resumed = GameRunner::from_state(restored);
+                resumed.act(GameAction::ChooseBranch { index }).unwrap();
+                if replacement {
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ));
+                    *resumed.state_mut() =
+                        serde_json::from_value(serde_json::to_value(resumed.state()).unwrap())
+                            .unwrap();
+                    resumed
+                        .act(GameAction::ChooseReplacement { index: 1 })
+                        .unwrap();
+                }
+                resumed.advance_until_stack_empty();
+                assert_eq!(
+                    resumed.state().objects[&recipient]
+                        .counters
+                        .get(&CounterType::Charge),
+                    Some(&if index == 0 { 2 } else { 8 })
+                );
+                assert_eq!(resumed.state().players[0].life, 21);
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(resumed.state().stack.is_empty());
+                assert!(resumed.state().resolution_stack.is_empty());
+                assert!(resumed.state().return_result_frames.is_empty());
+            }
+        }
+    }
 
     fn adjust_ability(
         target: crate::types::identifiers::ObjectId,

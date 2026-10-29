@@ -1825,6 +1825,7 @@ fn apply_search_partition(
 /// (`ChooseOption`) and object (`SubmitVoteCandidate`) submission arms without
 /// duplicating the advance/resolve logic across them.
 struct VoteRoundState {
+    retained_input: Option<Box<ResolvedAbility>>,
     return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     player: crate::types::player::PlayerId,
@@ -1869,6 +1870,7 @@ fn append_vote_ballot_and_advance(
     round: VoteRoundState,
 ) -> ResolutionChoiceOutcome {
     let VoteRoundState {
+        retained_input,
         return_result_occurrence,
         expected_return_result_process,
         player,
@@ -1889,6 +1891,8 @@ fn append_vote_ballot_and_advance(
         chain_root_targets,
     } = round;
 
+    let admitted = effects::vote_waiting_admitted_program(state, &state.waiting_for)
+        .expect("the public boundary validated the actual Vote carrier");
     let mut new_tallies = tallies;
     new_tallies[idx as usize] += 1;
     let mut new_ballots = ballots;
@@ -1909,6 +1913,7 @@ fn append_vote_ballot_and_advance(
     if remaining_votes > 1 {
         // CR 701.38d: Same player still has votes to cast.
         state.waiting_for = WaitingFor::VoteChoice {
+            retained_input,
             return_result_occurrence,
             expected_return_result_process,
             player,
@@ -1932,6 +1937,7 @@ fn append_vote_ballot_and_advance(
     } else if let Some(((next_player, next_votes), rest)) = remaining_voters.split_first() {
         // CR 101.4: Advance to the next voter in turn order.
         state.waiting_for = WaitingFor::VoteChoice {
+            retained_input,
             return_result_occurrence,
             expected_return_result_process,
             player: *next_player,
@@ -1965,7 +1971,7 @@ fn append_vote_ballot_and_advance(
                 .collect(),
         });
         let candidate_object_ids: Vec<ObjectId> = candidate_objects.iter().copied().collect();
-        let _ = effects::vote::resolve_tally(
+        let _ = effects::vote::resolve_tally_owned(
             state,
             source_id,
             controller,
@@ -1979,6 +1985,10 @@ fn append_vote_ballot_and_advance(
             &chain_root_targets,
             expected_return_result_process,
             events,
+            admitted
+                .as_ref()
+                .map(|(program, declarations)| (program, declarations)),
+            retained_input.as_deref(),
         );
         ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, controller, events))
     }
@@ -2662,10 +2672,13 @@ fn handle_resolution_choice_in_occurrence(
                 "ignorable_indices must index into results",
             );
 
-            if let Some(pending) = state.resolution_stack.active_die_roll() {
-                effects::roll_die::validate_pending_die_result_owner(state, pending)
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-            }
+            let admitted = state
+                .resolution_stack
+                .active_die_roll()
+                .map(|pending| effects::roll_die::pending_die_admitted_program(state, pending))
+                .transpose()
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                .flatten();
             let pending = state
                 .take_active_die_roll_frame()
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?
@@ -2705,11 +2718,14 @@ fn handle_resolution_choice_in_occurrence(
             ignore_indices.extend_from_slice(&pending.forced_ignored);
             ignore_indices.sort_unstable();
             ignore_indices.dedup();
-            let next = crate::game::effects::roll_die::resume_after_ignore(
+            let next = crate::game::effects::roll_die::resume_after_ignore_owned(
                 state,
                 pending,
                 ignore_indices,
                 events,
+                admitted
+                    .as_ref()
+                    .map(|(program, declarations)| (program, declarations)),
             );
             // CR 608.2c: drain under the owner before restoring the caller.
             let result = next.map(|next| match next {
@@ -4558,6 +4574,7 @@ fn handle_resolution_choice_in_occurrence(
         // `vote::resolve_tally` and drain the post-vote continuation.
         (
             WaitingFor::VoteChoice {
+                retained_input,
                 return_result_occurrence,
                 expected_return_result_process,
                 player,
@@ -4604,6 +4621,7 @@ fn handle_resolution_choice_in_occurrence(
                 events,
                 idx as u32,
                 VoteRoundState {
+                    retained_input,
                     return_result_occurrence,
                     expected_return_result_process,
                     player,
@@ -4631,6 +4649,7 @@ fn handle_resolution_choice_in_occurrence(
         // (empty `candidate_objects`) reject this path.
         (
             WaitingFor::VoteChoice {
+                retained_input,
                 return_result_occurrence,
                 expected_return_result_process,
                 player,
@@ -4664,6 +4683,7 @@ fn handle_resolution_choice_in_occurrence(
                 events,
                 candidate_index,
                 VoteRoundState {
+                    retained_input,
                     return_result_occurrence,
                     expected_return_result_process,
                     player,

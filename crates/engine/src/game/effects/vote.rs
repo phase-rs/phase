@@ -231,13 +231,12 @@ pub(crate) fn resolve_owned(
         }
     };
 
+    let return_result_occurrence =
+        super::retained_return_result_occurrence(state, ability, declarations)?;
     state.waiting_for = WaitingFor::VoteChoice {
-        return_result_occurrence: super::retained_return_result_occurrence(
-            state,
-            ability,
-            declarations,
-        )?,
-        expected_return_result_process: ability.return_result_process,
+        retained_input: Some(Box::new(ability.clone())),
+        return_result_occurrence,
+        expected_return_result_process: return_result_occurrence.and(ability.return_result_process),
         player: first_player,
         remaining_votes: first_votes,
         options,
@@ -322,6 +321,7 @@ pub fn resolve_tally(
         expected_return_result_process,
         events,
         None,
+        None,
     )
 }
 
@@ -341,6 +341,7 @@ pub(crate) fn resolve_tally_owned(
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
     admitted: Option<super::AdmittedInstructionResult<'_>>,
+    input: Option<&ResolvedAbility>,
 ) -> Result<(), EffectError> {
     // For named votes the per-choice slots are parallel to `options`; object
     // votes carry an empty `per_choice_effect` (winners drive
@@ -372,6 +373,7 @@ pub(crate) fn resolve_tally_owned(
                 expected_return_result_process,
                 events,
                 admitted,
+                input,
             );
         }
         // CR 701.38d: per-ballot fan-out (existing loop below) — multiple
@@ -426,7 +428,7 @@ pub(crate) fn resolve_tally_owned(
                 expected_return_result_process,
                 None,
                 None,
-                admitted.map(|(program, _)| program),
+                input,
             );
             resolve_vote_selected(state, &chain, events, admitted)?;
         } else if per_choice_effect[idx]
@@ -447,7 +449,7 @@ pub(crate) fn resolve_tally_owned(
                 expected_return_result_process,
                 None,
                 None,
-                admitted.map(|(program, _)| program),
+                input,
             );
             resolve_vote_selected(state, &chain, events, admitted)?;
         } else {
@@ -480,7 +482,7 @@ pub(crate) fn resolve_tally_owned(
                     controller,
                     chain_root_targets,
                     expected_return_result_process,
-                    admitted.map(|(program, _)| program),
+                    input,
                 );
                 let imports_parent = matches!(
                     crate::types::ability::classify_instruction_result_invocation(
@@ -491,9 +493,10 @@ pub(crate) fn resolve_tally_owned(
                     .0,
                     crate::types::ability::InstructionResultProcess::Imported { .. }
                 );
-                let ballot_occurrence = imports_parent
-                    .then_some(state.active_return_result_occurrence)
-                    .flatten();
+                let ballot_occurrence = (imports_parent
+                    || input.is_some_and(crate::types::game_state::has_return_result_metadata))
+                .then_some(state.active_return_result_occurrence)
+                .flatten();
                 resolve_vote_selected(state, &ballot_ability, events, admitted)?;
 
                 // If the inner effect parked an interactive choice, suspend.
@@ -501,6 +504,7 @@ pub(crate) fn resolve_tally_owned(
                     park_vote_ballot_after_current_ballot(
                         state,
                         PendingVoteBallotIteration {
+                            retained_input: input.cloned().map(Box::new),
                             return_result_occurrence: ballot_occurrence,
                             expected_return_result_process: ballot_occurrence
                                 .and(expected_return_result_process),
@@ -560,6 +564,7 @@ fn resolve_top_votes_tally(
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
     admitted: Option<super::AdmittedInstructionResult<'_>>,
+    input: Option<&ResolvedAbility>,
 ) -> Result<(), EffectError> {
     state.last_vote_ballots = ballots.clone();
 
@@ -601,7 +606,7 @@ fn resolve_top_votes_tally(
                             expected_return_result_process,
                             Some(winner_obj),
                             None,
-                            admitted.map(|(program, _)| program),
+                            input,
                         );
                         resolve_vote_selected(state, &chain, events, admitted)?;
                     }
@@ -617,7 +622,7 @@ fn resolve_top_votes_tally(
                             expected_return_result_process,
                             None,
                             None,
-                            admitted.map(|(program, _)| program),
+                            input,
                         );
                         resolve_vote_selected(state, &chain, events, admitted)?;
                     }
@@ -651,7 +656,7 @@ fn resolve_top_votes_tally(
                                     expected_return_result_process,
                                     Some(winner_obj),
                                     None,
-                                    admitted.map(|(program, _)| program),
+                                    input,
                                 );
                                 resolve_vote_selected(state, &chain, events, admitted)?;
                             }
@@ -667,7 +672,7 @@ fn resolve_top_votes_tally(
                                     expected_return_result_process,
                                     None,
                                     None,
-                                    admitted.map(|(program, _)| program),
+                                    input,
                                 );
                                 resolve_vote_selected(state, &chain, events, admitted)?;
                             }
@@ -759,7 +764,7 @@ fn votes_per_session_for(state: &GameState, player: PlayerId) -> u32 {
 
 /// Title-case the first character of a single word for display labels. The
 /// engine never compares against this value — only `options` (lowercase).
-fn title_case_word(s: &str) -> String {
+pub(super) fn title_case_word(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
         Some(c) => c.to_uppercase().chain(chars).collect(),
@@ -810,13 +815,7 @@ pub(crate) fn build_vote_outcome(
         chain_root_targets.to_vec(),
     );
     if let Some(input) = input {
-        let mut inputs = input.coin_target_input_projection();
-        // These are captured separately by the actual vote carrier. Retaining
-        // them also lets projection reject a forged carrier source/controller.
-        inputs.source_id = source_id;
-        inputs.controller = controller;
-        inputs.context.chain_root_targets = chain_root_targets.to_vec();
-        ability.inherit_coin_target_inputs(&inputs);
+        ability.inherit_coin_target_inputs(input);
     }
     ability.bind_return_result_process(expected_return_result_process);
     if let Some(winner) = winner {
@@ -850,7 +849,65 @@ pub(crate) fn validate_pending_result_owner(
     state: &GameState,
     pending: &PendingVoteBallotIteration,
 ) -> Result<(), EffectError> {
+    if !state.last_vote_ballots.is_empty() {
+        current_ballot_body(state, pending)?;
+    }
     pending_ballot_result_owner(state, pending).map(|_| ())
+}
+
+pub(crate) fn current_ballot_body(
+    state: &GameState,
+    pending: &PendingVoteBallotIteration,
+) -> Result<ResolvedAbility, EffectError> {
+    let input = pending
+        .retained_input
+        .as_deref()
+        .ok_or_else(|| EffectError::InvalidParam("ballot has no original input".into()))?;
+    let Effect::Vote {
+        per_choice_effect, ..
+    } = &input.effect
+    else {
+        return Err(EffectError::InvalidParam("ballot input is not Vote".into()));
+    };
+    let mut candidates = Vec::new();
+    for (index, template) in per_choice_effect.iter().enumerate() {
+        if template.as_ref() != pending.ability_template.as_ref() {
+            continue;
+        }
+        let voters: Vec<_> = state
+            .last_vote_ballots
+            .iter()
+            .filter(|(_, choice)| *choice == index as u32)
+            .map(|(voter, _)| *voter)
+            .collect();
+        let Some(cursor) = voters.len().checked_sub(pending.remaining_voters.len() + 1) else {
+            continue;
+        };
+        if voters[cursor + 1..] != pending.remaining_voters {
+            continue;
+        }
+        let body = build_per_ballot_ability(
+            template,
+            voters[cursor],
+            pending.source_id,
+            pending.controller,
+            &pending.chain_root_targets,
+            pending.expected_return_result_process,
+            Some(input),
+        );
+        if !candidates
+            .iter()
+            .any(|known| super::instruction_result_projection_eq(known, &body))
+        {
+            candidates.push(body);
+        }
+    }
+    if candidates.len() != 1 {
+        return Err(EffectError::InvalidParam(
+            "ballot queue disagrees with its held voter suffix".into(),
+        ));
+    }
+    Ok(candidates.pop().expect("one actual ballot cursor"))
 }
 
 fn pending_ballot_result_owner(
@@ -863,6 +920,13 @@ fn pending_ballot_result_owner(
     )>,
     EffectError,
 > {
+    if pending.remaining_voters.is_empty()
+        && pending.retained_input.is_none()
+        && pending.return_result_occurrence.is_none()
+        && pending.expected_return_result_process.is_none()
+    {
+        return Ok(None);
+    }
     let owner = super::vote_carrier_admitted_program(state, pending)?;
     for voter in &pending.remaining_voters {
         let body = build_per_ballot_ability(
@@ -872,7 +936,7 @@ fn pending_ballot_result_owner(
             pending.controller,
             &pending.chain_root_targets,
             pending.expected_return_result_process,
-            owner.as_ref().map(|(program, _)| program),
+            pending.retained_input.as_deref(),
         );
         if matches!(
             crate::types::ability::classify_instruction_result_invocation(
@@ -888,9 +952,14 @@ fn pending_ballot_result_owner(
                 &body,
                 pending.return_result_occurrence,
             )?;
-            let candidate =
-                super::owned_cursor_declarations(state, pending.return_result_occurrence, &body)?;
-            if owner.as_ref() != Some(&candidate) {
+            if !owner.as_ref().is_some_and(|(program, _)| {
+                super::instruction_result_owned_program_projects_to(
+                    state,
+                    pending.return_result_occurrence,
+                    program,
+                    &body,
+                )
+            }) {
                 return Err(EffectError::InvalidParam(
                     "ballots have different admitted owners".into(),
                 ));
@@ -945,6 +1014,8 @@ fn drain_vote_ballots_in_occurrence(
     let source_id = pending.source_id;
     let controller = pending.controller;
     let template = pending.ability_template;
+    let retained_input = pending.retained_input;
+    let input = retained_input.as_deref();
     let chain_root_targets = pending.chain_root_targets;
     let stack_depth_before_ballot = state.resolution_stack.capture_child_boundary();
 
@@ -957,7 +1028,7 @@ fn drain_vote_ballots_in_occurrence(
             controller,
             &chain_root_targets,
             expected_return_result_process,
-            admitted.map(|(program, _)| program),
+            input,
         );
         if resolve_vote_selected(state, &ballot_ability, events, admitted).is_err() {
             // On error, drop remaining ballots (matches existing error handling).
@@ -969,6 +1040,7 @@ fn drain_vote_ballots_in_occurrence(
             park_vote_ballot_after_current_ballot(
                 state,
                 PendingVoteBallotIteration {
+                    retained_input,
                     return_result_occurrence,
                     expected_return_result_process,
                     ability_template: template,
@@ -1024,6 +1096,641 @@ mod admitted_ballot_public_tests {
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::zones::Zone;
+
+    fn restored_input(state: &GameState, ingress: u8) -> GameState {
+        match ingress {
+            0 => serde_json::from_value(serde_json::to_value(state).unwrap()).unwrap(),
+            1 => serde_json::from_value::<TrustedGameStateEnvelope>(
+                serde_json::to_value(TrustedGameStateEnvelope::capture(state.clone())).unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+            _ => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                serde_json::to_value(
+                    crate::types::resolution::ResolutionStateWire::from_game_state(state.clone()),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .into_game_state(),
+        }
+    }
+
+    fn omit_old_vote_input(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if fields.get("type").and_then(serde_json::Value::as_str) == Some("VoteChoice") {
+                    fields.remove("retained_input");
+                }
+                for child in fields.values_mut() {
+                    omit_old_vote_input(child);
+                }
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(omit_old_vote_input),
+            _ => {}
+        }
+    }
+
+    fn input_vote(outcome: AbilityDefinition, visibility: VoteVisibility) -> Effect {
+        Effect::Vote {
+            choices: vec!["skip".into(), "read".into()],
+            per_choice_effect: vec![
+                Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                Box::new(outcome),
+            ],
+            starting_with: ControllerRef::You,
+            voter_scope: VoterScope::AnOpponent,
+            tally_mode: VoteTally::TopVotes {
+                tie: TieResolution::Breaker(0),
+            },
+            subject: VoteSubject::Named,
+            visibility,
+        }
+    }
+
+    #[test]
+    fn terminal_unused_vote_retains_complete_x_without_any_result_owner() {
+        for x in [3, 4] {
+            for visibility in [VoteVisibility::Open, VoteVisibility::Secret] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Supplemental empty input owner", "")
+                    .id();
+                let mut runner = scenario.build();
+                let mut input = ResolvedAbility::new(
+                    input_vote(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                player: TargetFilter::Controller,
+                                amount: QuantityExpr::Ref {
+                                    qty: QuantityRef::Variable { name: "X".into() },
+                                },
+                            },
+                        ),
+                        visibility,
+                    ),
+                    Vec::new(),
+                    source,
+                    P0,
+                );
+                input.chosen_x = Some(x);
+                if visibility == VoteVisibility::Secret {
+                    let rider = runner
+                        .state_mut()
+                        .install_replacement_continuation(ResolvedAbility::new(
+                            Effect::NoOp,
+                            Vec::new(),
+                            source,
+                            P0,
+                        ))
+                        .unwrap();
+                    let mut payload = ReplacementDefinition::new(
+                        crate::types::replacements::ReplacementEvent::DamageDone,
+                    );
+                    payload.runtime_execute = Some(rider);
+                    payload.shield_kind = ShieldKind::DamageReplacementOneShot;
+                    input.context.damage_opportunity = Some(DamageOpportunity {
+                        definitions: vec![(
+                            crate::types::proposed_event::AppliedReplacementKey::Floating {
+                                index: 0,
+                            },
+                            payload,
+                        )],
+                        ..DamageOpportunity::default()
+                    });
+                }
+                super::super::resolve_ability_chain(runner.state_mut(), &input, &mut Vec::new(), 0)
+                    .unwrap();
+                let paused = runner.state().clone();
+                assert!(paused.objects[&source].abilities.is_empty());
+                assert!(paused.return_result_frames.is_empty());
+                assert!(paused.resolution_stack.is_empty());
+                assert!(paused.stack.is_empty());
+                let WaitingFor::VoteChoice {
+                    retained_input: Some(held),
+                    return_result_occurrence: None,
+                    expected_return_result_process: None,
+                    player: P1,
+                    ..
+                } = &paused.waiting_for
+                else {
+                    panic!("actual unused Vote prompt");
+                };
+                assert_eq!(held.chosen_x, Some(x));
+                assert_eq!(
+                    held.context.damage_opportunity.is_some(),
+                    visibility == VoteVisibility::Secret
+                );
+                if visibility == VoteVisibility::Secret {
+                    let mut hostile = paused.clone();
+                    let WaitingFor::VoteChoice {
+                        retained_input: Some(input),
+                        ..
+                    } = &mut hostile.waiting_for
+                    else {
+                        unreachable!();
+                    };
+                    input
+                        .context
+                        .damage_opportunity
+                        .as_mut()
+                        .unwrap()
+                        .definitions[0]
+                        .1
+                        .runtime_execute = Some(
+                        crate::types::identifiers::ReplacementContinuationId(u64::MAX),
+                    );
+                    assert!(serde_json::from_value::<GameState>(
+                        serde_json::to_value(&hostile).unwrap()
+                    )
+                    .is_err());
+                    let original = hostile.clone();
+                    assert!(crate::game::engine::apply(
+                        &mut hostile,
+                        P1,
+                        GameAction::ChooseOption {
+                            choice: "read".into()
+                        }
+                    )
+                    .is_err());
+                    assert_eq!(
+                        hostile, original,
+                        "private-input rider admission precedes ballot mutation"
+                    );
+                }
+                assert!(
+                    super::super::vote_waiting_admitted_program(&paused, &paused.waiting_for)
+                        .unwrap()
+                        .is_none()
+                );
+                for view in [
+                    crate::game::visibility::filter_state_for_viewer(&paused, P0),
+                    crate::game::visibility::filter_state_for_viewer(&paused, P1),
+                    crate::game::visibility::filter_state_for_unseated_viewer(&paused),
+                ] {
+                    assert!(matches!(
+                        view.waiting_for,
+                        WaitingFor::VoteChoice {
+                            retained_input: None,
+                            ..
+                        }
+                    ));
+                    let _: GameState =
+                        serde_json::from_value(serde_json::to_value(&view).unwrap()).unwrap();
+                    assert!(
+                        serde_json::from_value::<crate::types::game_state::PersistedGameState>(
+                            serde_json::to_value(
+                                crate::types::game_state::PersistedGameState::capture(view)
+                            )
+                            .unwrap()
+                        )
+                        .unwrap()
+                        .into_game_state()
+                        .is_err()
+                    );
+                }
+                assert_eq!(runner.state(), &paused, "views never mutate authority");
+                let mut erased = serde_json::to_value(&paused).unwrap();
+                erased["waiting_for"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("retained_input");
+                let original = erased.clone();
+                assert!(serde_json::from_value::<GameState>(erased.clone()).is_err());
+                assert_eq!(erased, original);
+                for ingress in 0..3 {
+                    let restored = restored_input(&paused, ingress);
+                    assert!(restored.objects[&source].abilities.is_empty());
+                    let mut resumed = GameRunner::from_state(restored);
+                    resumed
+                        .act(GameAction::ChooseOption {
+                            choice: "read".into(),
+                        })
+                        .unwrap();
+                    assert_eq!(resumed.state().players[0].life, 20 + x as i32);
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(resumed.state().resolution_stack.is_empty());
+                    assert!(resumed.state().stack.is_empty());
+                    assert!(resumed.state().return_result_frames.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_vote_preserves_chosen_source_and_departure_shield_amount() {
+        for paid in [false, true] {
+            for empty in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                if !empty {
+                    scenario.add_creature(P0, "Two", 2, 2);
+                    scenario.add_creature(P0, "Three", 3, 3);
+                }
+                let damage = |amount| {
+                    AbilityDefinition::new(
+                        AbilityKind::Activated,
+                        Effect::DealDamage {
+                            amount: QuantityExpr::Fixed { value: amount },
+                            target: TargetFilter::SpecificPlayer { id: P0 },
+                            damage_source: None,
+                            excess: None,
+                        },
+                    )
+                };
+                let a = scenario
+                    .add_artifact_from_oracle(P1, "Chosen damage A", "")
+                    .with_ability_definition(damage(10))
+                    .id();
+                let b = scenario
+                    .add_artifact_from_oracle(P1, "Unchosen damage B", "")
+                    .with_ability_definition(damage(1))
+                    .id();
+                let source_filter = TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+                );
+                let sum = QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate {
+                        source: ZoneChangeRecordSource::InstructionResult {
+                            result: ReturnResultId(7),
+                        },
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Exile),
+                        filter: TargetFilter::Any,
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                    },
+                };
+                let protection = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::PreventDamage {
+                        lifetime: RedirectionLifetime::Continuous,
+                        amount: PreventionAmount::Next(0),
+                        amount_dynamic: Some(QuantityExpr::Offset {
+                            inner: Box::new(sum),
+                            offset: 1,
+                        }),
+                        target: TargetFilter::Controller,
+                        recipient_scope: EffectScope::Single,
+                        scope: PreventionScope::AllDamage,
+                        damage_source_filter: Some(TargetFilter::ChosenDamageSource {
+                            chooser: None,
+                            filter: Some(Box::new(source_filter.clone())),
+                        }),
+                        prevention_duration: Some(Duration::UntilEndOfTurn),
+                    },
+                );
+                let mut producer = AbilityDefinition::new(AbilityKind::Spell, serde_json::from_value(
+                    serde_json::json!({"type":"ChangeZoneAll","origin":"Battlefield","destination":"Exile",
+                        "target":TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))})).unwrap())
+                    .sub_ability(AbilityDefinition::new(AbilityKind::Spell, input_vote(protection, VoteVisibility::Open)));
+                producer.declares_return_result = Some(ReturnResultId(7));
+                let root = AbilityDefinition::new(
+                    if paid {
+                        AbilityKind::Activated
+                    } else {
+                        AbilityKind::Spell
+                    },
+                    Effect::ChooseDamageSource { source_filter },
+                )
+                .sub_ability(producer);
+                let source = if paid {
+                    scenario
+                        .add_artifact_from_oracle(P0, "Supplemental paid terminal vote", "")
+                        .with_ability_definition(root.clone().cost(AbilityCost::Mana {
+                            cost: ManaCost::generic(1),
+                        }))
+                        .id()
+                } else {
+                    scenario
+                        .add_artifact_from_oracle(P0, "Supplemental empty terminal vote", "")
+                        .id()
+                };
+                if paid {
+                    scenario.with_mana_pool(
+                        P0,
+                        vec![ManaUnit::new(ManaType::Black, source, false, Vec::new())],
+                    );
+                }
+                let mut runner = scenario.build();
+                if paid {
+                    runner.activate(source, 0).resolve();
+                } else {
+                    let actual = build_resolved_from_def(&root, source, P0);
+                    super::super::resolve_ability_chain(
+                        runner.state_mut(),
+                        &actual,
+                        &mut Vec::new(),
+                        0,
+                    )
+                    .unwrap();
+                }
+                let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for
+                else {
+                    panic!("actual source choice");
+                };
+                let selected = options
+                    .iter()
+                    .find(|option| option.identity.reference.object_id == a)
+                    .unwrap()
+                    .identity
+                    .reference;
+                assert!(options
+                    .iter()
+                    .any(|option| option.identity.reference.object_id == b));
+                runner
+                    .act(GameAction::ChooseDamageSource { source: selected })
+                    .unwrap();
+                let paused = runner.state().clone();
+                let WaitingFor::VoteChoice {
+                    retained_input: Some(input),
+                    return_result_occurrence: Some(occurrence),
+                    ..
+                } = &paused.waiting_for
+                else {
+                    panic!("terminal Vote");
+                };
+                assert_eq!(
+                    input
+                        .context
+                        .damage_source_choice
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .identity
+                        .reference,
+                    selected
+                );
+                assert!(
+                    paused.resolution_stack.is_empty(),
+                    "no old source-choice/prefix/tail remains"
+                );
+                assert!(
+                    matches!(&paused.return_result_frames[occurrence].results[&ReturnResultId(7)],
+                    InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
+                );
+                assert_eq!(paused.players[0].mana_pool.total(), 0);
+                if !paid {
+                    assert!(paused.objects[&source].abilities.is_empty());
+                }
+                for ingress in 0..3 {
+                    let mut resumed = GameRunner::from_state(restored_input(&paused, ingress));
+                    resumed
+                        .act(GameAction::ChooseOption {
+                            choice: "read".into(),
+                        })
+                        .unwrap();
+                    assert!(resumed.state().return_result_frames.is_empty());
+                    let mut returned = resumed.state().clone();
+                    crate::game::zones::move_to_zone(
+                        &mut returned,
+                        a,
+                        Zone::Exile,
+                        &mut Vec::new(),
+                    );
+                    crate::game::zones::move_to_zone(
+                        &mut returned,
+                        a,
+                        Zone::Battlefield,
+                        &mut Vec::new(),
+                    );
+                    assert_ne!(returned.objects[&a].incarnation, selected.incarnation);
+                    let mut returned = GameRunner::from_state(returned);
+                    if returned.state().priority_player != P1 {
+                        returned.act(GameAction::PassPriority).unwrap();
+                    }
+                    returned.activate(a, 0).resolve();
+                    assert_eq!(
+                        returned.state().players[0].life,
+                        10,
+                        "a new source birth cannot consume the old chosen-source shield"
+                    );
+                    // Both damage operations are ordinary public activations.
+                    resumed.act(GameAction::PassPriority).unwrap();
+                    resumed.activate(a, 0).resolve();
+                    assert_eq!(resumed.state().players[0].life, if empty { 11 } else { 16 });
+                    if resumed.state().priority_player != P1 {
+                        resumed.act(GameAction::PassPriority).unwrap();
+                    }
+                    resumed.activate(b, 0).resolve();
+                    assert_eq!(resumed.state().players[0].life, if empty { 10 } else { 15 });
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(resumed.state().stack.is_empty());
+                    assert!(resumed.state().resolution_stack.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extra_votes_and_repaused_ballots_keep_original_input_when_children_choose_again() {
+        let mut scenario = GameScenario::new_n_player(4, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_artifact_from_oracle(P0, "Supplemental extra vote", "")
+            .with_static(crate::types::statics::StaticMode::GrantsExtraVote);
+        let a = scenario
+            .add_artifact_from_oracle(P1, "Original ballot source", "")
+            .id();
+        let b = scenario
+            .add_artifact_from_oracle(P1, "Child selected source", "")
+            .id();
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Empty queued vote input", "")
+            .id();
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::Opponent),
+        );
+        let child = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseDamageSource {
+                source_filter: filter.clone(),
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".into() },
+                },
+            },
+        ));
+        let row = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChooseOneOf {
+                kind: ChooseOneOfKind::Ordinary,
+                chooser: PlayerFilter::Controller,
+                branches: vec![
+                    AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                    child,
+                ],
+            },
+        );
+        let mut vote = input_vote(row, VoteVisibility::Open);
+        let Effect::Vote {
+            voter_scope,
+            tally_mode,
+            ..
+        } = &mut vote
+        else {
+            unreachable!();
+        };
+        *voter_scope = VoterScope::AllPlayers;
+        *tally_mode = VoteTally::PerVote;
+        let mut input = ResolvedAbility::new(
+            Effect::ChooseDamageSource {
+                source_filter: filter,
+            },
+            Vec::new(),
+            source,
+            P0,
+        )
+        .sub_ability(ResolvedAbility::new(vote, Vec::new(), source, P0));
+        input.chosen_x = Some(3);
+        let mut runner = scenario.build();
+        super::super::resolve_ability_chain(runner.state_mut(), &input, &mut Vec::new(), 0)
+            .unwrap();
+        let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
+            panic!("original source choice");
+        };
+        let selected = options
+            .iter()
+            .find(|option| option.identity.reference.object_id == a)
+            .unwrap()
+            .identity
+            .reference;
+        runner
+            .act(GameAction::ChooseDamageSource { source: selected })
+            .unwrap();
+        for (step, player) in [
+            P0,
+            P0,
+            P1,
+            crate::types::player::PlayerId(2),
+            crate::types::player::PlayerId(3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let WaitingFor::VoteChoice {
+                player: actor,
+                retained_input: Some(held),
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("ballot {step} exists");
+            };
+            assert_eq!(*actor, player);
+            assert_eq!(held.chosen_x, Some(3));
+            assert_eq!(
+                held.context
+                    .damage_source_choice
+                    .as_ref()
+                    .unwrap()
+                    .source
+                    .as_ref()
+                    .unwrap()
+                    .identity
+                    .reference,
+                selected
+            );
+            *runner.state_mut() = restored_input(runner.state(), (step % 3) as u8);
+            runner
+                .act(GameAction::ChooseOption {
+                    choice: "read".into(),
+                })
+                .unwrap();
+        }
+        let paused = runner.state().clone();
+        assert!(matches!(
+            paused.waiting_for,
+            WaitingFor::ChooseOneOfBranch { .. }
+        ));
+        let held = paused.active_vote_ballot().unwrap();
+        assert_eq!(
+            held.remaining_voters.len(),
+            4,
+            "at least two future voters remain"
+        );
+        for ingress in 0..3 {
+            let mut resumed = GameRunner::from_state(restored_input(&paused, ingress));
+            for ballot in 0..5 {
+                let WaitingFor::ChooseOneOfBranch { context, .. } = &resumed.state().waiting_for
+                else {
+                    panic!("row {ballot} pause");
+                };
+                assert_eq!(
+                    context
+                        .damage_source_choice
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .identity
+                        .reference,
+                    selected
+                );
+                let held = resumed.state().active_vote_ballot().unwrap();
+                assert_eq!(held.retained_input.as_ref().unwrap().chosen_x, Some(3));
+                assert_eq!(
+                    held.retained_input
+                        .as_ref()
+                        .unwrap()
+                        .context
+                        .damage_source_choice
+                        .as_ref()
+                        .unwrap()
+                        .source
+                        .as_ref()
+                        .unwrap()
+                        .identity
+                        .reference,
+                    selected
+                );
+                *resumed.state_mut() = restored_input(resumed.state(), ingress);
+                resumed.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                let WaitingFor::DamageSourceChoice { options, .. } = &resumed.state().waiting_for
+                else {
+                    panic!("child source choice {ballot}");
+                };
+                let child_selected = options
+                    .iter()
+                    .find(|option| option.identity.reference.object_id == b)
+                    .unwrap()
+                    .identity
+                    .reference;
+                *resumed.state_mut() = restored_input(resumed.state(), ingress);
+                resumed
+                    .act(GameAction::ChooseDamageSource {
+                        source: child_selected,
+                    })
+                    .unwrap();
+                assert_eq!(resumed.state().players[0].life, 20 + 3 * (ballot + 1));
+            }
+            resumed.advance_until_stack_empty();
+            assert_eq!(resumed.state().players[0].life, 35);
+            assert!(matches!(
+                resumed.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(resumed.state().resolution_stack.is_empty());
+            assert!(resumed.state().return_result_frames.is_empty());
+            assert!(resumed.state().stack.is_empty());
+            assert!(resumed.state().objects[&source].abilities.is_empty());
+        }
+    }
 
     #[test]
     fn departure_public_vote_outcomes_and_ballot_drains_keep_the_parent_program() {
@@ -1126,6 +1833,65 @@ mod admitted_ballot_public_tests {
                 assert!(
                     matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
                 );
+                // This is the authentic pre-field writer shape: all actual
+                // original inputs survive on the existing admitted invocation.
+                for ingress in 0..3 {
+                    let mut value = match ingress {
+                        0 => serde_json::to_value(runner.state()).unwrap(),
+                        1 => serde_json::to_value(TrustedGameStateEnvelope::capture(
+                            runner.state().clone(),
+                        ))
+                        .unwrap(),
+                        _ => serde_json::to_value(
+                            crate::types::resolution::ResolutionStateWire::from_game_state(
+                                runner.state().clone(),
+                            ),
+                        )
+                        .unwrap(),
+                    };
+                    omit_old_vote_input(&mut value);
+                    let restored =
+                        match ingress {
+                            0 => serde_json::from_value(value).unwrap(),
+                            1 => serde_json::from_value::<TrustedGameStateEnvelope>(value)
+                                .unwrap()
+                                .into_game_state(),
+                            _ => serde_json::from_value::<
+                                crate::types::resolution::ResolutionStateWire,
+                            >(value)
+                            .unwrap()
+                            .into_game_state(),
+                        };
+                    let mut old = GameRunner::from_state(restored);
+                    old.act(GameAction::ChooseOption {
+                        choice: "read".into(),
+                    })
+                    .unwrap();
+                    old.act(GameAction::ChooseOption {
+                        choice: "read".into(),
+                    })
+                    .unwrap();
+                    for _ in 0..if per_ballot { 2 } else { 1 } {
+                        assert!(matches!(
+                            old.state().waiting_for,
+                            WaitingFor::ChooseOneOfBranch { .. }
+                        ));
+                        old.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                    }
+                    old.advance_until_stack_empty();
+                    assert_eq!(
+                        old.state().players[0].life,
+                        20 + if empty {
+                            0
+                        } else if per_ballot {
+                            10
+                        } else {
+                            5
+                        }
+                    );
+                    assert!(old.state().resolution_stack.is_empty());
+                    assert!(old.state().return_result_frames.is_empty());
+                }
                 let mut hostile = runner.state().clone();
                 let WaitingFor::VoteChoice {
                     per_choice_effect, ..
@@ -2275,6 +3041,7 @@ mod tests {
         let opp = state.players[1].id;
         // Subject is opp; actor is controller. Opponent attempts to label.
         state.waiting_for = WaitingFor::VoteChoice {
+            retained_input: None,
             return_result_occurrence: None,
             expected_return_result_process: None,
             player: opp,
@@ -2321,6 +3088,7 @@ mod tests {
         // After the controller labels themselves, the queue advances to opp
         // as the next subject — the actor must still be the controller.
         state.waiting_for = WaitingFor::VoteChoice {
+            retained_input: None,
             return_result_occurrence: None,
             expected_return_result_process: None,
             player: opp,

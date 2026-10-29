@@ -26549,6 +26549,25 @@ mod tests {
         );
 
         let pending = crate::types::resolution::PendingDieRoll {
+            retained_input: Some(Box::new({
+                let mut input = ResolvedAbility::new(
+                    Effect::RollDie {
+                        count: QuantityExpr::Fixed { value: 2 },
+                        sides: 6,
+                        results: vec![DieResultBranch {
+                            min: 1,
+                            max: 6,
+                            effect: Box::new(branch_def.clone()),
+                        }],
+                        modifier: None,
+                    },
+                    Vec::new(),
+                    spell,
+                    root.controller,
+                );
+                input.inherit_coin_target_inputs(&root);
+                input
+            })),
             return_result_occurrence: None,
             expected_return_result_process: None,
             source_id: spell,
@@ -26734,6 +26753,20 @@ mod tests {
         );
 
         state.push_vote_ballot(crate::types::game_state::PendingVoteBallotIteration {
+            retained_input: Some(Box::new({
+                let mut vote = root.clone();
+                vote.effect = Effect::Vote {
+                    choices: vec!["counter".into()],
+                    per_choice_effect: vec![Box::new(ballot_template.clone())],
+                    starting_with: ControllerRef::You,
+                    voter_scope: crate::types::ability::VoterScope::AllPlayers,
+                    tally_mode: crate::types::ability::VoteTally::PerVote,
+                    subject: crate::types::ability::VoteSubject::Named,
+                    visibility: crate::types::ability::VoteVisibility::Open,
+                };
+                vote.sub_ability = None;
+                vote
+            })),
             return_result_occurrence: None,
             expected_return_result_process: None,
             ability_template: Box::new(ballot_template),
