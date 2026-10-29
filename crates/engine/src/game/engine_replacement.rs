@@ -2835,8 +2835,9 @@ pub(crate) fn recover_selected_copy_continuation(
             }
         }
         for definition in definitions {
-            let mut resolved = if let Some(runtime) = definition.runtime_execute {
-                let mut resolved = *runtime;
+            let mut resolved = if let Some(runtime) = state.replacement_rider(&definition).cloned()
+            {
+                let mut resolved = runtime;
                 while super::replacement::EventModifiers::is_event_modifier_effect(&resolved.effect)
                 {
                     let Some(next) = resolved.sub_ability.take() else {

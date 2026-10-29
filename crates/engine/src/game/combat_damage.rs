@@ -1683,7 +1683,7 @@ fn finish_combat_replacements(
     // Move that owed amount once, preserving continuous/distributive riders.
     for (key, total) in std::mem::take(&mut record.prevention_tally) {
         if work.opportunity.iter().any(|(used, definition)| {
-            *used == key && replacement::immediate_opportunity_gain_rider(definition)
+            *used == key && replacement::immediate_opportunity_gain_rider(state, definition)
         }) {
             let tally = work
                 .opportunity
@@ -2088,7 +2088,7 @@ fn fire_combat_prevention_riders(
             .damage_source_filter
             .as_ref()
             .and_then(shield_specific_source);
-        let Some(runtime) = repl_def.runtime_execute.clone() else {
+        let Some(runtime) = state.replacement_rider(repl_def).cloned() else {
             continue;
         };
         state.last_effect_count = Some(total_prevented);
@@ -2098,7 +2098,7 @@ fn fire_combat_prevention_riders(
         // that by construction, where the old code had to remember to clear a
         // parallel field.
         state.install_ready_continuation(
-            crate::types::ability::PostReplacementContinuation::Resolved(runtime),
+            crate::types::ability::PostReplacementContinuation::Resolved(Box::new(runtime)),
         );
         if let Some(source) = event_source {
             if let Some(drain) = state

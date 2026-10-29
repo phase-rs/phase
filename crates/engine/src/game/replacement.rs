@@ -2326,7 +2326,7 @@ fn shield_rider_reflects_per_event(state: &GameState, rid: ReplacementId) -> boo
             .get(&rid.source)
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
     };
-    repl.and_then(|r| r.runtime_execute.as_deref())
+    repl.and_then(|r| state.replacement_rider(r))
         .is_some_and(rider_reflects_per_event_damage_source)
 }
 
@@ -2872,9 +2872,8 @@ fn damage_done_applier_with_definition(
                     let mut accumulated_in_batch = false;
                     if !captured
                         .map(|definition| {
-                            definition
-                                .runtime_execute
-                                .as_deref()
+                            state
+                                .replacement_rider(definition)
                                 .is_some_and(rider_reflects_per_event_damage_source)
                         })
                         .unwrap_or_else(|| shield_rider_reflects_per_event(state, rid))
@@ -2970,9 +2969,8 @@ fn damage_done_applier_with_definition(
     // each reflection binds its own damage source and prevented amount.
     let reflects_per_event = captured
         .map(|definition| {
-            definition
-                .runtime_execute
-                .as_deref()
+            state
+                .replacement_rider(definition)
                 .is_some_and(rider_reflects_per_event_damage_source)
         })
         .unwrap_or_else(|| shield_rider_reflects_per_event(state, rid));
@@ -3952,7 +3950,7 @@ fn draw_is_substituted_away(
                     && draw_replacement_count(state, rid, proposed).is_none()
             }
         },
-        None => repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+        None => state.replacement_rider(repl_def).is_some_and(|runtime| {
             !matches!(runtime.effect, Effect::Draw { .. })
                 && !EventModifiers::is_event_modifier_effect(&runtime.effect)
         }),
@@ -10722,9 +10720,8 @@ fn apply_single_replacement_with_definition(
                 // runtime riders retain this existing aggregate disposition.
                 let batched_combat_all_shield = state.combat_prevention_tally.is_some()
                     && repl_def.runtime_execute.is_some()
-                    && !repl_def
-                        .runtime_execute
-                        .as_deref()
+                    && !state
+                        .replacement_rider(repl_def)
                         .is_some_and(rider_reflects_per_event_damage_source)
                     && matches!(
                         repl_def.shield_kind,
@@ -10753,8 +10750,8 @@ fn apply_single_replacement_with_definition(
                         // apply to Damage events, where there is no `etb_counters`
                         // slot to absorb the counters into.
                         let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                        if let Some(runtime) = repl_def.runtime_execute.clone() {
-                            Some(PostReplacementContinuation::Resolved(runtime))
+                        if let Some(runtime) = state.replacement_rider(repl_def).cloned() {
+                            Some(PostReplacementContinuation::Resolved(Box::new(runtime)))
                         } else {
                             repl_def.execute.as_deref().and_then(|def| {
                                 // CR 608.2c + CR 121.6b: the applier replaces the
@@ -10870,7 +10867,7 @@ fn apply_single_replacement_with_definition(
                         }
                         None => {
                             !declined_without_branch_ability
-                                && repl_def.runtime_execute.as_deref().is_some_and(|runtime| {
+                                && state.replacement_rider(repl_def).is_some_and(|runtime| {
                                     !matches!(runtime.effect, Effect::Token { .. })
                                         && !EventModifiers::is_event_modifier_effect(
                                             &runtime.effect,
@@ -11709,9 +11706,12 @@ pub(crate) fn apply_damage_result_life_floor(
     event
 }
 
-pub(crate) fn immediate_opportunity_gain_rider(definition: &ReplacementDefinition) -> bool {
+pub(crate) fn immediate_opportunity_gain_rider(
+    state: &GameState,
+    definition: &ReplacementDefinition,
+) -> bool {
     matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
-        && definition.runtime_execute.as_deref().is_some_and(|rider| {
+        && state.replacement_rider(definition).is_some_and(|rider| {
             rider.repeat_for.is_none()
                 && !rider_reflects_per_event_damage_source(rider)
                 && matches!(rider.effect, Effect::GainLife { .. })
@@ -11734,8 +11734,9 @@ pub(crate) fn take_immediate_opportunity_gain_riders(
             .expect("an owned prevention total retains its complete definition")
             .1
             .clone();
-        let mut rider = *definition
-            .runtime_execute
+        let mut rider = state
+            .replacement_rider(&definition)
+            .cloned()
             .expect("an owned prevention total retains its rider");
         state.last_effect_count = Some(total);
         if let Effect::GainLife { amount, .. } = &rider.effect {
@@ -11791,9 +11792,9 @@ fn apply_single_replacement_and_record_opportunity(
         ProposedEvent::Damage { amount, .. }
             if opportunity.prevention_tally.is_some()
                 && matches!(branch, ReplacementBranch::Execute)
-                && before
-                    .as_ref()
-                    .is_some_and(immediate_opportunity_gain_rider) =>
+                && before.as_ref().is_some_and(|definition| {
+                    immediate_opportunity_gain_rider(state, definition)
+                }) =>
         {
             Some(*amount)
         }
@@ -13844,19 +13845,23 @@ fn auto_choice_identities(
             if entry_controller_choice(state, proposed, *rid).is_some()
                 || branch_can_prompt(execute)
                 || branch_can_prompt(decline)
-                || definition
-                    .runtime_execute
-                    .as_deref()
+                || state
+                    .replacement_rider(definition)
                     .is_some_and(super::resolution_prompt::chain_offers_choice)
             {
                 return None;
             }
             let occurrence = AppliedReplacementKey::for_event_in_state(state, proposed, *rid);
+            // CR 616.1 + CR 615.5: identity is the inline definition by value — the
+            // handle cleared and the rider carried — so allocation history never
+            // enters a remembered choice.
+            let (definition, rider) = state.split_replacement_rider(definition);
             Some(ReplacementAutoChoiceIdentity::Definition {
                 source: ObjectIncarnationRef::from_object(object),
                 index: occurrence.index(),
                 occurrence: Some(occurrence),
-                definition: Box::new(definition.clone()),
+                definition: Box::new(definition),
+                rider,
             })
         })
         .collect::<Option<_>>()?;
@@ -29961,6 +29966,299 @@ mod tests {
         assert!(
             record_proposed_events(|| {}).is_empty(),
             "an armed extent with no pipeline entry records nothing"
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_choice_identity_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::{
+        EffectScope, PreventionAmount, PreventionScope, QuantityModification, QuantityRef,
+        TypedFilter,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::counter::CounterMatch;
+    use crate::types::phase::Phase;
+
+    const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+
+    /// The chain Gatta and Luzzu's shield resolves ("If damage would be dealt to that
+    /// creature this turn, prevent that damage and put that many +1/+1 counters on
+    /// it."): an all-damage prevention on `bear` whose `ContinuationStep` rider puts one
+    /// +1/+1 counter per 1 damage prevented on the parent's target (CR 615.5).
+    fn prevention_chain(src: ObjectId, bear: ObjectId) -> ResolvedAbility {
+        let mut rider = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ParentTarget,
+            },
+            Vec::new(),
+            src,
+            P0,
+        );
+        rider.repeat_for = Some(QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        });
+        let mut prevent = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(bear)],
+            src,
+            P0,
+        )
+        .sub_ability(rider);
+        prevent.duration = Some(crate::types::ability::Duration::UntilEndOfTurn);
+        prevent
+    }
+
+    fn install_prevention(runner: &mut GameRunner, src: ObjectId, bear: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            runner.state_mut(),
+            &prevention_chain(src, bear),
+            &mut events,
+            0,
+        )
+        .unwrap();
+    }
+
+    /// Harness shortcut, as in `gatta_and_luzzu_prevents_through_the_real_cast_pipeline`:
+    /// hand P1 priority so it can cast its Lightning Bolt this turn.
+    fn bolt_bear(runner: &mut GameRunner, bolt: ObjectId, bear: ObjectId) {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P1;
+        state.waiting_for = WaitingFor::Priority { player: P1 };
+        runner.cast(bolt).target_object(bear).resolve();
+    }
+
+    fn handles(
+        state: &GameState,
+        bear: ObjectId,
+    ) -> Vec<Option<crate::types::identifiers::ReplacementContinuationId>> {
+        state.objects[&bear]
+            .replacement_definitions
+            .iter_all()
+            .map(|def| def.runtime_execute)
+            .collect()
+    }
+
+    fn counters(state: &GameState, bear: ObjectId) -> u32 {
+        state.objects[&bear]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// CR 616.1 + CR 615.5: a remembered order is keyed by each shield's definition and
+    /// rider BY VALUE, so a shield re-installed with an `==` rider under a new arena
+    /// handle still matches the saved identity, and the remembered order replays. Base
+    /// identity (inline riders) behaves the same: the second Bolt does not prompt.
+    /// Positive control: a re-installed shield whose rider differs does not match.
+    #[test]
+    fn remembered_order_matches_a_reinstalled_equal_rider_under_a_new_handle() {
+        for differing_rider in [false, true] {
+            let mut scenario = GameScenario::new_n_player(2, 42);
+            scenario.at_phase(Phase::PreCombatMain);
+            let bear = scenario.add_creature(P0, "Bear", 3, 3).id();
+            let src = scenario.add_creature(P0, "Source", 1, 1).id();
+            let src2 = scenario.add_creature(P0, "Other Source", 1, 1).id();
+            let bolts = [0, 1].map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, LIGHTNING_BOLT)
+                    .id()
+            });
+            let mut runner = scenario.build();
+            let arena = runner.state().replacement_continuations.len();
+            install_prevention(&mut runner, src, bear);
+            install_prevention(&mut runner, src, bear);
+            let first = handles(runner.state(), bear);
+            assert!(
+                first.len() == 2 && first[0].is_some() && first[0] != first[1],
+                "reach guard: two shields under distinct handles: {first:?}"
+            );
+            let defs = &runner.state().objects[&bear].replacement_definitions;
+            assert_eq!(
+                runner.state().replacement_rider(&defs[0]),
+                runner.state().replacement_rider(&defs[1]),
+                "reach guard: the two riders are equal"
+            );
+            assert_eq!(runner.state().replacement_continuations.len(), arena + 2);
+
+            bolt_bear(&mut runner, bolts[0], bear);
+            let WaitingFor::ReplacementChoice {
+                remember_identity: Some(key),
+                ..
+            } = runner.state().waiting_for.clone()
+            else {
+                panic!(
+                    "the first Bolt offers a rememberable CR 616.1 choice: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            let [ReplacementAutoChoiceIdentity::Definition {
+                source: s0,
+                index: i0,
+                definition: d0,
+                rider: r0,
+                ..
+            }, ReplacementAutoChoiceIdentity::Definition {
+                source: s1,
+                index: i1,
+                definition: d1,
+                rider: r1,
+                ..
+            }] = key.candidates.as_slice()
+            else {
+                panic!("two definition identities: {:?}", key.candidates);
+            };
+            assert!(
+                s0 == s1 && d0 == d1 && r0 == r1 && r0.is_some() && i0 != i1,
+                "the identities differ only in index"
+            );
+            assert!(d0.runtime_execute.is_none() && d1.runtime_execute.is_none());
+            let proposed = runner
+                .state()
+                .pending_replacement
+                .as_ref()
+                .unwrap()
+                .proposed
+                .clone();
+            runner
+                .act(GameAction::ChooseReplacementAndRemember {
+                    choice: ReplacementAutoChoice::Order { order: vec![0, 1] },
+                })
+                .unwrap();
+            runner.advance_until_stack_empty();
+            assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+            assert_eq!(counters(runner.state(), bear), 3);
+            assert_eq!(runner.state().replacement_auto_choices.len(), 1);
+
+            // Remove the index-0 shield and re-install one.
+            let mut position = 0;
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&bear)
+                .unwrap()
+                .replacement_definitions
+                .retain(|_| {
+                    position += 1;
+                    position != 1
+                });
+            let arena = runner.state().replacement_continuations.len();
+            install_prevention(&mut runner, if differing_rider { src2 } else { src }, bear);
+            let second = handles(runner.state(), bear);
+            assert!(
+                second.len() == 2 && second[0] == first[1] && second[1].is_some(),
+                "reach guard: h1 at index 0 and a new handle at index 1: {second:?}"
+            );
+            assert!(
+                !first.contains(&second[1]),
+                "the re-install mints a new handle"
+            );
+            assert_eq!(runner.state().replacement_continuations.len(), arena + 1);
+
+            let record = runner.state().replacement_auto_choices[0].clone();
+            let rebuilt = auto_choice_identities(
+                runner.state(),
+                &proposed,
+                &[
+                    ReplacementId {
+                        source: bear,
+                        index: 0,
+                    },
+                    ReplacementId {
+                        source: bear,
+                        index: 1,
+                    },
+                ],
+            )
+            .expect("the rebuilt shields have identities");
+            if differing_rider {
+                assert!(!same_identity_set(&rebuilt, &record.key.candidates));
+                continue;
+            }
+            assert!(same_identity_set(&rebuilt, &record.key.candidates));
+
+            bolt_bear(&mut runner, bolts[1], bear);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "the remembered order replays: {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+            assert_eq!(counters(runner.state(), bear), 6);
+        }
+    }
+
+    /// CR 616.1: a rider-free object-hosted identity serializes no `rider` key, so its
+    /// saved-preference id is byte-identical to the one recorded at base for this board.
+    #[test]
+    fn rider_free_identity_keeps_its_saved_preference_id() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let target = scenario.add_creature(P0, "Counter recipient", 1, 1).id();
+        for modification in [
+            QuantityModification::Plus { value: 1 },
+            QuantityModification::Minus { value: 1 },
+        ] {
+            scenario
+                .add_creature(P0, "Counter modifier", 1, 1)
+                .with_replacement_definition(
+                    ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                        .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+                        .counter_match(CounterMatch::OfType(CounterType::Plus1Plus1))
+                        .quantity_modification(modification),
+                );
+        }
+        let spell = scenario
+            .add_spell_to_hand(P0, "Counter spell", true)
+            .with_ability(Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            })
+            .id();
+        let mut runner = scenario.build();
+        runner.cast(spell).target_object(target).resolve();
+        let WaitingFor::ReplacementChoice {
+            remember_identity: Some(key),
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!("the two modifiers offer a rememberable ordering");
+        };
+        assert_eq!(key.candidates.len(), 2);
+        fn names_rider(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Object(object) => {
+                    object.contains_key("rider") || object.values().any(names_rider)
+                }
+                serde_json::Value::Array(values) => values.iter().any(names_rider),
+                _ => false,
+            }
+        }
+        assert!(!names_rider(&serde_json::to_value(&key).unwrap()));
+        runner
+            .act(GameAction::ChooseReplacementAndRemember {
+                choice: ReplacementAutoChoice::Order { order: vec![0, 1] },
+            })
+            .unwrap();
+        assert_eq!(
+            runner.state().replacement_auto_choices[0].id.0,
+            "r5cb2a4e985b2814dbce4d5d4c6521ec5d539b0f90b74feb454e24d0fab0feb74"
         );
     }
 }

@@ -21,8 +21,8 @@ use super::game_state::{
     TargetSelectionConstraint, TriggerSourceContext,
 };
 use super::identifiers::{
-    CardId, EpicEffectId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, TrackedSetId,
-    LEGACY_INCARNATION,
+    CardId, EpicEffectId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, ReplacementContinuationId,
+    TrackedSetId, LEGACY_INCARNATION,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -27977,8 +27977,9 @@ pub enum Effect {
     /// CR 614.1a + CR 611.2 + CR 901.9c: Install a floating "if a player would
     /// planeswalk as a result of rolling the planar die, [replacement_effect]
     /// instead" replacement (Fixed Point in Time). Mirrors CreateDrawReplacement
-    /// for the planar-die planeswalk event class — the substitute rides in
-    /// `runtime_execute`; expiry comes from the ability's Duration
+    /// for the planar-die planeswalk event class — the substitute is named by
+    /// `runtime_execute`, a handle into `GameState::replacement_continuations`;
+    /// expiry comes from the ability's Duration
     /// (`UntilNextTurnOf { Controller }`). RUNTIME:
     /// create_planeswalk_replacement::resolve.
     CreatePlaneswalkReplacement {
@@ -43590,10 +43591,12 @@ pub struct ReplacementDefinition {
     #[serde(default)]
     pub execute: Option<Box<AbilityDefinition>>,
     /// CR 615.5: Runtime continuation captured while resolving an effect that
-    /// creates a replacement shield. Unlike `execute`, this preserves selected
-    /// targets and other resolution-time context for the delayed follow-up.
+    /// creates a replacement shield, named by a handle into
+    /// `GameState::replacement_continuations`. Unlike `execute`, the continuation
+    /// preserves selected targets and other resolution-time context for the
+    /// delayed follow-up.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_execute: Option<Box<ResolvedAbility>>,
+    pub runtime_execute: Option<ReplacementContinuationId>,
     #[serde(default)]
     pub mode: ReplacementMode,
     /// CR 109.5: an optional "you may prevent" choice belongs to the
@@ -44074,8 +44077,8 @@ impl ReplacementDefinition {
         self
     }
 
-    pub fn runtime_execute(mut self, ability: ResolvedAbility) -> Self {
-        self.runtime_execute = Some(Box::new(ability));
+    pub fn runtime_execute(mut self, id: ReplacementContinuationId) -> Self {
+        self.runtime_execute = Some(id);
         self
     }
 
