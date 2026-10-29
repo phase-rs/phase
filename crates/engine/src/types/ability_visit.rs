@@ -1655,7 +1655,7 @@ pub(crate) fn ability_tree_any(
 ///
 /// Because the AST-layer match is exhaustive and wildcard-free, a newly added
 /// definition-carrying `Effect` variant is a compile error there — and every
-/// consumer in this module inherits that guarantee instead of needing its own
+/// consumer in `game::coverage` inherits that guarantee instead of needing its own
 /// arm list to be kept in sync by hand.
 pub(crate) fn visit_direct_effect_ability_payloads<'a>(
     effect: &'a Effect,

@@ -1087,7 +1087,7 @@ pub(crate) fn restrict_activation_prompt_to_joint_payment(
 /// they are defined here beside the payment authority.
 pub trait AbilityCostPayability {
     /// CR 605.3a + CR 602.2b + CR 601.2g-h: Payability gate for ACTIVATED
-    /// MANA ABILITIES specifically. Unlike [`is_payable`] (which defers mana
+    /// MANA ABILITIES specifically. Unlike [`Self::is_payable`] (which defers mana
     /// affordability to the normal spell/ability payment step), a mana ability
     /// resolves immediately after its activation cost is paid. If that cost
     /// includes mana, CR 117.1d and CR 118.2 still allow activating other mana
@@ -1113,7 +1113,7 @@ pub trait AbilityCostPayability {
     /// separately through the mana-payment flow.
     ///
     /// Ability-agnostic entry point for costs paid outside the activated-ability
-    /// pipeline (spell costs): delegates to [`Self::is_payable_in`] with no
+    /// pipeline (spell costs): delegates to [`AbilityCostLegPayability::is_payable_in`] with no
     /// activation index and [`ObjectLegPayment::Unguided`] object legs.
     /// Callers that KNOW the ability whose cost this is (the activation
     /// pipeline) must use [`Self::is_payable_for_activation`] instead so CR 106.6
@@ -1143,8 +1143,8 @@ pub trait AbilityCostPayability {
 /// The shared body of the [`AbilityCostPayability`] gates. A separate trait
 /// because its signature names the crate-private [`ObjectLegPayment`].
 pub(crate) trait AbilityCostLegPayability {
-    /// The single body behind [`Self::is_payable`],
-    /// [`Self::is_payable_for_activation`] and the mana-ability gates, so the
+    /// The single body behind [`AbilityCostPayability::is_payable`],
+    /// [`AbilityCostPayability::is_payable_for_activation`] and the mana-ability gates, so the
     /// composite/disjunctive traversal is not duplicated. `ability_index` is the
     /// ability's identity (granting object, CR 106.6 tagged mana); `payment` is
     /// how the caller's payment pipeline surfaces object-using legs. The two are

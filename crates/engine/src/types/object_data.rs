@@ -117,7 +117,7 @@ pub struct BackFaceData {
     pub casting_restrictions: Vec<CastingRestriction>,
     pub casting_options: Vec<SpellCastingOption>,
     /// Parser diagnostics for THIS face — the `BackFaceData` half of
-    /// [`GameObject::parse_warnings`], and per-face for the same reason `abilities`
+    /// `game::game_object::GameObject::parse_warnings`, and per-face for the same reason `abilities`
     /// is: the two faces are parsed independently, so a card whose front reads
     /// cleanly and whose back does not is the normal case rather than a corner one.
     ///

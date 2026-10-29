@@ -1,5 +1,7 @@
 //! CR 612.2: which serialized color and basic-land-type strings are words of the Oracle text, and which are symbols or names that only share a word's spelling.
 
+use std::str::FromStr;
+
 use serde_json::Value;
 
 use super::ability::TextWordDomain;
@@ -182,7 +184,6 @@ pub fn classified_word_occurrences(value: &Value) -> usize {
 
 /// Which closed word set a bare string belongs to, if either.
 fn word_domain(leaf: &str) -> Option<TextWordDomain> {
-    use std::str::FromStr;
     if crate::types::mana::ManaColor::from_str(leaf).is_ok() {
         Some(TextWordDomain::ColorWord)
     } else if crate::types::ability::BasicLandType::from_str(leaf).is_ok() {

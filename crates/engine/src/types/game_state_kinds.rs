@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{Comparator, QuantityExpr, TargetRef};
 use super::identifiers::ObjectId;
-use super::keywords::Keyword;
+use super::keywords::{Keyword, KeywordKind};
 use super::player::PlayerId;
 use super::zones::Zone;
 use crate::types::attack_target::AttackTarget;
@@ -415,7 +415,6 @@ impl CastingVariant {
     /// methods `KeywordKind` has no discriminant for. A permission that requires
     /// a method admits a cast only when this is `Some` of that keyword.
     pub fn cast_keyword(self) -> Option<crate::types::keywords::KeywordKind> {
-        use crate::types::keywords::KeywordKind;
         match self {
             CastingVariant::Warp => Some(KeywordKind::Warp),
             CastingVariant::Escape => Some(KeywordKind::Escape),

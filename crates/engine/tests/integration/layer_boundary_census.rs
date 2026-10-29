@@ -37,8 +37,10 @@
 //! * **Clause 5.** One index of the whole crate from `lib.rs` (test-only modules skipped):
 //!   per module its definitions, `use` entries, child modules and impl blocks, with a resolver
 //!   for `crate` / `self` / `super` chains, imported names, child modules, globs and
-//!   longest-prefix item resolution. A `macro_rules!` in `types/` whose body declares
-//!   `struct <Ident>` defines that struct at each invocation (`GameState`). A unit is a
+//!   longest-prefix item resolution. A `#[macro_export]` macro is also an item of the crate
+//!   root, and a bare name nothing binds resolves to a crate-root macro of that name, as an
+//!   invocation reaches one through textual scope. A `macro_rules!` in `types/` whose body
+//!   declares `struct <Ident>` defines that struct at each invocation (`GameState`). A unit is a
 //!   `types/` item's definition or body, a member of a `types/`-located impl on it, or a
 //!   `types/` macro (`macro_rules!` or item-level invocation); its references are its resolved
 //!   paths and its `serde` attribute path strings. The state layer T is the fixpoint of
@@ -51,12 +53,12 @@
 //!     re-export), and no parser path or `use` passes through a state module.
 //!   * **5b.** No AST unit names a game-side item or module or a T item, no AST path passes
 //!     through a game-side module, a state module or the parser (even when it lands on an AST
-//!     item; a bare head bound by a `use` is canonicalized through it), no `use` in a
-//!     non-state `types/` file names an AST item through one, every `serde` path string
-//!     resolves (or is a unit-local `fn` or an `EXTERN_HEADS` path), and
-//!     `types/game_state.rs`, `types/events.rs` and `types/proposed_event.rs` define no AST
-//!     item. It subsumes the retired clauses 4a and 4c (no `ResolvedAbility` in `Effect` or
-//!     `ReplacementDefinition`): such a field puts the item in T.
+//!     item; a bare head bound by a `use` or imported by a glob is canonicalized through
+//!     it), no `use` in a non-state `types/` file names an AST item or globs through one,
+//!     every `serde` path string resolves (or is a unit-local `fn` or an `EXTERN_HEADS`
+//!     path), and `types/game_state.rs`, `types/events.rs` and `types/proposed_event.rs`
+//!     define no AST item. It subsumes the retired clauses 4a and 4c (no `ResolvedAbility` in
+//!     `Effect` or `ReplacementDefinition`): such a field puts the item in T.
 //!   * **5c.** No impl outside `types/` on an AST item is inherent, and a trait impl there names
 //!     a game-side item in its trait path, so it stays orphan-legal once the AST is its own
 //!     crate.
@@ -65,8 +67,9 @@
 //! honoured (the statement is scanned as library code), and a `#[path]` inside an inline
 //! module panics instead of being guessed at. Clause 5's fail-open limits: a re-export chain
 //! deeper than `RESOLVE_DEPTH` resolves to nothing, a struct a macro declares through a
-//! metavariable name is not indexed, a name a glob imports is not canonicalized through the
-//! glob, and a statement-level `use` inside a function binds nothing.
+//! metavariable name is not indexed, and a statement-level `use` inside a function binds
+//! nothing: its own paths are checked, but a path through a module it imports
+//! (`use crate::types::game_state as gs; gs::GameState`) is not resolved.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -641,14 +644,17 @@ fn engine_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
 }
 
+/// Whether a `macro_rules!` is `#[macro_export]`, and so an item of the crate root.
+fn is_macro_export(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("macro_export"))
+}
+
 /// `#[macro_export]` macros defined in the `targets` modules.
 fn exported_macros(src: &Path, targets: &[&str]) -> Vec<String> {
     fn collect(items: &[syn::Item], out: &mut Vec<String>) {
         for item in items {
             match item {
-                syn::Item::Macro(m)
-                    if m.attrs.iter().any(|a| a.path().is_ident("macro_export")) =>
-                {
+                syn::Item::Macro(m) if is_macro_export(&m.attrs) => {
                     out.extend(m.ident.as_ref().map(ToString::to_string));
                 }
                 syn::Item::Mod(m) => {
@@ -1619,7 +1625,8 @@ fn use_entries(tree: &syn::UseTree, prefix: &[String], out: &mut Vec<UseEntry>) 
 }
 
 /// The paths written in `toks`: every run `a::b::c` whose head is not a field or method name
-/// (after `.`) or a path continuation, and every string literal naming a `crate::` path.
+/// (after `.`) or a path continuation, and every string literal naming a `crate::` path. A run
+/// that a `use` tree continues is expanded as `path_run` describes.
 fn paths_in(toks: &[String]) -> Vec<Vec<String>> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -1638,16 +1645,73 @@ fn paths_in(toks: &[String]) -> Vec<Vec<String>> {
             i += 1;
             continue;
         }
-        let mut segs = vec![t.to_string()];
-        let mut j = i + 1;
-        while j + 1 < toks.len() && toks[j] == "::" && is_ident_token(&toks[j + 1]) {
-            segs.push(toks[j + 1].clone());
-            j += 2;
-        }
-        out.push(segs);
-        i = j;
+        i = path_run(toks, i, &[], &mut out);
     }
     out
+}
+
+/// Push the path run starting at the ident `toks[i]`, below `prefix`, and return the index
+/// after it. A run that a `use` tree continues (a statement-level `use` inside a function, or
+/// a parser `use` unit) also pushes its full paths: `a::*` as `a::*`, so a state module `a` is
+/// a proper prefix, and `a::{b, c::{d}}` as `a::b` and `a::c::d`.
+fn path_run(toks: &[String], i: usize, prefix: &[String], out: &mut Vec<Vec<String>>) -> usize {
+    let mut segs = prefix.to_vec();
+    segs.push(toks[i].clone());
+    let mut j = i + 1;
+    while j + 1 < toks.len() && toks[j] == "::" && is_ident_token(&toks[j + 1]) {
+        segs.push(toks[j + 1].clone());
+        j += 2;
+    }
+    if toks.get(j).is_some_and(|t| t == "::") {
+        match toks.get(j + 1).map(String::as_str) {
+            Some("*") => {
+                segs.push("*".into());
+                j += 2;
+            }
+            Some("<g") => {
+                let end = use_group(toks, j + 2, &segs, out);
+                out.push(segs);
+                return end;
+            }
+            _ => {}
+        }
+    }
+    out.push(segs);
+    j
+}
+
+/// Push the full path of each entry of the `use` group whose first token is `toks[k]`, below
+/// `prefix`, and return the index after its closing `g>`.
+fn use_group(
+    toks: &[String],
+    mut k: usize,
+    prefix: &[String],
+    out: &mut Vec<Vec<String>>,
+) -> usize {
+    loop {
+        k = match toks.get(k).map(String::as_str) {
+            None => return k,
+            Some("g>") => return k + 1,
+            Some("<g") => use_group(toks, k + 1, prefix, out),
+            Some("*") => {
+                out.push(prefix.iter().cloned().chain(["*".to_string()]).collect());
+                k + 1
+            }
+            Some(t) if is_ident_token(t) => path_run(toks, k, prefix, out),
+            Some(_) => k + 1,
+        };
+        // Past a rename (`as x`) to the next entry, or to the closing `g>`.
+        while let Some(t) = toks.get(k) {
+            match t.as_str() {
+                "," => {
+                    k += 1;
+                    break;
+                }
+                "g>" => break,
+                _ => k += 1,
+            }
+        }
+    }
 }
 
 /// A path whose head is a keyword other than `crate` / `self` / `super`, or a bare `self`.
@@ -2102,6 +2166,9 @@ impl LayerIndex {
                 kind: DefKind::MacroRules,
             };
             self.add_name(&key, module);
+            if is_macro_export(&m.attrs) {
+                self.add_name(&key, &[]);
+            }
             if !(types || parser) {
                 return;
             }
@@ -2276,11 +2343,23 @@ impl LayerIndex {
         if named.is_some() {
             return named;
         }
-        uses.iter()
-            .filter(|e| e.kind == UseKind::Glob)
-            .filter_map(|e| self.abs_of(&e.segs, module, depth + 1))
-            .filter(|base| base != module)
+        self.glob_bases(module, depth)
             .find_map(|base| self.lookup(&base, name, depth + 1))
+    }
+
+    /// The absolute bases of `module`'s glob `use`s, other than `module` itself.
+    fn glob_bases<'a>(
+        &'a self,
+        module: &'a [String],
+        depth: usize,
+    ) -> impl Iterator<Item = Vec<String>> + 'a {
+        self.uses
+            .get(module)
+            .into_iter()
+            .flatten()
+            .filter(|e| e.kind == UseKind::Glob)
+            .filter_map(move |e| self.abs_of(&e.segs, module, depth + 1))
+            .filter(move |base| base != module)
     }
 
     fn abs_of(&self, segs: &[String], module: &[String], depth: usize) -> Option<Vec<String>> {
@@ -2338,7 +2417,8 @@ impl LayerIndex {
 
     /// The absolute path a written path denotes: a `crate` / `self` / `super` path absolutized,
     /// a bare head bound by a `use` replaced by that `use`'s path, a bare head naming a child
-    /// module prefixed by the module path. `None` for an extern or local name.
+    /// module prefixed by the module path, and a bare head a glob imports (and the module does
+    /// not define) prefixed by the glob's base. `None` for an extern or local name.
     fn canonical(&self, segs: &[String], module: &[String], depth: usize) -> Option<Vec<String>> {
         if depth > RESOLVE_DEPTH {
             return None;
@@ -2358,18 +2438,49 @@ impl LayerIndex {
         }
         let mut child = module.to_vec();
         child.push(segs[0].clone());
-        self.modules
-            .contains(&child)
-            .then(|| module.iter().chain(segs).cloned().collect())
+        if self.modules.contains(&child) {
+            return Some(module.iter().chain(segs).cloned().collect());
+        }
+        if self
+            .names
+            .get(module)
+            .is_some_and(|n| n.contains_key(&segs[0]))
+        {
+            return None;
+        }
+        let base = self
+            .glob_bases(module, depth)
+            .find(|base| self.resolve(&segs[..1], base).is_some())?;
+        Some(base.into_iter().chain(segs.iter().cloned()).collect())
     }
 
     fn refs_in(&self, toks: &[String], module: &[String]) -> BTreeSet<Ref> {
         paths_in(toks)
             .into_iter()
             .filter(|segs| !is_keyword_head(segs))
-            .filter_map(|segs| self.resolve(&segs, module))
+            .filter_map(|segs| {
+                self.resolve(&segs, module)
+                    .or_else(|| self.root_macro(&segs))
+            })
             .flat_map(Target::into_refs)
             .collect()
+    }
+
+    /// A bare name that resolves to nothing, as a crate-root macro of that name: the macro a
+    /// bare invocation reaches through textual scope.
+    fn root_macro(&self, segs: &[String]) -> Option<Target> {
+        let [name] = segs else {
+            return None;
+        };
+        let keys: BTreeSet<ItemKey> = self
+            .names
+            .get(&Vec::<String>::new())?
+            .get(name)?
+            .iter()
+            .filter(|k| k.kind == DefKind::MacroRules)
+            .cloned()
+            .collect();
+        (!keys.is_empty()).then_some(Target::Items(keys))
     }
 
     fn unit_refs(&self, u: usize) -> UnitRefs {
@@ -2851,8 +2962,8 @@ impl LayerCensus {
             }
         }
 
-        // 5a / 5b: `use` entries of non-state `types/` files (an AST target) and of parser
-        // library code (state-module passages only; clause 1 owns game-side ones).
+        // 5a / 5b: `use` entries of non-state `types/` files (an AST target, or a glob) and of
+        // parser library code (state-module passages only; clause 1 owns game-side ones).
         for use_item in &index.use_items {
             let parser = use_item.file.starts_with("parser/");
             if !parser && state_files.contains(&use_item.file) {
@@ -2870,11 +2981,14 @@ impl LayerCensus {
                 if parser && kind != ViolationKind::StatePassage {
                     continue;
                 }
-                let names_ast = entry.kind == UseKind::Name
-                    && matches!(
+                // A glob can supply any name of its base, so a passage through one is a hit.
+                let names_ast = match entry.kind {
+                    UseKind::Glob => true,
+                    UseKind::Name => matches!(
                         index.resolve(&entry.segs, &use_item.module),
                         Some(Target::Items(keys)) if keys.iter().any(|k| self.is_ast(k))
-                    );
+                    ),
+                };
                 if !parser && !names_ast {
                     continue;
                 }
@@ -3056,7 +3170,9 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
          pub trait LocalExt { fn ext(&self); }
          impl LocalExt for crate::types::ast::Clean { fn ext(&self) {} }
          impl crate::types::ast::GameInherent { pub fn planted(&self) {} }
-         impl Default for crate::types::ast::Leaf { fn default() -> Self { Self } }",
+         impl Default for crate::types::ast::Leaf { fn default() -> Self { Self } }
+         #[macro_export]
+         macro_rules! planted_assert { ($($t:tt)*) => {}; }",
     ),
     ("game/obj.rs", "pub struct Obj; pub fn touch() {}"),
     (
@@ -3136,6 +3252,21 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
         // AST items embedding a state-layer struct.
         pub enum VariantEmbeds { V(super::deep::Handle) }
         pub struct FieldEmbeds { pub h: crate::types::deep::Handle }
+        // Statement-level `use` trees in bodies: a nested crate-root group with a glob entry,
+        // and a glob.
+        pub fn stmt_grouped() { use crate::{types::{deep::make_handle, state::{Mode, *}}}; }
+        pub fn stmt_glob() { use crate::types::state::*; }
+        // A game-side `#[macro_export]` macro, by its bare name and through the crate root.
+        pub fn exported_bare() { planted_assert!(1); }
+        pub fn exported_crate() { crate::planted_assert!(1); }
+        // Names globs supply through a game-side `pub use` and a state module; a local
+        // definition shadows the glob.
+        pub mod glob_game { use crate::game::*; pub struct GlobGame { pub l: Leaf } }
+        pub mod glob_state {
+            use crate::types::state::*;
+            pub struct Runtime;
+            pub struct GlobState { pub m: Mode, pub r: Runtime }
+        }
         "#,
     ),
     (
@@ -3146,6 +3277,8 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
                  crate::types::ast::grouped::grouped, crate::types::ast::globbed::globbed,
                  crate::types::ast::nested::super_super, crate::types::ast::crate_path,
                  crate::types::ast::self_path, crate::types::ast::helper_mod::helper,
+                 crate::types::ast::stmt_grouped, crate::types::ast::exported_bare,
+                 crate::types::ast::exported_crate, crate::types::ast::stmt_glob,
              );
              let _: Option<(
                  crate::types::ast::WithInherent, crate::types::ast::WithTrait,
@@ -3153,7 +3286,8 @@ const PLANTED_CRATE: &[(&str, &str)] = &[
                  crate::types::ast::Clean, crate::types::ast::GameInherent,
                  crate::types::ast::counted::SerdeStateFn, crate::types::ast::SerdeUnresolved,
                  crate::types::ast::LocalDefault, crate::types::ast::VariantEmbeds,
-                 crate::types::ast::FieldEmbeds,
+                 crate::types::ast::FieldEmbeds, crate::types::ast::glob_game::GlobGame,
+                 crate::types::ast::glob_state::GlobState,
              )> = None;
          }
          pub fn via_root() -> Option<crate::types::Runtime> { None }
@@ -3203,6 +3337,7 @@ fn the_layer_census_resolves_every_reference_shape() {
     let handle = "types/deep.rs:Handle";
     let obj = "game/obj.rs:Obj";
     let touch = "game/obj.rs:touch";
+    let planted_assert = "game/mod.rs:planted_assert";
     let mut expected: Vec<(ViolationKind, &str, &str)> = vec![
         // Each reference shape resolves to `make_handle`.
         (ViolationKind::Reference, "direct", make_handle),
@@ -3290,6 +3425,35 @@ fn the_layer_census_resolves_every_reference_shape() {
         // for `Leaf`; its local-trait impl on `Clean` is legal.
         (ViolationKind::InherentImpl, "GameInherent", "inherent"),
         (ViolationKind::ForeignTraitImpl, "Leaf", "Default"),
+        // A statement-level `use` group's entries and a glob are full paths.
+        (ViolationKind::Reference, "stmt_grouped", make_handle),
+        (
+            ViolationKind::StatePassage,
+            "stmt_grouped",
+            "crate::types::state::Mode",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "stmt_grouped",
+            "crate::types::state::*",
+        ),
+        (
+            ViolationKind::StatePassage,
+            "stmt_glob",
+            "crate::types::state::*",
+        ),
+        // A game-side exported macro is a crate-root item.
+        (ViolationKind::Reference, "exported_bare", planted_assert),
+        (ViolationKind::Reference, "exported_crate", planted_assert),
+        // A name a glob supplies passes through its base, and the glob `use` is checked.
+        (ViolationKind::GamePassage, "GlobGame", "crate::game::Leaf"),
+        (ViolationKind::GamePassage, "<use>", "crate::game"),
+        (
+            ViolationKind::StatePassage,
+            "GlobState",
+            "crate::types::state::Mode",
+        ),
+        (ViolationKind::StatePassage, "<use>", "crate::types::state"),
     ];
     expected.sort();
     let mut actual: Vec<(ViolationKind, &str, &str)> = census
@@ -3347,4 +3511,19 @@ fn the_layer_census_resolves_every_reference_shape() {
         "a reference witness reads seed -> item: {}",
         witness(ViolationKind::Reference, "globbed")
     );
+    for (kind, item) in [
+        (ViolationKind::Reference, "stmt_grouped"),
+        (ViolationKind::StatePassage, "stmt_grouped"),
+        (ViolationKind::StatePassage, "stmt_glob"),
+        (ViolationKind::Reference, "exported_bare"),
+        (ViolationKind::Reference, "exported_crate"),
+        (ViolationKind::GamePassage, "GlobGame"),
+        (ViolationKind::StatePassage, "GlobState"),
+    ] {
+        let found = witness(kind, item);
+        assert!(
+            found.contains(&format!("parser parser/mod.rs:seeds -> {item}")),
+            "the {kind:?} witness for `{item}` reads seed -> item: {found}"
+        );
+    }
 }
