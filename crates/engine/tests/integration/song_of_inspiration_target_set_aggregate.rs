@@ -6,6 +6,7 @@
 //! fired. If this probe ever reads the correct total instead, plan G.2's
 //! rejection is falsified — PR C re-plans and PR B stands unchanged.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0};
 use engine::parser::parse_oracle_text;

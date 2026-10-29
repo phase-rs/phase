@@ -22,6 +22,7 @@
 //! Oracle text is quoted from Scryfall, not from memory.
 
 use engine::game::combat::AttackTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::quantity::{
     resolve_quantity, resolve_quantity_with_ctx, resolve_quantity_with_targets, QuantityContext,
 };
