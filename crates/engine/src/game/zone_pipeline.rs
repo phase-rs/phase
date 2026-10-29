@@ -1094,9 +1094,11 @@ pub(crate) fn move_object_with_terminal(
             let completion = zone_move_completion_from_delivery(member, &events[delivery_start..]);
             // CR 306.5b + CR 306.5c / CR 310.4b + CR 310.4c: a planeswalker or
             // battle that actually arrived on the battlefield gets its printed
-            // loyalty / defense counters. A CR 111.8-blocked token or a
-            // same-zone no-op is not `Moved` and gets nothing. The completion is
-            // computed first, so the added `CounterAdded` events cannot change it.
+            // loyalty / defense counters. An arrival `move_to_zone` refuses (a
+            // CR 614.17d "can't enter the battlefield" static, or a CR 304.4 /
+            // CR 307.4 instant or sorcery) is not `Moved` and gets nothing; the
+            // CR 111.8 and same-zone no-ops already returned above. The completion
+            // is computed first, so the added `CounterAdded` events cannot change it.
             if req.to == Zone::Battlefield && completion == ZoneMoveCompletion::Moved {
                 install_intrinsic_characteristic_counters(state, req.object_id, events);
             }
@@ -4604,9 +4606,10 @@ pub(crate) fn execute_zone_move_with_terminal_and_controller(
 /// counters" replacement onto a proposed non-cast battlefield `ZoneChange`
 /// when a planeswalker or battle enters the battlefield (effect-driven entry
 /// — bounce-return, reanimate, blink, etc. — and the sandbox entry). The
-/// counters ride the proposal, so `replacement::replace_event` and the
-/// delivery tail's `apply_etb_counters` apply Doubling Season class
-/// replacements (CR 614.1a) and any CR 616.1 order choice to them.
+/// counters ride the proposal, so `replacement::replace_event` sees them (an
+/// enters-as-copy replacement retargets them) and the delivery tail's
+/// `apply_etb_counters` applies Doubling Season class replacements
+/// (CR 614.1a) and any CR 616.1 order choice to them.
 ///
 /// Called before `replacement::replace_event` by the effect-driven pipeline
 /// (`execute_zone_move_with_applied_terminal`) and the sandbox entry

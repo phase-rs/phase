@@ -1129,7 +1129,8 @@ fn enter_battlefield_with_etb(
     };
     // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with
     // counters the effect-driven pipeline seeds, so the replacement consult
-    // (Doubling Season, CR 614.1a) and the delivery tail see them.
+    // sees them and the delivery tail applies Doubling Season class
+    // replacements (CR 614.1a) to them.
     crate::game::zone_pipeline::seed_intrinsic_entry_counters(state, &mut proposed);
 
     match replacement::replace_event(state, proposed, events) {
