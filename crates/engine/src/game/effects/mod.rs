@@ -25175,24 +25175,6 @@ pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effec
 /// iteratively. The `depth == 0` prelude (state-clearing, the resolution
 /// counter, the BeginGame/Mulligan guards) runs once in `resolve_ability_chain`
 /// and is intentionally NOT repeated per iteration.
-#[cfg(test)]
-fn resolve_chain_body(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    depth: u32,
-    payment_choice: Option<AutoMayChoice>,
-) -> Result<ResolutionProgress, EffectError> {
-    with_instruction_result_entry(
-        state,
-        ability,
-        crate::types::ability::InstructionResultEntry::Independent,
-        |state, ability, declarations| {
-            resolve_owned_chain_body(state, ability, events, depth, payment_choice, declarations)
-        },
-    )
-}
-
 fn resolve_owned_chain_body(
     state: &mut GameState,
     ability: &ResolvedAbility,
