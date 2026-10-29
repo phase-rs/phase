@@ -571,7 +571,16 @@ pub(crate) fn split_attachment_choice_operation(
     ability: &ResolvedAbility,
 ) -> (ResolvedAbility, Option<Box<ResolvedAbility>>) {
     let mut operation = ability.clone();
-    let tail = operation.sub_ability.take();
+    // CR 608.2c: the separately owned tail receives the same input as an
+    // ordinary descent. Later registrations and reflexive roots stay attached.
+    let tail = super::project_own_resolution_chain_child(
+        ability,
+        crate::types::game_state::ChainStep::SubAbility,
+    )
+    .map(Box::new);
+    if tail.is_some() {
+        operation.sub_ability = None;
+    }
     (operation, tail)
 }
 
@@ -4158,42 +4167,162 @@ mod tests {
         assert_eq!(runner.state().objects[&departed].zone, Zone::Exile);
         assert_eq!(runner.life(P0), 20);
         assert_eq!(runner.state().return_result_frames.len(), 1);
+        let tail = runner
+            .state()
+            .resolution_stack
+            .ability_continuations()
+            .find(|pending| matches!(pending.chain.effect, Effect::GainLife { .. }))
+            .expect("the independent reader is parked outside the attachment choice");
+        assert_eq!(tail.chain.ability_index, Some(0));
+        assert_eq!(tail.chain.source_id, source);
+        assert_eq!(
+            tail.chain.source_incarnation,
+            Some(runner.state().objects[&source].incarnation)
+        );
         let saved = serde_json::to_value(runner.state()).unwrap();
         *runner.state_mut() =
             serde_json::from_value(saved).expect("typed attachment child and owned parent restore");
-        let mut hostile = runner.state().clone();
-        hostile.return_result_frames.clear();
-        let before = hostile.clone();
-        assert!(crate::game::engine::apply(
-            &mut hostile,
-            P0,
-            GameAction::SelectCards {
-                cards: vec![second]
+        let paused = runner.state().clone();
+        for restore_kind in 0..3 {
+            *runner.state_mut() = match restore_kind {
+                0 => serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap(),
+                1 => serde_json::from_value::<crate::types::game_state::TrustedGameStateEnvelope>(
+                    serde_json::to_value(
+                        crate::types::game_state::TrustedGameStateEnvelope::capture(paused.clone()),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state(),
+                2 => serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                    serde_json::to_value(
+                        crate::types::resolution::ResolutionStateWire::from_game_state(
+                            paused.clone(),
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+                .into_game_state(),
+                _ => unreachable!(),
+            };
+            let mut hostile = runner.state().clone();
+            hostile.return_result_frames.clear();
+            let before = hostile.clone();
+            assert!(crate::game::engine::apply(
+                &mut hostile,
+                P0,
+                GameAction::SelectCards {
+                    cards: vec![second]
+                }
+            )
+            .is_err());
+            assert_eq!(hostile, before);
+            for fault in 0..8 {
+                let mut hostile = runner.state().clone();
+                let actor = if fault == 0 { P1 } else { P0 };
+                if (1..=4).contains(&fault) {
+                    let choice = hostile
+                        .active_ability_continuation_frame_mut()
+                        .unwrap()
+                        .pending
+                        .attachment_choice
+                        .as_mut()
+                        .unwrap();
+                    match fault {
+                        1 => choice.operation.source_id = host,
+                        2 => choice.operation.source_incarnation = Some(99),
+                        3 => choice.operation.ability_index = Some(99),
+                        4 => {
+                            if let Effect::Attach { target, .. } = &mut choice.operation.effect {
+                                *target = TargetFilter::SpecificObject { id: departed };
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                } else if fault == 5 {
+                    hostile
+                        .return_result_frames
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .process = None;
+                } else if fault == 6 {
+                    hostile
+                        .return_result_frames
+                        .values_mut()
+                        .next()
+                        .unwrap()
+                        .declarations = None;
+                } else if fault == 7 {
+                    let child = hostile.take_active_ability_continuation().unwrap().unwrap();
+                    hostile
+                        .active_ability_continuation_frame_mut()
+                        .unwrap()
+                        .pending
+                        .chain
+                        .ability_index = Some(99);
+                    hostile.resolution_stack.push_ability_continuation(child);
+                }
+                let before = hostile.clone();
+                let serialized = serde_json::to_value(&hostile).unwrap();
+                let rng = hostile.rng.get_word_pos();
+                if fault == 1 {
+                    assert!(
+                        crate::types::resolution::canonicalize_legacy_resolution_state(&hostile)
+                            .is_err()
+                    );
+                    assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+                }
+                assert!(
+                    crate::game::engine::apply(
+                        &mut hostile,
+                        actor,
+                        GameAction::SelectCards {
+                            cards: vec![second]
+                        }
+                    )
+                    .is_err(),
+                    "attachment fault {fault}"
+                );
+                assert_eq!(hostile, before, "attachment fault {fault}");
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+                assert_eq!(hostile.rng.get_word_pos(), rng);
             }
-        )
-        .is_err());
-        assert_eq!(hostile, before);
-        runner
-            .act(GameAction::SelectCards {
-                cards: vec![second],
-            })
-            .unwrap();
-        assert_eq!(
-            runner.state().objects[&second].attached_to,
-            Some(AttachTarget::Object(host))
-        );
-        assert_eq!(runner.state().objects[&first].attached_to, None);
-        // CR 608.2c + CR 608.2i: attachment selection does not replace the
-        // independently parked tail's original departure receipt.
-        assert_eq!(runner.life(P0), 23);
-        assert_eq!(runner.life(P1), 20);
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
-        assert!(runner.state().stack.is_empty());
-        assert!(runner.state().resolution_stack.is_empty());
-        assert!(runner.state().return_result_frames.is_empty());
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![second],
+                })
+                .unwrap();
+            assert_eq!(
+                runner.state().objects[&second].attached_to,
+                Some(AttachTarget::Object(host))
+            );
+            assert_eq!(runner.state().objects[&first].attached_to, None);
+            // CR 608.2c + CR 608.2i: attachment selection does not replace the
+            // independently parked tail's original departure receipt.
+            assert_eq!(runner.life(P0), 23);
+            assert_eq!(runner.life(P1), 20);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().return_result_frames.is_empty());
+        }
+    }
+
+    #[test]
+    fn attachment_split_keeps_reflexive_registration_on_the_operation() {
+        let mut operation = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        operation.ability_index = Some(3);
+        let mut child = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(1), PlayerId(0));
+        child.condition = Some(crate::types::ability::AbilityCondition::WhenYouDo);
+        operation.sub_ability = Some(Box::new(child));
+        let (split, tail) = split_attachment_choice_operation(&operation);
+        assert!(tail.is_none());
+        assert_eq!(split, operation);
     }
 
     #[test]

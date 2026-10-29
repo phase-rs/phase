@@ -1312,6 +1312,7 @@ pub(crate) fn build_remaining_damage_node(
 pub(crate) fn build_post_replacement_damage_node(
     ctx: &DamageContext,
     event: &ProposedEvent,
+    original: Option<&ResolvedAbility>,
 ) -> Option<ResolvedAbility> {
     let ProposedEvent::Damage {
         target,
@@ -1334,6 +1335,13 @@ pub(crate) fn build_post_replacement_damage_node(
         ctx.source_id,
         ctx.controller,
     );
+    node.source_incarnation = ctx.source_incarnation;
+    if let Some(original) = original {
+        carry_remaining_own_source(&mut node, original, ctx.source_id);
+    }
+    // CR 608.2h: the damage source's captured controller may differ from the
+    // invoking ability's controller. The survivor keeps that source snapshot.
+    node.controller = ctx.controller;
     node.context.damage_opportunity = Some(ctx.opportunity.borrow().clone());
     node.trigger_source = ctx.trigger_source.clone();
     node.source_incarnation = ctx.source_incarnation;
@@ -1362,8 +1370,6 @@ pub(crate) fn park_resumed_opportunity_survivor(
             .is_some_and(|owned| replacement::same_damage_opportunity_work(owned, &opportunity))
     });
     ctx.opportunity = Rc::new(RefCell::new(opportunity));
-    let mut node =
-        build_post_replacement_damage_node(&ctx, event).expect("the resumed survivor is damage");
     if owned_remainder {
         let (occurrence, parent) = admitted.ok_or_else(|| {
             EffectError::InvalidParam("missing resumed damage continuation owner".into())
@@ -1373,6 +1379,8 @@ pub(crate) fn park_resumed_opportunity_survivor(
             .expect("the owned damage remainder was selected above")
             .chain
             .clone();
+        let mut node = build_post_replacement_damage_node(&ctx, event, Some(&chain))
+            .expect("the resumed survivor is damage");
         // This survivor is part of the same admitted invocation as its raw
         // remainder; an independent replacement child never takes this arm.
         node.bind_return_result_process(chain.return_result_process);
@@ -1409,6 +1417,8 @@ pub(crate) fn park_resumed_opportunity_survivor(
     } else {
         // An independent child cannot splice its delivery behind its parent's
         // raw damage work or tail; its actual continuation is a separate frame.
+        let node = build_post_replacement_damage_node(&ctx, event, None)
+            .expect("the resumed survivor is damage");
         let pending = match admitted {
             Some((_, parent)) => crate::types::game_state::PendingContinuation::new_owned(
                 Box::new(node),
@@ -1433,7 +1443,7 @@ fn stash_remaining_post_replacement_damage(
 ) -> Result<(), EffectError> {
     let mut iter = remaining
         .iter()
-        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
+        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event, Some(ability)));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
             append_to_pending_continuation_owned(
@@ -1469,11 +1479,15 @@ pub(crate) fn carry_remaining_own_source(
         } | Effect::DamageAll {
             damage_source: None,
             ..
-        }
+        } | Effect::DamageEachPlayer { .. }
+            | Effect::ApplyPostReplacementDamage { .. }
     ) && original.source_id == source_id
+        && node
+            .source_incarnation
+            .zip(original.source_incarnation)
+            .is_none_or(|(left, right)| left == right)
     {
-        node.trigger_source = original.trigger_source.clone();
-        node.source_incarnation = original.source_incarnation;
+        node.inherit_coin_target_inputs(original);
     }
 }
 
@@ -1493,11 +1507,11 @@ pub(crate) fn cast_tail_with_parent_targets(
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
-    let mut tail = sub.clone();
-    if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
-        tail.mirror_targets_from(ability);
-    }
-    tail
+    super::project_own_resolution_chain_child(
+        ability,
+        crate::types::game_state::ChainStep::SubAbility,
+    )
+    .unwrap_or_else(|| sub.clone())
 }
 
 /// CR 120.4b + CR 616.1e: Stash a two-part continuation for an
@@ -1530,7 +1544,7 @@ fn stash_each_source_combined_continuation(
     }
 
     for (ctx, event) in already_replaced {
-        if let Some(node) = build_post_replacement_damage_node(ctx, event) {
+        if let Some(node) = build_post_replacement_damage_node(ctx, event, Some(ability)) {
             match head_opt.as_mut() {
                 None => head_opt = Some(node),
                 Some(h) => append_to_sub_chain(h, node),
@@ -9029,7 +9043,30 @@ mod u13_post_replacement_exact_source_tests {
             is_combat: false,
             applied: HashSet::new(),
         };
-        let node = build_post_replacement_damage_node(&context, &proposed).unwrap();
+        let mut input = ResolvedAbility::new(
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 4 },
+                player_filter: PlayerFilter::All,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        input.source_incarnation = Some(old.incarnation);
+        input.announced_source_incarnation = Some(old.incarnation);
+        input.ability_index = Some(2);
+        input.chosen_x = Some(3);
+        input.noted_mana_payment = Some(crate::types::ability::NotedManaPayment {
+            types: vec![crate::types::mana::ManaType::Black; 4],
+            source_incarnation: old.incarnation,
+        });
+        let node = build_post_replacement_damage_node(&context, &proposed, Some(&input)).unwrap();
+        assert_eq!(node.controller, P1);
+        assert_eq!(node.ability_index, Some(2));
+        assert_eq!(node.chosen_x, Some(3));
+        assert_eq!(node.noted_mana_payment, input.noted_mana_payment);
+        assert_eq!(node.announced_source_incarnation, Some(old.incarnation));
+        assert!(node.targets.is_empty());
         assert_eq!(
             node.trigger_source.as_ref().unwrap().identity.reference,
             old
@@ -9109,166 +9146,385 @@ mod damage_opportunity_public_remainder_tests {
         use crate::types::zones::Zone;
         // Supplemental typed activation: completed result, actual damage
         // replacement choice, generated remainder, then an addressed reader.
+        let mut completed_recipient_pauses = vec![];
         for empty in [false, true] {
-            let mut scenario = GameScenario::new();
-            scenario.at_phase(Phase::PreCombatMain);
-            if !empty {
-                scenario.add_creature(P0, "First departure", 2, 2);
-                scenario.add_creature(P0, "Second departure", 3, 3);
-            }
-            scenario.add_creature(P1, "Unrelated cohort decoy", 7, 7);
-            let reader = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainLife {
-                    player: TargetFilter::Controller,
-                    amount: QuantityExpr::Ref {
-                        qty: QuantityRef::ZoneChangeAggregate {
-                            source: ZoneChangeRecordSource::InstructionResult {
-                                result: ReturnResultId(7),
+            for diverged in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                if !empty {
+                    scenario.add_creature(P0, "First departure", 2, 2);
+                    scenario.add_creature(P0, "Second departure", 3, 3);
+                }
+                scenario.add_creature(P1, "Unrelated cohort decoy", 7, 7);
+                let reader = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeAggregate {
+                                source: ZoneChangeRecordSource::InstructionResult {
+                                    result: ReturnResultId(7),
+                                },
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Exile),
+                                filter: TargetFilter::Any,
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Power,
                             },
-                            from: Some(Zone::Battlefield),
-                            to: Some(Zone::Exile),
-                            filter: TargetFilter::Any,
-                            function: AggregateFunction::Sum,
-                            property: ObjectProperty::Power,
                         },
                     },
-                },
-            );
-            let producer = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile", "target":TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))})).unwrap();
-            let mut definition = AbilityDefinition::new(AbilityKind::Activated, producer)
-                .cost(AbilityCost::Mana {
-                    cost: ManaCost::generic(1),
-                })
-                .sub_ability(
-                    AbilityDefinition::new(
-                        AbilityKind::Spell,
-                        Effect::DamageEachPlayer {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                            player_filter: PlayerFilter::All,
-                        },
-                    )
-                    .sub_ability(reader),
                 );
-            definition.declares_return_result = Some(ReturnResultId(7));
-            let source = scenario
-                .add_artifact_from_oracle(P0, "Supplemental admitted damage", "")
-                .with_ability_definition(definition)
-                .id();
-            scenario.with_mana_pool(
-                P0,
-                vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
-            );
-            let mut runner = scenario.build();
-            runner.state_mut().pending_damage_replacements.push(
-                ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                    .mode(ReplacementMode::Optional { decline: None }),
-            );
-            runner.activate(source, 0).resolve();
-            assert!(matches!(
-                runner.state().waiting_for,
-                WaitingFor::ReplacementChoice { .. }
-            ));
-            assert!(
-                runner
-                    .state()
-                    .pending_replacement
-                    .as_ref()
-                    .unwrap()
-                    .is_optional
-            );
-            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
-            let pending = runner
-                .state()
-                .active_ability_continuation()
-                .expect("actual generated damage remainder");
-            let occurrence = pending.return_result_occurrence.unwrap();
-            let frame = &runner.state().return_result_frames[&occurrence];
-            assert_eq!(frame.process, pending.chain.return_result_process);
-            assert!(frame.admitted_program.is_some());
-            assert!(
-                matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
-            );
-            let paused = runner.state().clone();
-            let mut hostile = paused.clone();
-            hostile
-                .active_ability_continuation_frame_mut()
-                .unwrap()
-                .pending
-                .chain
-                .source_id = ObjectId(999_999);
-            let before = hostile.clone();
-            assert!(crate::game::engine::apply(
-                &mut hostile,
-                P0,
-                GameAction::ChooseReplacement { index: 1 }
-            )
-            .is_err());
-            assert_eq!(
-                hostile, before,
-                "foreign generated source refuses before replacement consumption"
-            );
-            for restore_kind in 0..3 {
-                let restored = if restore_kind == 1 {
-                    serde_json::from_value::<TrustedGameStateEnvelope>(
-                        serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
-                            .unwrap(),
-                    )
-                    .unwrap()
-                    .into_game_state()
-                } else if restore_kind == 2 {
-                    serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
-                        serde_json::to_value(
-                            crate::types::resolution::ResolutionStateWire::from_game_state(
-                                paused.clone(),
-                            ),
+                let producer = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile", "target":TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))})).unwrap();
+                let mut definition = AbilityDefinition::new(AbilityKind::Activated, producer)
+                    .cost(AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    })
+                    .sub_ability(
+                        AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::DamageEachPlayer {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                player_filter: PlayerFilter::All,
+                            },
                         )
-                        .unwrap(),
-                    )
-                    .unwrap()
-                    .into_game_state()
-                } else {
-                    serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
-                };
-                let mut resumed = GameRunner::from_state(restored);
-                let mut choices = 0;
-                for _ in 0..4 {
-                    if !matches!(
-                        resumed.state().waiting_for,
+                        .sub_ability(reader),
+                    );
+                definition.declares_return_result = Some(ReturnResultId(7));
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Supplemental admitted damage", "")
+                    .with_ability_definition(definition)
+                    .id();
+                scenario.with_mana_pool(
+                    P0,
+                    vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+                );
+                let mut runner = scenario.build();
+                runner.state_mut().pending_damage_replacements.push(
+                    ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                        .mode(ReplacementMode::Optional { decline: None }),
+                );
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: source,
+                        ability_index: 0,
+                        payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                    })
+                    .unwrap();
+                if diverged {
+                    let object = runner.state_mut().objects.get_mut(&source).unwrap();
+                    object.controller = P1;
+                    object.owner = P1;
+                }
+                for _ in 0..8 {
+                    if matches!(
+                        runner.state().waiting_for,
                         WaitingFor::ReplacementChoice { .. }
                     ) {
                         break;
                     }
-                    assert!(
-                        resumed
-                            .state()
-                            .pending_replacement
-                            .as_ref()
-                            .unwrap()
-                            .is_optional
-                    );
-                    resumed
-                        .act(GameAction::ChooseReplacement { index: 1 })
-                        .unwrap();
-                    choices += 1;
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    runner.act(GameAction::PassPriority).unwrap();
                 }
-                assert_eq!(
-                    choices, 2,
-                    "each actual player damage leg reaches its optional replacement"
-                );
-                resumed.advance_until_stack_empty();
-                assert_eq!(resumed.life(P0), 19 + if empty { 0 } else { 5 });
-                assert_eq!(resumed.life(P1), 19);
                 assert!(matches!(
-                    resumed.state().waiting_for,
-                    WaitingFor::Priority { .. }
+                    runner.state().waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
                 ));
                 assert!(
-                    resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+                    runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .unwrap()
+                        .is_optional
                 );
-                assert!(resumed.state().pending_replacement.is_none());
-                assert!(resumed.state().return_result_frames.is_empty());
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+                let pending = runner
+                    .state()
+                    .active_ability_continuation()
+                    .expect("actual generated damage remainder");
+                let occurrence = pending.return_result_occurrence.unwrap();
+                let frame = &runner.state().return_result_frames[&occurrence];
+                assert_eq!(frame.process, pending.chain.return_result_process);
+                assert!(frame.admitted_program.is_some());
+                assert_eq!(pending.chain.ability_index, Some(0));
+                assert_eq!(
+                    pending.chain.noted_mana_payment.as_ref().unwrap().types,
+                    vec![ManaType::Black]
+                );
+                assert_eq!(pending.chain.chosen_x, None);
+                assert_eq!(
+                    pending.chain.source_incarnation,
+                    Some(runner.state().objects[&source].incarnation)
+                );
+                assert!(
+                    matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
+                );
+                let paused = runner.state().clone();
+                let mut hostile = paused.clone();
+                hostile
+                    .active_ability_continuation_frame_mut()
+                    .unwrap()
+                    .pending
+                    .chain
+                    .source_id = ObjectId(999_999);
+                let before = hostile.clone();
+                assert!(crate::game::engine::apply(
+                    &mut hostile,
+                    P0,
+                    GameAction::ChooseReplacement { index: 1 }
+                )
+                .is_err());
+                assert_eq!(
+                    hostile, before,
+                    "foreign generated source refuses before replacement consumption"
+                );
+                for fault in 0..9 {
+                    let mut hostile = paused.clone();
+                    if fault == 6 {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .process = None;
+                    } else if fault == 7 {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .declarations = None;
+                    } else if fault == 8 {
+                        hostile
+                            .return_result_frames
+                            .get_mut(&occurrence)
+                            .unwrap()
+                            .admitted_program = None;
+                    } else {
+                        let chain = &mut hostile
+                            .active_ability_continuation_frame_mut()
+                            .unwrap()
+                            .pending
+                            .chain;
+                        match fault {
+                            0 => chain.source_incarnation = Some(99),
+                            1 => chain.ability_index = Some(99),
+                            2 => chain.chosen_x = Some(99),
+                            3 => chain.noted_mana_payment = None,
+                            4 => chain.sub_ability.as_mut().unwrap().ability_index = Some(99),
+                            5 => chain.push_target(TargetRef::Player(P0)),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let before = hostile.clone();
+                    let serialized = serde_json::to_value(&hostile).unwrap();
+                    let rng = hostile.rng.get_word_pos();
+                    assert!(
+                        crate::game::engine::apply(
+                            &mut hostile,
+                            P0,
+                            GameAction::ChooseReplacement { index: 1 }
+                        )
+                        .is_err(),
+                        "damage fault {fault}"
+                    );
+                    assert_eq!(hostile, before, "damage fault {fault}");
+                    assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+                    assert_eq!(hostile.rng.get_word_pos(), rng);
+                }
+                for restore_kind in 0..3 {
+                    let restored = if restore_kind == 1 {
+                        serde_json::from_value::<TrustedGameStateEnvelope>(
+                            serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state()
+                    } else if restore_kind == 2 {
+                        serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                            serde_json::to_value(
+                                crate::types::resolution::ResolutionStateWire::from_game_state(
+                                    paused.clone(),
+                                ),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state()
+                    } else {
+                        serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
+                    };
+                    let mut resumed = GameRunner::from_state(restored);
+                    let mut choices = 0;
+                    let mut delivered = vec![];
+                    for _ in 0..4 {
+                        if !matches!(
+                            resumed.state().waiting_for,
+                            WaitingFor::ReplacementChoice { .. }
+                        ) {
+                            break;
+                        }
+                        assert!(
+                            resumed
+                                .state()
+                                .pending_replacement
+                                .as_ref()
+                                .unwrap()
+                                .is_optional
+                        );
+                        if choices == 1 {
+                            let chain =
+                                &resumed.state().active_ability_continuation().unwrap().chain;
+                            assert!(matches!(
+                                &chain.effect,
+                                Effect::ApplyPostReplacementDamage {
+                                    target: TargetRef::Player(P0),
+                                    ..
+                                }
+                            ));
+                            assert!(chain.targets.is_empty());
+                            assert_eq!(chain.ability_index, Some(0));
+                            assert_eq!(
+                                chain.noted_mana_payment.as_ref().unwrap().types,
+                                vec![ManaType::Black]
+                            );
+                            assert_eq!(chain.controller, if diverged { P1 } else { P0 });
+                            completed_recipient_pauses.push((source, resumed.state().clone()));
+                            for fault in 0..2 {
+                                let mut hostile = resumed.state().clone();
+                                let chain = &mut hostile
+                                    .active_ability_continuation_frame_mut()
+                                    .unwrap()
+                                    .pending
+                                    .chain;
+                                match fault {
+                                    0 => chain.push_target(TargetRef::Player(P1)),
+                                    1 => chain.context.damage_opportunity = None,
+                                    _ => unreachable!(),
+                                }
+                                let before = hostile.clone();
+                                let serialized = serde_json::to_value(&hostile).unwrap();
+                                let rng = hostile.rng.get_word_pos();
+                                assert!(
+                                    crate::game::engine::apply(
+                                        &mut hostile,
+                                        P1,
+                                        GameAction::ChooseReplacement { index: 1 }
+                                    )
+                                    .is_err(),
+                                    "post damage fault {fault}"
+                                );
+                                assert_eq!(hostile, before);
+                                assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+                                assert_eq!(hostile.rng.get_word_pos(), rng);
+                            }
+                        }
+                        delivered.extend(
+                            resumed
+                                .act(GameAction::ChooseReplacement { index: 1 })
+                                .unwrap()
+                                .events,
+                        );
+                        choices += 1;
+                    }
+                    assert_eq!(
+                        choices, 2,
+                        "each actual player damage leg reaches its optional replacement"
+                    );
+                    resumed.advance_until_stack_empty();
+                    assert_eq!(resumed.life(P0), 19 + if empty { 0 } else { 5 });
+                    assert_eq!(resumed.life(P1), 19);
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        resumed.state().stack.is_empty()
+                            && resumed.state().resolution_stack.is_empty()
+                    );
+                    assert!(resumed.state().pending_replacement.is_none());
+                    assert!(resumed.state().return_result_frames.is_empty());
+                    let damage: Vec<_> = delivered
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, event)| {
+                            if let GameEvent::DamageDealt {
+                                source_id,
+                                target,
+                                amount: 1,
+                                is_combat: false,
+                                ..
+                            } = event
+                            {
+                                assert_eq!(*source_id, source);
+                                Some((index, target.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    assert_eq!(damage.len(), 2);
+                    assert!(damage
+                        .iter()
+                        .any(|(_, target)| *target == TargetRef::Player(P0)));
+                    assert!(damage
+                        .iter()
+                        .any(|(_, target)| *target == TargetRef::Player(P1)));
+                    let gains: Vec<_> = delivered
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, event)| {
+                            if let GameEvent::LifeChanged {
+                                player_id: P0,
+                                amount,
+                                ..
+                            } = event
+                            {
+                                (*amount > 0).then_some((index, *amount))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if empty {
+                        assert!(gains.is_empty());
+                    } else {
+                        assert_eq!(gains.len(), 1);
+                        assert_eq!(gains[0].1, 5);
+                        assert!(damage.iter().all(|(index, _)| *index < gains[0].0));
+                    }
+                    assert_eq!(resumed.state().active_return_result_occurrence, None);
+                }
             }
+        }
+        // This supplemental historical-recipient forgery executes only after
+        // every original public completion and reload assertion above.
+        for (source, mut hostile) in completed_recipient_pauses {
+            let chain = &mut hostile
+                .active_ability_continuation_frame_mut()
+                .unwrap()
+                .pending
+                .chain;
+            let Effect::ApplyPostReplacementDamage { target, .. } = &mut chain.effect else {
+                unreachable!()
+            };
+            *target = TargetRef::Object(source);
+            let before = hostile.clone();
+            let serialized = serde_json::to_value(&hostile).unwrap();
+            let rng = hostile.rng.get_word_pos();
+            assert!(
+                crate::game::engine::apply(
+                    &mut hostile,
+                    P1,
+                    GameAction::ChooseReplacement { index: 1 }
+                )
+                .is_err(),
+                "supplemental post damage historical-recipient forgery"
+            );
+            assert_eq!(hostile, before);
+            assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+            assert_eq!(hostile.rng.get_word_pos(), rng);
         }
     }
 

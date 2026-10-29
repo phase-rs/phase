@@ -549,10 +549,32 @@ fn private_zone_pick_stash(
     target_filter: &TargetFilter,
     source_zone: Zone,
 ) -> (ResolvedAbility, TargetFilter) {
-    let mut stash = ability.clone();
-    // CR 202.3 + CR 608.2h: Freeze before filtering so the private prompt's
-    // eligibility test and its later cast consume the same concrete ceiling.
-    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
+    try_private_zone_pick_stash(
+        ability,
+        target_filter,
+        source_zone,
+        &mut |value, nonnegative| {
+            Some(freeze_resolution_quantity(
+                state,
+                ability,
+                value,
+                nonnegative,
+            ))
+        },
+        &mut |controller| Some(freeze_resolution_controller_ref(state, ability, controller)),
+    )
+    .expect("state-backed cast policy resolution is infallible")
+}
+
+fn try_private_zone_pick_stash(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    source_zone: Zone,
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+    controller: &mut impl FnMut(
+        crate::types::ability::ControllerRef,
+    ) -> Option<crate::types::ability::ControllerRef>,
+) -> Option<(ResolvedAbility, TargetFilter)> {
     // CR 608.2h: a private-zone choice resumes after the resolving ability's
     // trigger/event context has expired. Persist the complete cast policy now,
     // while that context is still live, rather than retaining a live anaphor on
@@ -566,23 +588,131 @@ fn private_zone_pick_stash(
     } else {
         target_filter.clone()
     };
-    let stored_filter =
-        freeze_resolution_cast_filter(state, ability, stored_filter, None).normalized();
     // A hand selection is normally a lingering permission (including a play,
     // durational, or alternate-cost grant). The exact free spell-cast shape is
     // the one exception: it must be offered and cast while this ability
     // resolves. Store that mechanism on the continuation, rather than inferring
     // it later from the target zone.
     let during_resolution = matches!(source_zone, Zone::Hand | Zone::Graveyard)
-        && is_free_immediate_cast(&stash.effect);
+        && is_free_immediate_cast(&ability.effect);
+    let stash = try_resolution_cast_pick_stash(
+        ability,
+        stored_filter,
+        during_resolution.then_some(crate::types::ability::CastFromZoneDriver::DuringResolution),
+        quantity,
+        controller,
+    )?;
+    let Effect::CastFromZone { target, .. } = &stash.effect else {
+        return None;
+    };
+    let target = target.clone();
+    Some((stash, target))
+}
+
+fn try_resolution_cast_pick_stash(
+    ability: &ResolvedAbility,
+    stored_filter: TargetFilter,
+    projected_driver: Option<crate::types::ability::CastFromZoneDriver>,
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+    controller: &mut impl FnMut(
+        crate::types::ability::ControllerRef,
+    ) -> Option<crate::types::ability::ControllerRef>,
+) -> Option<ResolvedAbility> {
+    let mut stash = ability.clone();
+    try_snapshot_cast_from_zone_constraint_into_effect(ability, &mut stash, quantity)?;
+    let stored_filter =
+        try_freeze_resolution_cast_filter(stored_filter, None, quantity, controller)?.normalized();
     if let Effect::CastFromZone { target, driver, .. } = &mut stash.effect {
-        *target = stored_filter.clone();
-        if during_resolution {
-            *driver = crate::types::ability::CastFromZoneDriver::DuringResolution;
+        *target = stored_filter;
+        if let Some(projected_driver) = projected_driver {
+            *driver = projected_driver;
         }
     }
     stash.clear_targets();
-    (stash, stored_filter)
+    Some(stash)
+}
+
+fn try_linked_zone_pick_stash(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+    controller: &mut impl FnMut(
+        crate::types::ability::ControllerRef,
+    ) -> Option<crate::types::ability::ControllerRef>,
+) -> Option<ResolvedAbility> {
+    try_resolution_cast_pick_stash(
+        ability,
+        target_filter
+            .without_exile_anaphor()
+            .unwrap_or(TargetFilter::Any),
+        None,
+        quantity,
+        controller,
+    )
+}
+
+/// Reconstruct a retained picker from its independent admitted instruction.
+/// Historic board/event reads cannot be reconstructed from the requested stash.
+pub(crate) fn project_retained_cast_pick(ability: &ResolvedAbility) -> Option<ResolvedAbility> {
+    use crate::types::ability::ControllerRef;
+    let Effect::CastFromZone {
+        target,
+        driver,
+        without_paying_mana_cost,
+        alt_ability_cost,
+        duration,
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    // CR 107.3a: only an already-announced X is an independent numeric input.
+    let mut quantity = |value: QuantityExpr, nonnegative| {
+        let value = match value {
+            QuantityExpr::Fixed { value } => value,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name },
+            } if name == "X" => ability.chosen_x? as i32,
+            _ => return None,
+        };
+        Some(QuantityExpr::Fixed {
+            value: if nonnegative { value.max(0) } else { value },
+        })
+    };
+    let mut controller = |value| {
+        Some(match value {
+            ControllerRef::You => ControllerRef::SpecificPlayer {
+                id: ability.controller,
+            },
+            value @ (ControllerRef::SpecificPlayer { .. } | ControllerRef::Opponent) => value,
+            _ => return None,
+        })
+    };
+    if let Some(zone) = target.extract_in_zone().filter(|zone| {
+        *zone == Zone::Hand
+            || (*zone == Zone::Graveyard && is_free_immediate_graveyard_pick(ability))
+    }) {
+        // A preselected object takes the ordinary selected-card route. Only
+        // the private opener's empty object selection is projected here.
+        if ability
+            .targets
+            .iter()
+            .any(|target| matches!(target, TargetRef::Object(_)))
+        {
+            return None;
+        }
+        return try_private_zone_pick_stash(ability, target, zone, &mut quantity, &mut controller)
+            .map(|(stash, _)| stash);
+    }
+    if target.references_exiled_by_source()
+        && !without_paying_mana_cost
+        && driver.is_during_resolution()
+        && alt_ability_cost.is_none()
+        && duration.is_none()
+    {
+        return try_linked_zone_pick_stash(ability, target, &mut quantity, &mut controller);
+    }
+    None
 }
 
 /// CR 608.2d: whether `card` could be cast right now by the immediate
@@ -619,15 +749,20 @@ fn open_linked_exile_cast_selection(
     events: &mut Vec<GameEvent>,
     declarations: super::AdmittedInstructionResult<'_>,
 ) -> Result<(), EffectError> {
-    let mut stash = ability.clone();
-    snapshot_cast_from_zone_constraint_into_effect(state, ability, &mut stash);
-    let residual = target_filter
-        .without_exile_anaphor()
-        .unwrap_or(TargetFilter::Any);
-    if let Effect::CastFromZone { target, .. } = &mut stash.effect {
-        *target = freeze_resolution_cast_filter(state, ability, residual, None).normalized();
-    }
-    stash.targets.clear();
+    let stash = try_linked_zone_pick_stash(
+        ability,
+        target_filter,
+        &mut |value, nonnegative| {
+            Some(freeze_resolution_quantity(
+                state,
+                ability,
+                value,
+                nonnegative,
+            ))
+        },
+        &mut |controller| Some(freeze_resolution_controller_ref(state, ability, controller)),
+    )
+    .expect("state-backed cast policy resolution is infallible");
     let projection = crate::game::casting::ResolutionCastProjection::new(state);
     let pool: Vec<ObjectId> = pool
         .into_iter()
@@ -1952,11 +2087,11 @@ fn private_resolution_cast_request(
 /// the later `EffectZoneChoice` resume — where `current_trigger_event` is gone —
 /// reads a value that no longer needs the trigger context. A constraint already
 /// `Fixed`, or absent, leaves the stash untouched.
-fn snapshot_cast_from_zone_constraint_into_effect(
-    state: &GameState,
+fn try_snapshot_cast_from_zone_constraint_into_effect(
     ability: &ResolvedAbility,
     stash: &mut ResolvedAbility,
-) {
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+) -> Option<()> {
     let effective = match &ability.effect {
         Effect::CastFromZone {
             constraint: Some(c),
@@ -1964,13 +2099,14 @@ fn snapshot_cast_from_zone_constraint_into_effect(
         } => Some(c.clone()),
         _ => effective_cast_from_zone_constraint(ability),
     };
-    let frozen = freeze_cast_permission_constraint(state, ability, effective.clone());
+    let frozen = try_freeze_cast_permission_constraint(effective.clone(), quantity)?;
     if frozen == effective {
-        return;
+        return Some(());
     }
     if let Effect::CastFromZone { constraint, .. } = &mut stash.effect {
         *constraint = frozen;
     }
+    Some(())
 }
 
 /// Persist only a concrete policy while an interactive resolution cast is
@@ -1988,7 +2124,31 @@ pub(crate) fn freeze_resolution_cast_filter(
     filter: TargetFilter,
     selected_card: Option<ObjectId>,
 ) -> TargetFilter {
-    match filter {
+    try_freeze_resolution_cast_filter(
+        filter,
+        selected_card,
+        &mut |value, nonnegative| {
+            Some(freeze_resolution_quantity(
+                state,
+                ability,
+                value,
+                nonnegative,
+            ))
+        },
+        &mut |controller| Some(freeze_resolution_controller_ref(state, ability, controller)),
+    )
+    .expect("state-backed cast policy resolution is infallible")
+}
+
+fn try_freeze_resolution_cast_filter(
+    filter: TargetFilter,
+    selected_card: Option<ObjectId>,
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+    controller: &mut impl FnMut(
+        crate::types::ability::ControllerRef,
+    ) -> Option<crate::types::ability::ControllerRef>,
+) -> Option<TargetFilter> {
+    Some(match filter {
         contextual @ (TargetFilter::LastRevealed
         | TargetFilter::LastZoneChanged
         | TargetFilter::CostPaidObject {
@@ -2004,35 +2164,40 @@ pub(crate) fn freeze_resolution_cast_filter(
             .map(|id| TargetFilter::SpecificObject { id })
             .unwrap_or(contextual),
         TargetFilter::Typed(mut typed) => {
-            typed.controller = typed
-                .controller
-                .map(|controller| freeze_resolution_controller_ref(state, ability, controller));
+            typed.controller = match typed.controller {
+                Some(value) => Some(controller(value)?),
+                None => None,
+            };
             typed.properties = typed
                 .properties
                 .into_iter()
-                .map(|prop| freeze_resolution_filter_prop(state, ability, prop))
-                .collect();
+                .map(|prop| try_freeze_resolution_filter_prop(prop, quantity, controller))
+                .collect::<Option<_>>()?;
             TargetFilter::Typed(typed)
         }
         TargetFilter::Not { filter } => TargetFilter::Not {
-            filter: Box::new(freeze_resolution_cast_filter(
-                state,
-                ability,
+            filter: Box::new(try_freeze_resolution_cast_filter(
                 *filter,
                 selected_card,
-            )),
+                quantity,
+                controller,
+            )?),
         },
         TargetFilter::And { filters } => TargetFilter::And {
             filters: filters
                 .into_iter()
-                .map(|filter| freeze_resolution_cast_filter(state, ability, filter, selected_card))
-                .collect(),
+                .map(|filter| {
+                    try_freeze_resolution_cast_filter(filter, selected_card, quantity, controller)
+                })
+                .collect::<Option<_>>()?,
         },
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|filter| freeze_resolution_cast_filter(state, ability, filter, selected_card))
-                .collect(),
+                .map(|filter| {
+                    try_freeze_resolution_cast_filter(filter, selected_card, quantity, controller)
+                })
+                .collect::<Option<_>>()?,
         },
         TargetFilter::TrackedSetFiltered {
             id,
@@ -2040,24 +2205,25 @@ pub(crate) fn freeze_resolution_cast_filter(
             caused_by,
         } => TargetFilter::TrackedSetFiltered {
             id,
-            filter: Box::new(freeze_resolution_cast_filter(
-                state,
-                ability,
+            filter: Box::new(try_freeze_resolution_cast_filter(
                 *filter,
                 selected_card,
-            )),
+                quantity,
+                controller,
+            )?),
             caused_by,
         },
         TargetFilter::ChosenDamageSource { chooser, filter } => TargetFilter::ChosenDamageSource {
             chooser,
-            filter: filter.map(|filter| {
-                Box::new(freeze_resolution_cast_filter(
-                    state,
-                    ability,
+            filter: match filter {
+                Some(filter) => Some(Box::new(try_freeze_resolution_cast_filter(
                     *filter,
                     selected_card,
-                ))
-            }),
+                    quantity,
+                    controller,
+                )?)),
+                None => None,
+            },
         },
         // Keep this leaf inventory explicit.  A new top-level TargetFilter
         // variant must make the resolution-boundary freezer decide whether it
@@ -2109,7 +2275,7 @@ pub(crate) fn freeze_resolution_cast_filter(
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
         | TargetFilter::AllPlayers => filter,
-    }
+    })
 }
 
 fn freeze_resolution_controller_ref(
@@ -2131,24 +2297,31 @@ fn freeze_resolution_controller_ref(
     .unwrap_or(controller)
 }
 
-fn freeze_resolution_filter_prop(
+fn freeze_resolution_quantity(
     state: &GameState,
     ability: &ResolvedAbility,
+    value: QuantityExpr,
+    nonnegative: bool,
+) -> QuantityExpr {
+    let value = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
+    QuantityExpr::Fixed {
+        value: if nonnegative { value.max(0) } else { value },
+    }
+}
+
+fn try_freeze_resolution_filter_prop(
     prop: crate::types::ability::FilterProp,
-) -> crate::types::ability::FilterProp {
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+    controller: &mut impl FnMut(
+        crate::types::ability::ControllerRef,
+    ) -> Option<crate::types::ability::ControllerRef>,
+) -> Option<crate::types::ability::FilterProp> {
     use crate::types::ability::FilterProp;
 
-    let freeze_quantity = |value: QuantityExpr, nonnegative: bool| {
-        let value = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
-        QuantityExpr::Fixed {
-            value: if nonnegative { value.max(0) } else { value },
-        }
-    };
-
-    match prop {
+    Some(match prop {
         FilterProp::Cmc { comparator, value } => FilterProp::Cmc {
             comparator,
-            value: freeze_quantity(value, true),
+            value: quantity(value, true)?,
         },
         // CR 122.1: a counter count cannot be negative.  Unlike CMC, this
         // is not merely a shared numeric convenience: Counter and P/T filters
@@ -2160,7 +2333,7 @@ fn freeze_resolution_filter_prop(
         } => FilterProp::Counters {
             counters,
             comparator,
-            count: freeze_quantity(count, true),
+            count: quantity(count, true)?,
         },
         // CR 208: power and toughness may be negative, so preserve the signed
         // resolved threshold rather than applying the CMC/counter clamp.
@@ -2173,26 +2346,28 @@ fn freeze_resolution_filter_prop(
             stat,
             scope,
             comparator,
-            value: freeze_quantity(value, false),
+            value: quantity(value, false)?,
         },
         FilterProp::AnyOf { props } => FilterProp::AnyOf {
             props: props
                 .into_iter()
-                .map(|prop| freeze_resolution_filter_prop(state, ability, prop))
-                .collect(),
+                .map(|prop| try_freeze_resolution_filter_prop(prop, quantity, controller))
+                .collect::<Option<_>>()?,
         },
         FilterProp::Not { prop } => FilterProp::Not {
-            prop: Box::new(freeze_resolution_filter_prop(state, ability, *prop)),
+            prop: Box::new(try_freeze_resolution_filter_prop(
+                *prop, quantity, controller,
+            )?),
         },
         // CR 400.3 + CR 608.2h: the owner leg names whose graveyard the pick
         // reads ("from that player's graveyard"). Like the controller leg it is
         // made concrete while this ability's targets are still live; the
         // stashed continuation no longer carries them.
-        FilterProp::Owned { controller } => FilterProp::Owned {
-            controller: freeze_resolution_controller_ref(state, ability, controller),
+        FilterProp::Owned { controller: value } => FilterProp::Owned {
+            controller: controller(value)?,
         },
         prop => prop,
-    }
+    })
 }
 
 // CR 608.2h: information a resolving effect requires is determined once, when
@@ -2205,20 +2380,35 @@ fn freeze_cast_permission_constraint(
     ability: &ResolvedAbility,
     constraint: Option<CastPermissionConstraint>,
 ) -> Option<CastPermissionConstraint> {
+    try_freeze_cast_permission_constraint(constraint, &mut |value, nonnegative| {
+        Some(freeze_resolution_quantity(
+            state,
+            ability,
+            value,
+            nonnegative,
+        ))
+    })
+    .expect("state-backed cast policy resolution is infallible")
+}
+
+fn try_freeze_cast_permission_constraint(
+    constraint: Option<CastPermissionConstraint>,
+    quantity: &mut impl FnMut(QuantityExpr, bool) -> Option<QuantityExpr>,
+) -> Option<Option<CastPermissionConstraint>> {
     let (comparator, value) = match constraint {
         Some(CastPermissionConstraint::ManaValue { comparator, value }) => (comparator, value),
-        other => return other,
+        other => return Some(other),
     };
     if matches!(value, QuantityExpr::Fixed { .. }) {
-        return Some(CastPermissionConstraint::ManaValue { comparator, value });
+        return Some(Some(CastPermissionConstraint::ManaValue {
+            comparator,
+            value,
+        }));
     }
-    let resolved = crate::game::quantity::resolve_quantity_with_targets(state, &value, ability);
-    Some(CastPermissionConstraint::ManaValue {
+    Some(Some(CastPermissionConstraint::ManaValue {
         comparator,
-        value: QuantityExpr::Fixed {
-            value: resolved.max(0),
-        },
-    })
+        value: quantity(value, true)?,
+    }))
 }
 
 fn effective_cast_from_zone_constraint(
@@ -5315,37 +5505,382 @@ mod tests {
                     .contains(&occurrence)
             );
             state.active_return_result_occurrence = None;
-            state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
-            assert_eq!(
-                state.objects[&card].zone,
-                if linked { Zone::Exile } else { Zone::Hand }
-            );
-            assert!(state.objects[&card].casting_permissions.is_empty());
-            assert_eq!(
-                state.players[0].life, 25,
-                "the retained reader completes once with its own published result"
-            );
-            assert!(state.active_ability_continuation().is_none());
-            assert!(state.return_result_frames.is_empty());
-            assert_eq!(state.active_return_result_occurrence, None);
+            let paused = state.clone();
+            for restore_kind in 0..3 {
+                state =
+                    match restore_kind {
+                        0 => {
+                            serde_json::from_str(&serde_json::to_string(&paused).unwrap()).unwrap()
+                        }
+                        1 => serde_json::from_value::<
+                            crate::types::game_state::TrustedGameStateEnvelope,
+                        >(
+                            serde_json::to_value(
+                                crate::types::game_state::TrustedGameStateEnvelope::capture(
+                                    paused.clone(),
+                                ),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state(),
+                        2 => {
+                            serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                                serde_json::to_value(
+                                    crate::types::resolution::ResolutionStateWire::from_game_state(
+                                        paused.clone(),
+                                    ),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state()
+                        }
+                        _ => unreachable!(),
+                    };
+                apply_as_current(&mut state, GameAction::SelectCards { cards: vec![] }).unwrap();
+                assert_eq!(
+                    state.objects[&card].zone,
+                    if linked { Zone::Exile } else { Zone::Hand }
+                );
+                assert!(state.objects[&card].casting_permissions.is_empty());
+                assert_eq!(
+                    state.players[0].life, 25,
+                    "the retained reader completes once with its own published result"
+                );
+                assert!(state.active_ability_continuation().is_none());
+                assert!(state.return_result_frames.is_empty());
+                assert_eq!(state.active_return_result_occurrence, None);
 
-            // A subsequent independent pick has no import to borrow.
-            let next = add_card_to_hand(&mut state, PlayerId(0), CardId(8_303));
-            let mut independent = electrodominance_hand_ability(3);
-            independent.source_id = source;
-            crate::game::effects::resolve_ability_chain(&mut state, &independent, &mut events, 0)
+                // A subsequent independent pick has no import to borrow.
+                let next = add_card_to_hand(&mut state, PlayerId(0), CardId(8_303));
+                let mut independent = electrodominance_hand_ability(3);
+                independent.source_id = source;
+                crate::game::effects::resolve_ability_chain(
+                    &mut state,
+                    &independent,
+                    &mut events,
+                    0,
+                )
                 .unwrap();
-            assert!(
-                matches!(&state.waiting_for, WaitingFor::EffectZoneChoice { return_result_occurrence: None, return_result_process: None, cards, .. } if cards.contains(&next))
-            );
-            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![next] }).unwrap();
-            assert_eq!(state.objects[&next].zone, Zone::Stack);
-            crate::game::stack::resolve_top(&mut state, &mut events);
-            assert_eq!(state.players[0].life, 25);
-            assert!(state.active_ability_continuation().is_none());
-            assert!(state.return_result_frames.is_empty());
+                assert!(
+                    matches!(&state.waiting_for, WaitingFor::EffectZoneChoice { return_result_occurrence: None, return_result_process: None, cards, .. } if cards.contains(&next))
+                );
+                apply_as_current(&mut state, GameAction::SelectCards { cards: vec![next] })
+                    .unwrap();
+                assert_eq!(state.objects[&next].zone, Zone::Stack);
+                crate::game::stack::resolve_top(&mut state, &mut events);
+                assert_eq!(state.players[0].life, 25);
+                assert!(state.active_ability_continuation().is_none());
+                assert!(state.return_result_frames.is_empty());
+            }
         }
+    }
+
+    #[test]
+    fn paid_public_cast_picks_keep_original_policy_and_result_through_reload() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, ObjectProperty,
+            ReturnResultId, ZoneChangeRecordSource,
+        };
+        use crate::types::mana::{ManaType, ManaUnit};
+        for linked in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let departed = scenario
+                .add_creature(P0, "Supplemental five-power receipt", 5, 5)
+                .id();
+            let card = scenario
+                .add_spell_to_hand_from_oracle(P0, "Supplemental cast candidate", true, "")
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let other_source = scenario
+                .add_artifact_from_oracle(P0, "Other linked source", "")
+                .id();
+            let decoy = scenario
+                .add_spell_to_hand_from_oracle(P1, "Foreign linked candidate", true, "")
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let amount = QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult {
+                        result: ReturnResultId(7),
+                    },
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Any,
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
+            };
+            let mut cast =
+                AbilityDefinition::new(AbilityKind::Spell, electrodominance_hand_ability(3).effect);
+            if linked {
+                let Effect::CastFromZone {
+                    target,
+                    without_paying_mana_cost,
+                    driver,
+                    ..
+                } = &mut cast.effect
+                else {
+                    unreachable!()
+                };
+                *target = TargetFilter::ExiledBySource;
+                *without_paying_mana_cost = false;
+                *driver = CastFromZoneDriver::DuringResolution;
+            }
+            cast.condition = Some(AbilityCondition::QuantityCheck {
+                lhs: amount.clone(),
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            });
+            let mut reader = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount,
+                },
+            );
+            reader.condition = Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::EffectOutcome {
+                    signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                }),
+            });
+            cast.sub_ability = Some(Box::new(reader));
+            let producer = serde_json::from_value(serde_json::json!({
+                "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+                "target": TargetFilter::SpecificObject { id: departed },
+            }))
+            .unwrap();
+            let mut definition = AbilityDefinition::new(AbilityKind::Activated, producer)
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                })
+                .sub_ability(cast);
+            definition.declares_return_result = Some(ReturnResultId(7));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental public cast owner", "")
+                .with_ability_definition(definition)
+                .id();
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+            );
+            let mut runner = scenario.build();
+            if linked {
+                let mut events = vec![];
+                zones::move_to_zone(runner.state_mut(), card, Zone::Exile, &mut events);
+                zones::move_to_zone(runner.state_mut(), decoy, Zone::Exile, &mut events);
+                runner.state_mut().exile_links.extend([
+                    ExileLink {
+                        exiled_id: card,
+                        source_id: source,
+                        kind: ExileLinkKind::TrackedBySource,
+                    },
+                    ExileLink {
+                        exiled_id: decoy,
+                        source_id: other_source,
+                        kind: ExileLinkKind::TrackedBySource,
+                    },
+                ]);
+            }
+            runner.activate(source, 0).resolve();
+            let WaitingFor::EffectZoneChoice {
+                player: P0,
+                cards,
+                zone,
+                return_result_occurrence: Some(occurrence),
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("paid public producer must reach its real cast picker");
+            };
+            assert_eq!(cards, &vec![card]);
+            assert_eq!(*zone, if linked { Zone::Exile } else { Zone::Hand });
+            let occurrence = *occurrence;
+            assert_eq!(runner.life(P0), 20);
+            assert_eq!(runner.state().objects[&departed].zone, Zone::Exile);
+            assert!(runner.state().players[0].mana_pool.is_empty());
+            let mut paused = runner.state().clone();
+            paused.active_return_result_occurrence = None;
+            for fault in 0..13 {
+                let mut hostile = paused.clone();
+                let actor = if fault == 0 { P1 } else { P0 };
+                if fault == 10 {
+                    hostile
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .process = None;
+                } else if fault == 11 {
+                    hostile
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .declarations = None;
+                } else if fault == 12 {
+                    hostile
+                        .return_result_frames
+                        .get_mut(&occurrence)
+                        .unwrap()
+                        .admitted_program = None;
+                } else if fault != 0 {
+                    let chain = &mut hostile
+                        .active_ability_continuation_frame_mut()
+                        .unwrap()
+                        .pending
+                        .chain;
+                    match fault {
+                        1 => chain.source_id = other_source,
+                        2 => chain.controller = P1,
+                        3 => chain.source_incarnation = Some(99),
+                        4 => chain.push_target(TargetRef::Object(decoy)),
+                        5 => chain.sub_ability.as_mut().unwrap().ability_index = Some(99),
+                        6..=9 => {
+                            let Effect::CastFromZone {
+                                driver,
+                                target,
+                                constraint,
+                                without_paying_mana_cost,
+                                ..
+                            } = &mut chain.effect
+                            else {
+                                unreachable!()
+                            };
+                            match fault {
+                                6 => *driver = CastFromZoneDriver::LingeringPermission,
+                                7 => *target = TargetFilter::SpecificObject { id: decoy },
+                                8 => {
+                                    *constraint = Some(CastPermissionConstraint::ManaValue {
+                                        comparator: Comparator::LE,
+                                        value: QuantityExpr::Fixed { value: 99 },
+                                    })
+                                }
+                                9 => *without_paying_mana_cost = !*without_paying_mana_cost,
+                                _ => unreachable!(),
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let before = hostile.clone();
+                let serialized = serde_json::to_value(&hostile).unwrap();
+                let rng = hostile.rng.get_word_pos();
+                if fault == 1 {
+                    assert!(
+                        crate::types::resolution::canonicalize_legacy_resolution_state(&hostile)
+                            .is_err()
+                    );
+                    assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+                }
+                assert!(
+                    crate::game::engine::apply(
+                        &mut hostile,
+                        actor,
+                        GameAction::SelectCards { cards: vec![] }
+                    )
+                    .is_err(),
+                    "cast fault {fault}, linked={linked}"
+                );
+                assert_eq!(hostile, before, "cast fault {fault}, linked={linked}");
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
+                assert_eq!(hostile.rng.get_word_pos(), rng);
+            }
+            for restore_kind in 0..3 {
+                let restored =
+                    match restore_kind {
+                        0 => {
+                            serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
+                        }
+                        1 => serde_json::from_value::<
+                            crate::types::game_state::TrustedGameStateEnvelope,
+                        >(
+                            serde_json::to_value(
+                                crate::types::game_state::TrustedGameStateEnvelope::capture(
+                                    paused.clone(),
+                                ),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state(),
+                        2 => {
+                            serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                                serde_json::to_value(
+                                    crate::types::resolution::ResolutionStateWire::from_game_state(
+                                        paused.clone(),
+                                    ),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state()
+                        }
+                        _ => unreachable!(),
+                    };
+                let mut resumed = GameRunner::from_state(restored);
+                resumed
+                    .act(GameAction::SelectCards { cards: vec![] })
+                    .unwrap();
+                assert_eq!(resumed.life(P0), 25);
+                assert_eq!(resumed.life(P1), 20);
+                assert_eq!(
+                    resumed.state().objects[&card].zone,
+                    if linked { Zone::Exile } else { Zone::Hand }
+                );
+                assert!(resumed.state().objects[&card]
+                    .casting_permissions
+                    .is_empty());
+                assert!(matches!(
+                    resumed.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(
+                    resumed.state().stack.is_empty() && resumed.state().resolution_stack.is_empty()
+                );
+                assert!(resumed.state().return_result_frames.is_empty());
+                assert_eq!(resumed.state().active_return_result_occurrence, None);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_cast_projection_uses_only_original_static_or_announced_inputs() {
+        let state = make_test_state();
+        let mut original = electrodominance_hand_ability(3);
+        let target = original.effect.target_filter().unwrap().clone();
+        let (live, _) = private_zone_pick_stash(&state, &original, &target, Zone::Hand);
+        assert!(super::super::instruction_result_projection_eq(
+            &project_retained_cast_pick(&original).unwrap(),
+            &live,
+        ));
+        if let Effect::CastFromZone { constraint, .. } = &mut original.effect {
+            *constraint = Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".into() },
+                },
+            });
+        }
+        assert!(project_retained_cast_pick(&original).is_none());
+        original.chosen_x = Some(3);
+        let (live, _) = private_zone_pick_stash(&state, &original, &target, Zone::Hand);
+        assert!(super::super::instruction_result_projection_eq(
+            &project_retained_cast_pick(&original).unwrap(),
+            &live,
+        ));
+        if let Effect::CastFromZone { constraint, .. } = &mut original.effect {
+            *constraint = Some(CastPermissionConstraint::ManaValue {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: crate::types::ability::PlayerScope::Controller,
+                    },
+                },
+            });
+        }
+        assert!(project_retained_cast_pick(&original).is_none());
     }
 
     #[test]

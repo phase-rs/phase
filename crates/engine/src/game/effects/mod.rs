@@ -2950,6 +2950,19 @@ fn visit_instruction_result_program_projections_inner(
     if visit(program) {
         return true;
     }
+    if let Some(projected) = cast_from_zone::project_retained_cast_pick(program) {
+        if !instruction_result_projection_eq(program, &projected)
+            && visit_instruction_result_program_projections_inner(
+                &projected,
+                scoped_player,
+                current,
+                generated_state,
+                visit,
+            )
+        {
+            return true;
+        }
+    }
     if (program.optional || program.optional_for.is_some())
         && current.is_some_and(|current| !current.optional && current.optional_for.is_none())
     {
@@ -3729,9 +3742,11 @@ fn instruction_result_damage_program_projects_to(
                         is_combat: *is_combat,
                         applied: Default::default(),
                     };
-                    let Some(generated) =
-                        deal_damage::build_post_replacement_damage_node(&context, &event)
-                    else {
+                    let Some(generated) = deal_damage::build_post_replacement_damage_node(
+                        &context,
+                        &event,
+                        Some(original),
+                    ) else {
                         return false;
                     };
                     generated
@@ -8483,6 +8498,8 @@ pub(crate) fn should_propagate_parent_targets(
 /// intentionally empty nodes retain the original inheritance rules.
 pub(crate) fn can_inherit_parent_targets(sub: &ResolvedAbility) -> bool {
     sub.targets.is_empty()
+        // CR 120.4b: this survivor already owns its concrete embedded recipient.
+        && !matches!(sub.effect, Effect::ApplyPostReplacementDamage { .. })
         && sub.illegal_local_target_slots.is_empty()
         && sub.declares_chosen_group.is_none()
         && sub.reads_chosen_group.is_none()
