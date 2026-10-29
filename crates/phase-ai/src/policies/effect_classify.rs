@@ -2211,7 +2211,7 @@ mod suspect_scope_tests {
     #[test]
     fn extract_target_filter_only_for_single_scope_prevent_damage() {
         let prevent = |recipient_scope| Effect::PreventDamage {
-            lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+            lifetime: engine::types::ability::RedirectionLifetime::Continuous,
             amount: PreventionAmount::All,
             amount_dynamic: None,
             target: TargetFilter::Typed(TypedFilter::creature()),

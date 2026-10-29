@@ -65601,8 +65601,7 @@ mod damage_source_canonical_admission_tests {
         let mut runner = scenario.build();
         if repeated_flip {
             let spell = runner.state_mut().objects.get_mut(&gambit).unwrap();
-            let definition = spell
-                .abilities
+            let definition = std::sync::Arc::make_mut(&mut spell.abilities)
                 .iter_mut()
                 .find(|definition| matches!(*definition.effect, Effect::ChooseDamageSource { .. }))
                 .expect("the real parsed Gambit has one source-choice instruction");

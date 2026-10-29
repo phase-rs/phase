@@ -379,16 +379,21 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         is_optional: false,
     };
     let state = runner.state_mut();
+    let proposed = ProposedEvent::SearchFound {
+        searcher: P0,
+        library_owner: Some(P0),
+        object_id: found,
+        disposition: SearchFoundDisposition::Original,
+        applied: Default::default(),
+    };
+    let candidate_key = engine::types::proposed_event::AppliedReplacementKey::for_event_in_state(
+        state, &proposed, rid,
+    );
     state.pending_replacement = Some(Box::new(PendingReplacement {
+        candidate_keys: vec![candidate_key],
         damage_opportunity: Default::default(),
         damage_source_context: None,
-        proposed: ProposedEvent::SearchFound {
-            searcher: P0,
-            library_owner: Some(P0),
-            object_id: found,
-            disposition: SearchFoundDisposition::Original,
-            applied: Default::default(),
-        },
+        proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],
         search_found_candidates: vec![candidate],

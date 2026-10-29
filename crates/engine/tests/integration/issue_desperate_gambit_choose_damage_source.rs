@@ -1591,9 +1591,9 @@ fn assert_source_origin_refusal_preserves_input(
 fn assert_installed_cast_owner(runner: &engine::game::scenario::GameRunner) -> ResolvedAbility {
     use engine::types::game_state::StackEntryKind;
     let installed = &runner.state().pending_damage_replacements[0];
-    let rider = installed
-        .runtime_execute
-        .as_deref()
+    let rider = runner
+        .state()
+        .replacement_rider(installed)
         .expect("actual installed continuation");
     let occurrence = rider
         .cast_occurrence
@@ -1639,6 +1639,11 @@ fn restore_installed_legacy_with_retained_original(
 ) {
     use engine::types::resolution::ResolutionStateWire;
     let expected = runner.state().pending_damage_replacements[0].clone();
+    let expected_rider = runner
+        .state()
+        .replacement_rider(&expected)
+        .expect("actual installed continuation")
+        .clone();
     let mut installed = if wire {
         serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap()
     } else {
@@ -1668,7 +1673,11 @@ fn restore_installed_legacy_with_retained_original(
             "the actual announced source target has an occurrence pin"
         );
         assert_eq!(
-            expected.runtime_execute.as_ref().unwrap().cast_occurrence,
+            runner
+                .state()
+                .replacement_rider(&expected)
+                .expect("actual installed continuation")
+                .cast_occurrence,
             original.cast_occurrence
         );
     }
@@ -1691,6 +1700,13 @@ fn restore_installed_legacy_with_retained_original(
     };
     assert_eq!(runner.state().pending_damage_replacements[0], expected,
         "the retained exact original/declared-target owner preserves the complete installed typed program");
+    assert_eq!(
+        runner
+            .state()
+            .replacement_rider(&runner.state().pending_damage_replacements[0]),
+        Some(&expected_rider),
+        "the restored actual arena preserves the complete cast-owned continuation"
+    );
 }
 
 #[test]
@@ -2700,10 +2716,10 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
             ));
             assert_eq!(
                 original.cast_occurrence,
-                expected[0]
-                    .runtime_execute
-                    .as_ref()
-                    .unwrap()
+                runner
+                    .state()
+                    .replacement_rider(&expected[0])
+                    .expect("actual installed continuation")
                     .cast_occurrence
             );
             assert!(runner.state().zone_changes_this_turn.iter().enumerate().all(|(index, record)|
@@ -2850,6 +2866,10 @@ fn cast_owned_reverse_installed_legacy_capture_recovers_and_null_contradiction_r
                 assert_eq!(
                     hostile["pending_damage_replacements"][0]["runtime_execute"],
                     current["pending_damage_replacements"][0]["runtime_execute"]
+                );
+                assert_eq!(
+                    hostile["replacement_continuations"], current["replacement_continuations"],
+                    "the installed cast-owned rider remains intact in its actual arena"
                 );
                 assert_eq!(
                     hostile["spells_cast_this_turn_by_player"],
@@ -3224,7 +3244,11 @@ fn same_cast_resolved_native_and_chosen_alternatives_cannot_lend_each_other_sour
                 Some(occurrence)
             );
             assert_eq!(
-                definition.runtime_execute.as_ref().unwrap().cast_occurrence,
+                runner
+                    .state()
+                    .replacement_rider(&definition)
+                    .expect("actual installed continuation")
+                    .cast_occurrence,
                 Some(occurrence)
             );
             let current = source_state_value(&runner, wire);
@@ -3386,7 +3410,7 @@ fn own_resolution_nested_choice_keeps_its_actual_missing_cast_stamp_and_current_
                 runner.advance_until_stack_empty();
                 let definition = runner.state().pending_damage_replacements[0].clone();
                 assert_eq!(definition.selected_damage_source.is_none(), branch == 0);
-                assert!(definition.runtime_execute.as_ref().unwrap().cast_occurrence.is_none(),
+                assert!(runner.state().replacement_rider(&definition).expect("actual installed continuation").cast_occurrence.is_none(),
                 "actual newly built nested branch is NOT recursively stamped by the cast producer");
                 let raw = source_state_value(&runner, wire);
                 assert!(
@@ -3497,7 +3521,10 @@ fn actual_noncast_copy_retains_cloned_coordinate_but_cannot_borrow_the_original_
         assert_source_program_complete(&runner);
         let definitions = runner.state().pending_damage_replacements.clone();
         assert_eq!(definitions.len(), 2);
-        let copy_rider = definitions[0].runtime_execute.as_ref().unwrap();
+        let copy_rider = runner
+            .state()
+            .replacement_rider(&definitions[0])
+            .expect("actual copied continuation");
         assert_ne!(copy_rider.source_id, reverse);
         assert_eq!(
             copy_rider.cast_occurrence,
@@ -3735,10 +3762,10 @@ fn actual_recast_and_other_caster_coordinates_preserve_each_definition_owned_spe
         let coordinates: Vec<_> = definitions
             .iter()
             .map(|definition| {
-                definition
-                    .runtime_execute
-                    .as_ref()
-                    .unwrap()
+                runner
+                    .state()
+                    .replacement_rider(definition)
+                    .expect("actual installed continuation")
                     .cast_occurrence
                     .unwrap()
             })
@@ -3791,10 +3818,28 @@ fn actual_recast_and_other_caster_coordinates_preserve_each_definition_owned_spe
         // Supplemental field-loss control on a reached real three-cast state.
         // Missing a coordinate alone does not change coherent Some or native null.
         let mut missing = current;
-        missing["pending_damage_replacements"][0]["runtime_execute"]
+        let rider_index = usize::try_from(
+            definitions[0]
+                .runtime_execute
+                .expect("actual installed continuation handle")
+                .0,
+        )
+        .unwrap();
+        assert_eq!(
+            missing["replacement_continuations"][rider_index],
+            serde_json::to_value(
+                runner
+                    .state()
+                    .replacement_rider(&definitions[0])
+                    .expect("the actual handle names this exact rider"),
+            )
+            .unwrap()
+        );
+        let removed = missing["replacement_continuations"][rider_index]
             .as_object_mut()
             .unwrap()
             .remove("cast_occurrence");
+        assert_eq!(removed, Some(serde_json::json!(coordinates[0])));
         let retained = decode_source_state(missing.clone(), wire).unwrap();
         assert_eq!(
             retained.pending_damage_replacements[0].selected_damage_source,

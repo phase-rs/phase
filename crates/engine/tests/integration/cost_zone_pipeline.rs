@@ -968,17 +968,23 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         .regeneration_shield()
         .description("Prevent the staged mana cost move".to_string())]
     .into();
+    let proposed = ProposedEvent::Destroy {
+        object_id: source,
+        source: None,
+        cant_regenerate: false,
+        applied: Default::default(),
+    };
+    let candidate = ReplacementId { source, index: 0 };
+    let candidate_key = engine::types::proposed_event::AppliedReplacementKey::for_event_in_state(
+        state, &proposed, candidate,
+    );
     state.pending_replacement = Some(Box::new(PendingReplacement {
+        candidate_keys: vec![candidate_key],
         damage_opportunity: Default::default(),
         damage_source_context: None,
-        proposed: ProposedEvent::Destroy {
-            object_id: source,
-            source: None,
-            cant_regenerate: false,
-            applied: Default::default(),
-        },
+        proposed,
         sacrifice_provenance: None,
-        candidates: vec![ReplacementId { source, index: 0 }],
+        candidates: vec![candidate],
         search_found_candidates: Vec::new(),
         depth: 0,
         is_optional: false,
@@ -5031,17 +5037,25 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         .regeneration_shield()
         .description("Prevent the staged cost move".to_string())]
     .into();
+    let proposed = ProposedEvent::Destroy {
+        object_id: source,
+        source: None,
+        cant_regenerate: false,
+        applied: Default::default(),
+    };
+    let candidate = ReplacementId { source, index: 0 };
+    let candidate_key = engine::types::proposed_event::AppliedReplacementKey::for_event_in_state(
+        runner.state(),
+        &proposed,
+        candidate,
+    );
     runner.state_mut().pending_replacement = Some(Box::new(PendingReplacement {
+        candidate_keys: vec![candidate_key],
         damage_opportunity: Default::default(),
         damage_source_context: None,
-        proposed: ProposedEvent::Destroy {
-            object_id: source,
-            source: None,
-            cant_regenerate: false,
-            applied: Default::default(),
-        },
+        proposed,
         sacrifice_provenance: None,
-        candidates: vec![ReplacementId { source, index: 0 }],
+        candidates: vec![candidate],
         search_found_candidates: Vec::new(),
         depth: 0,
         is_optional: false,

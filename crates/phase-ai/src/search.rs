@@ -7211,6 +7211,7 @@ mod tests {
             PlayerId(0),
         );
         state.waiting_for = WaitingFor::UnlessPayment {
+            return_result_occurrence: None,
             player: payer,
             cost,
             pending_effect: Box::new(pending_effect),

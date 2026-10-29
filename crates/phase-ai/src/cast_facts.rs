@@ -964,7 +964,7 @@ mod tests {
                 let ability = AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::PreventDamage {
-                        lifetime: crate::types::ability::RedirectionLifetime::Continuous,
+                        lifetime: engine::types::ability::RedirectionLifetime::Continuous,
                         amount: PreventionAmount::All,
                         amount_dynamic: None,
                         target: target.clone(),
