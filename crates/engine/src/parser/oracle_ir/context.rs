@@ -252,7 +252,7 @@ impl TriggerZoneChangeProvenance {
 /// binding rather than a bare `TrackedAnaphorSource`, which under-expresses
 /// the referent axis (a target-set referent is not a chain-set cause).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum BareCardAggregateBinding {
+pub enum BareCardAggregateBinding {
     /// A chain-set cause (mill, discard, sacrifice, …).
     ChainSet(crate::types::ability::TrackedAnaphorSource),
     /// The ability's own chosen targets (`TargetedObjects { slot: None }`).
