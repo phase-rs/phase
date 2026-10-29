@@ -4240,7 +4240,7 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
             if let Some(filter) = filter {
                 profile.merge(board_membership_read(filter));
             }
-            profile.reads_member_bound = true;
+            profile.bind_per_member();
             profile
         }
         // CR 608.2i: the cast journal is read by looking BACK at actions already
@@ -8079,7 +8079,7 @@ mod tests {
         };
         let mut expected_filtered = reads_zone_membership();
         expected_filtered.merge(board_membership_read(&board_filter));
-        expected_filtered.reads_member_bound = true;
+        expected_filtered.bind_per_member();
         assert_eq!(
             characteristic_source_read(&filtered_chain),
             expected_filtered,
@@ -8100,7 +8100,7 @@ mod tests {
             filter: None,
         };
         let mut expected_unfiltered = reads_zone_membership();
-        expected_unfiltered.reads_member_bound = true;
+        expected_unfiltered.bind_per_member();
         assert_eq!(
             characteristic_source_read(&unfiltered_chain),
             expected_unfiltered,
