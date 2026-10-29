@@ -662,7 +662,7 @@ fn visit_characteristic_leaf<'s>(
         } => {
             // MED1: same defense-in-depth skip as the `Objects` arm above
             // for hand-built in-memory values only.
-            if matches!(filter, Some(member) if crate::types::ability::member_filter_has_unsupported_selected_ref(member))
+            if matches!(filter, Some(member) if crate::types::ability::tracked_member_filter_has_unsupported_ref(member))
             {
                 return;
             }
@@ -6376,7 +6376,7 @@ fn resolve_ref(
             // parser builds only selected-free shapes, and this fail-closed
             // skip covers hand-built in-memory values. Its zero must never
             // count as support.
-            if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
+            if crate::types::ability::tracked_member_filter_has_unsupported_ref(filter) {
                 return 0;
             }
             let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
@@ -23332,6 +23332,75 @@ mod tests {
             resolve_quantity_with_targets(&state, &aggregate, &ability),
             12,
             "both members admitted vacuously (5 + 7)"
+        );
+    }
+
+    #[test]
+    fn snapshot_unsupported_shared_reference_refuses_only_tracked_sources() {
+        let (mut state, ability, _) = r2b_departed_shares_fixture();
+        assert_brute_reads_departure_snapshot(&state);
+        let reference = create_object(
+            &mut state,
+            CardId(553),
+            PlayerId(0),
+            "Live Reference".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&reference)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        let filter = TargetFilter::Typed(
+            crate::types::ability::TypedFilter::new(crate::types::ability::TypeFilter::Permanent)
+                .properties(vec![crate::types::ability::FilterProp::SharesQuality {
+                    quality: crate::types::ability::SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::SpecificObject { id: reference })),
+                    relation: crate::types::ability::SharedQualityRelation::DoesNotShare,
+                }]),
+        );
+        let ctx = crate::game::filter::FilterContext::from_ability(&ability);
+        for (source, expected) in [
+            (
+                CardTypeSetSource::Objects {
+                    filter: filter.clone(),
+                },
+                1,
+            ),
+            (
+                CardTypeSetSource::TrackedSet {
+                    set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+                    caused_by: None,
+                    filter: Some(filter.clone()),
+                },
+                0,
+            ),
+        ] {
+            let mut members = 0;
+            visit_characteristic_leaf(
+                &state,
+                &source,
+                QuantityContext::new(ability.source_id),
+                &ctx,
+                PlayerId(0),
+                &mut |_, _, _| members += 1,
+            );
+            assert_eq!(members, expected);
+        }
+        assert_eq!(
+            resolve_quantity_with_targets(
+                &state,
+                &QuantityExpr::Ref {
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(filter),
+                        caused_by: None,
+                    },
+                },
+                &ability,
+            ),
+            0,
+            "the hand-built tracked-size peer refuses the unsupported reference too"
         );
     }
 

@@ -12508,8 +12508,12 @@ impl CardTypeSetSource {
                 CardTypeSetSource::TrackedSet {
                     filter: Some(filter),
                     ..
+                } => {
+                    if tracked_member_filter_has_unsupported_ref(filter) {
+                        dependent_member_filter = true;
+                    }
                 }
-                | CardTypeSetSource::Objects { filter } => {
+                CardTypeSetSource::Objects { filter } => {
                     if member_filter_has_unsupported_selected_ref(filter) {
                         dependent_member_filter = true;
                     }
@@ -12556,6 +12560,23 @@ impl CardTypeSetSource {
 /// a future variant fails compilation here instead of silently admitting.
 pub(crate) fn member_filter_has_unsupported_selected_ref(filter: &TargetFilter) -> bool {
     target_filter_has_unsupported_selected_ref(filter, false)
+}
+
+/// CR 608.2h: tracked members may read departure snapshots. Their shared-quality
+/// evaluator supports only no reference or the direct selected target; other
+/// reference populations require a live candidate. Keep those forms out of
+/// tracked-source admission while preserving live `Objects` source filters.
+pub(crate) fn tracked_member_filter_has_unsupported_ref(filter: &TargetFilter) -> bool {
+    member_filter_has_unsupported_selected_ref(filter)
+        || filter_contains_filter_prop(filter, &|prop| {
+            matches!(
+                prop,
+                FilterProp::SharesQuality {
+                    reference: Some(reference),
+                    ..
+                } if !matches!(reference.as_ref(), TargetFilter::ParentTarget)
+            )
+        })
 }
 
 /// `nested` selects the evaluation context: `false` is the member-evaluation
@@ -13141,7 +13162,7 @@ pub enum CardTypeSetSourceError {
     #[error("triggering-batch sources accept no member filter")]
     FilteredTriggeringBatch,
     #[error(
-        "member filter references selected targets the suspension-resume path cannot evaluate"
+        "member filter references objects the snapshot or suspension-resume path cannot evaluate"
     )]
     DependentMemberFilter,
     #[error("card-type-set source exceeds the supported union depth")]
@@ -13604,7 +13625,7 @@ pub enum PropertyAggregateError {
     UnsupportedTurnJournalProperty(ObjectProperty),
     #[error("triggering-batch property aggregates accept no member filter")]
     UnsupportedTriggeringBatchFilter,
-    #[error("property aggregates accept no selected-dependent member filter")]
+    #[error("property aggregates accept no member filter with unsupported object references")]
     UnsupportedDependentMemberFilter,
     #[error("property aggregate source exceeds the supported union depth")]
     SourceDepthExceeded,
@@ -47112,6 +47133,67 @@ mod tests {
             set: TrackedAnaphorSource::ChainSet,
             caused_by: None,
             filter,
+        }
+    }
+
+    #[test]
+    fn tracked_shared_quality_admission_matches_snapshot_reference_support() {
+        let filter = |reference: Option<TargetFilter>, relation| {
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent).properties(vec![
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: reference.map(Box::new),
+                    relation,
+                },
+            ]))
+        };
+        for relation in [
+            SharedQualityRelation::Shares,
+            SharedQualityRelation::DoesNotShare,
+        ] {
+            for reference in [None, Some(TargetFilter::ParentTarget)] {
+                let source = chain_set_with(filter(reference, relation));
+                assert_eq!(source.validate_admission(), Ok(()));
+                assert!(PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    source,
+                )
+                .is_ok());
+            }
+            for reference in [
+                TargetFilter::SpecificObject { id: ObjectId(7) },
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+            ] {
+                let unsupported = filter(Some(reference), relation);
+                let live = CardTypeSetSource::Objects {
+                    filter: unsupported.clone(),
+                };
+                assert_eq!(live.validate_admission(), Ok(()));
+                let tracked = chain_set_with(unsupported.clone());
+                assert_eq!(
+                    tracked.validate_admission(),
+                    Err(CardTypeSetSourceError::DependentMemberFilter)
+                );
+                assert_eq!(
+                    PropertyAggregate::new(AggregateFunction::Sum, ObjectProperty::Power, tracked,),
+                    Err(PropertyAggregateError::UnsupportedDependentMemberFilter)
+                );
+                let nested = chain_set_with(TargetFilter::Not {
+                    filter: Box::new(TargetFilter::And {
+                        filters: vec![TargetFilter::Any, unsupported],
+                    }),
+                });
+                assert_eq!(
+                    nested.validate_admission(),
+                    Err(CardTypeSetSourceError::DependentMemberFilter)
+                );
+                let encoded = serde_json::to_string(&QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes { source: nested },
+                })
+                .expect("typed witness serializes");
+                assert!(serde_json::from_str::<QuantityExpr>(&encoded).is_err());
+            }
         }
     }
 
