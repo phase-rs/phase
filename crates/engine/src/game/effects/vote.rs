@@ -269,7 +269,11 @@ pub(crate) fn resolve_owned(
     // `resolve_tally`, then drains this continuation to run any post-Vote
     // chained effects. Mirrors clash::stash_sub.
     if let Some(sub) = ability.sub_ability.as_ref() {
-        state.park_ability_continuation(PendingContinuation::new(sub.clone(), state));
+        state.park_ability_continuation(PendingContinuation::new_owned(
+            sub.clone(),
+            state,
+            declarations,
+        )?);
     }
 
     Ok(())
@@ -303,6 +307,41 @@ pub fn resolve_tally(
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_tally_owned(
+        state,
+        source_id,
+        controller,
+        options,
+        per_choice_effect,
+        tallies,
+        ballots,
+        tally_mode,
+        candidate_objects,
+        outcome_template,
+        chain_root_targets,
+        expected_return_result_process,
+        events,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_tally_owned(
+    state: &mut GameState,
+    source_id: ObjectId,
+    controller: PlayerId,
+    options: &[String],
+    per_choice_effect: &[Box<AbilityDefinition>],
+    tallies: &[u32],
+    ballots: &crate::im::Vector<(PlayerId, u32)>,
+    tally_mode: VoteTally,
+    candidate_objects: &[ObjectId],
+    outcome_template: Option<&AbilityDefinition>,
+    chain_root_targets: &[TargetRef],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
+) -> Result<(), EffectError> {
     // For named votes the per-choice slots are parallel to `options`; object
     // votes carry an empty `per_choice_effect` (winners drive
     // `outcome_template` instead), so only assert the parallel invariant when
@@ -332,6 +371,7 @@ pub fn resolve_tally(
                 chain_root_targets,
                 expected_return_result_process,
                 events,
+                admitted,
             );
         }
         // CR 701.38d: per-ballot fan-out (existing loop below) — multiple
@@ -378,14 +418,17 @@ pub fn resolve_tally(
         if per_choice_player_scope.is_some() {
             // player_scope path — single dispatch, fan-out handled by
             // resolve_ability_chain's player_scope driver.
-            let mut chain = build_resolved_from_def_with_chain_root(
+            let chain = build_vote_outcome(
                 &per_choice_effect[idx],
                 source_id,
                 controller,
-                chain_root_targets.to_vec(),
+                chain_root_targets,
+                expected_return_result_process,
+                None,
+                None,
+                admitted.map(|(program, _)| program),
             );
-            chain.bind_return_result_process(expected_return_result_process);
-            super::resolve_selected_ability_chain(state, &chain, events, 1)?;
+            resolve_vote_selected(state, &chain, events, admitted)?;
         } else if per_choice_effect[idx]
             .effect
             .count_expr()
@@ -396,14 +439,17 @@ pub fn resolve_tally(
             // `QuantityRef::VoteCount`, so the effect resolves as ONE aggregate
             // event whose `resolve_ref` sums the full tally — do NOT repeat it
             // per ballot, which would multiply the tally by itself.
-            let mut chain = build_resolved_from_def_with_chain_root(
+            let chain = build_vote_outcome(
                 &per_choice_effect[idx],
                 source_id,
                 controller,
-                chain_root_targets.to_vec(),
+                chain_root_targets,
+                expected_return_result_process,
+                None,
+                None,
+                admitted.map(|(program, _)| program),
             );
-            chain.bind_return_result_process(expected_return_result_process);
-            super::resolve_selected_ability_chain(state, &chain, events, 1)?;
+            resolve_vote_selected(state, &chain, events, admitted)?;
         } else {
             // CR 701.38d + CR 608.2c: Per-ballot iteration. Each ballot that
             // chose this option triggers one resolution of the sub-effect.
@@ -434,16 +480,30 @@ pub fn resolve_tally(
                     controller,
                     chain_root_targets,
                     expected_return_result_process,
+                    admitted.map(|(program, _)| program),
                 );
-                super::resolve_selected_ability_chain(state, &ballot_ability, events, 1)?;
+                let imports_parent = matches!(
+                    crate::types::ability::classify_instruction_result_invocation(
+                        &ballot_ability,
+                        crate::types::ability::InstructionResultEntry::SelectedBody,
+                        None,
+                    )?
+                    .0,
+                    crate::types::ability::InstructionResultProcess::Imported { .. }
+                );
+                let ballot_occurrence = imports_parent
+                    .then_some(state.active_return_result_occurrence)
+                    .flatten();
+                resolve_vote_selected(state, &ballot_ability, events, admitted)?;
 
                 // If the inner effect parked an interactive choice, suspend.
                 if state.waiting_for != initial_waiting_for {
                     park_vote_ballot_after_current_ballot(
                         state,
                         PendingVoteBallotIteration {
-                            return_result_occurrence: state.active_return_result_occurrence,
-                            expected_return_result_process,
+                            return_result_occurrence: ballot_occurrence,
+                            expected_return_result_process: ballot_occurrence
+                                .and(expected_return_result_process),
                             ability_template: Box::new(per_choice_effect[idx].as_ref().clone()),
                             remaining_voters,
                             source_id,
@@ -499,6 +559,7 @@ fn resolve_top_votes_tally(
     chain_root_targets: &[TargetRef],
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
     events: &mut Vec<GameEvent>,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
 ) -> Result<(), EffectError> {
     state.last_vote_ballots = ballots.clone();
 
@@ -532,28 +593,33 @@ fn resolve_top_votes_tally(
                 // winner is exiled (not a battlefield rescan).
                 Some(template) => {
                     if let Some(&winner_obj) = candidate_objects.get(winner as usize) {
-                        let mut chain = build_resolved_from_def_with_chain_root(
+                        let chain = build_vote_outcome(
                             template,
                             source_id,
                             controller,
-                            chain_root_targets.to_vec(),
+                            chain_root_targets,
+                            expected_return_result_process,
+                            Some(winner_obj),
+                            None,
+                            admitted.map(|(program, _)| program),
                         );
-                        chain.set_unpinned_targets(vec![TargetRef::Object(winner_obj)]);
-                        chain.bind_return_result_process(expected_return_result_process);
-                        super::resolve_selected_ability_chain(state, &chain, events, 1)?;
+                        resolve_vote_selected(state, &chain, events, admitted)?;
                     }
                 }
                 // Named vote: `per_choice_effect` is populated.
                 None => {
                     if let Some(winning_effect) = per_choice_effect.get(winner as usize) {
-                        let mut chain = build_resolved_from_def_with_chain_root(
+                        let chain = build_vote_outcome(
                             winning_effect,
                             source_id,
                             controller,
-                            chain_root_targets.to_vec(),
+                            chain_root_targets,
+                            expected_return_result_process,
+                            None,
+                            None,
+                            admitted.map(|(program, _)| program),
                         );
-                        chain.bind_return_result_process(expected_return_result_process);
-                        super::resolve_selected_ability_chain(state, &chain, events, 1)?;
+                        resolve_vote_selected(state, &chain, events, admitted)?;
                     }
                 }
             }
@@ -577,28 +643,33 @@ fn resolve_top_votes_tally(
                         // rescan).
                         Some(template) => {
                             if let Some(&winner_obj) = candidate_objects.get(idx) {
-                                let mut chain = build_resolved_from_def_with_chain_root(
+                                let chain = build_vote_outcome(
                                     template,
                                     source_id,
                                     controller,
-                                    chain_root_targets.to_vec(),
+                                    chain_root_targets,
+                                    expected_return_result_process,
+                                    Some(winner_obj),
+                                    None,
+                                    admitted.map(|(program, _)| program),
                                 );
-                                chain.set_unpinned_targets(vec![TargetRef::Object(winner_obj)]);
-                                chain.bind_return_result_process(expected_return_result_process);
-                                super::resolve_selected_ability_chain(state, &chain, events, 1)?;
+                                resolve_vote_selected(state, &chain, events, admitted)?;
                             }
                         }
                         // Named vote: `per_choice_effect` is populated.
                         None => {
                             if let Some(winning_effect) = per_choice_effect.get(idx) {
-                                let mut chain = build_resolved_from_def_with_chain_root(
+                                let chain = build_vote_outcome(
                                     winning_effect,
                                     source_id,
                                     controller,
-                                    chain_root_targets.to_vec(),
+                                    chain_root_targets,
+                                    expected_return_result_process,
+                                    None,
+                                    None,
+                                    admitted.map(|(program, _)| program),
                                 );
-                                chain.bind_return_result_process(expected_return_result_process);
-                                super::resolve_selected_ability_chain(state, &chain, events, 1)?;
+                                resolve_vote_selected(state, &chain, events, admitted)?;
                             }
                         }
                     }
@@ -699,13 +770,38 @@ fn title_case_word(s: &str) -> String {
 /// Build a `ResolvedAbility` for a single per-ballot vote body, binding
 /// `scoped_player` to the voter so that `ZoneOwner::ScopedPlayer` resolves
 /// to the correct player's permanents.
-fn build_per_ballot_ability(
+pub(crate) fn build_per_ballot_ability(
     template: &AbilityDefinition,
     voter: PlayerId,
     source_id: crate::types::identifiers::ObjectId,
     controller: PlayerId,
     chain_root_targets: &[TargetRef],
     expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
+    input: Option<&ResolvedAbility>,
+) -> ResolvedAbility {
+    build_vote_outcome(
+        template,
+        source_id,
+        controller,
+        chain_root_targets,
+        expected_return_result_process,
+        None,
+        Some(voter),
+        input,
+    )
+}
+
+/// Pure binding shared by vote execution and admitted-program projection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_vote_outcome(
+    template: &AbilityDefinition,
+    source_id: ObjectId,
+    controller: PlayerId,
+    chain_root_targets: &[TargetRef],
+    expected_return_result_process: Option<crate::types::game_state::ReturnResultProcessId>,
+    winner: Option<ObjectId>,
+    voter: Option<PlayerId>,
+    input: Option<&ResolvedAbility>,
 ) -> ResolvedAbility {
     let mut ability = build_resolved_from_def_with_chain_root(
         template,
@@ -713,10 +809,38 @@ fn build_per_ballot_ability(
         controller,
         chain_root_targets.to_vec(),
     );
+    if let Some(input) = input {
+        let mut inputs = input.coin_target_input_projection();
+        // These are captured separately by the actual vote carrier. Retaining
+        // them also lets projection reject a forged carrier source/controller.
+        inputs.source_id = source_id;
+        inputs.controller = controller;
+        inputs.context.chain_root_targets = chain_root_targets.to_vec();
+        ability.inherit_coin_target_inputs(&inputs);
+    }
     ability.bind_return_result_process(expected_return_result_process);
-    ability.scoped_player = Some(voter);
-    ability.original_controller = Some(controller);
+    if let Some(winner) = winner {
+        ability.set_unpinned_targets(vec![TargetRef::Object(winner)]);
+    }
+    if let Some(voter) = voter {
+        ability.scoped_player = Some(voter);
+        ability.original_controller = Some(controller);
+    }
     ability
+}
+
+fn resolve_vote_selected(
+    state: &mut GameState,
+    selected: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
+) -> Result<(), EffectError> {
+    match admitted {
+        Some(parent) => {
+            super::resolve_parent_selected_ability_chain(state, selected, events, 1, parent)
+        }
+        None => super::resolve_selected_ability_chain(state, selected, events, 1),
+    }
 }
 
 /// CR 701.38d: Resume per-ballot vote iteration after an interactive choice
@@ -726,20 +850,62 @@ pub(crate) fn validate_pending_result_owner(
     state: &GameState,
     pending: &PendingVoteBallotIteration,
 ) -> Result<(), EffectError> {
-    let mut body = crate::game::ability_utils::build_resolved_from_def(
-        &pending.ability_template,
-        pending.source_id,
-        pending.controller,
-    );
-    body.bind_return_result_process(pending.expected_return_result_process);
-    super::validate_selected_instruction_result_owner(
-        state,
-        &body,
-        pending.return_result_occurrence,
-    )
+    pending_ballot_result_owner(state, pending).map(|_| ())
+}
+
+fn pending_ballot_result_owner(
+    state: &GameState,
+    pending: &PendingVoteBallotIteration,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EffectError,
+> {
+    let owner = super::vote_carrier_admitted_program(state, pending)?;
+    for voter in &pending.remaining_voters {
+        let body = build_per_ballot_ability(
+            &pending.ability_template,
+            *voter,
+            pending.source_id,
+            pending.controller,
+            &pending.chain_root_targets,
+            pending.expected_return_result_process,
+            owner.as_ref().map(|(program, _)| program),
+        );
+        if matches!(
+            crate::types::ability::classify_instruction_result_invocation(
+                &body,
+                crate::types::ability::InstructionResultEntry::SelectedBody,
+                None
+            )?
+            .0,
+            crate::types::ability::InstructionResultProcess::Imported { .. }
+        ) {
+            super::validate_selected_instruction_result_owner(
+                state,
+                &body,
+                pending.return_result_occurrence,
+            )?;
+            let candidate =
+                super::owned_cursor_declarations(state, pending.return_result_occurrence, &body)?;
+            if owner.as_ref() != Some(&candidate) {
+                return Err(EffectError::InvalidParam(
+                    "ballots have different admitted owners".into(),
+                ));
+            }
+        }
+    }
+    Ok(owner)
 }
 
 pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let Some(actual) = state.active_vote_ballot() else {
+        return;
+    };
+    let owner = pending_ballot_result_owner(state, actual)
+        .expect("a retained vote-ballot owner is validated before consumption");
     let pending = match state
         .take_active_vote_ballot()
         .expect("vote-ballot drain may consume only the active vote-ballot frame")
@@ -752,7 +918,14 @@ pub(crate) fn drain_active_vote_ballot(state: &mut GameState, events: &mut Vec<G
         state,
         pending.return_result_occurrence,
         |state| {
-            drain_vote_ballots_in_occurrence(state, events, pending);
+            drain_vote_ballots_in_occurrence(
+                state,
+                events,
+                pending,
+                owner
+                    .as_ref()
+                    .map(|(program, declarations)| (program, declarations)),
+            );
             Ok::<(), EffectError>(())
         },
     )
@@ -763,9 +936,11 @@ fn drain_vote_ballots_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     pending: PendingVoteBallotIteration,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
 ) {
     let initial_waiting_for = state.waiting_for.clone();
     let mut remaining_voters = pending.remaining_voters;
+    let return_result_occurrence = pending.return_result_occurrence;
     let expected_return_result_process = pending.expected_return_result_process;
     let source_id = pending.source_id;
     let controller = pending.controller;
@@ -782,8 +957,9 @@ fn drain_vote_ballots_in_occurrence(
             controller,
             &chain_root_targets,
             expected_return_result_process,
+            admitted.map(|(program, _)| program),
         );
-        if super::resolve_selected_ability_chain(state, &ballot_ability, events, 1).is_err() {
+        if resolve_vote_selected(state, &ballot_ability, events, admitted).is_err() {
             // On error, drop remaining ballots (matches existing error handling).
             return;
         }
@@ -793,7 +969,7 @@ fn drain_vote_ballots_in_occurrence(
             park_vote_ballot_after_current_ballot(
                 state,
                 PendingVoteBallotIteration {
-                    return_result_occurrence: state.active_return_result_occurrence,
+                    return_result_occurrence,
                     expected_return_result_process,
                     ability_template: template,
                     remaining_voters,
@@ -839,6 +1015,226 @@ fn park_vote_ballot_after_current_ballot(
 }
 
 #[cfg(test)]
+mod admitted_ballot_public_tests {
+    use super::*;
+    use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use crate::types::ability::*;
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::{InstructionResult, TrustedGameStateEnvelope};
+    use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+    use crate::types::phase::Phase;
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn departure_public_vote_outcomes_and_ballot_drains_keep_the_parent_program() {
+        // Supplemental typed program covers both a top winner and the actual
+        // queued per-ballot owner, including a selected-body public pause.
+        for per_ballot in [false, true] {
+            for empty in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                if !empty {
+                    scenario.add_creature(P0, "First departure", 2, 2);
+                    scenario.add_creature(P0, "Second departure", 3, 3);
+                }
+                scenario.add_creature(P1, "Unrelated cohort decoy", 7, 7);
+                let gain = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneChangeAggregate {
+                                source: ZoneChangeRecordSource::InstructionResult {
+                                    result: ReturnResultId(7),
+                                },
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Exile),
+                                filter: TargetFilter::Any,
+                                function: AggregateFunction::Sum,
+                                property: ObjectProperty::Power,
+                            },
+                        },
+                    },
+                );
+                let selected = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Controller,
+                        branches: vec![
+                            AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::GainLife {
+                                    player: TargetFilter::Controller,
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                },
+                            ),
+                            gain,
+                        ],
+                        kind: ChooseOneOfKind::Ordinary,
+                    },
+                );
+                let producer = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile", "target":TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))})).unwrap();
+                let mut definition = AbilityDefinition::new(AbilityKind::Activated, producer)
+                    .cost(AbilityCost::Mana {
+                        cost: ManaCost::generic(1),
+                    })
+                    .sub_ability(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Vote {
+                            choices: vec!["skip".into(), "read".into()],
+                            per_choice_effect: vec![
+                                Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                                Box::new(selected),
+                            ],
+                            starting_with: ControllerRef::You,
+                            voter_scope: VoterScope::AllPlayers,
+                            tally_mode: if per_ballot {
+                                VoteTally::PerVote
+                            } else {
+                                VoteTally::TopVotes {
+                                    tie: TieResolution::AllTied,
+                                }
+                            },
+                            subject: VoteSubject::Named,
+                            visibility: VoteVisibility::Open,
+                        },
+                    ));
+                definition.declares_return_result = Some(ReturnResultId(7));
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Supplemental admitted vote", "")
+                    .with_ability_definition(definition)
+                    .id();
+                scenario.with_mana_pool(
+                    P0,
+                    vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+                );
+                let mut runner = scenario.build();
+                runner.activate(source, 0).resolve();
+                let WaitingFor::VoteChoice {
+                    player: P0,
+                    return_result_occurrence: Some(occurrence),
+                    expected_return_result_process: Some(process),
+                    ..
+                } = runner.state().waiting_for
+                else {
+                    panic!("paid producer must reach its actual first ballot");
+                };
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+                let frame = &runner.state().return_result_frames[&occurrence];
+                assert_eq!(frame.process, Some(process));
+                assert!(frame.admitted_program.is_some());
+                assert!(
+                    matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
+                );
+                let mut hostile = runner.state().clone();
+                let WaitingFor::VoteChoice {
+                    per_choice_effect, ..
+                } = &mut hostile.waiting_for
+                else {
+                    unreachable!()
+                };
+                per_choice_effect[1] = Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 999 },
+                    },
+                ));
+                let before = hostile.clone();
+                assert!(crate::game::engine::apply(
+                    &mut hostile,
+                    P0,
+                    GameAction::ChooseOption {
+                        choice: "read".into()
+                    }
+                )
+                .is_err());
+                assert_eq!(
+                    hostile, before,
+                    "a changed outcome refuses before recording a ballot"
+                );
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "read".into(),
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::VoteChoice { player: P1, .. }
+                ));
+                *runner.state_mut() =
+                    serde_json::from_value(serde_json::to_value(runner.state()).unwrap()).unwrap();
+                runner
+                    .act(GameAction::ChooseOption {
+                        choice: "read".into(),
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseOneOfBranch { player: P0, .. }
+                ));
+                let paused = runner.state().clone();
+                for restore_kind in 0..3 {
+                    let restored = if restore_kind == 1 {
+                        serde_json::from_value::<TrustedGameStateEnvelope>(
+                            serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state()
+                    } else if restore_kind == 2 {
+                        serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                            serde_json::to_value(
+                                crate::types::resolution::ResolutionStateWire::from_game_state(
+                                    paused.clone(),
+                                ),
+                            )
+                            .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state()
+                    } else {
+                        serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
+                    };
+                    let mut resumed = GameRunner::from_state(restored);
+                    for ballot in 0..if per_ballot { 2 } else { 1 } {
+                        assert!(
+                            matches!(
+                                resumed.state().waiting_for,
+                                WaitingFor::ChooseOneOfBranch { player: P0, .. }
+                            ),
+                            "selected ballot {ballot} must really pause"
+                        );
+                        resumed.act(GameAction::ChooseBranch { index: 1 }).unwrap();
+                    }
+                    resumed.advance_until_stack_empty();
+                    assert_eq!(
+                        resumed.life(P0),
+                        20 + if empty {
+                            0
+                        } else if per_ballot {
+                            10
+                        } else {
+                            5
+                        }
+                    );
+                    assert_eq!(resumed.life(P1), 20);
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(
+                        resumed.state().stack.is_empty()
+                            && resumed.state().resolution_stack.is_empty()
+                    );
+                    assert!(resumed.state().return_result_frames.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
@@ -877,8 +1273,15 @@ mod tests {
         per_ballot.distribute = Some(crate::types::game_state::DistributionUnit::Counters(
             "charge".to_string(),
         ));
-        let per_ballot_runtime =
-            build_per_ballot_ability(&per_ballot, PlayerId(1), source_id, controller, &[], None);
+        let per_ballot_runtime = build_per_ballot_ability(
+            &per_ballot,
+            PlayerId(1),
+            source_id,
+            controller,
+            &[],
+            None,
+            None,
+        );
 
         assert_eq!(player_scope_runtime.distribute, player_scope.distribute);
         assert_eq!(aggregate_runtime.distribute, aggregate.distribute);

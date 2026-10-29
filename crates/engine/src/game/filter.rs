@@ -8,6 +8,101 @@ use std::collections::{HashMap, HashSet};
 pub(crate) use crate::types::ability::filter_implies_battlefield_permanent;
 
 #[cfg(test)]
+mod addressed_player_predicate_tests {
+    use super::*;
+    use crate::types::ability::{
+        AggregateFunction, Comparator, ObjectProperty, PlayerRelation, PlayerScope, ReturnResultId,
+        ZoneChangeRecordSource,
+    };
+
+    // CR 608.2c: a missing prior instruction's result is not a scalar zero.
+    #[test]
+    fn source_only_player_predicates_refuse_before_not_or_and_all_except() {
+        let state = GameState::new_two_player(42);
+        let scope = PlayerFilter::PlayerAttribute {
+            relation: PlayerRelation::Opponent,
+            attr: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
+            comparator: Comparator::GT,
+            value: QuantityExpr::Ref {
+                qty: QuantityRef::ZoneChangeAggregate {
+                    source: ZoneChangeRecordSource::InstructionResult {
+                        result: ReturnResultId(7),
+                    },
+                    from: Some(Zone::Battlefield),
+                    to: Some(Zone::Exile),
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                    function: AggregateFunction::Sum,
+                    property: ObjectProperty::Power,
+                },
+            },
+        };
+        let direct = TargetFilter::PlayerMatching {
+            player: Box::new(scope.clone()),
+        };
+        let predicates = [
+            direct.clone(),
+            TargetFilter::Not {
+                filter: Box::new(direct.clone()),
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Any, direct.clone()],
+            },
+            TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Any,
+                    TargetFilter::Not {
+                        filter: Box::new(direct),
+                    },
+                ],
+            },
+            TargetFilter::PlayerMatching {
+                player: Box::new(PlayerFilter::AllExcept {
+                    exclude: Box::new(scope),
+                }),
+            },
+        ];
+        for filter in predicates {
+            assert!(!player_matches_target_filter(
+                &filter,
+                PlayerId(1),
+                Some(PlayerId(0))
+            ));
+            for source in [None, Some(ObjectId(999))] {
+                assert!(!player_matches_target_filter_in_state(
+                    &state,
+                    &filter,
+                    PlayerId(1),
+                    Some(PlayerId(0)),
+                    source
+                ));
+            }
+        }
+        let ordinary = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 0 },
+            }),
+        };
+        assert!(
+            player_matches_target_filter_in_state(
+                &state,
+                &ordinary,
+                PlayerId(1),
+                Some(PlayerId(0)),
+                Some(ObjectId(999))
+            ),
+            "ordinary scalar predicate reaches the same stateful door"
+        );
+    }
+}
+
+#[cfg(test)]
 mod prior_controller_filter_tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0, P1};
@@ -10498,10 +10593,7 @@ fn matches_filter_prop_known(
                 state,
                 obj.controller,
                 player,
-                &FilterContext {
-                    source_controller: Some(source.controller.unwrap_or(obj.controller)),
-                    ..FilterContext::from_source_context(source)
-                },
+                &FilterContext::from_source_context(source),
             )
         }
         // CR 305.1 + CR 601.2a: "played by" entry replacements (Uphill Battle).
@@ -11208,7 +11300,7 @@ fn matches_filter_prop_known(
             if candidate_names.is_empty() {
                 return false;
             }
-            let nested_ctx = FilterContext::from_source_with_controller(source.id, controller);
+            let nested_ctx = FilterContext::from_source_context(source);
             !state
                 .battlefield
                 .iter()
@@ -13119,7 +13211,9 @@ pub fn player_matches_target_filter(
     player_id: PlayerId,
     source_controller: Option<PlayerId>,
 ) -> bool {
-    if player_predicate_needs_result_context(filter) { return false; }
+    if player_predicate_needs_result_context(filter) {
+        return false;
+    }
     player_matches_target_filter_with(
         filter,
         player_id,
@@ -13154,7 +13248,9 @@ pub fn player_matches_target_filter_in_state(
     source_id: Option<ObjectId>,
 ) -> bool {
     let Some(source_id) = source_id else {
-        if player_predicate_needs_result_context(filter) { return false; }
+        if player_predicate_needs_result_context(filter) {
+            return false;
+        }
         return player_matches_target_filter_with(
             filter,
             player_id,

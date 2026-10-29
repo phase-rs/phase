@@ -78,6 +78,35 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_owned(state, ability, events, None)
+}
+
+pub(crate) fn resolve_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::AdmittedInstructionResult<'_>>,
+) -> Result<(), EffectError> {
+    let declarations;
+    let admitted = if let Some(admitted) = admitted {
+        admitted
+    } else {
+        let (summary, namespace) = crate::types::ability::classify_instruction_result_invocation(
+            ability,
+            crate::types::ability::InstructionResultEntry::Independent,
+            None,
+        )?;
+        if !matches!(
+            summary,
+            crate::types::ability::InstructionResultProcess::Unused
+        ) {
+            return Err(EffectError::InvalidParam(
+                "PayCost requires an admitted instruction-result invocation".into(),
+            ));
+        }
+        declarations = namespace;
+        (ability, &declarations)
+    };
     let (cost, scale, payer_filter) = match &ability.effect {
         Effect::PayCost { cost, scale, payer } => (cost, scale, payer),
         _ => return Err(EffectError::MissingParam("PayCost".to_string())),
@@ -134,6 +163,7 @@ pub fn resolve(
             payer,
             &AbilityCost::Mana { cost: scaled },
             events,
+            admitted,
         )?;
         return Ok(());
     }
@@ -233,8 +263,14 @@ pub fn resolve(
                 resolve_quantity_with_targets(state, amount, &payment_ability).max(0),
             )
             .unwrap_or(0);
-            let outcome =
-                resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+            let outcome = resolve_ability_cost_payment(
+                state,
+                &payment_ability,
+                payer,
+                cost,
+                events,
+                admitted,
+            )?;
             // Gate the stamp on THIS payment's outcome, not the global
             // `cost_payment_failed_flag` — a stale flag from an earlier effect
             // must not suppress the stamp for a payment that succeeded.
@@ -250,7 +286,7 @@ pub fn resolve(
         // `pay_life_as_cost`).
         _ => {
             prepare_pay_cost_life_amount(state, &mut payment_ability, cost);
-            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events, admitted)?;
         }
     }
     Ok(())
@@ -306,6 +342,7 @@ fn resolve_ability_cost_payment(
     payer: PlayerId,
     cost: &AbilityCost,
     events: &mut Vec<GameEvent>,
+    admitted: super::AdmittedInstructionResult<'_>,
 ) -> Result<PaymentOutcome, EffectError> {
     if matches!(cost, AbilityCost::Composite { .. })
         && !state.payment_transaction_replay
@@ -339,12 +376,13 @@ fn resolve_ability_cost_payment(
             // ordinary non-mana cost choices such as discard selection.
             if !crate::game::casting::mana_ability_cost_payment_is_paused(state) {
                 if let Some(remaining_cost) = remaining_cost.clone() {
-                    super::prepend_remaining_pay_cost_continuation(
+                    super::prepend_remaining_pay_cost_continuation_owned(
                         state,
                         ability,
                         payer,
                         remaining_cost,
-                    );
+                        admitted,
+                    )?;
                 }
             }
             Ok(PaymentOutcome::Paused { remaining_cost })

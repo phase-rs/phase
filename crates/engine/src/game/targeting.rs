@@ -4128,6 +4128,72 @@ pub(crate) fn resolve_tracked_set_sentinel(
 #[cfg(test)]
 mod tests {
 
+    // CR 109.5 + CR 608.2b: recheck the announced ability's player predicate.
+    #[test]
+    fn player_target_revalidation_keeps_executable_and_candidate_scope() {
+        use crate::game::filter::FilterContext;
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{
+            Comparator, Effect, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr,
+            QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+        };
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P1, "Supplemental player role source", 2, 2)
+            .id();
+        scenario.add_card_to_hand(P1, "Candidate hand card");
+        let mut state = scenario.build().state().clone();
+        state.objects.get_mut(&source).unwrap().controller = P0;
+        let mut ability =
+            ResolvedAbility::new(Effect::NoOp, vec![TargetRef::Player(P1)], source, P0);
+        ability.chosen_x = Some(1);
+        ability.scoped_player = Some(P0);
+        let role = TargetFilter::PlayerMatching {
+            player: Box::new(PlayerFilter::PlayerAttribute {
+                relation: PlayerRelation::Opponent,
+                attr: QuantityRef::HandSize {
+                    player: PlayerScope::ScopedPlayer,
+                },
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name: "X".into() },
+                },
+            }),
+        };
+        assert!(super::target_ref_matches_resolved_filter_with_context(
+            &state,
+            &role,
+            &TargetRef::Player(P1),
+            &FilterContext::from_ability(&ability)
+        ));
+        assert!(
+            !super::target_ref_matches_resolved_filter_with_context(
+                &state,
+                &role,
+                &TargetRef::Player(P0),
+                &FilterContext::from_ability(&ability)
+            ),
+            "the source owner is not the controller-relative opponent"
+        );
+        ability.chosen_x = Some(0);
+        assert!(!super::target_ref_matches_resolved_filter_with_context(
+            &state,
+            &role,
+            &TargetRef::Player(P1),
+            &FilterContext::from_ability(&ability)
+        ));
+        ability.chosen_x = Some(1);
+        assert!(
+            !super::target_ref_matches_resolved_filter_with_context(
+                &state,
+                &role,
+                &TargetRef::Player(P1),
+                &FilterContext::from_source_with_controller(source, P0)
+            ),
+            "source-only inspection cannot borrow the executable's announced X"
+        );
+    }
+
     /// CR 400.7j + CR 608.2k: an activated ability follows its paid source
     /// into exile, but cannot follow a later independent move of that card.
     #[test]

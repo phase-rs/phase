@@ -6503,7 +6503,7 @@ mod tests {
         detect_replacement, dynamic_markers_are_all_recorded_unrecognized,
         effect_has_internal_optionality, trigger_tree_has_optional, twice_is_activation_limit,
     };
-    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle::{parse_oracle_text, parse_oracle_text_traced};
     use crate::parser::oracle_effect::gap_diagnosis::{
         swallowed_clause_gap, GuardWord, SwallowedAxis,
     };
@@ -6512,7 +6512,8 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
         CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
+        CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
+        ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
         EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
         PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
         StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
@@ -6722,12 +6723,16 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // authorities asked about one text. This is the multi-authority hostile fixture:
         // a shared phrase buffer, or extraction hoisted above the per-detector call,
         // gives both records the same verdict and turns the second half red.
-        let parsed = parse_named(
+        let trace = parse_oracle_text_traced(
             "Destroy target creature unless its controller pays life equal to its \
              toughness. A creature destroyed this way can't be regenerated.",
             "Essence Vortex",
-            &["Instant"],
+            &[],
+            &["Instant".to_string()],
+            &[],
         );
+        eprintln!("condition_unless_swallow_carries_the_rejected_guard: {trace:#?}");
+        let parsed = trace.production_output;
 
         assert_eq!(
             only_swallow(&parsed, "Condition_Unless").gap(),
@@ -6988,7 +6993,15 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         let mut gapful: Vec<String> = Vec::new();
 
         for (name, text, types) in fixtures {
-            let parsed = parse_named(text, name, types);
+            let trace = parse_oracle_text_traced(
+                text,
+                name,
+                &[],
+                &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+                &[],
+            );
+            eprintln!("non_phrase_detectors_carry_no_gap/{name}: {trace:#?}");
+            let parsed = trace.production_output;
             for warning in &parsed.parse_warnings {
                 let OracleDiagnostic::SwallowedClause { detector, .. } = warning else {
                     continue;
@@ -7189,7 +7202,15 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         let text = "Double strike\nSpells cast from among cards you drew this turn cost {1} \
                     less to cast.\nSpells cast from among cards your opponents drew this turn \
                     cost {1} more to cast.";
-        let parsed = parse_named(text, "Captain Eberhart", &["Creature"]);
+        let trace = parse_oracle_text_traced(
+            text,
+            "Captain Eberhart",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        eprintln!("different_units_carry_different_spans: {trace:#?}");
+        let parsed = trace.production_output;
 
         let found = swallows(&parsed);
         assert_eq!(found.len(), 2, "one finding per line: {found:?}");
@@ -9286,11 +9307,15 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// longer a swallow, so the guard now uses a genuinely dropped duration.)
     #[test]
     fn duration_this_turn_still_fires_outside_exemption_scope() {
-        let parsed = parse_named(
+        let trace = parse_oracle_text_traced(
             "Creatures you control can't block this turn.",
             "Test Block Lock",
-            &["Land"],
+            &[],
+            &["Land".to_string()],
+            &[],
         );
+        eprintln!("duration_this_turn_still_fires_outside_exemption_scope: {trace:#?}");
+        let parsed = trace.production_output;
 
         assert!(has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
@@ -9302,12 +9327,18 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// keeps the exemption from over-reaching.
     #[test]
     fn duration_this_turn_fires_when_duration_and_activation_restriction_coexist() {
-        let parsed = parse_named(
+        let trace = parse_oracle_text_traced(
             "Creatures you control can't block this turn.\n\
              {T}: Draw a card. Activate only if you attacked with two or more creatures this turn.",
             "Test Hybrid",
-            &["Land"],
+            &[],
+            &["Land".to_string()],
+            &[],
         );
+        eprintln!(
+            "duration_this_turn_fires_when_duration_and_activation_restriction_coexist: {trace:#?}"
+        );
+        let parsed = trace.production_output;
 
         assert!(has_swallowed_detector(&parsed, "Duration_ThisTurn"));
     }
@@ -14301,11 +14332,15 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// not a co-scoped reveal iteration; it still raises exactly one `DynamicQty`.
     #[test]
     fn make_an_example_verbatim_still_raises_one_dynamic_qty() {
-        let parsed = parse_named(
+        let trace = parse_oracle_text_traced(
             "Each opponent separates the creatures they control into two piles. For each opponent, you choose one of their piles. Each opponent sacrifices the creatures in their chosen pile. (Piles can be empty.)",
             "Make an Example",
-            &["Sorcery"],
+            &[],
+            &["Sorcery".to_string()],
+            &[],
         );
+        eprintln!("make_an_example_verbatim_still_raises_one_dynamic_qty: {trace:#?}");
+        let parsed = trace.production_output;
         assert_eq!(swallows_for(&parsed, "DynamicQty").len(), 1);
     }
 
@@ -14975,19 +15010,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         }
     }
 
-    /// CR 509.1g + CR 608.2i: every shape whose bare "it" has no `SelfRef`
-    /// antecedent declines the blocked-history clause and must be REPORTED, in
-    /// both windows: a typed trigger subject in an anaphoric compound (a), a
-    /// spell's chosen target (b), a chain-pinned target (c), a typed subject in a
-    /// delayed body (d), and a typed dies-trigger subject (e). Each row pairs the
-    /// negative (no `BlockedBySubject` in the parse) with its reach guard — the
-    /// mass effect parsed with its unrestricted creature filter — and with the
-    /// detector firing, which itself proves the unit was not skipped as
-    /// unimplemented.
+    /// The complete anaphoric compound is refused rather than widened into an
+    /// unrestricted mass effect. Same-unit refusal needs no duplicate swallow.
     #[test]
-    fn combat_history_relation_detector_reports_every_declined_clause() {
-        // (a) Typed trigger subject, anaphoric compound: the primary acted on the
-        // triggering creature, so the continuation gets no `SelfRef` pin.
+    fn combat_history_anaphoric_compound_preserves_complete_public_refusal() {
         let parsed = parse_named(
             "Whenever a creature you control blocks, destroy it and all creatures it blocked this turn.",
             "Test Card",
@@ -15000,22 +15026,106 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         assert!(
             matches!(
                 &*execute.effect,
-                Effect::Destroy {
-                    target: TargetFilter::TriggeringSource,
-                    ..
-                }
+                Effect::Unimplemented { name, description }
+                    if name == "destroy_target_tail"
+                        && description.as_deref()
+                            == Some("destroy it and all creatures it blocked this turn")
             ),
-            "reach guard: primary must destroy the triggering creature, got {:?}",
+            "reach guard: the complete unsupported instruction is retained, got {:?}",
             execute.effect
         );
-        assert!(
-            execute
-                .sub_ability
-                .as_deref()
-                .is_some_and(|sub| destroy_all_target(&sub.effect).is_some()),
-            "reach guard: the DestroyAll continuation must exist"
-        );
+        assert!(any_ability_has_unimplemented(&parsed));
+        assert!(!parse_has_blocked_history_filter(&parsed));
+        assert!(!parse_has_bare_creature_mass_effect(
+            &parsed,
+            destroy_all_target
+        ));
+        assert!(!has_swallowed_detector(&parsed, "CombatHistoryRelation"));
+    }
 
+    #[test]
+    fn combat_history_relation_detector_distinguishes_missing_matching_and_wrong_windows() {
+        for (text, scope, wrong_scope) in [
+            (
+                "Destroy all creatures it blocked this turn.",
+                CombatHistoryScope::ThisTurn,
+                CombatHistoryScope::ThisCombat,
+            ),
+            (
+                "Destroy all creatures it blocked this combat.",
+                CombatHistoryScope::ThisCombat,
+                CombatHistoryScope::ThisTurn,
+            ),
+        ] {
+            let cleaned = text.to_ascii_lowercase();
+            let (_, (_, recognized_scope), _) =
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_source_blocked_history_clause,
+                )
+                .expect("reach guard: the existing recognizer owns the history clause");
+            assert_eq!(recognized_scope, scope);
+
+            // Deliberate typed audit faults, not alleged public parser output.
+            for (represented_scope, expected_count) in
+                [(None, 1), (Some(scope), 0), (Some(wrong_scope), 1)]
+            {
+                let properties = represented_scope
+                    .map(|scope| FilterProp::CombatRelation {
+                        relation: CombatRelation::BlockedBySubject { scope },
+                        subject: CombatRelationSubject::Source,
+                    })
+                    .into_iter()
+                    .collect();
+                let effect = Effect::DestroyAll {
+                    target: TargetFilter::Typed(TypedFilter::creature().properties(properties)),
+                    cant_regenerate: false,
+                };
+                let evidence = UnitEvidence::of_effect(&effect);
+                assert!(evidence.any::<Effect>(|effect| {
+                    matches!(
+                        effect,
+                        Effect::DestroyAll {
+                            cant_regenerate: false,
+                            ..
+                        }
+                    )
+                }));
+                assert_eq!(
+                    evidence.any::<FilterProp>(|prop| matches!(
+                        prop,
+                        FilterProp::CombatRelation {
+                            relation: CombatRelation::BlockedBySubject { scope: found },
+                            subject: CombatRelationSubject::Source,
+                        } if Some(*found) == represented_scope
+                    )),
+                    represented_scope.is_some(),
+                    "reach guard: typed evidence retains the supplied exact scope"
+                );
+                let mut diagnostics = Vec::new();
+                super::detect_combat_history_relation(&cleaned, text, &evidence, &mut diagnostics);
+                assert_eq!(
+                    diagnostics.len(),
+                    expected_count,
+                    "{text}/{represented_scope:?}: {diagnostics:?}"
+                );
+                for diagnostic in diagnostics {
+                    assert!(matches!(
+                        &diagnostic,
+                        OracleDiagnostic::SwallowedClause { detector, .. }
+                            if detector == "CombatHistoryRelation"
+                    ));
+                    assert_eq!(diagnostic.gap(), None);
+                }
+            }
+        }
+    }
+
+    /// CR 509.1g + CR 608.2i: the remaining non-source antecedents must be
+    /// reported when their mass effect survives with an unrestricted filter.
+    /// Each row retains that positive reach guard before checking the warning.
+    #[test]
+    fn combat_history_relation_detector_reports_every_declined_clause() {
         // (b) A spell's chosen target: the continuation's "it" names a target,
         // which has no sound combat-relation subject.
         let spell = parse_named(
@@ -15044,8 +15154,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         );
 
         for (label, parsed, is_mass_effect) in [
-            ("(a) typed compound", parsed, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
-            ("(b) spell target", spell, destroy_all_target),
+            ("(b) spell target", spell, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
             (
                 "(c) chain-pinned target",
                 parse_named(
