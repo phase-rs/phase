@@ -74,9 +74,10 @@
 //! nothing: its own paths are checked, but a path through a module it imports
 //! (`use crate::types::game_state as gs; gs::GameState`, or one through `{self}`) is not
 //! resolved, and in parser code such a `use` of a state module is not itself reported, as a
-//! module-level one is; and a game-side trait a mixed `types/` file imports, called by method
-//! syntax from an AST item there, is not seen: method resolution needs types, and Phase 6's
-//! split compiles it.
+//! module-level one is; a game-side or state-layer trait a mixed `types/` file imports, called
+//! by method syntax from an AST item there, is not seen; and a trait that a glob of a non-state
+//! `types/` module or of the root, or a function-local glob, brings into scope, called by method
+//! syntax, is not seen: method resolution needs types, and Phase 6's split compiles it.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
