@@ -44,6 +44,7 @@ mod retained_spell_journal_tests {
     }
 }
 
+use super::bridge::nom_on_lower;
 use super::context::ParseContext;
 use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
@@ -2415,19 +2416,28 @@ pub(crate) fn parse_historical_zone_aggregate(
 /// past-controller population now and publish its single captured X value.
 /// This operand parser deliberately does not participate in ordinary quantities.
 pub(crate) fn parse_announce_locked_past_aggregate(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (population, (function, property)) = parse_object_property_aggregate_head(input)?;
+    let ((function, property), population) = nom_on_lower(
+        input,
+        &input.to_ascii_lowercase(),
+        parse_object_property_aggregate_head,
+    )
+    .ok_or_else(|| oracle_err(input))?;
     let antecedents = PlayerAntecedents::default();
     let (noun, controller, rest) = scan_preceded(population, |i| {
-        map_opt(
-            verify(parse_controller_phrase, |phrase| {
-                phrase.tense == ControllerTense::Past
-            }),
-            |phrase| {
-                let controller = bind_controller_phrase(&phrase, &antecedents)?;
-                admits_quantity_controller(&controller, phrase.form).then_some(controller)
-            },
-        )
-        .parse(i)
+        let (controller, rest) = nom_on_lower(i, &i.to_ascii_lowercase(), |lower| {
+            map_opt(
+                verify(parse_controller_phrase, |phrase| {
+                    phrase.tense == ControllerTense::Past
+                }),
+                |phrase| {
+                    let controller = bind_controller_phrase(&phrase, &antecedents)?;
+                    admits_quantity_controller(&controller, phrase.form).then_some(controller)
+                },
+            )
+            .parse(lower)
+        })
+        .ok_or_else(|| oracle_err(i))?;
+        Ok((rest, controller))
     })
     .ok_or_else(|| oracle_err(input))?;
     let (rest, _) = eof(rest)?;

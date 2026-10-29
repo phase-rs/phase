@@ -13540,9 +13540,8 @@ pub(super) fn apply_where_x_ability_expression(
     // happens to be read (resolution, for a damage amount or a draw count), which is
     // precisely the behaviour the printed qualifier exists to forbid.
     if let Some(locked) = where_x_expression.and_then(strip_announce_lock) {
-        let lower = locked.to_lowercase();
         let announced =
-            super::super::oracle_nom::quantity::parse_announce_locked_past_aggregate(&lower)
+            super::super::oracle_nom::quantity::parse_announce_locked_past_aggregate(locked)
                 .ok()
                 .map(|(_, qty)| QuantityExpr::Ref { qty })
                 .or_else(|| parse_where_x_quantity_expression(locked));
@@ -16798,6 +16797,55 @@ mod where_x_tests {
                 assert!(
                     matches!(definition.effect.as_ref(), Effect::Draw { count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } }, .. } if name == "X")
                 );
+                // Lexical matching folds case; literal names keep source spelling,
+                // and registered subtypes retain their existing canonical spelling.
+                for (noun, type_filters, properties) in [
+                    (
+                        "creatures named MiXeD Bonder's Ornament",
+                        vec![TypeFilter::Creature],
+                        vec![FilterProp::Named {
+                            name: "MiXeD Bonder's Ornament".into(),
+                        }],
+                    ),
+                    ("Oozes", vec![TypeFilter::Subtype("Ooze".into())], vec![]),
+                    ("oozes", vec![TypeFilter::Subtype("Ooze".into())], vec![]),
+                ] {
+                    let mut definition = AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::Draw {
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::Variable { name: "X".into() },
+                            },
+                            target: TargetFilter::Controller,
+                        },
+                    );
+                    let expression =
+                        format!("{}{noun} YOU CONTROLLED{suffix}", head.to_ascii_uppercase());
+                    super::apply_where_x_ability_expression(&mut definition, Some(&expression));
+                    assert_eq!(
+                        definition.announced_x,
+                        Some(QuantityExpr::Ref {
+                            qty: QuantityRef::PropertyAggregate(
+                                PropertyAggregate::new(
+                                    function,
+                                    property,
+                                    CardTypeSetSource::Objects {
+                                        filter: TargetFilter::Typed(TypedFilter {
+                                            type_filters,
+                                            controller: Some(ControllerRef::You),
+                                            properties,
+                                        })
+                                    }
+                                )
+                                .unwrap()
+                            ),
+                        }),
+                        "{expression}"
+                    );
+                    assert!(
+                        matches!(definition.effect.as_ref(), Effect::Draw { count: QuantityExpr::Ref { qty: QuantityRef::Variable { name } }, .. } if name == "X")
+                    );
+                }
             }
         }
         for expression in [
