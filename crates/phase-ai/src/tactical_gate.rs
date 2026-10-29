@@ -923,13 +923,23 @@ fn definition_is_componentwise_known_zero(
 ) -> bool {
     // CR 109.5 + CR 608.2c: on the candidate's ordinary printed spell tree,
     // "you" is its original caster, already supplied as `controller` here.
-    // A foreign or contextual actor needs a separate binding proof and fails open.
-    if definition.instruction_actor.as_ref().is_some_and(|actor| {
-        !matches!(
-            actor.as_controller(),
-            Some(engine::types::ability::ControllerRef::You)
-        )
-    }) || definition.kind != AbilityKind::Spell
+    // A targeted instruction needs a bound player and a zero proof for every
+    // possible player binding. Other contextual actors still fail open.
+    let targeted_actor = match definition
+        .instruction_actor
+        .as_ref()
+        .map(|actor| actor.as_controller())
+    {
+        None | Some(Some(engine::types::ability::ControllerRef::You)) => false,
+        Some(Some(engine::types::ability::ControllerRef::TargetPlayer))
+            if parent_target_bound
+                || (root && effect_binds_parent_target(definition.effect.as_ref())) =>
+        {
+            true
+        }
+        _ => return false,
+    };
+    if definition.kind != AbilityKind::Spell
         || definition.cost.is_some()
         || definition.else_ability.is_some()
         || definition.duration.is_some()
@@ -969,25 +979,37 @@ fn definition_is_componentwise_known_zero(
         return false;
     }
 
+    let quantity_is_zero = |quantity| {
+        if targeted_actor {
+            !state.players.is_empty()
+                && state.players.iter().all(|player| {
+                    try_resolve_quantity_in_source_context(state, quantity, player.id, source_id)
+                        == Some(0)
+                })
+        } else {
+            try_resolve_quantity_in_source_context(state, quantity, controller, source_id)
+                == Some(0)
+        }
+    };
     let effect_is_zero = match definition.effect.as_ref() {
         Effect::Draw { count, target }
             if accepted_zero_recipient(target, root, parent_target_bound)
                 && quantity_is_cast_stable_for_pre_cast(count) =>
         {
-            try_resolve_quantity_in_source_context(state, count, controller, source_id) == Some(0)
+            quantity_is_zero(count)
         }
         Effect::GainLife { amount, player }
             if accepted_zero_recipient(player, root, parent_target_bound)
                 && quantity_is_cast_stable_for_pre_cast(amount) =>
         {
-            try_resolve_quantity_in_source_context(state, amount, controller, source_id) == Some(0)
+            quantity_is_zero(amount)
         }
         Effect::LoseLife { amount, target }
             if target.as_ref().is_none_or(|recipient| {
                 accepted_zero_recipient(recipient, root, parent_target_bound)
             }) && quantity_is_cast_stable_for_pre_cast(amount) =>
         {
-            try_resolve_quantity_in_source_context(state, amount, controller, source_id) == Some(0)
+            quantity_is_zero(amount)
         }
         Effect::Discard {
             count,
@@ -999,7 +1021,7 @@ fn definition_is_componentwise_known_zero(
             && selection.is_chosen()
             && quantity_is_cast_stable_for_pre_cast(count) =>
         {
-            try_resolve_quantity_in_source_context(state, count, controller, source_id) == Some(0)
+            quantity_is_zero(count)
         }
         _ => false,
     };
@@ -6239,6 +6261,90 @@ mod tests {
         assert!(
             !zero_cast_is_retained(&state, harvest),
             "the real issued Auto cast is rejected for the proven original caster"
+        );
+    }
+
+    #[test]
+    fn instruction_actor_target_player_zero_requires_binding_and_all_player_previews() {
+        let (mut state, congregate) = funded_zero_congregate_state();
+        let definition = &state.objects[&congregate].abilities[0];
+        assert_eq!(
+            definition
+                .instruction_actor
+                .as_ref()
+                .and_then(|actor| actor.as_controller()),
+            Some(&ControllerRef::TargetPlayer),
+            "the real Congregate parser retains the targeted instruction actor"
+        );
+        assert!(!zero_cast_is_retained(&state, congregate));
+        let mut runner = GameRunner::from_state(state.clone());
+        runner
+            .cast(congregate)
+            .target_player(P1)
+            .resolve()
+            .assert_life_delta(P1, 0);
+
+        let mut child = zero_controller_gain_definition();
+        child.instruction_actor = Some(ControllerRef::TargetPlayer.into());
+        child.effect = Box::new(Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 0 },
+            player: TargetFilter::ParentTarget,
+        });
+        Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)[0].sub_ability =
+            Some(Box::new(child));
+        assert!(
+            !zero_cast_is_retained(&state, congregate),
+            "the root's real player target also binds its zero continuation"
+        );
+
+        let amount = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+        Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)[0].effect =
+            Box::new(Effect::GainLife {
+                amount: amount.clone(),
+                player: TargetFilter::Player,
+            });
+        assert!(!zero_cast_is_retained(&state, congregate));
+        let witness = create_object(
+            &mut state,
+            CardId(91_950),
+            P1,
+            "Opponent's creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&witness)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &amount, P0, congregate),
+            Some(0)
+        );
+        assert_eq!(
+            try_resolve_quantity_in_source_context(&state, &amount, P1, congregate),
+            Some(1)
+        );
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a caster-only zero preview cannot prove zero for every actor binding"
+        );
+        state.battlefield.retain(|id| *id != witness);
+        state.objects.remove(&witness);
+        assert!(!zero_cast_is_retained(&state, congregate));
+
+        let definition =
+            &mut Arc::make_mut(&mut state.objects.get_mut(&congregate).unwrap().abilities)[0];
+        definition.effect = zero_controller_gain_definition().effect;
+        definition.sub_ability = None;
+        assert!(
+            zero_cast_is_retained(&state, congregate),
+            "a zero amount does not supply an absent player target binding"
         );
     }
 
