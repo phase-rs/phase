@@ -34318,7 +34318,10 @@ fn gavel_counter_pump_component_uses_public_equip_and_real_counter_producers() {
         equipped.final_waiting_for(),
         crate::types::game_state::WaitingFor::Priority { .. }
     ));
-    assert_eq!(runner.state().objects[&source].attached_to, Some(host));
+    assert_eq!(
+        runner.state().objects[&source].attached_to,
+        Some(crate::game::game_object::AttachTarget::Object(host))
+    );
     assert!(runner.state().stack.is_empty());
     assert_eq!(
         runner.state().players[0].mana_pool.total(),

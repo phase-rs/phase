@@ -15702,6 +15702,9 @@ mod token_materialization_completion_tests {
         use crate::game::effects::token_copy::tests::{
             creation_test_source, install_creation_fixture_replacements, CreationPauseCase,
         };
+        use crate::types::ability::{QuantityModification, ReplacementEvent, TargetFilter};
+        use crate::types::counter::CounterType;
+        use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
         for pause in [
             CreationPauseCase::Synchronous,
             CreationPauseCase::Queued,
@@ -15751,12 +15754,58 @@ mod token_materialization_completion_tests {
                 source_id: ObjectId(0),
                 pending_mana_ability: None,
             };
+            // Supplemental boundary contract: scheduled_collapse_axes and
+            // ObservedGrowth withhold observed Life while Tokens still enter.
+            let (expected_life_observed, expected_life, queued, counter) = match pause {
+                CreationPauseCase::Synchronous => (false, 22, false, false),
+                CreationPauseCase::Queued => (true, 20, true, false),
+                CreationPauseCase::Counter => (true, 20, false, true),
+                CreationPauseCase::ReloadQueued => (true, 20, true, false),
+                CreationPauseCase::ReloadCounter => (true, 20, false, true),
+            };
+            assert_eq!(life, 20);
+            let definitions = state
+                .objects
+                .values()
+                .flat_map(|object| object.replacement_definitions.iter())
+                .collect::<Vec<_>>();
+            if queued {
+                assert!(definitions.iter().any(|definition| {
+                    definition.execute.as_ref().is_some_and(|body| {
+                        matches!(&body.effect, Effect::ChooseOneOf { branches, .. }
+                            if branches.len() == 2 && branches.iter().all(|branch|
+                                matches!(branch.effect, Effect::Token { .. })))
+                    })
+                }), "actual queued two-Token legacy body; row={pause:?}; definitions={definitions:?}");
+            }
+            if counter {
+                assert!(definitions.iter().any(|definition| {
+                    definition.event == ReplacementEvent::ChangeZone
+                        && definition.valid_card == Some(TargetFilter::Any)
+                        && definition.execute.as_ref().is_some_and(|body| {
+                            matches!(&body.effect, Effect::PutCounter {
+                                counter_type: CounterType::Plus1Plus1,
+                                count: QuantityExpr::Fixed { value: 1 },
+                                target: TargetFilter::SelfRef,
+                            })
+                        })
+                }), "actual fixed entry-counter legacy body; row={pause:?}; definitions={definitions:?}");
+            }
+            assert_eq!(
+                ObservedGrowth::at_boundary(&state).life,
+                expected_life_observed,
+                "pre-submit persistent row={pause:?}; definitions={definitions:?}"
+            );
             let mut events = crate::game::apply_as_current(
                 &mut state,
                 GameAction::SubmitPayAmount { amount: 1 },
             )
             .unwrap()
             .events;
+            assert_eq!(
+                state.players[0].life, expected_life,
+                "immediate persistent row={pause:?}"
+            );
             if !matches!(pause, CreationPauseCase::Synchronous) {
                 assert!(
                     matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
@@ -15765,7 +15814,7 @@ mod token_materialization_completion_tests {
                     state.resolving_stack_entry, state.return_result_frames
                 );
                 assert_eq!(state.phase, phase);
-                assert_eq!(state.players[0].life, life + 2,
+                assert_eq!(state.players[0].life, expected_life,
                     "persistent row={pause:?}; wait={:?}; life_observed={}; counter_observed={}; resolution={:?}",
                     state.waiting_for,
                     crate::analysis::resource::life_growth_is_observed(&state),
@@ -15776,6 +15825,8 @@ mod token_materialization_completion_tests {
                 pause,
                 CreationPauseCase::ReloadQueued | CreationPauseCase::ReloadCounter
             ) {
+                let held_replacement = state.pending_replacement.clone();
+                let held_waiting = state.waiting_for.clone();
                 state = serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
                     serde_json::to_value(
                         crate::types::resolution::ResolutionStateWire::from_game_state(state),
@@ -15784,14 +15835,78 @@ mod token_materialization_completion_tests {
                 )
                 .unwrap()
                 .into_game_state();
+                assert_eq!(state.players[0].life, expected_life);
+                assert!(matches!(
+                    state.waiting_for,
+                    WaitingFor::ReplacementChoice { .. }
+                ));
+                assert_eq!(state.pending_replacement, held_replacement);
+                assert_eq!(state.waiting_for, held_waiting);
             }
+            let mut replacement_answers = 0;
+            let mut branch_answers = 0;
+            let mut expected_entry_counters = None;
+            let mut completed = false;
             for step in 0..60 {
-                let action = match state.waiting_for {
-                    WaitingFor::ReplacementChoice { .. } => {
+                let action = match &state.waiting_for {
+                    WaitingFor::ReplacementChoice { player, candidate_count, .. } => {
+                        assert_eq!(*player, PlayerId(0));
+                        assert_eq!(*candidate_count, 2);
+                        replacement_answers += 1;
+                        let pending = state.pending_replacement.as_ref().expect("actual held replacement");
+                        if counter {
+                            assert!(!pending.is_optional);
+                            assert_eq!(pending.candidates.len(), 2);
+                            let entrant = match &pending.proposed {
+                                ProposedEvent::AddCounter {
+                                    placement: CounterPlacement::Object {
+                                        actor, object_id, counter_type: CounterType::Plus1Plus1,
+                                    }, count: 1, ..
+                                } => {
+                                    assert_eq!(*actor, PlayerId(0));
+                                    assert_ne!(*object_id, source);
+                                    assert_ne!(*object_id, ObjectId(0));
+                                    *object_id
+                                }
+                                other => panic!("expected count1 entrant counter proposal; row={pause:?}; actual={other:?}"),
+                            };
+                            let modifiers = pending.candidates.iter().map(|candidate| {
+                                let definition = &state.objects[&candidate.source]
+                                    .replacement_definitions[candidate.index];
+                                assert_eq!(definition.event, ReplacementEvent::AddCounter);
+                                definition.quantity_modification.clone()
+                            }).collect::<Vec<_>>();
+                            assert!(modifiers == vec![Some(QuantityModification::DOUBLE), Some(QuantityModification::Plus { value: 1 })]
+                                || modifiers == vec![Some(QuantityModification::Plus { value: 1 }), Some(QuantityModification::DOUBLE)],
+                                "actual DOUBLE/Plus1 candidates; row={pause:?}; modifiers={modifiers:?}");
+                            // CR 616.1 + CR 616.1f: index0 applies first, then
+                            // the remaining mandatory modifier applies to it.
+                            let count = match modifiers[0] {
+                                Some(QuantityModification::Times { factor: 2 }) => 3,
+                                Some(QuantityModification::Plus { value: 1 }) => 4,
+                                ref other => panic!("unexpected selected modifier: {other:?}"),
+                            };
+                            assert!(expected_entry_counters.replace((entrant, count)).is_none());
+                        } else {
+                            assert!(queued);
+                            assert!(pending.is_optional);
+                            assert_eq!(pending.candidates.len(), 1);
+                        }
                         GameAction::ChooseReplacement { index: 0 }
                     }
-                    WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 1 },
-                    WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => break,
+                    WaitingFor::ChooseOneOfBranch { player, branches, .. } => {
+                        assert!(queued);
+                        assert_eq!(*player, PlayerId(0));
+                        assert_eq!(branches.len(), 2);
+                        assert!(matches!(&branches[1].effect, Effect::Token { types, .. }
+                            if types.iter().any(|kind| kind == "Dog")));
+                        branch_answers += 1;
+                        GameAction::ChooseBranch { index: 1 }
+                    }
+                    WaitingFor::Priority { .. } if state.resolution_stack.is_empty() => {
+                        completed = true;
+                        break;
+                    }
                     WaitingFor::Priority { .. } => GameAction::PassPriority,
                     ref other => panic!(
                         "persistent row={pause:?}, step={step}; wait={other:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}",
@@ -15804,7 +15919,15 @@ mod token_materialization_completion_tests {
                         .unwrap()
                         .events,
                 );
+                assert_eq!(state.phase, phase, "persistent row={pause:?}, step={step}");
             }
+            assert!(completed,
+                "persistent row={pause:?} exhausted 60 actions; wait={:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}; active={:?}; pending={:?}",
+                state.waiting_for, state.stack, state.resolution_stack, state.resolving_stack_entry,
+                state.return_result_frames, state.active_return_result_occurrence,
+                state.pending_resolution_completion);
+            assert_eq!(replacement_answers, usize::from(queued || counter));
+            assert_eq!(branch_answers, usize::from(queued));
             let births = events
                 .iter()
                 .filter_map(|event| {
@@ -15827,11 +15950,79 @@ mod token_materialization_completion_tests {
                 }
             );
             assert!(state.resolution_stack.is_empty());
-            assert_eq!(state.players[0].life, life + 2);
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+            assert!(state.pending_replacement.is_none());
+            assert!(state.pending_token_battlefield_entry.is_none());
+            assert!(state.pending_etb_counters.is_empty());
+            assert!(state.active_copy_token().is_none());
+            assert!(state.active_counter_additions().is_none());
+            assert!(!state.has_post_replacement_drain());
+            assert!(state.return_result_frames.is_empty());
+            assert!(state.active_return_result_occurrence.is_none());
+            assert!(state.resolving_stack_entry.is_none());
+            assert!(state.pending_resolution_completion.is_none());
+            assert_eq!(state.players[0].life, expected_life);
             assert_eq!(
                 state.phase, phase,
                 "materialization completes in the intended stable phase"
             );
+            assert_eq!(
+                births.iter().copied().collect::<HashSet<_>>().len(),
+                births.len(),
+                "no replayed TokenCreated event"
+            );
+            // CR 111.3: the original profile and chosen Dog branch supply
+            // the characteristics of their respective actual births.
+            let original_births = births
+                .iter()
+                .filter(|id| state.objects[*id].name == "Persistent token class")
+                .collect::<Vec<_>>();
+            assert_eq!(original_births.len(), 1);
+            let original = &state.objects[original_births[0]];
+            assert_eq!(
+                (original.base_power, original.base_toughness),
+                (Some(2), Some(3))
+            );
+            if queued {
+                let dogs = births
+                    .iter()
+                    .filter(|id| state.objects[*id].card_types.subtypes == ["Dog".to_string()])
+                    .collect::<Vec<_>>();
+                assert_eq!(dogs.len(), 1);
+                let dog = &state.objects[dogs[0]];
+                assert_eq!((dog.base_power, dog.base_toughness), (Some(3), Some(1)));
+                assert!(dog
+                    .keywords
+                    .contains(&crate::types::keywords::Keyword::Vigilance));
+            }
+            if counter {
+                // CR 122.6: the real entrant owns the counters placed on entry.
+                let (entrant, expected_count) =
+                    expected_entry_counters.expect("actual counter ordering response");
+                assert_eq!(births, vec![entrant]);
+                assert_eq!(
+                    state.objects[&entrant]
+                        .counters
+                        .get(&CounterType::Plus1Plus1),
+                    Some(&expected_count)
+                );
+                assert!(
+                    state
+                        .objects
+                        .values()
+                        .filter(|object| !births.contains(&object.id))
+                        .all(|object| object
+                            .counters
+                            .get(&CounterType::Plus1Plus1)
+                            .copied()
+                            .unwrap_or(0)
+                            == 0),
+                    "no counters on a replacement host, original source or sentinel"
+                );
+            } else {
+                assert!(expected_entry_counters.is_none());
+            }
             for id in births {
                 assert_eq!(state.objects[&id].zone, Zone::Battlefield);
                 assert!(state.objects[&id].tapped,
