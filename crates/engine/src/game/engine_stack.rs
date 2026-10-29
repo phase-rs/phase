@@ -426,12 +426,9 @@ pub(super) fn handle_multi_target_selection(
         }
     };
 
-    effects::validate_selected_instruction_result_owner(
-        state,
-        &pending_ability,
-        return_result_occurrence,
-    )
-    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    let (admitted_program, declarations) =
+        effects::owned_cursor_declarations(state, return_result_occurrence, &pending_ability)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     effects::with_inherited_return_result_occurrence(state, return_result_occurrence, |state| {
         if selected.len() < min_targets || selected.len() > max_targets {
             return Err(EngineError::InvalidAction(format!(
@@ -463,8 +460,14 @@ pub(super) fn handle_multi_target_selection(
 
         state.waiting_for = WaitingFor::Priority { player };
         state.priority_player = player;
-        effects::resolve_resume_owned_ability_chain(state, &ability, events, 0)
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+        effects::resolve_carrier_owned_ability_chain(
+            state,
+            &ability,
+            events,
+            0,
+            (&admitted_program, &declarations),
+        )
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
         resume_pending_continuation_if_priority(state, events)?;
 
         Ok(state.waiting_for.clone())

@@ -61,6 +61,45 @@ fn payment_occurrence(
     }
 }
 
+fn pending_cost_move_admitted_program(
+    state: &GameState,
+) -> Result<
+    (
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    ),
+    EngineError,
+> {
+    let (occurrence, body) = match state.pending_cost_move_resume.as_ref() {
+        Some(PendingCostMoveResume::WardSacrificePayment {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        })
+        | Some(PendingCostMoveResume::UnlessBouncePayment {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        })
+        | Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        }) => (*return_result_occurrence, pending_effect.as_ref()),
+        Some(PendingCostMoveResume::RandomDiscardUnlessPayment(resume)) => (
+            resume.return_result_occurrence,
+            resume.pending_effect.as_ref(),
+        ),
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "missing resolution payment continuation".into(),
+            ))
+        }
+    };
+    effects::owned_cursor_declarations(state, occurrence, body)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))
+}
+
 pub(crate) fn validate_payment_result_owner(
     state: &GameState,
     waiting: &WaitingFor,
@@ -94,7 +133,7 @@ pub(crate) fn validate_payment_result_owner(
         } => (*return_result_occurrence, pending_effect.as_ref()),
         _ => return Ok(()),
     };
-    effects::validate_selected_instruction_result_owner(state, body, occurrence)?;
+    effects::owned_cursor_declarations(state, occurrence, body)?;
     let mut addressed = Vec::new();
     let mut read = |reference: &crate::types::ability::QuantityRef| {
         if let Some(result) = reference.instruction_result_id() {
@@ -230,9 +269,27 @@ pub(super) fn handle_optional_effect_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let owned = state
+        .active_optional_effect_frame()
+        .map(|frame| {
+            effects::owned_cursor_declarations(
+                state,
+                frame.return_result_occurrence,
+                &frame.ability,
+            )
+        })
+        .transpose()
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     let events_before = events.len();
     let produced = super::triggers::with_accepted_triggered_mana_action_scope(state, |state| {
-        handle_optional_effect_choice_inner(state, accept, events)
+        handle_optional_effect_choice_inner(
+            state,
+            accept,
+            events,
+            owned
+                .as_ref()
+                .map(|(program, declarations)| (program, declarations)),
+        )
     })?;
     if let super::triggers::TriggeredManaReadiness::Resumed { wait, .. } =
         super::triggers::finish_accepted_triggered_mana_action(state, events, events_before)?
@@ -261,6 +318,8 @@ pub(super) fn handle_resolution_optional_payment_choice(
         .active_optional_effect_frame()
         .cloned()
         .ok_or_else(|| EngineError::InvalidAction("optional payment frame is missing".into()))?;
+    effects::owned_cursor_declarations(state, frame.return_result_occurrence, &frame.ability)
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     let (live_player, live) = effects::resolution_optional_payment_options(state, &frame.ability)
         .ok_or_else(|| {
         EngineError::InvalidAction("optional payment root is no longer valid".into())
@@ -320,7 +379,13 @@ fn handle_optional_effect_choice_inner(
     state: &mut GameState,
     accept: bool,
     events: &mut Vec<GameEvent>,
+    admitted: Option<effects::AdmittedInstructionResult<'_>>,
 ) -> Result<WaitingFor, EngineError> {
+    if state.active_optional_effect_frame().is_some() && admitted.is_none() {
+        return Err(EngineError::InvalidAction(
+            "optional effect lost its admitted program".into(),
+        ));
+    }
     let events_before = events.len();
     state.cost_payment_failed_flag = false;
 
@@ -383,8 +448,10 @@ fn handle_optional_effect_choice_inner(
                 &mut state.active_return_result_occurrence,
                 return_result_occurrence,
             );
-            let result =
-                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            let admitted = admitted.expect("optional frame authenticated before consumption");
+            let result = effects::resolve_optional_effect_decision_owned(
+                state, *ability, choice, events, 1, admitted,
+            );
             state.active_return_result_occurrence = previous_return_occurrence;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_events = previous_trigger_events;
@@ -510,6 +577,10 @@ pub(super) fn handle_opponent_may_choice(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
+    if let Some(frame) = state.active_optional_effect_frame() {
+        effects::owned_cursor_declarations(state, frame.return_result_occurrence, &frame.ability)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+    }
     let occurrence = state
         .active_optional_effect_frame()
         .and_then(|frame| frame.return_result_occurrence);
@@ -570,6 +641,17 @@ fn handle_opponent_may_choice_inner(
     accept: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let owned = state
+        .active_optional_effect_frame()
+        .map(|frame| {
+            effects::owned_cursor_declarations(
+                state,
+                frame.return_result_occurrence,
+                &frame.ability,
+            )
+        })
+        .transpose()
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
     let events_before = events.len();
     let WaitingFor::OpponentMayChoice {
         player: promptee,
@@ -588,6 +670,8 @@ fn handle_opponent_may_choice_inner(
 
     if accept {
         if let Some(frame) = state.active_optional_effect_frame().cloned() {
+            let (program, declarations) = owned.as_ref().expect("authenticated optional frame");
+            let admitted = (program, declarations);
             let mut ability = frame.ability.clone();
             // CR 608.2c: "their" in an accepted any-player instruction binds
             // to the player who accepted across the complete local chain.
@@ -619,7 +703,7 @@ fn handle_opponent_may_choice_inner(
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                     .expect("cloned optional-effect frame remains active until final decision");
                 set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &frame.ability, events)?;
+                resolve_all_declined_opponent_may(state, &frame.ability, events, admitted)?;
                 resume_pending_continuation_if_priority(state, events)?;
                 super::triggers::collect_and_drain_observer_triggers_if_settled(
                     state,
@@ -697,11 +781,13 @@ fn handle_opponent_may_choice_inner(
                         // owner's library") is silently skipped.
                         sub.context = ability.context.clone();
                         sub.context.optional_effect_performed = true;
-                        state.park_ability_continuation(PendingContinuation::new(sub, state));
+                        let pending = PendingContinuation::new_owned(sub, state, admitted)
+                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                        state.park_ability_continuation(pending);
                     }
                     state.waiting_for = WaitingFor::MultiTargetSelection {
                         return_result_occurrence: effects::retained_return_result_occurrence(
-                            state, &ability,
+                            state, &ability, admitted,
                         )
                         .map_err(|error| EngineError::InvalidAction(error.to_string()))?,
                         player: promptee,
@@ -731,7 +817,7 @@ fn handle_opponent_may_choice_inner(
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
                     .expect("cloned optional-effect frame remains active until final decision");
                 set_active_priority(state);
-                resolve_all_declined_opponent_may(state, &ability, events)?;
+                resolve_all_declined_opponent_may(state, &ability, events, admitted)?;
             } else {
                 state
                     .take_active_optional_effect_frame()
@@ -745,7 +831,7 @@ fn handle_opponent_may_choice_inner(
                     ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
                 }
                 set_active_priority(state);
-                effects::resolve_resume_owned_ability_chain(state, &ability, events, 1)
+                effects::resolve_carrier_owned_ability_chain(state, &ability, events, 1, admitted)
                     .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             }
         }
@@ -766,7 +852,13 @@ fn handle_opponent_may_choice_inner(
             .take_active_optional_effect_frame()
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
         {
-            resolve_all_declined_opponent_may(state, &frame.ability, events)?;
+            let (program, declarations) = owned.as_ref().expect("authenticated optional frame");
+            resolve_all_declined_opponent_may(
+                state,
+                &frame.ability,
+                events,
+                (program, declarations),
+            )?;
         }
     }
 
@@ -779,6 +871,7 @@ fn resolve_all_declined_opponent_may(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<(), EngineError> {
     if let Some(ref sub) = ability.sub_ability {
         if sub
@@ -801,8 +894,14 @@ fn resolve_all_declined_opponent_may(
                 else_resolved.context = ability.context.clone();
                 else_resolved
                     .set_replacement_applied_recursive(ability.replacement_applied.clone());
-                effects::resolve_resume_owned_ability_chain(state, &else_resolved, events, 1)
-                    .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+                effects::resolve_carrier_owned_ability_chain(
+                    state,
+                    &else_resolved,
+                    events,
+                    1,
+                    admitted,
+                )
+                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
             }
         } else if sub
             .condition
@@ -817,7 +916,7 @@ fn resolve_all_declined_opponent_may(
             // evaluates this same negated condition as false and skips it.)
             let mut sub_resolved = sub.as_ref().clone();
             sub_resolved.context = ability.context.clone();
-            effects::resolve_resume_owned_ability_chain(state, &sub_resolved, events, 1)
+            effects::resolve_carrier_owned_ability_chain(state, &sub_resolved, events, 1, admitted)
                 .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
         }
     }
@@ -1122,12 +1221,13 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     players: Vec<PlayerId>,
-) -> bool {
+    admitted: effects::AdmittedInstructionResult<'_>,
+) -> Result<bool, crate::types::ability::EffectError> {
     let Some(modifier) = ability.unless_pay.as_ref() else {
-        return false;
+        return Ok(false);
     };
     let AbilityCost::Sacrifice(cost) = &modifier.cost else {
-        return false;
+        return Ok(false);
     };
     // The scoped resolver owns the actual payer. Oracle lowering can preserve
     // an anaphoric "they" as `Player` before the outer player scope is applied.
@@ -1142,20 +1242,17 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
             }
         )
     ) {
-        return false;
+        return Ok(false);
     }
     let Some((current_player, remaining_players)) = players.split_first() else {
-        return false;
+        return Ok(false);
     };
 
-    let mut pending_effect = ability.clone();
-    pending_effect.player_scope = None;
-    pending_effect.unless_pay = None;
-    if let Effect::Token { owner, .. } = &mut pending_effect.effect {
-        *owner = TargetFilter::OriginalController;
-    }
+    let pending_effect = project_player_scope_token_unless_effect(ability, None);
+    let return_result_occurrence =
+        effects::retained_return_result_occurrence(state, &pending_effect, admitted)?;
     state.pending_player_scope_unless_payment = Some(Box::new(PendingPlayerScopeUnlessPayment {
-        return_result_occurrence: state.active_return_result_occurrence,
+        return_result_occurrence,
         pending_effect: Box::new(pending_effect),
         remaining_players: remaining_players.to_vec(),
         declining_players: Vec::new(),
@@ -1163,7 +1260,30 @@ pub(crate) fn begin_player_scope_token_unless_sacrifice(
         cost: modifier.cost.clone(),
     }));
     set_player_scope_unless_payment_waiting_for(state);
-    true
+    Ok(true)
+}
+
+pub(crate) fn project_player_scope_token_unless_effect(
+    ability: &ResolvedAbility,
+    count: Option<usize>,
+) -> ResolvedAbility {
+    let mut effect = ability.clone();
+    effect.player_scope = None;
+    effect.unless_pay = None;
+    if let Effect::Token {
+        owner,
+        count: actual,
+        ..
+    } = &mut effect.effect
+    {
+        *owner = TargetFilter::OriginalController;
+        if let Some(count) = count {
+            *actual = crate::types::ability::QuantityExpr::Fixed {
+                value: count as i32,
+            };
+        }
+    }
+    effect
 }
 
 fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
@@ -1188,6 +1308,18 @@ fn advance_player_scope_token_unless_payment(
     paid: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let (program, declarations) = {
+        let pending = state
+            .pending_player_scope_unless_payment
+            .as_ref()
+            .expect("player-scope unless settlement requires aggregate state");
+        effects::owned_cursor_declarations(
+            state,
+            pending.return_result_occurrence,
+            &pending.pending_effect,
+        )
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    };
     let Some(mut pending) = state.pending_player_scope_unless_payment.take() else {
         unreachable!("player-scope unless settlement requires aggregate state")
     };
@@ -1208,7 +1340,7 @@ fn advance_player_scope_token_unless_payment(
         return Ok(state.waiting_for.clone());
     }
 
-    settle_player_scope_token_unless_payment(state, pending, events)
+    settle_player_scope_token_unless_payment(state, pending, events, (&program, &declarations))
 }
 
 /// CR 101.4 + CR 118.12a: Close the aggregate only after every still-in-game
@@ -1219,22 +1351,23 @@ fn settle_player_scope_token_unless_payment(
     state: &mut GameState,
     pending: Box<PendingPlayerScopeUnlessPayment>,
     events: &mut Vec<GameEvent>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<WaitingFor, EngineError> {
     // `UnlessPayment` belongs only to the per-payer question. Clear it before
     // resolving the one aggregate result so a decline cannot leave its prior
     // chooser serialized after token creation or a replacement resume.
     set_active_priority(state);
     if !pending.declining_players.is_empty() {
-        let mut effect = *pending.pending_effect;
-        if let Effect::Token { count, .. } = &mut effect.effect {
-            *count = crate::types::ability::QuantityExpr::Fixed {
-                value: pending.declining_players.len() as i32,
-            };
-        }
+        let effect = project_player_scope_token_unless_effect(
+            &pending.pending_effect,
+            Some(pending.declining_players.len()),
+        );
         effects::with_inherited_return_result_occurrence(
             state,
             pending.return_result_occurrence,
-            |state| effects::resolve_resume_owned_ability_chain(state, &effect, events, 1),
+            |state| {
+                effects::resolve_carrier_owned_ability_chain(state, &effect, events, 1, admitted)
+            },
         )
         .map_err(|error| EngineError::InvalidAction(format!("{error:?}")))?;
     }
@@ -1247,11 +1380,23 @@ pub(crate) fn settle_eliminated_player_scope_token_unless_payment(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let (program, declarations) = {
+        let pending = state
+            .pending_player_scope_unless_payment
+            .as_ref()
+            .expect("elimination settlement requires aggregate state");
+        effects::owned_cursor_declarations(
+            state,
+            pending.return_result_occurrence,
+            &pending.pending_effect,
+        )
+        .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+    };
     let pending = state
         .pending_player_scope_unless_payment
         .take()
         .expect("elimination settlement requires aggregate state");
-    settle_player_scope_token_unless_payment(state, pending, events)
+    settle_player_scope_token_unless_payment(state, pending, events, (&program, &declarations))
 }
 
 fn finish_player_scope_token_unless_payment(
@@ -1324,6 +1469,29 @@ fn handle_unless_payment_in_occurrence(
     waiting_for: WaitingFor,
     pay: bool,
     events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let owned = match &waiting_for {
+        WaitingFor::UnlessPayment {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        } => effects::owned_cursor_declarations(state, *return_result_occurrence, pending_effect)
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?,
+        _ => {
+            return Err(EngineError::InvalidAction(
+                "Not waiting for unless payment".into(),
+            ))
+        }
+    };
+    handle_unless_payment_in_occurrence_owned(state, waiting_for, pay, events, (&owned.0, &owned.1))
+}
+
+fn handle_unless_payment_in_occurrence_owned(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    pay: bool,
+    events: &mut Vec<GameEvent>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<ActionResult, EngineError> {
     if state
         .pending_player_scope_unless_payment
@@ -2096,11 +2264,12 @@ fn handle_unless_payment_in_occurrence(
         }
 
         if !payment_failed {
-            let waiting_for = finish_successful_unless_payment(
+            let waiting_for = finish_successful_unless_payment_owned(
                 state,
                 pending_effect.as_ref(),
                 &trigger_event,
                 events,
+                admitted,
             )?;
             return Ok(action_result(events, waiting_for));
         }
@@ -2117,6 +2286,7 @@ fn handle_unless_payment_in_occurrence(
         remaining,
         post_action_event_start,
         events,
+        admitted,
     )
 }
 
@@ -2143,6 +2313,7 @@ fn finish_unless_payment(
     remaining: Vec<PlayerId>,
     mut post_action_event_start: Option<usize>,
     events: &mut Vec<GameEvent>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<ActionResult, EngineError> {
     if !pay || payment_failed {
         // CR 614.17b + CR 614.17a: the CR 118.12a poll re-emit re-asks eligibility on
@@ -2196,6 +2367,7 @@ fn finish_unless_payment(
             events,
             &trigger_event,
             Some(AutoMayChoice::Decline),
+            admitted,
         )?);
     }
 
@@ -2219,11 +2391,12 @@ fn finish_unless_payment(
 /// the cost authority again. Deferred life-payment substitutions use this
 /// after their replacement post-effects finish, because the mana and life
 /// components were committed before the replacement choice opened.
-pub(crate) fn finish_successful_unless_payment(
+pub(crate) fn finish_successful_unless_payment_owned(
     state: &mut GameState,
     pending_effect: &ResolvedAbility,
     trigger_event: &Option<GameEvent>,
     events: &mut Vec<GameEvent>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 118.12: a completed successful payment owns this result even when
     // a previous instruction failed. Clear before every child/no-child route.
@@ -2277,6 +2450,7 @@ pub(crate) fn finish_successful_unless_payment(
             events,
             trigger_event,
             None,
+            admitted,
         )?);
         if sub.sub_link == SubAbilityLink::SequentialSibling
             && !matches!(state.waiting_for, WaitingFor::Priority { .. })
@@ -2313,7 +2487,7 @@ pub(crate) fn finish_successful_unless_payment(
 /// leading mana component was committed and a Phyrexian-style life replacement
 /// finished. The exact suffix remains a payment, not a completed unless cost.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
+pub(crate) fn continue_unless_payment_after_paid_mana_prefix_owned(
     state: &mut GameState,
     player: PlayerId,
     cost: AbilityCost,
@@ -2322,6 +2496,7 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
     events: &mut Vec<GameEvent>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<WaitingFor, EngineError> {
     let waiting_for = WaitingFor::UnlessPayment {
         return_result_occurrence: state.active_return_result_occurrence,
@@ -2332,7 +2507,8 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
         effect_description,
         remaining,
     };
-    let result = handle_unless_payment(state, waiting_for, true, events)?;
+    let result =
+        handle_unless_payment_in_occurrence_owned(state, waiting_for, true, events, admitted)?;
     events.extend(result.events);
     Ok(result.waiting_for)
 }
@@ -2343,16 +2519,18 @@ fn resolve_ability_chain_for_unless_payment(
     events: &mut Vec<GameEvent>,
     trigger_event: &Option<GameEvent>,
     payment_choice: Option<AutoMayChoice>,
+    admitted: effects::AdmittedInstructionResult<'_>,
 ) -> Result<usize, EngineError> {
     let events_before = events.len();
     let previous_trigger_event = state.current_trigger_event.clone();
     state.current_trigger_event = trigger_event.clone();
-    let result = effects::resolve_resume_owned_ability_chain_with_payment_choice(
+    let result = effects::resolve_carrier_owned_ability_chain_with_payment_choice(
         state,
         ability,
         events,
         1,
         payment_choice,
+        admitted,
     );
     state.current_trigger_event = previous_trigger_event;
     result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
@@ -2874,6 +3052,8 @@ pub(super) fn resume_ward_sacrifice_payment(
         });
     crate::types::game_state::validate_retained_payment_result_owners(state)
         .map_err(EngineError::InvalidAction)?;
+    pending_cost_move_admitted_program(state)?;
+
     effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
         resume_ward_sacrifice_payment_in_occurrence(state, events)
     })
@@ -3034,6 +3214,8 @@ pub(super) fn resume_counter_addition_unless_payment(
         });
     crate::types::game_state::validate_retained_payment_result_owners(state)
         .map_err(EngineError::InvalidAction)?;
+    pending_cost_move_admitted_program(state)?;
+
     effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
         resume_counter_addition_unless_payment_in_occurrence(state, events, boundary)
     })
@@ -3044,6 +3226,7 @@ fn resume_counter_addition_unless_payment_in_occurrence(
     events: &mut Vec<GameEvent>,
     boundary: CostMoveDrainBoundary,
 ) -> Result<WaitingFor, EngineError> {
+    let (program, declarations) = pending_cost_move_admitted_program(state)?;
     let Some(PendingCostMoveResume::CounterAdditionUnlessPayment {
         return_result_occurrence: _,
         pending_effect,
@@ -3065,7 +3248,13 @@ fn resume_counter_addition_unless_payment_in_occurrence(
             unreachable!("counter-addition unless-payment is not eligible at the priority boundary")
         }
     }
-    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
+    finish_successful_unless_payment_owned(
+        state,
+        &pending_effect,
+        &trigger_event,
+        events,
+        (&program, &declarations),
+    )
 }
 
 /// CR 701.9b + CR 118.12 + CR 616.1: Resume a RANDOM unless-discard after the
@@ -3115,6 +3304,8 @@ pub(super) fn resume_random_discard_unless_payment(
         });
     crate::types::game_state::validate_retained_payment_result_owners(state)
         .map_err(EngineError::InvalidAction)?;
+    pending_cost_move_admitted_program(state)?;
+
     effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
         resume_random_discard_unless_payment_in_occurrence(state, events)
     })
@@ -3124,6 +3315,7 @@ fn resume_random_discard_unless_payment_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let (program, declarations) = pending_cost_move_admitted_program(state)?;
     let Some(PendingCostMoveResume::RandomDiscardUnlessPayment(parked)) =
         state.pending_cost_move_resume.take()
     else {
@@ -3185,7 +3377,13 @@ fn resume_random_discard_unless_payment_in_occurrence(
     // silently skips `EffectResolved`, the `IfAPlayerDoes` alternative-outcome
     // sub, and the `SequentialSibling` chain. Balduvian Horde has none of
     // those, which is exactly why that mistake was invisible in its tests.
-    finish_successful_unless_payment(state, &pending_effect, &trigger_event, events)
+    finish_successful_unless_payment_owned(
+        state,
+        &pending_effect,
+        &trigger_event,
+        events,
+        (&program, &declarations),
+    )
 }
 
 pub(super) fn handle_ward_sacrifice_choice(
@@ -3452,6 +3650,8 @@ pub(super) fn resume_unless_bounce_cost_move(
         });
     crate::types::game_state::validate_retained_payment_result_owners(state)
         .map_err(EngineError::InvalidAction)?;
+    pending_cost_move_admitted_program(state)?;
+
     effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
         resume_unless_bounce_cost_move_in_occurrence(state, events)
     })
@@ -3557,9 +3757,287 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prior_instruction_result_survives_public_optional_and_unless_answers() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{
+            AggregateFunction, ObjectProperty, QuantityRef, ReturnResultId, ZoneChangeRecordSource,
+        };
+        // Supplemental typed program: exercise the actual payment/optional
+        // response, with a nonempty historical result and an independent tail.
+        for (optional, accept) in [(true, true), (true, false), (false, true), (false, false)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let first = scenario.add_creature(P0, "First departure", 3, 3).id();
+            let second = scenario.add_creature(P0, "Second departure", 2, 2).id();
+            let producer = serde_json::from_value(serde_json::json!({
+                "type": "ChangeZoneAll", "origin": "Battlefield", "destination": "Exile",
+                "target": TargetFilter::Typed(TypedFilter::creature())
+            }))
+            .unwrap();
+            let mut root = AbilityDefinition::new(AbilityKind::Activated, producer);
+            root.cost = Some(zero_payment());
+            root.declares_return_result = Some(ReturnResultId(7));
+            let mut reader = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate {
+                            source: ZoneChangeRecordSource::InstructionResult {
+                                result: ReturnResultId(7),
+                            },
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Exile),
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                            function: AggregateFunction::Sum,
+                            property: ObjectProperty::Power,
+                        },
+                    },
+                },
+            );
+            if optional {
+                reader.optional = true;
+            } else {
+                reader.unless_pay = Some(crate::types::ability::UnlessPayModifier {
+                    cost: zero_payment(),
+                    payer: TargetFilter::Controller,
+                });
+            }
+            let mut tail = AbilityDefinition::new(AbilityKind::Spell, gain_life(11));
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            reader.sub_ability = Some(Box::new(tail));
+            root.sub_ability = Some(Box::new(reader));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental owned payment", "")
+                .with_ability_definition(root)
+                .id();
+            let mut runner = scenario.build();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { .. } | WaitingFor::UnlessPayment { .. }
+                ) {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(if optional {
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                )
+            } else {
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::UnlessPayment {
+                        player: P0,
+                        return_result_occurrence: Some(_),
+                        ..
+                    }
+                )
+            });
+            assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+            assert_eq!(runner.state().objects[&second].zone, Zone::Exile);
+            assert_eq!(runner.life(P0), 20);
+            assert_eq!(runner.state().return_result_frames.len(), 1);
+            let saved = serde_json::to_value(runner.state()).unwrap();
+            *runner.state_mut() =
+                serde_json::from_value(saved).expect("current owned payment restores");
+            let action = if optional {
+                GameAction::DecideOptionalEffect { accept }
+            } else {
+                GameAction::PayUnlessCost { pay: accept }
+            };
+            let mut wrong_actor = runner.state().clone();
+            let before = wrong_actor.clone();
+            assert!(crate::game::engine::apply(&mut wrong_actor, P1, action.clone()).is_err());
+            assert_eq!(wrong_actor, before);
+            let mut missing_owner = runner.state().clone();
+            missing_owner.return_result_frames.clear();
+            let before = missing_owner.clone();
+            assert!(crate::game::engine::apply(&mut missing_owner, P0, action.clone()).is_err());
+            assert_eq!(
+                missing_owner, before,
+                "owner refusal must precede prompt/effect mutation"
+            );
+            runner
+                .act(action)
+                .expect("authenticated public answer resumes the prior-result reader");
+            // CR 608.2c + CR 608.2i: read the original 3+2 departures only when
+            // this answer executes the instruction; the printed sibling runs once.
+            let performs_reader = if optional { accept } else { !accept };
+            assert_eq!(runner.life(P0), 31 + if performs_reader { 5 } else { 0 });
+            assert_eq!(runner.life(P1), 20);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().return_result_frames.is_empty());
+        }
+    }
+
     fn payment_action(state: &mut GameState, pay: bool) -> ActionResult {
         crate::game::engine::apply_as_current(state, GameAction::PayUnlessCost { pay })
             .expect("public payment action")
+    }
+
+    #[test]
+    fn opponent_may_multitarget_keeps_the_prior_result_owner_on_its_parked_tail() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{
+            AggregateFunction, ObjectProperty, OpponentMayScope, QuantityRef, ReturnResultId,
+            ZoneChangeRecordSource,
+        };
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let departed = scenario.add_creature(P0, "Prior departure", 3, 3).id();
+        let first = scenario.add_creature(P1, "Unselected sacrifice", 2, 2).id();
+        let second = scenario.add_creature(P1, "Selected sacrifice", 4, 4).id();
+        let mut choice = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+        choice.optional = true;
+        choice.optional_for = Some(OpponentMayScope::AnyOpponent);
+        let mut reader = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                player: TargetFilter::Controller,
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeAggregate {
+                        source: ZoneChangeRecordSource::InstructionResult {
+                            result: ReturnResultId(7),
+                        },
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Exile),
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                        function: AggregateFunction::Sum,
+                        property: ObjectProperty::Power,
+                    },
+                },
+            },
+        );
+        reader.condition = Some(AbilityCondition::effect_performed());
+        let mut tail = AbilityDefinition::new(AbilityKind::Spell, gain_life(11));
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        reader.sub_ability = Some(Box::new(tail));
+        choice.sub_ability = Some(Box::new(reader));
+        let producer = serde_json::from_value(serde_json::json!({
+            "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+            "target": TargetFilter::SpecificObject { id: departed }
+        }))
+        .unwrap();
+        let mut root = AbilityDefinition::new(AbilityKind::Activated, producer);
+        root.cost = Some(zero_payment());
+        root.declares_return_result = Some(ReturnResultId(7));
+        root.sub_ability = Some(Box::new(choice));
+        let source = scenario
+            .add_artifact_from_oracle(P0, "Supplemental multi-target owner", "")
+            .with_ability_definition(root)
+            .id();
+        let mut runner = scenario.build();
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            })
+            .unwrap();
+        for _ in 0..8 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::OpponentMayChoice { .. }
+            ) {
+                break;
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OpponentMayChoice { player: P1, .. }
+        ));
+        assert_eq!(runner.state().objects[&departed].zone, Zone::Exile);
+        assert_eq!(runner.state().return_result_frames.len(), 1);
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() = serde_json::from_value(saved).expect("opponent-may owner restores");
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        let WaitingFor::MultiTargetSelection {
+            player: P1,
+            legal_targets,
+            min_targets: 1,
+            max_targets: 1,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("accepted choice must reach its actual sacrifice target prompt");
+        };
+        assert_eq!(legal_targets.len(), 2);
+        assert!(legal_targets.contains(&first) && legal_targets.contains(&second));
+        assert_eq!(runner.life(P0), 20);
+        let saved = serde_json::to_value(runner.state()).unwrap();
+        *runner.state_mut() =
+            serde_json::from_value(saved).expect("multi-target and separate owned tail restore");
+        for (actor, cards, erase_frame) in [
+            (P0, vec![second], false),
+            (P1, vec![second, second], false),
+            (P1, vec![second], true),
+        ] {
+            let mut hostile = runner.state().clone();
+            if erase_frame {
+                hostile.return_result_frames.clear();
+            }
+            let before = hostile.clone();
+            assert!(crate::game::engine::apply(
+                &mut hostile,
+                actor,
+                GameAction::SelectCards { cards }
+            )
+            .is_err());
+            assert_eq!(hostile, before);
+        }
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![second],
+            })
+            .unwrap();
+        assert_eq!(runner.state().objects[&second].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&first].zone, Zone::Battlefield);
+        // CR 608.2c + CR 608.2i: the resumed tail reads the first departure's
+        // power3, not the later sacrifice's power4, and preserves controller P0.
+        assert_eq!(runner.life(P0), 34);
+        assert_eq!(runner.life(P1), 20);
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        assert!(runner.state().resolution_stack.is_empty());
+        assert!(runner.state().return_result_frames.is_empty());
     }
 
     #[test]

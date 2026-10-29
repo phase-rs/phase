@@ -28,6 +28,15 @@ pub fn resolve_combine_host(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_combine_host_owned(state, ability, events, None)
+}
+
+pub(crate) fn resolve_combine_host_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
+) -> Result<(), EffectError> {
     let (source_kind, host_filter) = match &ability.effect {
         Effect::CombineHost { source, host } => (*source, host.as_ref()),
         _ => {
@@ -74,14 +83,14 @@ pub fn resolve_combine_host(
             Ok(())
         }
         _ => {
-            let mut continuation = ability.clone();
-            continuation.clear_targets();
-            continuation.effect = Effect::CombineHost {
-                source: CombineSource::SpecificObject { id: augment_id },
-                host: Box::new(TargetFilter::ParentTarget),
+            let continuation = continuation_for_host_choice(ability, augment_id);
+            let pending = match admitted {
+                Some(admitted) => {
+                    PendingContinuation::new_owned(Box::new(continuation), state, admitted)?
+                }
+                None => PendingContinuation::new(Box::new(continuation), state),
             };
-            state
-                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
+            state.park_ability_continuation(pending);
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: hosts,
@@ -105,6 +114,15 @@ pub fn resolve_choose_augment_and_combine(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    resolve_choose_augment_and_combine_owned(state, ability, events, None)
+}
+
+pub(crate) fn resolve_choose_augment_and_combine_owned(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
 ) -> Result<(), EffectError> {
     let (zones_to_search, filter, host_filter) = match &ability.effect {
         Effect::ChooseAugmentAndCombineWithHost {
@@ -138,17 +156,17 @@ pub fn resolve_choose_augment_and_combine(
                 source: CombineSource::SpecificObject { id: *augment_id },
                 host: Box::new(frozen_host),
             };
-            resolve_combine_host(state, &direct, events)
+            resolve_combine_host_owned(state, &direct, events, admitted)
         }
         _ => {
-            let mut continuation = ability.clone();
-            continuation.clear_targets();
-            continuation.effect = Effect::CombineHost {
-                source: CombineSource::ParentTarget,
-                host: Box::new(frozen_host),
+            let continuation = continuation_for_augment_choice(ability, frozen_host);
+            let pending = match admitted {
+                Some(admitted) => {
+                    PendingContinuation::new_owned(Box::new(continuation), state, admitted)?
+                }
+                None => PendingContinuation::new(Box::new(continuation), state),
             };
-            state
-                .park_ability_continuation(PendingContinuation::new(Box::new(continuation), state));
+            state.park_ability_continuation(pending);
             state.waiting_for = WaitingFor::ChooseFromZoneChoice {
                 player: ability.controller,
                 cards: candidates,
@@ -166,6 +184,32 @@ pub fn resolve_choose_augment_and_combine(
             Ok(())
         }
     }
+}
+
+pub(crate) fn continuation_for_host_choice(
+    ability: &ResolvedAbility,
+    augment_id: ObjectId,
+) -> ResolvedAbility {
+    let mut continuation = ability.clone();
+    continuation.clear_targets();
+    continuation.effect = Effect::CombineHost {
+        source: CombineSource::SpecificObject { id: augment_id },
+        host: Box::new(TargetFilter::ParentTarget),
+    };
+    continuation
+}
+
+pub(crate) fn continuation_for_augment_choice(
+    ability: &ResolvedAbility,
+    frozen_host: TargetFilter,
+) -> ResolvedAbility {
+    let mut continuation = ability.clone();
+    continuation.clear_targets();
+    continuation.effect = Effect::CombineHost {
+        source: CombineSource::ParentTarget,
+        host: Box::new(frozen_host),
+    };
+    continuation
 }
 
 pub(crate) fn check_standalone_augment_permanents(
@@ -518,6 +562,191 @@ fn push_unique_colors(into: &mut Vec<ManaColor>, extra: &[ManaColor]) {
     for color in extra {
         if !into.contains(color) {
             into.push(*color);
+        }
+    }
+}
+
+#[cfg(test)]
+mod owned_continuation_tests {
+    use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::types::ability::{
+        AggregateFunction, ControllerRef, FilterProp, ObjectProperty, QuantityExpr, QuantityRef,
+        ReturnResultId, SubAbilityLink, TypedFilter, ZoneChangeRecordSource,
+    };
+    use crate::types::actions::GameAction;
+
+    #[test]
+    fn generated_augment_choices_preserve_the_admitted_prior_result_and_tail() {
+        // Supplemental typed program; both actual generated continuation forms
+        // must finish through public responses with a nonempty prior result.
+        for choose_augment in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+            let departed = scenario.add_creature(P0, "Prior departure", 3, 3).id();
+            let first_host = scenario.add_creature(P0, "First Host", 2, 2).id();
+            let second_host = scenario.add_creature(P0, "Second Host", 4, 4).id();
+            let (first_augment, second_augment) = if choose_augment {
+                (
+                    scenario.add_card_to_library_top(P0, "First augment"),
+                    scenario.add_card_to_library_top(P0, "Second augment"),
+                )
+            } else {
+                (
+                    scenario
+                        .add_creature_to_hand(P0, "Selected augment", 1, 1)
+                        .id(),
+                    scenario
+                        .add_creature_to_hand(P0, "Unselected augment", 2, 2)
+                        .id(),
+                )
+            };
+            let operation = if choose_augment {
+                Effect::ChooseAugmentAndCombineWithHost {
+                    zones: vec![Zone::Library],
+                    filter: Box::new(TargetFilter::Any),
+                    host: Box::new(TargetFilter::SpecificObject { id: first_host }),
+                }
+            } else {
+                Effect::CombineHost {
+                    source: CombineSource::SpecificObject { id: first_augment },
+                    host: Box::new(TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::HasSupertype {
+                                value: Supertype::Host,
+                            }]),
+                    )),
+                }
+            };
+            let mut combine = AbilityDefinition::new(AbilityKind::Spell, operation);
+            combine.target_choice_timing = crate::types::ability::TargetChoiceTiming::Resolution;
+            let mut tail = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate {
+                            source: ZoneChangeRecordSource::InstructionResult {
+                                result: ReturnResultId(7),
+                            },
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Exile),
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                            function: AggregateFunction::Sum,
+                            property: ObjectProperty::Power,
+                        },
+                    },
+                },
+            );
+            tail.sub_link = SubAbilityLink::SequentialSibling;
+            combine.sub_ability = Some(Box::new(tail));
+            let producer = serde_json::from_value(serde_json::json!({
+                "type": "ChangeZoneAll", "origin": "Battlefield", "destination": "Exile",
+                "target": TargetFilter::SpecificObject { id: departed }
+            }))
+            .unwrap();
+            let mut root = AbilityDefinition::new(AbilityKind::Activated, producer);
+            root.declares_return_result = Some(ReturnResultId(7));
+            root.sub_ability = Some(Box::new(combine));
+            let source = scenario
+                .add_artifact_from_oracle(P0, "Supplemental augment owner", "")
+                .with_ability_definition(root)
+                .id();
+            let mut runner = scenario.build();
+            for host in [first_host, second_host] {
+                let object = runner.state_mut().objects.get_mut(&host).unwrap();
+                object.card_types.supertypes.push(Supertype::Host);
+                object.base_card_types.supertypes.push(Supertype::Host);
+            }
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for _ in 0..8 {
+                if matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::ChooseFromZoneChoice { .. }
+                ) {
+                    break;
+                }
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            let WaitingFor::ChooseFromZoneChoice {
+                player: P0,
+                cards,
+                count: 1,
+                ..
+            } = &runner.state().waiting_for
+            else {
+                panic!("actual generated augment prompt must be reached");
+            };
+            let (selected, host, augment) = if choose_augment {
+                assert_eq!(cards.len(), 2);
+                assert!(cards.contains(&first_augment) && cards.contains(&second_augment));
+                (second_augment, first_host, second_augment)
+            } else {
+                assert_eq!(cards.len(), 2);
+                assert!(cards.contains(&first_host) && cards.contains(&second_host));
+                (second_host, second_host, first_augment)
+            };
+            assert_eq!(runner.state().objects[&departed].zone, Zone::Exile);
+            assert_eq!(runner.life(P0), 20);
+            assert_eq!(runner.state().return_result_frames.len(), 1);
+            let saved = serde_json::to_value(runner.state()).unwrap();
+            *runner.state_mut() =
+                serde_json::from_value(saved).expect("generated augment owner restores");
+            let mut hostile = runner.state().clone();
+            hostile.return_result_frames.clear();
+            let before = hostile.clone();
+            assert!(crate::game::engine::apply(
+                &mut hostile,
+                P0,
+                GameAction::SelectCards {
+                    cards: vec![selected]
+                }
+            )
+            .is_err());
+            assert_eq!(hostile, before);
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![selected],
+                })
+                .unwrap();
+            assert!(runner.state().objects[&host]
+                .merged_components
+                .contains(&augment));
+            let unselected = if choose_augment {
+                first_augment
+            } else {
+                second_augment
+            };
+            assert_eq!(
+                runner.state().objects[&unselected].zone,
+                if choose_augment {
+                    Zone::Library
+                } else {
+                    Zone::Hand
+                }
+            );
+            // CR 608.2c + CR 608.2i: the generated choice resumes the same
+            // invocation and consumes the original departure's power once.
+            assert_eq!(runner.life(P0), 23);
+            assert_eq!(runner.life(P1), 20);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
+            assert!(runner.state().return_result_frames.is_empty());
         }
     }
 }

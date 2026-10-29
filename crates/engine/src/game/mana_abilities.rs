@@ -1536,6 +1536,7 @@ pub fn handle_choose_mana_color(
     chosen: ManaChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let admitted = admitted_payment_resume(state, &pending.resume)?;
     let override_value = match (prompt, chosen) {
         (ManaChoicePrompt::SingleColor { options }, ManaChoice::SingleColor(color)) => {
             if !options.contains(&color) {
@@ -1621,7 +1622,15 @@ pub fn handle_choose_mana_color(
         return Ok(pause);
     }
 
-    resume_mana_ability_root(state, pending.player, pending.resume.clone(), events)
+    resume_mana_ability_root_owned(
+        state,
+        pending.player,
+        pending.resume.clone(),
+        events,
+        admitted
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    )
 }
 
 /// CR 605.3a: Bulk-activate the controller's other identical, choice-free mana
@@ -3684,6 +3693,7 @@ fn finish_mana_ability_cost_payment(
     mut cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
 ) -> Result<WaitingFor, EngineError> {
     let resolves_automatically = matches!(
         cursor.resolution_mode,
@@ -3861,12 +3871,13 @@ fn finish_mana_ability_cost_payment(
             &events[cost_event_start..],
         );
         let parent_event_start = events.len();
-        return continue_mana_ability_cost_payment(
+        return continue_mana_ability_cost_payment_owned(
             state,
             *parent.pending,
             parent_cursor,
             events,
             parent_event_start,
+            admitted,
         );
     }
     // CR 603.2 + CR 603.3b + CR 605.3b + CR 605.4a: EVERY completed root mana
@@ -3913,7 +3924,8 @@ fn finish_mana_ability_cost_payment(
         }
     }
 
-    let resume = resume_mana_ability_root(state, pending.player, pending.resume, events)?;
+    let resume =
+        resume_mana_ability_root_owned(state, pending.player, pending.resume, events, admitted)?;
     if super::casting::mana_ability_cost_payment_is_paused(state) {
         debug_assert!(is_ultimate_root);
         // A settled frame has nothing left to hand upward: its ledger was taken
@@ -4114,6 +4126,7 @@ pub(super) fn continue_mana_ability_activation(
     pending: PendingManaAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let admitted = admitted_payment_resume(state, &pending.resume)?;
     let before = state.clone();
     let events_before = events.len();
     let (player, source_id, place) = (pending.player, pending.source_id, pending.chain_place());
@@ -4122,7 +4135,15 @@ pub(super) fn continue_mana_ability_activation(
         *state = before;
         events.truncate(events_before);
         super::play_trace::mana_ability_reversed(state, source_id, place);
-        resume_mana_ability_root(state, player, resume, events)
+        resume_mana_ability_root_owned(
+            state,
+            player,
+            resume,
+            events,
+            admitted
+                .as_ref()
+                .map(|(program, declarations)| (program, declarations)),
+        )
     })
 }
 
@@ -4131,6 +4152,61 @@ pub(crate) fn resume_mana_ability_root(
     mana_source_controller: PlayerId,
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let admitted = admitted_payment_resume(state, &resume)?;
+    resume_mana_ability_root_owned(
+        state,
+        mana_source_controller,
+        resume,
+        events,
+        admitted
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    )
+}
+
+pub(crate) fn admitted_payment_resume(
+    state: &GameState,
+    resume: &ManaAbilityResume,
+) -> Result<
+    Option<(
+        ResolvedAbility,
+        crate::types::ability::ResultProducerEnvironment,
+    )>,
+    EngineError,
+> {
+    match resume {
+        ManaAbilityResume::UnlessPayment {
+            return_result_occurrence,
+            pending_effect,
+            ..
+        } => super::effects::owned_cursor_declarations(
+            state,
+            *return_result_occurrence,
+            pending_effect,
+        )
+        .map(Some)
+        .map_err(|error| EngineError::InvalidAction(error.to_string())),
+        ManaAbilityResume::EffectPayCost {
+            return_result_occurrence,
+            ability,
+            ..
+        } => super::effects::owned_cursor_declarations(state, *return_result_occurrence, ability)
+            .map(Some)
+            .map_err(|error| EngineError::InvalidAction(error.to_string())),
+        ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } => admitted_payment_resume(state, &pending_mana_ability.resume),
+        _ => Ok(None),
+    }
+}
+
+pub(crate) fn resume_mana_ability_root_owned(
+    state: &mut GameState,
+    mana_source_controller: PlayerId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
 ) -> Result<WaitingFor, EngineError> {
     let occurrence = match &resume {
         ManaAbilityResume::UnlessPayment {
@@ -4143,17 +4219,6 @@ pub(crate) fn resume_mana_ability_root(
         } => *return_result_occurrence,
         _ => None,
     };
-    // The root may already have been removed from its cursor. Authenticate its
-    // actual executable and typed cost before restoring lookup authority.
-    if let ManaAbilityResume::UnlessPayment {
-        pending_effect: body,
-        ..
-    }
-    | ManaAbilityResume::EffectPayCost { ability: body, .. } = &resume
-    {
-        super::effects::validate_selected_instruction_result_owner(state, body, occurrence)
-            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-    }
     super::effects::with_inherited_return_result_occurrence(state, occurrence, |state| {
         if let ManaAbilityResume::UnlessPayment {
             pending_effect: body,
@@ -4169,7 +4234,13 @@ pub(crate) fn resume_mana_ability_root(
             super::quantity::validate_addressed_cost_reads(state, cost, body)
                 .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
         }
-        resume_mana_ability_root_in_occurrence(state, mana_source_controller, resume, events)
+        resume_mana_ability_root_in_occurrence(
+            state,
+            mana_source_controller,
+            resume,
+            events,
+            admitted,
+        )
     })
 }
 
@@ -4178,6 +4249,7 @@ fn resume_mana_ability_root_in_occurrence(
     mana_source_controller: PlayerId,
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 601.2g + CR 605.3b: the single authority for the row policy of a
     // resumed automatic payment. A synchronous auto-tap never reaches this
@@ -4194,7 +4266,8 @@ fn resume_mana_ability_root_in_occurrence(
     if resume.resumes_automatic_payment() {
         state.active_auto_tap_row_policy = Some(super::casting_costs::AutoTapRowPolicy::AllRows);
     }
-    let resumed = resume_mana_ability_root_payment(state, mana_source_controller, resume, events);
+    let resumed =
+        resume_mana_ability_root_payment(state, mana_source_controller, resume, events, admitted);
     state.active_auto_tap_row_policy = enclosing_row_policy;
     resumed
 }
@@ -4204,6 +4277,7 @@ fn resume_mana_ability_root_payment(
     mana_source_controller: PlayerId,
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
 ) -> Result<WaitingFor, EngineError> {
     match resume {
         ManaAbilityResume::EffectPayCost {
@@ -4212,34 +4286,49 @@ fn resume_mana_ability_root_payment(
             return_to,
             ability,
             cost,
-        } => match super::costs::pay_ability_cost_for_resolution(
-            state,
-            payer,
-            cost.as_ref(),
-            ability.as_ref(),
-            events,
-        )? {
-            super::costs::PaymentOutcome::Paid => {
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+        } => {
+            let admitted = admitted.ok_or_else(|| {
+                EngineError::InvalidAction("effect payment lost its admitted program".into())
+            })?;
+            match super::costs::pay_ability_cost_for_resolution(
+                state,
+                payer,
+                cost.as_ref(),
+                ability.as_ref(),
+                events,
+            )? {
+                super::costs::PaymentOutcome::Paid => {
+                    super::effects::resolve_effect_pay_cost_rider_owned(
+                        state,
+                        ability.as_ref(),
+                        events,
+                        admitted,
+                    )
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    Ok(WaitingFor::Priority { player: return_to })
-                } else {
-                    Ok(state.waiting_for.clone())
+                    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        Ok(WaitingFor::Priority { player: return_to })
+                    } else {
+                        Ok(state.waiting_for.clone())
+                    }
+                }
+                super::costs::PaymentOutcome::Paused { .. } => Ok(state.waiting_for.clone()),
+                super::costs::PaymentOutcome::Failed { .. } => {
+                    state.cost_payment_failed_flag = true;
+                    super::effects::resolve_effect_pay_cost_rider_owned(
+                        state,
+                        ability.as_ref(),
+                        events,
+                        admitted,
+                    )
+                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                        Ok(WaitingFor::Priority { player: return_to })
+                    } else {
+                        Ok(state.waiting_for.clone())
+                    }
                 }
             }
-            super::costs::PaymentOutcome::Paused { .. } => Ok(state.waiting_for.clone()),
-            super::costs::PaymentOutcome::Failed { .. } => {
-                state.cost_payment_failed_flag = true;
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
-                    .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-                    Ok(WaitingFor::Priority { player: return_to })
-                } else {
-                    Ok(state.waiting_for.clone())
-                }
-            }
-        },
+        }
         ManaAbilityResume::PhyrexianCastPayment { caster, choices } => {
             super::casting_costs::finalize_mana_payment_with_phyrexian_choices(
                 state, caster, &choices, events,
@@ -4350,7 +4439,40 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
     resume: ManaAbilityResume,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    match resume {
+    let admitted = admitted_payment_resume(state, &resume)?;
+    finish_mana_root_after_deferred_life_payment_owned(
+        state,
+        player,
+        resume,
+        events,
+        admitted
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    )
+}
+
+pub(crate) fn finish_mana_root_after_deferred_life_payment_owned(
+    state: &mut GameState,
+    player: PlayerId,
+    resume: ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
+) -> Result<WaitingFor, EngineError> {
+    let occurrence = match &resume {
+        ManaAbilityResume::UnlessPayment {
+            return_result_occurrence,
+            ..
+        }
+        | ManaAbilityResume::EffectPayCost {
+            return_result_occurrence,
+            ..
+        } => *return_result_occurrence,
+        _ => state.active_return_result_occurrence,
+    };
+    super::effects::with_inherited_return_result_occurrence(
+        state,
+        occurrence,
+        |state| match resume {
         ManaAbilityResume::Priority => Ok(WaitingFor::Priority { player }),
         ManaAbilityResume::ManaPayment {
             outer_player,
@@ -4383,6 +4505,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             effect_description,
             remaining,
         } => {
+            let admitted = admitted.ok_or_else(|| EngineError::InvalidAction("unless payment lost its admitted program".into()))?;
             let remaining_cost = super::costs::remaining_cost_after_paid_mana_prefix(cost.as_ref());
             match remaining_cost {
                 Some(cost) => {
@@ -4390,7 +4513,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                     // component was committed before the life-replacement
                     // pause. Resume the exact suffix before suppressing the
                     // unless effect.
-                    super::engine_payment_choices::continue_unless_payment_after_paid_mana_prefix(
+                    super::engine_payment_choices::continue_unless_payment_after_paid_mana_prefix_owned(
                         state,
                         outer_player.unwrap_or(player),
                         cost,
@@ -4399,13 +4522,15 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                         effect_description,
                         remaining,
                         events,
+                        admitted,
                     )
                 }
-                None => super::engine_payment_choices::finish_successful_unless_payment(
+                None => super::engine_payment_choices::finish_successful_unless_payment_owned(
                     state,
                     pending_effect.as_ref(),
                     &trigger_event,
                     events,
+                    admitted,
                 ),
             }
         }
@@ -4416,21 +4541,23 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             ability,
             cost,
         } => {
+            let admitted = admitted.ok_or_else(|| EngineError::InvalidAction("effect payment lost its admitted program".into()))?;
             if let Some(remaining_cost) =
                 super::costs::remaining_cost_after_paid_mana_prefix(cost.as_ref())
             {
                 // CR 118.12 + CR 608.2c: Re-enter resolution through the
                 // remaining PayCost suffix. The ordinary continuation authority
                 // then pays it before handing off to the original rider.
-                super::effects::prepend_remaining_pay_cost_before_parked_rider(
+                super::effects::prepend_remaining_pay_cost_before_parked_rider_owned(
                     state,
                     ability.as_ref(),
                     payer,
                     remaining_cost,
-                );
+                    admitted,
+                ).map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 Ok(WaitingFor::Priority { player: return_to })
             } else {
-                super::effects::resolve_effect_pay_cost_rider(state, ability.as_ref(), events)
+                super::effects::resolve_effect_pay_cost_rider_owned(state, ability.as_ref(), events, admitted)
                     .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
                     Ok(WaitingFor::Priority { player: return_to })
@@ -4503,7 +4630,8 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
         | ManaAbilityResume::CombatTaxPayment { .. } => Err(EngineError::InvalidAction(
             "Cast mana payment reached the non-cast deferred-life continuation".to_string(),
         )),
-    }
+    },
+    )
 }
 
 fn continue_mana_ability_cost_payment(
@@ -4513,11 +4641,39 @@ fn continue_mana_ability_cost_payment(
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
 ) -> Result<WaitingFor, EngineError> {
+    let admitted = admitted_payment_resume(state, &pending.resume)?;
+    continue_mana_ability_cost_payment_owned(
+        state,
+        pending,
+        cursor,
+        events,
+        cost_event_start,
+        admitted
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    )
+}
+
+fn continue_mana_ability_cost_payment_owned(
+    state: &mut GameState,
+    pending: PendingManaAbility,
+    cursor: ManaAbilityCostCursor,
+    events: &mut Vec<GameEvent>,
+    cost_event_start: usize,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
+) -> Result<WaitingFor, EngineError> {
     let node = pending
         .rules_execution_node
         .unwrap_or_else(|| state.begin_activated_mana_journal_node(pending.source_id));
     state.with_rules_execution_node(node, |state| {
-        continue_mana_ability_cost_payment_in_node(state, pending, cursor, events, cost_event_start)
+        continue_mana_ability_cost_payment_in_node(
+            state,
+            pending,
+            cursor,
+            events,
+            cost_event_start,
+            admitted,
+        )
     })
 }
 
@@ -4527,6 +4683,7 @@ fn continue_mana_ability_cost_payment_in_node(
     mut cursor: ManaAbilityCostCursor,
     events: &mut Vec<GameEvent>,
     cost_event_start: usize,
+    admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
 ) -> Result<WaitingFor, EngineError> {
     let ability_def = mana_ability_definition(state, &pending)?;
     if cost_sacrifices_reserved_source(state, pending.source_id, &ability_def.cost) {
@@ -4613,7 +4770,7 @@ fn continue_mana_ability_cost_payment_in_node(
         }
     }
     ensure_mana_ability_selection_cursor_consumed(&pending, &cursor)?;
-    finish_mana_ability_cost_payment(state, pending, cursor, events, cost_event_start)
+    finish_mana_ability_cost_payment(state, pending, cursor, events, cost_event_start, admitted)
 }
 
 /// CR 601.2h + CR 602.2b + CR 605.3b + CR 616.1: Resume the precise unpaid
@@ -4624,12 +4781,27 @@ pub(crate) fn resume_mana_ability_cost_move(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let admitted = match state.pending_cost_move_resume.as_ref() {
+        Some(PendingCostMoveResume::ManaAbilityPayment { pending, .. }) => {
+            admitted_payment_resume(state, &pending.resume)?
+        }
+        _ => unreachable!("mana ability cost-move resume requires its typed continuation"),
+    };
     let Some(PendingCostMoveResume::ManaAbilityPayment { pending, cursor }) =
         state.pending_cost_move_resume.take()
     else {
         unreachable!("mana ability cost-move resume requires its typed continuation")
     };
-    continue_mana_ability_cost_payment(state, *pending, cursor, events, 0)
+    continue_mana_ability_cost_payment_owned(
+        state,
+        *pending,
+        cursor,
+        events,
+        0,
+        admitted
+            .as_ref()
+            .map(|(program, declarations)| (program, declarations)),
+    )
 }
 
 /// CR 605.3b + CR 605.1a: Run a mana ability's `sub_ability` chain inline.
