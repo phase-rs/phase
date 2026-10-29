@@ -44304,8 +44304,8 @@ fn complete_publication_full_native_companion_population() {
             match name {
                 "Alpine Moon" => TargetFilter::And { filters: vec![TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)), TargetFilter::HasChosenName] },
                 "Archon of the Wild Rose" => TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![
-                    FilterProp::Another, FilterProp::HasAttachment { kind: crate::types::ability::AttachmentKind::Aura,
-                        controller: Some(ControllerRef::You), exclude_source: crate::types::ability::SourceExclusion::Include }])),
+                    FilterProp::HasAttachment { kind: crate::types::ability::AttachmentKind::Aura,
+                        controller: Some(ControllerRef::You), exclude_source: crate::types::ability::SourceExclusion::Include }, FilterProp::Another])),
                 "Blade of the Oni" | "Hulkbuster Armor" | "Mace of the Valiant" | "Rakdos Riteknife" | "Reaper's Scythe" =>
                     TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
                 _ => TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
@@ -44614,7 +44614,23 @@ fn complete_publication_all_mixed_honest_and_native_exceptions_keep_specific_sou
             };
             let card: crate::database::mtgjson::AtomicCard = serde_json::from_value(serde_json::json!({
                 "name": name, "text": text, "types": types, "subtypes": subtypes, "keywords": hints,
-                "layout": "normal", "colors": colors, "colorIdentity": identity, "identifiers": {}
+                "layout": "normal", "colors": colors, "colorIdentity": identity, "identifiers": {},
+                "manaValue": match name {
+                    "Rising Chicane" | "Eight-and-a-Half-Tails Avatar" => 0,
+                    "Dark Matter Manipulator" | "The Knight of Weeks" => 1,
+                    "Undercover Skrull" | "Sinister Concierge" | "Battlefield Thaumaturge" | "Conspicuous Snoop" => 2,
+                    "Spark Rupture" | "Eunuchs' Intrigues" | "Goblin War Cry" | "Absorb Energy" | "Blood Sun"
+                    | "Skill Borrower" | "Varchild, Betrayer of Kjeldor" | "Tarelily, Lovestruck Archer" => 3,
+                    "Possessed Aven" | "Possessed Barbarian" | "Possessed Centaur" | "Possessed Nomad"
+                    | "Wrath of Oko" | "Hinata, Dawn-Crowned" | "Mark for Death" | "Buzzing Whack-a-Doodle" => 4,
+                    "Obsidian Charmaw" | "Seal of the Guildpact" | "Astral Confrontation" | "Delightful Discovery" => 5,
+                    "Wayward Angel" | "Amped Up" | "Marina Vendrell's Grimoire" | "Mine, Mine, Mine!" => 6,
+                    "The Balrog, Durin's Bane" | "Valiant Changeling" => 7,
+                    "Blaster Hulk" | "Korvold, Gleeful Glutton" => 8,
+                    "Void Winnower" => 9,
+                    "Lumbering Megasloth" | "Thrasta, Tempest's Roar" => 12,
+                    _ => unreachable!("pinned complete fixture mana value: {name}"),
+                }
             })).unwrap();
             crate::database::synthesis::build_oracle_face(&card, None)
         };
@@ -46205,8 +46221,8 @@ pub(crate) mod population_relation_publication {
                 out.extracted_keywords = vec![Keyword::Flying];
                 out.statics.push(StaticDefinition::continuous()
                     .affected(TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![
-                        FilterProp::Another, FilterProp::HasAttachment { kind: AttachmentKind::Aura,
-                            controller: Some(ControllerRef::You), exclude_source: SourceExclusion::Include }])))
+                        FilterProp::HasAttachment { kind: AttachmentKind::Aura,
+                            controller: Some(ControllerRef::You), exclude_source: SourceExclusion::Include }, FilterProp::Another])))
                     .modifications(vec![ContinuousModification::SetPower { value: 4 }, ContinuousModification::SetToughness { value: 4 },
                         ContinuousModification::AddKeyword { keyword: Keyword::Flying }])
                     .description("Other creatures you control that are enchanted by Auras you control have base power and toughness 4/4 and have flying.".into()));
@@ -46765,6 +46781,23 @@ pub(crate) mod defining_modifier_publication {
             text = text.replace("counter on Rakdos Riteknife", "counter on \u{E0004}");
         }
         let text = text.replace(name, "~");
+        // Item spans index the normalized buffer, while document.source_text
+        // retains raw Oracle. Spell/card/ability and Siege phrases stay literal.
+        // These are independent expected spellings present in this 102-card pin;
+        // no parser result or production normalizer supplies these bytes.
+        let mut text = text;
+        for (lower, titled) in [
+            ("this creature", "This creature"),
+            ("this permanent", "This permanent"),
+            ("this enchantment", "This enchantment"),
+            ("this Aura", "This Aura"),
+            ("this Equipment", "This Equipment"),
+            ("this Saga", "This Saga"),
+            ("this Vehicle", "This Vehicle"),
+            ("this token", "This token"),
+        ] {
+            text = text.replace(lower, "~").replace(titled, "~");
+        }
         match name {
             "Alpine Moon" => "As ~ enters, choose a nonbasic land card name.\nLands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"".to_owned(),
             "Jenny, Generated Anomaly" => text.replace("Jenny", "~"),
@@ -46817,7 +46850,7 @@ pub(crate) mod defining_modifier_publication {
                 };
                 let (description, body) = match name {
                     "Jadelight Ranger" => (
-                        "When this creature enters, it explores, then it explores again.",
+                        "When ~ enters, it explores, then it explores again.",
                         chain(vec![spell(Effect::Explore), spell(Effect::Explore)]),
                     ),
                     "Jadelight Spelunker" => {
@@ -46825,22 +46858,17 @@ pub(crate) mod defining_modifier_publication {
                         explore.repeat_for = Some(QuantityExpr::Ref {
                             qty: QuantityRef::Variable { name: "X".into() },
                         });
-                        ("When this creature enters, it explores X times.", explore)
+                        ("When ~ enters, it explores X times.", explore)
                     }
-                    _ => (
-                        "When this creature enters, it explores.",
-                        spell(Effect::Explore),
-                    ),
+                    _ => ("When ~ enters, it explores.", spell(Effect::Explore)),
                 };
                 out.triggers.push(enter_explore(description, body));
             }
             "Emperor's Vanguard" | "Jenny, Generated Anomaly" => {
-                let description = if name == "Jenny, Generated Anomaly" {
+                if name == "Jenny, Generated Anomaly" {
                     out.extracted_keywords = vec![Keyword::DoubleStrike];
-                    "Whenever ~ deals combat damage to a player, it explores."
-                } else {
-                    "Whenever this creature deals combat damage to a player, it explores."
-                };
+                }
+                let description = "Whenever ~ deals combat damage to a player, it explores.";
                 let mut trigger = TriggerDefinition::new(TriggerMode::DamageDone)
                     .valid_source(TargetFilter::SelfRef)
                     .valid_target(TargetFilter::Player)
@@ -46856,20 +46884,20 @@ pub(crate) mod defining_modifier_publication {
                     "Seeker of Sunlight" => {
                         explore.activation_restrictions = vec![ActivationRestriction::AsSorcery];
                         (AbilityCost::Mana { cost: mana("{2}{G}") },
-                            "{2}{G}: This creature explores. Activate only as a sorcery.")
+                            "{2}{G}: ~ explores. Activate only as a sorcery.")
                     }
                     "Tomb Robber" => {
                         out.extracted_keywords = vec![Keyword::Menace];
                         (serde_json::from_value(json!({"type":"Composite","costs":[
                             {"type":"Mana","cost":mana("{1}")},
                             {"type":"Discard","count":{"type":"Fixed","value":1},"filter":null}]})).unwrap(),
-                            "{1}, Discard a card: This creature explores.")
+                            "{1}, Discard a card: ~ explores.")
                     }
                     _ => (
                         serde_json::from_value(json!({"type":"Composite","costs":[
                             {"type":"Mana","cost":mana("{1}")},
                             {"type":"Sacrifice","target":{"type":"Typed","type_filters":["Creature"],"properties":[{"type":"Another"}]},"count":1}]})).unwrap(),
-                        "{1}, Sacrifice another creature: This creature explores.",
+                        "{1}, Sacrifice another creature: ~ explores.",
                     ),
                 };
                 explore.cost = Some(cost);
@@ -47904,7 +47932,7 @@ pub(crate) mod defining_modifier_publication {
             "Weeping Angel" => {
                 out.extracted_keywords =
                     vec![Keyword::Flash, Keyword::FirstStrike, Keyword::Vigilance];
-                out.triggers.push(angel_turns_noncreature("Whenever an opponent casts a creature spell, this creature isn't a creature until end of turn."));
+                out.triggers.push(angel_turns_noncreature("Whenever an opponent casts a creature spell, ~ isn't a creature until end of turn."));
                 let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
                     .prevention_shield(PreventionAmount::All)
                     .combat_scope(CombatDamageScope::CombatOnly)
@@ -48927,7 +48955,9 @@ pub(crate) mod defining_modifier_publication {
     }
 
     fn alien_angel(count: i32) -> AbilityDefinition {
-        let granted = angel_turns_noncreature("Whenever an opponent casts a creature spell, this token isn't a creature until end of turn.");
+        let granted = angel_turns_noncreature(
+            "Whenever an opponent casts a creature spell, ~ isn't a creature until end of turn.",
+        );
         spell(effect(
             json!({"type":"Token","name":"Alien Angel","power":{"type":"Fixed","value":2},
             "toughness":{"type":"Fixed","value":2},"types":["Artifact","Creature","Alien","Angel"],
@@ -49043,7 +49073,7 @@ pub(crate) mod defining_modifier_publication {
                     .valid_card(TargetFilter::SelfRef)
                     .trigger_zones(vec![Zone::Battlefield])
                     .execute(spell(Effect::Explore))
-                    .description("Whenever this creature attacks, it explores.".into());
+                    .description("Whenever ~ attacks, it explores.".into());
                 out.statics.push(
                     StaticDefinition::continuous()
                         .affected(TargetFilter::Typed(
@@ -49198,9 +49228,7 @@ pub(crate) mod defining_modifier_publication {
                         .destination(Zone::Graveyard)
                         .trigger_zones(vec![Zone::Battlefield])
                         .execute(target_explore(own_creature()))
-                        .description(
-                            "When this creature dies, target creature you control explores.".into(),
-                        ),
+                        .description("When ~ dies, target creature you control explores.".into()),
                 );
             }
             "Path of Discovery" | "Captain Kathryn Janeway" => {
@@ -49254,7 +49282,10 @@ pub(crate) mod defining_modifier_publication {
                         AbilityCost::Tap,
                     ],
                 });
-                body.description = Some("{1}{B}, {T}: Exile two target cards from an opponent's graveyard. This creature explores.".into());
+                body.description = Some(
+                    "{1}{B}, {T}: Exile two target cards from an opponent's graveyard. ~ explores."
+                        .into(),
+                );
                 out.abilities.push(body);
             }
             "Enter the Unknown" => {
@@ -49283,17 +49314,12 @@ pub(crate) mod defining_modifier_publication {
                     power: 1,
                     once_per_turn: None,
                 }];
-                let subject = if name == "Subterranean Schooner" {
-                    "this Vehicle"
-                } else {
-                    "~"
-                };
                 out.triggers.push(TriggerDefinition::new(TriggerMode::Attacks)
                     .valid_card(TargetFilter::SelfRef).trigger_zones(vec![Zone::Battlefield])
                     .execute(target_explore(TargetFilter::Typed(TypedFilter::creature().properties(vec![
                         FilterProp::CrewedThisTurn { relation: CrewRelation::CrewedSource },
                     ]))))
-                    .description(format!("Whenever {subject} attacks, target creature that crewed it this turn explores.")));
+                    .description("Whenever ~ attacks, target creature that crewed it this turn explores.".into()));
                 if name == "Leisure Bicycle" {
                     out.extracted_keywords.push(Keyword::Cycling(
                         crate::types::keywords::CyclingCost::Mana(mana("{2}")),
@@ -49302,7 +49328,7 @@ pub(crate) mod defining_modifier_publication {
             }
             "Topography Tracker" => {
                 out.triggers.push(enter_explore(
-                    "When this creature enters, create a Map token.",
+                    "When ~ enters, create a Map token.",
                     token("Map", &["Artifact", "Map"], 1),
                 ));
                 out.replacements.push(ReplacementDefinition::new(ReplacementEvent::Explore)

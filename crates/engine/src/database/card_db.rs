@@ -3555,14 +3555,6 @@ mod complete_source_choice_publication_tests {
             raw.as_object_mut()
                 .unwrap()
                 .remove("resolved_rules_journal");
-            for frame in raw[frames]["frames"].as_array_mut().unwrap() {
-                if frame["type"] == "CoinFlip" {
-                    frame["data"]["branch_context"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("damage_source_choice");
-                }
-            }
             omit_source_choosers(&mut raw, false);
             let flip_index = raw[frames]["frames"]
                 .as_array()
@@ -3570,20 +3562,39 @@ mod complete_source_choice_publication_tests {
                 .iter()
                 .position(|frame| frame["type"] == "CoinFlip")
                 .unwrap();
+            let selected = raw[frames]["frames"][flip_index]["data"]["branch_context"]
+                ["damage_source_choice"]
+                .clone();
+            let capture: crate::types::game_state::ChosenDamageSource =
+                serde_json::from_value(selected.clone()).unwrap();
+            assert_eq!(capture.source.unwrap().identity.reference, first_ref,
+                "the actual active owner retains the selected birth through legacy scalar admission");
             let custody = &raw[frames]["frames"][flip_index]["data"]["branch_context"]
                 ["coin_branch_target_abilities"];
             assert_eq!(custody.as_array().unwrap().len(), 2);
             for child in custody.as_array().unwrap() {
-                let capture: crate::types::game_state::ChosenDamageSource =
+                let capture: Option<crate::types::game_state::ChosenDamageSource> =
                     serde_json::from_value(child[1]["context"]["damage_source_choice"].clone())
                         .unwrap();
-                assert_eq!(
-                    capture.source.unwrap().identity.reference,
-                    first_ref,
-                    "the active flip's canonical outcomes retain the actual selected birth"
+                assert!(capture.is_none(),
+                    "canonical outcome custody contains announcement inputs, not the owner's produced choice"
                 );
             }
             let mut conflicting = raw.clone();
+            // Hostile legacy input deliberately forges disagreeing outcome
+            // custody without the genuine enclosing owner. This is a refusal
+            // control, not a claimed historical capture-bearing save.
+            let branch = &mut conflicting[frames]["frames"][flip_index]["data"]["branch_context"];
+            branch
+                .as_object_mut()
+                .unwrap()
+                .remove("damage_source_choice");
+            for child in branch["coin_branch_target_abilities"]
+                .as_array_mut()
+                .unwrap()
+            {
+                child[1]["context"]["damage_source_choice"] = selected.clone();
+            }
             conflicting[frames]["frames"][flip_index]["data"]["branch_context"]
                 ["coin_branch_target_abilities"][1][1]["context"]["damage_source_choice"]
                 ["source"]["identity"]["reference"]["incarnation"] =

@@ -47251,6 +47251,7 @@ impl ResolvedAbility {
                 source_incarnation,
             );
         }
+        self.refresh_coin_target_inputs();
     }
 
     /// Digital-only Alchemy (no CR entry): stamp source-less gameplay identity

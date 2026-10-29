@@ -12149,7 +12149,26 @@ mod selected_damage_capture_axis_tests {
         )));
         let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
         assert!(axes.projected);
-        assert_ne!(axes.history, HistoryReads::NONE, "a nested execute reads its actual life-gain journal; capture storage does not suppress that read");
+        assert_eq!(
+            axes.history,
+            HistoryReads::NONE,
+            "life gained this turn is a projected resource, independently of the frozen capture"
+        );
+        def.execute.as_mut().unwrap().effect = Box::new(Effect::GainLife {
+            player: TargetFilter::Controller,
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::CardsDrawnThisTurn {
+                    player: PlayerScope::Controller,
+                },
+            },
+        });
+        let axes = replacement_definition_axes(&def, ScanMode::LoopFirewall);
+        assert!(axes.projected);
+        assert_eq!(
+            axes.history,
+            HistoryReads::of(HistoryMember::CardsDrawnThisTurn),
+            "a genuine nested history reader remains visible alongside the frozen capture"
+        );
     }
 }
 

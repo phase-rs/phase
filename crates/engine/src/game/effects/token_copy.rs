@@ -8648,6 +8648,21 @@ pub(crate) mod tests {
                 state.waiting_for,
                 WaitingFor::ReplacementChoice { .. }
             ));
+            let pending = state.pending_replacement.as_ref().unwrap();
+            assert!(
+                matches!(pending.proposed, ProposedEvent::AddCounter { count: 1, .. }),
+                "only the noncommuting counter modifiers require an order choice"
+            );
+            assert_eq!(pending.candidates.len(), 2);
+            let plus = pending
+                .candidates
+                .iter()
+                .position(|replacement| state.objects[&replacement.source].name == "Plus counters")
+                .expect("the +1 modifier is an actual offered replacement");
+            assert!(pending
+                .candidates
+                .iter()
+                .any(|replacement| state.objects[&replacement.source].name == "Double counters"));
             prompts += 1;
             state = serde_json::from_value::<ResolutionStateWire>(
                 serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap(),
@@ -8655,12 +8670,12 @@ pub(crate) mod tests {
             .unwrap()
             .into_game_state();
             events.extend(
-                apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                apply_as_current(&mut state, GameAction::ChooseReplacement { index: plus })
                     .unwrap()
                     .events,
             );
         }
-        assert!(prompts >= 6, "ordered Divine/counter pauses={prompts}; wait={:?}; pending={:?}; frames={:?}; events={events:?}", state.waiting_for, state.pending_replacement, state.resolution_stack);
+        assert_eq!(prompts, 4, "one noncommuting counter order per birth; the Divine/body and token-count replacements commute");
         assert!(state.resolution_stack.is_empty());
         let births = state.delayed_triggers[0]
             .ability
@@ -8689,13 +8704,14 @@ pub(crate) mod tests {
             assert!(object.keywords.contains(&Keyword::Flying));
             assert!(object.keywords.contains(&Keyword::Vigilance));
             assert!(!object.keywords.contains(&Keyword::Indestructible));
-            assert!(
+            assert_eq!(
                 object
                     .counters
                     .get(&CounterType::Plus1Plus1)
                     .copied()
-                    .unwrap_or(0)
-                    >= 3
+                    .unwrap_or(0),
+                4,
+                "the chosen order is (one + one) doubled for each exact birth"
             );
         }
         let mut runner = crate::game::scenario::GameRunner::from_state(state);

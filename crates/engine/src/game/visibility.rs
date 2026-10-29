@@ -8783,6 +8783,7 @@ mod tests {
             mana.cost_paid_object.as_ref().unwrap().lki.name,
             "Public retained source"
         );
+        let public_keyword = Keyword::CumulativeUpkeep(pending.activation_cost.clone().unwrap());
         assert!(serde_json::to_string(&cost)
             .unwrap()
             .contains("\"return_result_process\":901"));
@@ -8816,6 +8817,9 @@ mod tests {
                 public_epic.declares_return_result,
                 snapshot.declares_return_result
             );
+            let mut public_program = snapshot.clone();
+            public_program.return_result_process = None;
+            assert_eq!(public_epic.as_ref(), &public_program);
             let plain = serde_json::to_value(&projected).unwrap();
             let wire = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
                 &state, viewer,
@@ -8824,12 +8828,31 @@ mod tests {
             for (envelope, public) in [("plain", &plain), ("client", &wire)] {
                 assert!(!public.to_string().contains("return_result_process"));
                 assert!(public.to_string().contains("Public keyword option"));
-                assert_eq!(
-                    public.to_string().matches("EpicCopy").count(),
-                    authoritative.to_string().matches("EpicCopy").count(),
-                    "viewer={viewer:?}, envelope={envelope}; projected program={public}"
-                );
+                let public_state = if envelope == "client" {
+                    &public["state"]
+                } else {
+                    public
+                };
+                let keywords: Vec<Keyword> = serde_json::from_value(
+                    public_state["objects"][source.0.to_string()]["keywords"].clone(),
+                )
+                .unwrap();
+                assert_eq!(keywords, vec![public_keyword.clone()],
+                    "viewer={viewer:?}, envelope={envelope}: retain the complete public keyword program");
+                let options: Vec<Keyword> = serde_json::from_value(
+                    public_state["waiting_for"]["data"]["choice_type"]["Keyword"]["options"]
+                        .clone(),
+                )
+                .unwrap();
+                assert_eq!(options, vec![public_keyword.clone()],
+                    "viewer={viewer:?}, envelope={envelope}: retain the complete public choice program");
             }
+            let badges: Vec<Keyword> = serde_json::from_value(
+                wire["derived"]["battlefield_keyword_badges"][source.0.to_string()].clone(),
+            )
+            .unwrap();
+            assert_eq!(badges, vec![public_keyword.clone()],
+                "the client independently publishes the same public keyword badge for viewer={viewer:?}");
         }
         assert_eq!(serde_json::to_value(&state).unwrap(), authoritative);
         assert_eq!(&*state.epic_effect(epic).unwrap().spell, &snapshot);

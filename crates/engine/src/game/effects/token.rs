@@ -5930,6 +5930,7 @@ mod tests {
         use crate::types::ability::{NamedDefenderScope, TokenAttackDestination};
 
         let (mut state, source) = attacking_token_board();
+        state.phase = crate::types::phase::Phase::BeginCombat;
         let mut events = Vec::new();
         let named = ResolvedAbility::new(
             goblin_token_effect(TokenAttackDestination::Player {
@@ -5953,6 +5954,22 @@ mod tests {
             PlayerId(0),
         );
         resolve(&mut state, &twin, &mut events).unwrap();
+        let crate::types::game_state::WaitingFor::EntryAttackTargetChoice { valid_targets, .. } =
+            &state.waiting_for
+        else {
+            panic!("the three-player twin must choose its actual attack destination");
+        };
+        assert_eq!(valid_targets.len(), 2);
+        let target = valid_targets[0];
+        events.extend(
+            crate::game::apply_as_current(
+                &mut state,
+                crate::types::actions::GameAction::ChooseEntryAttackTarget { target },
+            )
+            .unwrap()
+            .events,
+        );
+        assert_eq!(state.last_created_token_ids.len(), 1);
         let twin_token = state.last_created_token_ids[0];
 
         let attackers: Vec<ObjectId> = state

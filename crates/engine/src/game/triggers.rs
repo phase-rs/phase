@@ -11672,13 +11672,22 @@ pub(crate) fn resolution_completion_can_settle(state: &GameState) -> bool {
     if !state.resolution_stack.is_empty() {
         return false;
     }
-    // CR 608.2c: Several resolution-owned prompts (notably Ripple's
+    // CR 608.2c + CR 608.2d: Several resolution-owned prompts (notably Ripple's
     // `CastOffer`) do not require a typed resolution-stack frame. They still
     // suspend the parent object, so its carrier and deferred observers must
-    // remain live until the shared choice dispatcher has completed them.
+    // remain live until their choice dispatcher has completed them. A mana
+    // effect's color choice is dispatched separately from resolution choices;
+    // its instruction-result frames still belong to the resolving carrier.
     if state.resolving_stack_entry.is_some()
         && (super::engine_resolution_choices::handles(&state.waiting_for)
-            || matches!(state.waiting_for, WaitingFor::CopyRetarget { .. }))
+            || matches!(
+                state.waiting_for,
+                WaitingFor::CopyRetarget { .. }
+                    | WaitingFor::ChooseManaColor {
+                        context: crate::types::game_state::ManaChoiceContext::ResolvingEffect(_),
+                        ..
+                    }
+            ))
     {
         return false;
     }

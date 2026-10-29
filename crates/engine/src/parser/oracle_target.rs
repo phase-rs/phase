@@ -9545,13 +9545,18 @@ pub(crate) fn parse_that_clause_suffix<'a>(
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
     if let Some((after_intro, intro_len, negated)) = parse_relative_clause_intro(trimmed) {
-        if let Ok((rest, property)) = crate::types::text_grammar::parse_property_filter(after_intro)
-        {
+        // The complete combat owner must see its defender/alone suffix before
+        // the generic property parser can consume only the leading adjective.
+        let property = parse_attacking_defender_suffix(after_intro)
+            .map(|(property, consumed)| (&after_intro[consumed..], property))
+            .or_else(|| crate::types::text_grammar::parse_property_filter(after_intro).ok());
+        if let Some((rest, property)) = property {
             if matches!(
                 property,
                 FilterProp::Tapped
                     | FilterProp::Untapped
                     | FilterProp::Attacking { .. }
+                    | FilterProp::AttackingAlone
                     | FilterProp::Blocking
                     | FilterProp::BlockStatus { .. }
             ) {
@@ -25267,6 +25272,55 @@ mod casting_name_reference_preservation_tests {
 #[cfg(test)]
 mod complete_population_relation_tests {
     use super::*;
+
+    #[test]
+    fn relative_attacking_properties_preserve_the_complete_combat_owner() {
+        // Relative-clause grammar variants, including the defender forms used
+        // by Oviya and Ordruun Mentor, plus the bare and negated siblings.
+        for (clause, property) in [
+            (
+                "that's attacking one of your opponents",
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::Opponent),
+                },
+            ),
+            (
+                "that is attacking that player",
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::DefendingPlayer),
+                },
+            ),
+            (
+                "that are attacking you",
+                FilterProp::Attacking {
+                    defender: Some(ControllerRef::You),
+                },
+            ),
+            ("that's attacking alone", FilterProp::AttackingAlone),
+            ("that's attacking", FilterProp::Attacking { defender: None }),
+            (
+                "that isn't attacking",
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::Attacking { defender: None }),
+                },
+            ),
+            (
+                "that aren't attacking alone",
+                FilterProp::Not {
+                    prop: Box::new(FilterProp::AttackingAlone),
+                },
+            ),
+        ] {
+            let text = format!("target creature {clause}");
+            let (filter, rest) = parse_target(&text);
+            assert!(rest.is_empty(), "{text}: {rest:?}");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter::creature().properties(vec![property])),
+                "{text}"
+            );
+        }
+    }
 
     #[test]
     fn repeated_all_colors_share_the_complete_creature_noun_and_zone() {

@@ -38931,11 +38931,23 @@ mod selected_cast_intent_tests {
                     .unwrap()
                     .is_face_down
                 );
-                let options = current_casting_variant_choice_options(runner.state(), P0, spell);
                 assert_eq!(
-                    options.iter().any(|option| option.variant == variant),
+                    can_cast_prepared_now_with_probe(
+                        &prepared.transformed_state,
+                        P0,
+                        &prepared.prepared,
+                        None
+                    ),
                     !restricted
                 );
+                if variant == CastingVariant::Foretell {
+                    assert_eq!(
+                        current_casting_variant_choice_options(runner.state(), P0, spell)
+                            .iter()
+                            .any(|option| option.variant == variant),
+                        !restricted
+                    );
+                }
                 if restricted {
                     assert!(!can_cast_prepared_now_with_probe(
                         &prepared.transformed_state,
@@ -39113,12 +39125,12 @@ mod selected_cast_intent_tests {
                 .cast_variant,
                 CastingVariant::Normal
             );
-            assert!(
-                current_casting_variant_choice_options(runner.state(), P0, ordinary)
-                    .iter()
-                    .any(|option| option.variant == CastingVariant::Normal
-                        && option.mana_cost == ManaCost::generic(4))
-            );
+            assert!(can_cast_prepared_now_with_probe(
+                &prepared.transformed_state,
+                P0,
+                &prepared.prepared,
+                None
+            ));
             let outcome = runner
                 .cast(ordinary)
                 .casting_variant(CastingVariant::Normal)

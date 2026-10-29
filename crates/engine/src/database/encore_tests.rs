@@ -202,8 +202,18 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
     let must_attack = state
         .transient_continuous_effects
         .iter()
-        .find(|ce| ce.affected == (TargetFilter::SpecificObject { id: token }))
-        .expect("token must carry a transient continuous effect");
+        .filter(|ce| ce.affected == (TargetFilter::SpecificObject { id: token }))
+        .find(|ce| {
+            ce.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddStaticMode {
+                        mode: StaticMode::MustAttackDefender { .. }
+                    }
+                )
+            })
+        })
+        .expect("token must carry its independent attack requirement");
     assert!(
         must_attack.modifications.iter().any(|m| matches!(
             m,
@@ -214,6 +224,11 @@ fn encore_activation_creates_attacking_haste_copy_per_opponent() {
             } if *player == PlayerId(1)
         )),
         "token must be required to attack the opponent"
+    );
+    assert!(crate::game::combat::creature_must_attack(&state, token));
+    assert_eq!(
+        crate::game::combat::must_attack_defenders_for_creature(&state, tok),
+        vec![crate::game::combat::AttackTarget::Player(PlayerId(1))]
     );
 
     // CR 702.141a + CR 603.7d: a one-shot end-step delayed sacrifice of the token.

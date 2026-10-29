@@ -3488,17 +3488,22 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             // approved primary and any later work. The replacement frame was
             // the child keeping that instruction suspended; retiring it is not
             // completion of the parent's remaining queue or printed tail.
+            // A ready id-less legacy owner has no current parent key, but still
+            // owns its remaining batches and terminal completion.
             if retired_paused_dispatch
                 && matches!(state.waiting_for, WaitingFor::Priority { .. })
-                && token_creation_parent.is_some_and(|parent| {
-                    state.active_copy_token().is_some_and(|pending| {
-                        pending.creation_id == Some(parent.frame)
-                            && matches!(
+                && state
+                    .active_copy_token()
+                    .is_some_and(|pending| match token_creation_parent {
+                        Some(parent) => {
+                            pending.creation_id == Some(parent.frame)
+                                && matches!(
                                 pending.pending,
                                 Some(crate::types::game_state::TokenCreationPending::Substitution)
                             )
+                        }
+                        None => pending.creation_id.is_none() && pending.pending.is_none(),
                     })
-                })
             {
                 resume_resolution_frames(state, events);
             }

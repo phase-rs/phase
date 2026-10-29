@@ -9089,12 +9089,18 @@ mod damage_opportunity_public_remainder_tests {
             } else {
                 serde_json::from_value(saved).unwrap()
             };
-            let result = runner
+            let mut events = runner
                 .act(GameAction::ChooseReplacement { index: choice })
-                .unwrap();
-            runner.advance_until_stack_empty();
+                .unwrap()
+                .events;
+            for _ in 0..40 {
+                if runner.state().stack.is_empty() {
+                    break;
+                }
+                events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+            }
             assert_eq!(runner.life(P1), 2, "CR 120.4d: remaining damage five and prevention gain five share the modified event outside combat too");
-            assert_eq!(result.events.iter().filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 5, .. } if *player_id == P1)).count(), 1);
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 5, .. } if *player_id == P1)).count(), 1);
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }

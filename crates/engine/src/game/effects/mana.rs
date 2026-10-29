@@ -5322,7 +5322,8 @@ mod tests {
         use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, AggregateFunction, Comparator, ObjectProperty,
-            PlayerFilter, PlayerRelation, QuantityExpr, ReturnResultId, ZoneChangeRecordSource,
+            PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, ReturnResultId,
+            ZoneChangeRecordSource,
         };
         use crate::types::actions::GameAction;
         use crate::types::game_state::{InstructionResult, RevealedInstructionResult};
@@ -5383,9 +5384,13 @@ mod tests {
                         recipient: TargetFilter::PlayerMatching {
                             player: Box::new(PlayerFilter::PlayerAttribute {
                                 relation: PlayerRelation::Opponent,
-                                attr: Box::new(reference),
-                                comparator: Comparator::GE,
-                                value: Box::new(QuantityExpr::Fixed { value: 0 }),
+                                // `attr` is the candidate's scalar; the general
+                                // addressed quantity belongs in its threshold.
+                                attr: Box::new(QuantityRef::HandSize {
+                                    player: PlayerScope::ScopedPlayer,
+                                }),
+                                comparator: Comparator::LE,
+                                value: Box::new(QuantityExpr::Ref { qty: reference }),
                             }),
                         },
                     }),

@@ -2676,11 +2676,15 @@ fn damage_done_applier_with_definition(
     events: &mut Vec<GameEvent>,
     captured: Option<&ReplacementDefinition>,
 ) -> ApplyResult {
+    // CR 120.4c + CR 120.4d: a captured definition may intentionally defer
+    // its life-floor modifier to damage-result delivery. Its absence of a
+    // modifier is authoritative too; only an uncaptured definition reads live.
+    let modification = match captured {
+        Some(definition) => definition.damage_modification.clone(),
+        None => damage_modification_for_rid(state, rid),
+    };
     // Branch 1: Damage modification (Double, Triple, Plus, Minus)
-    if let Some(modification) = captured
-        .and_then(|definition| definition.damage_modification.clone())
-        .or_else(|| damage_modification_for_rid(state, rid))
-    {
+    if let Some(modification) = modification {
         // CR 510.2: identity for the combat-damage-batch prevention tally, taken
         // before the event is destructured (mirrors the Branch 2 shield path).
         let applied_key = AppliedReplacementKey::for_event(&event, rid);
@@ -15369,9 +15373,13 @@ mod tests {
                     source: ObjectId(0),
                     index: second,
                 };
+                // The production caller marks the selected replacement before
+                // invoking the leaf applier.
+                let mut proposed = event.clone();
+                proposed.mark_applied(first_id);
                 let once = apply_single_replacement(
                     &mut local,
-                    event.clone(),
+                    proposed,
                     first_id,
                     ReplacementBranch::Execute,
                     replacement_registry(),
@@ -15384,9 +15392,11 @@ mod tests {
                     find_applicable_replacements(&local, &once, replacement_registry()),
                     vec![second_id]
                 );
+                let mut proposed = once;
+                proposed.mark_applied(second_id);
                 let twice = apply_single_replacement(
                     &mut local,
-                    once,
+                    proposed,
                     second_id,
                     ReplacementBranch::Execute,
                     replacement_registry(),

@@ -6018,7 +6018,21 @@ mod tests {
             );
             let mut runner = scenario.build();
             runner.act(GameAction::PassPriority).unwrap();
-            runner.activate(pilgrim, 0).resolve();
+            let prevention = runner.state().objects[&pilgrim]
+                .abilities
+                .iter()
+                .position(|ability| {
+                    ability.kind == crate::types::ability::AbilityKind::Activated
+                        && matches!(
+                            ability.effect.as_ref(),
+                            Effect::PreventDamage {
+                                damage_source_filter: Some(TargetFilter::ChosenDamageSource { .. }),
+                                ..
+                            }
+                        )
+                })
+                .expect("the printed sacrifice ability chooses a damage source");
+            runner.activate(pilgrim, prevention).resolve();
             let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {
                 panic!("the printed paid sacrifice reaches the actual source prompt: rider={rider_choice}; wait={:?}; source={:?}; frames={:?}; stack={:?}",
                     runner.state().waiting_for, runner.state().objects[&pilgrim], runner.state().resolution_stack, runner.state().stack);

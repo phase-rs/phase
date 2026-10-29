@@ -2802,13 +2802,19 @@ fn complete_modification_clause(
         let body_lower = body.to_lowercase();
         let body = nom_tag_lower(body, &body_lower, "an additional ").unwrap_or(body);
         let body_lower = body.to_lowercase();
-        if all_consuming(parse_variable_pt_pattern)
-            .parse(body_lower.as_str())
-            .is_ok()
+        if let Ok((_, (_, power, _, toughness))) =
+            all_consuming(parse_variable_pt_pattern).parse(body_lower.as_str())
         {
-            return parse_dynamic_pt_in_text(&format!("gets {}", body.to_lowercase()), where_x)
-                .map(|modifications| (modifications, verb));
-        };
+            // The shared axis grammar also recognizes fixed magnitudes; those
+            // belong to the fixed owner below. True variables retain the
+            // dynamic owner's binding checks and cannot fall back to numbers.
+            if matches!(power, PtAxisMag::VarX | PtAxisMag::VarY)
+                || matches!(toughness, PtAxisMag::VarX | PtAxisMag::VarY)
+            {
+                return parse_dynamic_pt_in_text(&format!("gets {}", body_lower), where_x)
+                    .map(|modifications| (modifications, verb));
+            }
+        }
         if let Ok((rest, (power, toughness))) = parse_pt_mod_with_remainder(body) {
             if rest.trim().is_empty() {
                 return Some((
@@ -3579,6 +3585,51 @@ pub(crate) fn with_protection_does_not_remove(
 #[cfg(test)]
 mod quote_authority_tests {
     use super::*;
+
+    #[test]
+    fn complete_pumps_distinguish_fixed_axes_from_bound_variable_axes() {
+        // Synthetic grammar discriminators complement the full printed-card
+        // runtime tests; fixed zero axes still belong to the numeric owner.
+        for (text, power, toughness) in [
+            ("gets -1/-0", -1, 0),
+            ("gets +0/+2", 0, 2),
+            ("gets +3/+3", 3, 3),
+        ] {
+            let (mods, verb) = complete_modification_clause(text, None, ContinuousVerb::Unbound)
+                .expect("fixed axes must reach the existing numeric owner");
+            assert!(matches!(verb, ContinuousVerb::Pump));
+            assert_eq!(
+                mods,
+                vec![
+                    ContinuousModification::AddPower { value: power },
+                    ContinuousModification::AddToughness { value: toughness },
+                ],
+                "{text}"
+            );
+        }
+        let binding = Some("the number of creatures you control");
+        let (mods, _) =
+            complete_modification_clause("gets +X/+1", binding, ContinuousVerb::Unbound)
+                .expect("a bound variable retains the dynamic owner");
+        assert!(matches!(
+            mods.as_slice(),
+            [
+                ContinuousModification::AddDynamicPower { .. },
+                ContinuousModification::AddToughness { value: 1 },
+            ]
+        ));
+        for (text, binding) in [
+            ("gets +X/+1", Some("an unknown quantity")),
+            ("gets +X/+Y", None),
+            ("gets +Y/+X", binding),
+            ("gets +1/+1 and unsupported tail", None),
+        ] {
+            assert!(
+                complete_modification_clause(text, binding, ContinuousVerb::Unbound).is_none(),
+                "an unowned variable binding or tail must remain refused: {text}"
+            );
+        }
+    }
 
     #[test]
     fn complete_members_skip_inner_condition_markers_and_keep_outer_duration() {

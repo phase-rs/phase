@@ -32097,6 +32097,14 @@ impl GameStateDecode {
         // projection marker, which the transport wire carries on purpose.
         reject_zero_bound_shortcut_offer(&state)?;
         reject_dangling_epic_effect_handles(&state, &epic_effect_handles)?;
+        // Bare GameState deserialization admits both current authority and
+        // transport projections. Validate their canonical frame/prompt shape
+        // after normalization, as the resolution-wire decoder does, so invalid
+        // saved authority returns an error before the debug invariant checks.
+        let frames = crate::types::resolution::canonicalize_legacy_resolution_state(&state)?;
+        frames
+            .validate(&state.waiting_for)
+            .map_err(|error| error.to_string())?;
         #[cfg(debug_assertions)]
         debug_assert_runtime_resolution_invariants(&state);
         Ok(state)

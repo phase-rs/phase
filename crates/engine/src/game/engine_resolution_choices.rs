@@ -15653,6 +15653,7 @@ mod token_materialization_completion_tests {
             CreationPauseCase::ReloadCounter,
         ] {
             let mut state = GameState::new_two_player(997);
+            state.phase = crate::types::phase::Phase::PreCombatMain;
             let source = creation_test_source(
                 &mut state,
                 "Persistent token class",
@@ -15758,6 +15759,10 @@ mod token_materialization_completion_tests {
             );
             assert!(state.resolution_stack.is_empty());
             assert_eq!(state.players[0].life, life + 2);
+            assert_eq!(
+                state.phase, phase,
+                "materialization completes in the intended stable phase"
+            );
             for id in births {
                 assert_eq!(state.objects[&id].zone, Zone::Battlefield);
                 assert!(state.objects[&id].tapped,
