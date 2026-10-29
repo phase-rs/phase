@@ -453,53 +453,60 @@ fn raw_debug_placement_installs_printed_loyalty_without_a_replacement_choice() {
 }
 
 /// CR 310.4b + CR 310.4c: Invasion of Amonkhet (printed defense 4) enters with
-/// four defense counters. On the consulting route the CR 614.12a protector
-/// choice pauses the entry before it enters, and the counters survive the
-/// resume. On the raw route the counters are installed directly, and they are
-/// what damage removes: Shock deals 2 damage to the battle, which removes two
-/// defense counters (CR 120.3h + CR 310.6).
+/// four defense counters. On the consulting routes (card and token) the
+/// CR 614.12a protector choice pauses the entry before it enters, and the
+/// counters survive the resume. On the raw route the counters are installed
+/// directly, and they are what damage removes: Shock deals 2 damage to the
+/// battle, which removes two defense counters (CR 120.3h + CR 310.6).
 ///
-/// Red at base: neither route installed a defense counter, so Shock left the
-/// raw battle at defense 4.
+/// Red at base: no route installed a defense counter, so Shock left the raw
+/// battle at defense 4. The token route stayed red until its TokenEntry
+/// proposal carried the staged card's printed defense.
 #[test]
 fn debug_created_battle_enters_with_printed_defense_counters() {
-    // Consulting route: the protector choice, then the counters.
-    let mut runner = board(|_| {});
-    create(
-        &mut runner,
-        SIEGE,
-        P0,
-        Zone::Battlefield,
-        true,
-        DebugCardCreationKind::Card,
-    );
-    let choice = match &runner.state().waiting_for {
-        WaitingFor::NamedChoice {
-            player, options, ..
-        } => {
-            assert_eq!(*player, P0, "the Siege's controller chooses its protector");
-            options
-                .first()
-                .cloned()
-                .expect("an opponent can protect the Siege")
-        }
-        other => panic!("expected the protector choice, got {}", short(other)),
-    };
-    runner
-        .act(GameAction::ChooseOption { choice })
-        .expect("the protector choice is accepted");
-    let siege = only_object_named(&runner, SIEGE);
-    assert_eq!(zone_of(&runner, siege), Zone::Battlefield, "run_etb=true");
-    assert_defense(&runner, siege, 4, "run_etb=true");
-    assert!(
-        is_priority(&runner),
-        "run_etb=true: {}",
-        short(&runner.state().waiting_for)
-    );
-    assert!(
-        runner.state().resolution_stack.is_empty(),
-        "run_etb=true: the parked entry resumed and finished"
-    );
+    // Consulting routes, card and token: the protector choice, then the
+    // counters.
+    for kind in [DebugCardCreationKind::Card, DebugCardCreationKind::Token] {
+        let row = format!("run_etb=true, {kind:?}");
+        let mut runner = board(|_| {});
+        create(&mut runner, SIEGE, P0, Zone::Battlefield, true, kind);
+        let choice = match &runner.state().waiting_for {
+            WaitingFor::NamedChoice {
+                player, options, ..
+            } => {
+                assert_eq!(
+                    *player, P0,
+                    "{row}: the Siege's controller chooses its protector"
+                );
+                options
+                    .first()
+                    .cloned()
+                    .expect("an opponent can protect the Siege")
+            }
+            other => panic!("{row}: expected the protector choice, got {}", short(other)),
+        };
+        runner
+            .act(GameAction::ChooseOption { choice })
+            .expect("the protector choice is accepted");
+        let siege = only_object_named(&runner, SIEGE);
+        assert_eq!(zone_of(&runner, siege), Zone::Battlefield, "{row}");
+        assert_eq!(
+            runner.state().objects[&siege].is_token,
+            kind == DebugCardCreationKind::Token,
+            "{row}"
+        );
+        assert_defense(&runner, siege, 4, &row);
+        assert!(
+            is_priority(&runner),
+            "{row}: {}",
+            short(&runner.state().waiting_for)
+        );
+        assert!(runner.state().stack.is_empty(), "{row}: the stack is empty");
+        assert!(
+            runner.state().resolution_stack.is_empty(),
+            "{row}: the parked entry resumed and finished"
+        );
+    }
 
     // Raw route: the counters, then Shock removes two of them.
     let mut shock = None;

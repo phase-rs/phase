@@ -1182,17 +1182,18 @@ fn route_debug_token_to_battlefield(
     zones::remove_from_zone(state, object_id, staged.zone, staged.owner);
 
     let values = super::printed_cards::intrinsic_copiable_values(&staged);
-    // CR 306.5b + CR 614.1c: the sandbox token's body is the card's copiable
-    // printed characteristics; its printed loyalty seeds the intrinsic loyalty
-    // counters onto the TokenEntry proposal, which the liminal commit applies
-    // through the replacement pipeline (CR 614.1a). The production copy-token
-    // path seeds the same counters itself and uses this liminal seam only when
-    // it has none. CopiableValues carries no defense.
+    // CR 306.5b + CR 310.4b + CR 614.1c: the sandbox token's body is the
+    // card's copiable printed characteristics; its printed loyalty and the
+    // staged card's printed defense (CopiableValues carries no defense) seed
+    // the intrinsic loyalty/defense counters onto the TokenEntry proposal,
+    // which the liminal commit applies through the replacement pipeline
+    // (CR 614.1a). The production copy-token path seeds the same counters
+    // itself and uses this liminal seam only when it has none.
     let intrinsic_counters = super::printed_cards::intrinsic_face_entry_counters(
         values.printed_loyalty,
         values.loyalty,
         None,
-        None,
+        staged.base_defense,
     );
     let copy = CopyTokenSpec {
         values: Box::new(values.clone()),
