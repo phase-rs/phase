@@ -1597,7 +1597,7 @@ mod admitted_ballot_public_tests {
             P0,
         )
         .sub_ability(ResolvedAbility::new(vote, Vec::new(), source, P0));
-        input.chosen_x = Some(3);
+        input.set_chosen_x_recursive(3);
         let mut runner = scenario.build();
         super::super::resolve_ability_chain(runner.state_mut(), &input, &mut Vec::new(), 0)
             .unwrap();
@@ -2519,7 +2519,20 @@ mod tests {
             )),
         )];
         let options = vec!["choice".to_string()];
-        let ballots = crate::im::Vector::from(vec![(controller, 0), (opponent, 0)]);
+        let input = ResolvedAbility::new(
+            Effect::Vote {
+                choices: options,
+                per_choice_effect,
+                starting_with: ControllerRef::You,
+                voter_scope: VoterScope::AllPlayers,
+                tally_mode: VoteTally::PerVote,
+                subject: VoteSubject::Named,
+                visibility: VoteVisibility::Open,
+            },
+            Vec::new(),
+            source,
+            controller,
+        );
         let mut events = Vec::new();
         crate::game::stack::begin_resolving_stack_entry(
             &mut state,
@@ -2529,34 +2542,24 @@ mod tests {
                 controller,
                 kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
                     source_id: source,
-                    ability: Box::new(crate::types::ability::ResolvedAbility::new(
-                        Effect::NoOp,
-                        vec![],
-                        source,
-                        controller,
-                    )),
+                    ability: Box::new(input.clone()),
                 },
             },
             None,
         )
         .expect("the vote resolves inside its own carrier");
 
-        resolve_tally(
-            &mut state,
-            source,
-            controller,
-            &options,
-            &per_choice_effect,
-            &[2],
-            &ballots,
-            VoteTally::PerVote,
-            &[],
-            None,
-            &[],
-            None,
-            &mut events,
-        )
-        .expect("first ballot pauses on the first player choice");
+        resolve(&mut state, &input, &mut events).expect("the complete Vote opens its ballot");
+        for voter in [controller, opponent] {
+            crate::game::engine::apply(
+                &mut state,
+                voter,
+                GameAction::ChooseOption {
+                    choice: "choice".into(),
+                },
+            )
+            .expect("each public ballot retains the original complete Vote input");
+        }
         assert_eq!(
             state
                 .resolution_stack

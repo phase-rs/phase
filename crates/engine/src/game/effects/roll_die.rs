@@ -1500,7 +1500,7 @@ mod tests {
                 source,
                 P0,
             ));
-            input.chosen_x = Some(x);
+            input.set_chosen_x_recursive(x);
             super::super::resolve_ability_chain(runner.state_mut(), &input, &mut Vec::new(), 0)
                 .unwrap();
             let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for else {

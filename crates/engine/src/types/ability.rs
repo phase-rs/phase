@@ -17253,12 +17253,6 @@ pub(crate) fn validate_instruction_result_effect_context(
             validate_source_only_result_quantity(count)?;
             validate_source_only_result_quantity(life_payment)?;
         }
-        Effect::PreventDamage {
-            amount_dynamic: Some(amount),
-            ..
-        } => {
-            validate_source_only_result_quantity(amount)?;
-        }
         _ => {}
     }
     match effect {
@@ -58729,17 +58723,28 @@ mod departure_owned_dependency_walk_tests {
             assert_eq!(
                 effects.len(),
                 10,
-                "nine effect owners have ten actual scalar fields"
+                "ten scalar fields include nine source-only slots and one immediate latched amount"
             );
             for (slot, effect) in effects.into_iter().enumerate() {
+                let immediate_prevention_amount = matches!(&effect, Effect::PreventDamage { .. });
                 assert_eq!(
                     validate_instruction_result_effect_context(&effect).is_ok(),
-                    mode != 0,
+                    mode != 0 || immediate_prevention_amount,
                     "slot {slot}, mode {mode}"
                 );
+                if mode == 0 && immediate_prevention_amount {
+                    assert!(
+                        validate_instruction_result_definition(&AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            effect.clone(),
+                        ))
+                        .is_err(),
+                        "an immediate amount still needs its authentic prior producer"
+                    );
+                }
                 assert_eq!(
                     validate_instruction_result_definition(&complete_root(effect)).is_ok(),
-                    mode != 0,
+                    mode != 0 || immediate_prevention_amount,
                     "complete root, slot {slot}, mode {mode}"
                 );
             }

@@ -1827,7 +1827,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // It is deliberately NOT refused on the transport decode path: the multiplayer
     // protocol ships projections to viewers on purpose. Last-writer-wins:
     // re-projecting a projection for another viewer re-latches to that viewer.
-    filtered.viewer_projection = viewer;
+    // The documented non-seat spectator sentinel marks display provenance only;
+    // `viewer` remains None for every unseated access/redaction decision.
+    filtered.viewer_projection = Some(viewer.unwrap_or(PlayerId(u8::MAX)));
     // The original Cube multiset is authoritative pack-generation input. A viewer
     // learns the opened pack through `waiting_for`, never every undealt entry.
     filtered.booster_pack_pool = None;
@@ -5908,6 +5910,71 @@ mod tests {
     use crate::types::resolution::OptionalEffectFrame;
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
+
+    #[test]
+    fn unseated_projection_marker_survives_transport_and_refuses_persistence() {
+        let mut state = GameState::new_two_player(42);
+        let hands = [PlayerId(0), PlayerId(1)].map(|owner| {
+            create_object(
+                &mut state,
+                CardId(7 + u64::from(owner.0)),
+                owner,
+                format!("Private hand {}", owner.0),
+                Zone::Hand,
+            )
+        });
+        let original = serde_json::to_value(&state).unwrap();
+        assert!(
+            serde_json::from_value::<crate::types::game_state::PersistedGameState>(
+                original.clone()
+            )
+            .is_ok(),
+            "the complete authoritative state remains restorable"
+        );
+        for viewer in [Some(PlayerId(0)), Some(PlayerId(1)), None] {
+            let projection = filter_state_for_scope(&state, viewer);
+            let expected_marker = Some(viewer.unwrap_or(PlayerId(u8::MAX)));
+            assert_eq!(projection.viewer_projection, expected_marker);
+            for (seat, hand) in hands.iter().enumerate() {
+                assert_eq!(
+                    projection.objects[hand].name == HIDDEN_CARD_NAME,
+                    viewer != Some(PlayerId(seat as u8)),
+                    "the marker must grant no private access to {viewer:?}"
+                );
+            }
+            let value = serde_json::to_value(&projection).unwrap();
+            let decoded: GameState = serde_json::from_value(value.clone())
+                .expect("every display audience transport-decodes");
+            assert_eq!(decoded.viewer_projection, expected_marker);
+            let error =
+                serde_json::from_value::<crate::types::game_state::PersistedGameState>(value)
+                    .unwrap_err();
+            assert!(error.to_string().contains("not the full game record"));
+            let captured = crate::types::game_state::PersistedGameState::capture(decoded.clone());
+            let captured_error = serde_json::from_value::<
+                crate::types::game_state::PersistedGameState,
+            >(serde_json::to_value(captured).unwrap())
+            .unwrap_err();
+            assert!(captured_error
+                .to_string()
+                .contains("not the full game record"));
+
+            let unseated = filter_state_for_unseated_viewer(&decoded);
+            assert_eq!(unseated.viewer_projection, Some(PlayerId(u8::MAX)));
+            assert!(hands
+                .iter()
+                .all(|id| unseated.objects[id].name == HIDDEN_CARD_NAME));
+            let reseated = filter_state_for_viewer(&unseated, PlayerId(1));
+            assert_eq!(reseated.viewer_projection, Some(PlayerId(1)));
+            assert!(
+                hands
+                    .iter()
+                    .all(|id| reseated.objects[id].name == HIDDEN_CARD_NAME),
+                "reprojection cannot recover private identities already removed"
+            );
+        }
+        assert_eq!(serde_json::to_value(&state).unwrap(), original);
+    }
 
     /// U4 — CR 708.5: the battlefield-entry observation table is engine-internal (a face-down
     /// entrant's projection carries its card identity), so every viewer projection strips it.

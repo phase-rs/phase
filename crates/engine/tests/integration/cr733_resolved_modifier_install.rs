@@ -844,8 +844,8 @@ fn populated_retirement_persists_checked_but_never_enters_viewer_authority() {
             None => filter_state_for_unseated_viewer(&state),
         };
         assert!(projected.resolved_rules_journal.entries().is_empty());
-        // Visibility filtering redacts the journal in a GameState. The client
-        // wire wrapper adds the marker that rejects it as restore authority.
+        // Visibility filtering redacts the journal and marks display provenance.
+        // The client wire wrapper also adds its explicit wire projection marker.
         let filtered = serde_json::to_value(&projected).unwrap();
         assert!(filtered.get("wire_projection").is_none());
         let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, viewer)).unwrap();
@@ -854,7 +854,10 @@ fn populated_retirement_persists_checked_but_never_enters_viewer_authority() {
         let decoded: ClientGameState = serde_json::from_value(wire.clone())
             .expect("redacted client state remains decodable for display");
         assert!(decoded.state.resolved_rules_journal.entries().is_empty());
-        assert_eq!(decoded.state.viewer_projection, viewer);
+        assert_eq!(
+            decoded.state.viewer_projection,
+            Some(viewer.unwrap_or(engine::types::player::PlayerId(u8::MAX)))
+        );
         assert!(serde_json::from_value::<PersistedGameState>(wire["state"].clone()).is_err());
     }
 }
