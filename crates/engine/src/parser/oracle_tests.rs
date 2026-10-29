@@ -299,7 +299,7 @@ mod contextual_hand_publication {
                             3 => DURESS,
                             _ => unreachable!(),
                         },
-                        "Dread Fugue" => if prepared == DREAD.replace('[', "").replace(']', "") { "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card." } else { "Target player reveals their hand. You choose a nonland card from it . That player discards that card." },
+                        "Dread Fugue" => if prepared == DREAD.replace('[', "").replace(']', "") { "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card." } else { "Target player reveals their hand. You choose a nonland card from it. That player discards that card." },
                         _ => prepared,
                     };
                     assert_eq!(spell.source_text, body);
@@ -412,7 +412,7 @@ mod contextual_hand_publication {
                 vec!["Target opponent reveals their hand", "You choose a nonlegendary, nonland card from it", "That player discards that card"]
             } else if body == "Target player reveals their hand. You choose a nonland card from it with mana value 2 or less. That player discards that card." {
                 vec!["Target player reveals their hand", "You choose a nonland card from it with mana value 2 or less", "That player discards that card"]
-            } else if body == "Target player reveals their hand. You choose a nonland card from it . That player discards that card." {
+            } else if body == "Target player reveals their hand. You choose a nonland card from it. That player discards that card." {
                 vec!["Target player reveals their hand", "You choose a nonland card from it", "That player discards that card"]
             } else if body == "target opponent reveals their hand. You choose a noncreature, nonland card from it. Exile that card until ~ leaves the battlefield." {
                 vec!["target opponent reveals their hand", "You choose a noncreature, nonland card from it", "Exile that card until ~ leaves the battlefield"]
@@ -883,7 +883,9 @@ mod contextual_hand_publication {
             );
             assert_eq!(&face, expected);
             if expected.name == "Dread Fugue" {
-                let cleave_source = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it . That player discards that card.";
+                // CR 702.148a: removing the bracketed restriction leaves the
+                // complete sentence; bracket preparation removes its orphan space.
+                let cleave_source = "Cleave {2}{B} (You may cast this spell for its cleave cost. If you do, remove the words in square brackets.)\nTarget player reveals their hand. You choose a nonland card from it. That player discards that card.";
                 assert_eq!(prepared.cleave_oracle_text(), Some(cleave_source));
                 assert!(prepared.has_cleave_variant);
                 let mut cleave_doc = parse_oracle_ir(
@@ -1292,8 +1294,10 @@ mod nested_operand_publication {
                     } else {
                         *body.sub_ability.unwrap().effect
                     };
-                    let mut expected_clause = crate::parser::oracle_ir::ast::parsed_clause(effect);
-                    expected_clause.optional = i == 1;
+                    let expected_clause = crate::parser::oracle_ir::ast::parsed_clause(effect);
+                    // CR 608.2d: the leading "you may" belongs to the complete
+                    // instruction, not the already-peeled subject/effect leaf.
+                    assert_eq!(clause.is_optional, i == 1);
                     assert_eq!(clause.parsed, expected_clause);
                     let body_source = format!("draw a card, then {PUT}.");
                     assert_eq!(
@@ -1598,14 +1602,14 @@ mod relative_population_publication {
             attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             enter_with_counters: vec![],
-            static_abilities: vec![StaticDefinition::continuous()
+            // CR 111.3 + CR 509.1b: the quoted text is the token's own
+            // blocking restriction, rather than a grant to another object.
+            static_abilities: vec![StaticDefinition::new(StaticMode::CantBlock)
                 .affected(TargetFilter::SelfRef)
-                .modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantBlock,
-                }])],
+                .description("~ can't block".into())],
         };
         let mut descend = TriggerDefinition::new(TriggerMode::Phase).phase(Phase::End).trigger_zones(vec![Zone::Battlefield]).execute(spell(token))
-            .description("At the beginning of your end step, create X 1/1 black Fungus creature tokens with \"This token can't block,\" where X is the number of times you descended this turn.".into());
+            .description("At the beginning of your end step, create X 1/1 black Fungus creature tokens with \"~ can't block,\" where X is the number of times you descended this turn.".into());
         descend.constraint = Some(TriggerConstraint::OnlyDuringYourTurn);
         let mut death = TriggerDefinition::new(TriggerMode::ChangesZone)
             .valid_card(TargetFilter::SelfRef)
@@ -3828,7 +3832,9 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
             last.source.fragment(),
             Some("Creatures you control have flying.")
         );
-        assert_eq!(last.source.span().start_byte, text.len() + 1);
+        // The source span indexes the normalized parser buffer, while the
+        // document retains the original Oracle text separately.
+        assert_eq!(last.source.span().start_byte, normalized.len() + 1);
         assert_eq!(last.source.span().first_line, text.lines().count());
         let followed_parsed = lower_oracle_ir(&mut followed_doc);
         assert_eq!(
@@ -44745,8 +44751,8 @@ fn complete_publication_full_native_companion_population() {
             match name {
                 "Alpine Moon" => TargetFilter::And { filters: vec![TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)), TargetFilter::HasChosenName] },
                 "Archon of the Wild Rose" => TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You).properties(vec![
-                    FilterProp::HasAttachment { kind: crate::types::ability::AttachmentKind::Aura,
-                        controller: Some(ControllerRef::You), exclude_source: crate::types::ability::SourceExclusion::Include }, FilterProp::Another])),
+                    FilterProp::Another, FilterProp::HasAttachment { kind: crate::types::ability::AttachmentKind::Aura,
+                        controller: Some(ControllerRef::You), exclude_source: crate::types::ability::SourceExclusion::Include }])),
                 "Blade of the Oni" | "Hulkbuster Armor" | "Mace of the Valiant" | "Rakdos Riteknife" | "Reaper's Scythe" =>
                     TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EquippedBy])),
                 _ => TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
@@ -45267,9 +45273,15 @@ fn complete_publication_preserves_full_dedicated_off_zone_identity_and_costs() {
             let mut residuals = Vec::new(); complete_publication_gap_fragments(&serialized, &mut residuals);
             let normalized = crate::parser::oracle_special::normalize_self_refs_for_static(&broken, face_name);
             let stripped = crate::parser::oracle_util::strip_reminder_text(&normalized);
+            // CR 207.2a: the unsupported rules body excludes reminder text.
+            // StaticStructure keeps that body as the definition description;
+            // its diagnostic fragment additionally identifies the failed route.
+            let static_refusal = format!("Static pattern matched but line failed static parser: {stripped}");
             assert!(residuals.iter().any(|fragment| *fragment == broken || *fragment == normalized || *fragment == stripped)
                 || refused.items.iter().any(|item| matches!(&item.node, OracleNodeIr::Unsupported { unsupported, .. }
-                    if unsupported.fragment == broken || unsupported.fragment == normalized || unsupported.fragment == stripped)),
+                    if unsupported.fragment == broken || unsupported.fragment == normalized || unsupported.fragment == stripped
+                        || (unsupported.category == crate::parser::oracle_ir::doc::UnsupportedAbilityCategory::StaticStructure
+                            && unsupported.fragment == static_refusal && unsupported.description == stripped))),
                 "specific complete refused population/kind/cost/tail, not an unrelated sibling: {face_name}: {broken}: {residuals:?}");
         }
     }
@@ -50215,12 +50227,15 @@ pub(crate) mod defining_modifier_publication {
         assert_eq!(document.items.len(), categories.len(), "{name}");
         let mut line_ordinals = std::collections::BTreeMap::<usize, u32>::new();
         for (index, (item, (line, category))) in document.items.iter().zip(categories).enumerate() {
-            let expected_id = if name == "Blink" {
-                [0, 1, 4, 2, 3][index]
-            } else {
-                index as u32
+            // The document sorts by source, while item identities follow
+            // allocation: deferred singleton owners are emitted after bodies.
+            let expected_id = match name {
+                "Blink" => [0, 1, 4, 2, 3][index],
+                "Eliminate the Competition" | "Immoral Bargain" => [1, 0][index],
+                "Szat's Will" | "Over the Edge" => [2, 0, 1][index],
+                _ => index as u32,
             };
-            assert_eq!(item.id, OracleItemId(expected_id));
+            assert_eq!(item.id, OracleItemId(expected_id), "{name}: item {index}");
             assert_eq!(item.source.id().item, item.id);
             assert_eq!(item.source.id().ordinal, 0);
             let start = lines.iter().take(line).map(|text| text.len() + 1).sum();
