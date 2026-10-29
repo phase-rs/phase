@@ -791,10 +791,13 @@ pub(crate) fn resolve_random_in_chain(
 
     // A gather role is honored only on the random single-owner `Direct` pick
     // below. On any other random shape it fails closed before any draw: the
-    // pool counts as empty and nothing is published.
+    // pool counts as empty, published by role exactly as an empty pool is, so
+    // an opening leg still opens its instruction's (empty) set and the
+    // instruction's action never reads an earlier instruction's set.
     let gather_role = gather_role_of(&ability.effect);
     if gather_role.is_some() && !random_pick_gathers(&ability.effect) {
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
+        publish_gathered_pick(state, gather_role, Vec::new());
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -4685,7 +4688,10 @@ mod tests {
     /// A gather role is honored only by a `LibraryTop` pick and a random
     /// single-owner `Direct` pick. On every other path it fails closed: the
     /// prompting resolver returns an error with no prompt, and a random pick of
-    /// any other shape makes no draw, picks nothing and publishes nothing.
+    /// any other shape makes no draw and picks nothing. Its empty pick is
+    /// published by role, as an empty pool is: an opening pick opens a fresh,
+    /// empty set, so the instruction's action cannot read the earlier
+    /// instruction's set, and a joining pick publishes nothing.
     #[test]
     fn gather_role_off_its_two_paths_is_refused_without_a_prompt_or_draw() {
         let state_with_graveyard_cards = || {
@@ -4791,7 +4797,8 @@ mod tests {
                 let mut state = state_with_graveyard_cards();
                 let mut ability = with_gather(random_pick(), role);
                 edit(&mut ability.effect);
-                let before = (tracked_sets_snapshot(&state), rng_position(&state));
+                let (sets_before, rng_before) =
+                    (tracked_sets_snapshot(&state), rng_position(&state));
                 let mut events = Vec::new();
                 assert!(resolve_random_in_chain(
                     &mut state,
@@ -4804,11 +4811,42 @@ mod tests {
                     ability.effect
                 );
                 assert_eq!(
-                    (tracked_sets_snapshot(&state), rng_position(&state)),
-                    before,
-                    "no draw, nothing published: {:?}",
+                    rng_position(&state),
+                    rng_before,
+                    "no draw: {:?}",
                     ability.effect
                 );
+                match role {
+                    ZoneChoiceGatherRole::Opens => {
+                        let opened = state
+                            .chain_tracked_set_id
+                            .expect("an opening pick opens a set");
+                        assert_ne!(
+                            opened,
+                            TrackedSetId(1),
+                            "a fresh set, not the earlier one: {:?}",
+                            ability.effect
+                        );
+                        assert_eq!(
+                            state.tracked_object_sets.get(&opened),
+                            Some(&Vec::new()),
+                            "the opened set is empty: {:?}",
+                            ability.effect
+                        );
+                        assert_eq!(
+                            state.tracked_object_sets.get(&TrackedSetId(1)),
+                            sets_before.2.get(&TrackedSetId(1)),
+                            "the earlier set is untouched: {:?}",
+                            ability.effect
+                        );
+                    }
+                    ZoneChoiceGatherRole::Joins => assert_eq!(
+                        tracked_sets_snapshot(&state),
+                        sets_before,
+                        "a joining pick publishes nothing: {:?}",
+                        ability.effect
+                    ),
+                }
                 assert_eq!(choose_from_zone_resolutions(&events), 1);
             }
         }
