@@ -27,14 +27,16 @@ use engine::game::combat::AttackTarget;
 use engine::game::effects::deal_damage;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    Effect, PreventionAmount, QuantityExpr, ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
+    Effect, PreventionAmount, QuantityExpr, ReplacementDefinition, ReplacementOrigin,
+    ResolvedAbility, ShieldKind, TargetFilter, TargetRef,
 };
 use engine::types::actions::{GameAction, ReplacementAutoChoice};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{GameState, ReplacementAutoChoiceIdentity, WaitingFor};
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::proposed_event::AppliedReplacementKey;
 use engine::types::zones::Zone;
 
 const INKSHIELD_TEXT: &str = "Prevent all combat damage that would be dealt to you this turn. \
@@ -348,15 +350,15 @@ fn test_of_faith_twice_offers_a_rider_bearing_saved_choice() {
             outcome.final_waiting_for()
         );
     }
-    let shields = runner.state().objects[&bear]
+    let installed_shields = runner.state().objects[&bear]
         .replacement_definitions
         .as_slice()
         .to_vec();
     assert!(
-        shields.len() == 2
-            && shields[0].runtime_execute.is_some()
-            && shields[0].runtime_execute != shields[1].runtime_execute,
-        "reach guard: the Bear holds two shields under distinct handles: {shields:?}"
+        installed_shields.len() == 2
+            && installed_shields[0].runtime_execute.is_some()
+            && installed_shields[0].runtime_execute != installed_shields[1].runtime_execute,
+        "reach guard: the Bear holds two shields under distinct handles: {installed_shields:?}"
     );
     assert_eq!(runner.state().replacement_continuations.len(), arena + 2);
 
@@ -385,6 +387,7 @@ fn test_of_faith_twice_offers_a_rider_bearing_saved_choice() {
     fn assert_identities(
         state: &GameState,
         bear: ObjectId,
+        installed_shields: &[ReplacementDefinition],
         identities: &[ReplacementAutoChoiceIdentity],
         label: &str,
     ) {
@@ -393,16 +396,68 @@ fn test_of_faith_twice_offers_a_rider_bearing_saved_choice() {
             let ReplacementAutoChoiceIdentity::Definition {
                 source,
                 index,
+                occurrence,
                 definition,
                 rider,
             } = identity
             else {
                 panic!("{label}: a shield identity is a definition: {identity:?}");
             };
-            assert_eq!(source.object_id, bear, "{label}");
+            let object = &state.objects[&bear];
+            let host = ObjectIncarnationRef::from_object(object);
+            assert_eq!(source, &host, "{label}: exact source incarnation");
+            let AppliedReplacementKey::Object {
+                source: key_source,
+                index: ordinal,
+                copy_effect: None,
+                resolution_host: Some(key_host),
+            } = occurrence.expect("a resolution-installed shield has its full occurrence key")
+            else {
+                panic!(
+                    "{label}: expected an exact resolution-installed object key: {occurrence:?}"
+                );
+            };
+            assert_eq!(
+                (key_source, key_host, ordinal),
+                (bear, host, *index),
+                "{label}: exact key/index/host"
+            );
+            let has_ordinal = |candidate: &&ReplacementDefinition| matches!(candidate.origin, ReplacementOrigin::Resolution { installation: Some(found) } if found == ordinal);
+            let live_definitions: Vec<_> = object
+                .replacement_definitions
+                .as_slice()
+                .iter()
+                .filter(has_ordinal)
+                .collect();
+            let [live_definition] = live_definitions.as_slice() else {
+                panic!("{label}: the stable ordinal resolves exactly once: {live_definitions:?}");
+            };
+            let originals: Vec<_> = installed_shields.iter().filter(has_ordinal).collect();
+            let [original] = originals.as_slice() else {
+                panic!("{label}: the original installation resolves exactly once: {originals:?}");
+            };
             assert_eq!(definition.runtime_execute, None, "{label}: handle cleared");
-            let live =
-                state.replacement_rider(&state.objects[&bear].replacement_definitions[*index]);
+            let mut original_definition = (**original).clone();
+            original_definition.runtime_execute = None;
+            assert_eq!(
+                definition.as_ref(),
+                &original_definition,
+                "{label}: exact installed definition by value"
+            );
+            assert_eq!(
+                live_definition.origin, original.origin,
+                "{label}: consumption preserves the installation"
+            );
+            // The remembered program stays original; only depletion is live.
+            let mut live_program = (**live_definition).clone();
+            live_program.runtime_execute = None;
+            live_program.is_consumed = original_definition.is_consumed;
+            live_program.shield_kind = original_definition.shield_kind;
+            assert_eq!(
+                live_program, original_definition,
+                "{label}: live program changes only its shield depletion state"
+            );
+            let live = state.replacement_rider(live_definition);
             assert!(live.is_some(), "{label}: the shield names a rider");
             assert_eq!(
                 rider.as_deref(),
@@ -416,7 +471,13 @@ fn test_of_faith_twice_offers_a_rider_bearing_saved_choice() {
             "{label}: {indices:?}"
         );
     }
-    assert_identities(runner.state(), bear, &key.candidates, "prompt");
+    assert_identities(
+        runner.state(),
+        bear,
+        &installed_shields,
+        &key.candidates,
+        "prompt",
+    );
 
     runner
         .act(GameAction::ChooseReplacementAndRemember {
@@ -457,7 +518,13 @@ fn test_of_faith_twice_offers_a_rider_bearing_saved_choice() {
     );
     let records = &runner.state().replacement_auto_choices;
     assert_eq!(records.len(), 1);
-    assert_identities(runner.state(), bear, &records[0].key.candidates, "record");
+    assert_identities(
+        runner.state(),
+        bear,
+        &installed_shields,
+        &records[0].key.candidates,
+        "record",
+    );
 }
 
 /// #8777 (H-2) — Brace for Impact: real cast, targeted (`ColorCount {GE,2}`),
