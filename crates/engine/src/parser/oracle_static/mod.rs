@@ -204,6 +204,8 @@ pub(crate) use type_change::parse_additive_type_clause_modifications;
 pub(crate) use type_change::parse_inverted_base_pt_type_grant;
 
 /// Parse a static/continuous ability line into a `StaticDefinition`.
+/// Recognized ability-word frames select the first definition of the complete
+/// body production; callers needing every companion use `parse_static_line_multi`.
 #[tracing::instrument(level = "debug")]
 pub fn parse_static_line(text: &str) -> Option<crate::types::ability::StaticDefinition> {
     let ir = parse_static_line_ir(text)?;
@@ -228,17 +230,21 @@ pub(crate) fn parse_flashback_trailing_self_spell_cost_reduction(
 
 /// IR production: parse a static line into `StaticIr` (pre-lowering).
 pub(crate) fn parse_static_line_ir(text: &str) -> Option<StaticIr> {
-    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow).or_else(|| {
-        let body = shared::known_static_ability_word_body(text)?;
-        let mut definition = parse_static_line_inner(&body, InvertedAsLongAs::Allow)?;
-        definition.description = Some(text.to_string());
-        Some(definition)
-    })?;
-    Some(StaticIr {
-        definition,
-        source_text: text.to_string(),
-        body_ir: None,
-    })
+    if shared::known_static_ability_word_body(text).is_none() {
+        return parse_static_line_unframed_ir(text);
+    }
+    // CR 207.2c: framing cannot collapse a compound body through a partial
+    // single-result owner before the multi-result transaction sees it.
+    let definition = shared::parse_static_line_multi_inner(text)
+        .into_iter()
+        .next()?;
+    Some(StaticIr::from_definition(text, definition))
+}
+
+/// Raw fallback for the multi dispatcher: never retry an ability-word frame here.
+fn parse_static_line_unframed_ir(text: &str) -> Option<StaticIr> {
+    let definition = parse_static_line_inner(text, InvertedAsLongAs::Allow)?;
+    Some(StaticIr::from_definition(text, definition))
 }
 
 /// Lowering: apply post-parse transforms to produce the final `StaticDefinition`.
