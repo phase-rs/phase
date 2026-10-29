@@ -90,6 +90,7 @@ use nom::combinator::{
 use nom::multi::{many0, many1, many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
+use std::collections::HashSet;
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_reflexive_conditional_connector;
@@ -31181,14 +31182,17 @@ fn lower_subject_exile_objects(
         ));
     };
     let objects: Vec<SubjectExileObjectAst> = std::iter::once(first).chain(rest).collect();
-    // Two library objects would both read the same top cards before the single
-    // exile moves any of them; that form is not modelled.
-    if objects
-        .iter()
-        .filter(|object| matches!(object, SubjectExileObjectAst::LibraryTop(_)))
-        .count()
-        > 1
-    {
+    // Two objects from one zone would both read that zone before the single
+    // exile moves any of them — two library objects read the same top cards,
+    // and two at-random picks from one graveyard can select the same card —
+    // so one card could fill both; that form is not modelled.
+    let mut read_zones = HashSet::new();
+    if !objects.iter().all(|object| {
+        read_zones.insert(match object {
+            SubjectExileObjectAst::LibraryTop(_) => Zone::Library,
+            SubjectExileObjectAst::AtRandomFrom(zone) => *zone,
+        })
+    }) {
         return parsed_clause(Effect::unimplemented("subject_exile_object_list", text));
     }
     // Each object's pool: (count, zone, candidate provenance, selection).

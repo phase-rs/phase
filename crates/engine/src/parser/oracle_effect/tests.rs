@@ -33289,6 +33289,32 @@ fn subject_exile_object_list_two_library_objects_is_unimplemented() {
     );
 }
 
+/// Two at-random objects from one zone would each sample the same unchanged
+/// zone before the single exile, so one card could be picked twice; it is an
+/// honest gap. At-random objects from different zones still lower.
+#[test]
+fn subject_exile_object_list_two_random_objects_from_one_zone_is_unimplemented() {
+    // Reach-guard: Crabomination's graveyard and hand objects are different
+    // zones and lower gap-free.
+    let def = parse_effect_chain(
+        "target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand",
+        AbilityKind::Spell,
+    );
+    assert!(subject_exile_has_no_gap(&def), "{def:?}");
+    for zone in ["graveyard", "hand"] {
+        assert_subject_exile_gap(
+            &format!(
+                "target opponent exiles a card at random from their {zone} and a card at random from their {zone}"
+            ),
+            "subject_exile_object_list",
+        );
+    }
+    assert_subject_exile_gap(
+        "target opponent exiles a card at random from their graveyard, the top card of their library, and a card at random from their graveyard",
+        "subject_exile_object_list",
+    );
+}
+
 /// R-MED (SHAPE). CR 608.2c + CR 115.1: after an earlier instruction that
 /// announces another player, the list's legs still read the group their own
 /// root declares, not the earlier one.
