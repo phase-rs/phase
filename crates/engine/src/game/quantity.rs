@@ -15,6 +15,7 @@ use crate::game::filter::{
     target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
     ParkedTargets,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::speed::effective_speed;
 use crate::game::targeting::TriggeringSpell;
 use crate::types::ability::{

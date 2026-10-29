@@ -5,6 +5,7 @@ use std::ops::{BitOrAssign, ControlFlow};
 use std::sync::Arc;
 
 use serde::de;
+use serde::de::DeserializeOwned;
 use serde::ser::SerializeStructVariant;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
@@ -15,11 +16,9 @@ use super::ability_visit::{
 use super::card::{PrintedCardRef, PrintedLoyalty};
 use super::card_type::{CardType, CoreType, SubtypeSet, Supertype};
 use super::counter::{CounterMatch, CounterType};
-use super::events::BendingType;
-use super::game_state::{
-    is_zero_usize, CastOccurrence, DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope,
-    TargetSelectionConstraint, TriggerSourceContext,
-};
+use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
+use super::game_state::{CastOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext};
+use super::game_state_kinds::{DistributionUnit, RetargetScope, TargetSelectionConstraint};
 use super::identifiers::{
     CardId, EpicEffectId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, ReplacementContinuationId,
     TrackedSetId, LEGACY_INCARNATION,
@@ -34,11 +33,11 @@ use super::proposed_event::AppliedReplacementKey;
 use super::replacements::ReplacementEvent;
 use super::statics::{ActivationExemption, CastFrequency, CostModifyMode, StaticMode};
 use super::stickers::{AppliedSticker, StickerKind};
+use super::text_word_carriers::{carrier_class, walk_strings, WordClass};
 use super::triggers::TriggerMode;
 use super::zones::{EtbTapState, Zone};
-use crate::game::filter::FilterContext;
-use crate::game::game_object::{BackFaceData, DisplayIdentity};
-use crate::types::events::{ActivatedAbilityKind, ClashResult, PlayerActionKind};
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::object_data::{BackFaceData, DisplayIdentity};
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -1925,6 +1924,51 @@ impl TextSubstitution {
                 to.parse::<BasicLandType>().ok()?,
             ),
         })
+    }
+}
+
+impl TextSubstitution {
+    /// CR 612.1 + CR 612.2: `value` with every replaced word rewritten at classified carrier positions only, or `None` when nothing changed or the value does not survive its serialized form.
+    pub fn rewrite<T: Serialize + DeserializeOwned>(&self, value: &T) -> Option<T> {
+        self.rewrite_counted(value).map(|(rewritten, _)| rewritten)
+    }
+
+    /// [`Self::rewrite`] plus the number of word instances it replaced.
+    pub(crate) fn rewrite_counted<T: Serialize + DeserializeOwned>(
+        &self,
+        value: &T,
+    ) -> Option<(T, usize)> {
+        let mut json = serde_json::to_value(value).ok()?;
+        let (from, to) = self.words();
+        let domain = self.domain();
+        let mut occurrences = 0;
+        walk_strings(&mut json, None, "", &mut |tag, key, leaf| {
+            if leaf == from && carrier_class(tag, key, domain) == Some(WordClass::Word) {
+                *leaf = to.to_owned();
+                occurrences += 1;
+            }
+        });
+        if occurrences == 0 {
+            return None;
+        }
+        match serde_json::from_value(json) {
+            Ok(rewritten) => Some((rewritten, occurrences)),
+            Err(error) => {
+                debug_assert!(false, "text substitution broke a serde round trip: {error}");
+                None
+            }
+        }
+    }
+
+    /// Rewrites `value` in place; returns the number of word instances replaced.
+    pub(crate) fn rewrite_in_place<T: Serialize + DeserializeOwned>(&self, value: &mut T) -> usize {
+        match self.rewrite_counted(value) {
+            Some((rewritten, occurrences)) => {
+                *value = rewritten;
+                occurrences
+            }
+            None => 0,
+        }
     }
 }
 
@@ -7129,18 +7173,30 @@ pub enum AttackerBlockStatus {
 /// Combat relationship required by `FilterProp::CombatRelation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CombatRelation {
-    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it.
+    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it —
+    /// the current block pairing, in either orientation. A subject that has left
+    /// the battlefield answers from the pairings it had immediately before it
+    /// left (CR 608.2h last known information), and only for a candidate still
+    /// in that combat role (CR 506.4).
     BlockingOrBlockedBy,
-    /// CR 509.1g + CR 400.7: Candidate is an attacking creature the subject was
-    /// recorded as blocking, within `scope`. Unlike `BlockingOrBlockedBy`, which
-    /// reads live `combat.blocker_to_attacker` and empties when CR 506.4 removes
-    /// either creature from combat, this reads the block-history ledgers
-    /// (`CombatState::creature_blocked_attackers_this_combat` /
-    /// `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
-    /// not prune. Each record pins both creatures' exact incarnations, so a
-    /// creature that left and returned matches none of its predecessor's
-    /// records.
-    BlockedBySubject { scope: CombatHistoryScope },
+    /// CR 509.1g + CR 400.7: Candidate is an attacking creature blocked by the
+    /// subject.
+    ///
+    /// * `scope: None` — the current block pairing ("creatures blocked by this
+    ///   creature"): the same pairing authority as `BlockingOrBlockedBy`, in the
+    ///   one orientation where the subject is the blocker.
+    /// * `scope: Some(window)` — the subject was recorded as blocking the
+    ///   candidate within `window` ("creatures it blocked this turn"). This
+    ///   reads the block-history ledgers
+    ///   (`CombatState::creature_blocked_attackers_this_combat` /
+    ///   `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
+    ///   not prune. Each record pins both creatures' exact incarnations, so a
+    ///   creature that left and returned matches none of its predecessor's
+    ///   records.
+    BlockedBySubject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<CombatHistoryScope>,
+    },
 }
 
 /// CR 702.122b + CR 702.122c: which side of a crew payment the candidate of a
@@ -17343,7 +17399,7 @@ pub enum StaticCondition {
     },
     /// CR 731.1: True when the game has the given day/night designation.
     DayNightIs {
-        state: crate::types::game_state::DayNight,
+        state: crate::types::game_state_kinds::DayNight,
     },
     /// CR 122.1: True when the source object has at least `minimum` (and at most `maximum`,
     /// if specified) counters matching `counters`. `CounterMatch::Any` sums across every
@@ -17473,7 +17529,7 @@ pub enum StaticCondition {
     /// just Warp — shares one variant. Not controller-scoped: "a spell was
     /// warped this turn" matches a cast by any player.
     SpellCastWithVariantThisTurn {
-        variant: crate::types::game_state::CastingVariant,
+        variant: crate::types::game_state_kinds::CastingVariant,
     },
     /// CR 508.6 + CR 109.5: the "attacked you during their last
     /// turn" revenge gate. TRUE when a player declared one or more creatures
@@ -17738,7 +17794,7 @@ pub enum StaticCondition {
     /// Visions of Ruin). Evaluated only during self-spell `ModifyCost` collection,
     /// not in the layer pipeline.
     CastingAsVariant {
-        variant: crate::types::game_state::CastingVariant,
+        variant: crate::types::game_state_kinds::CastingVariant,
     },
     None,
 }
@@ -18558,7 +18614,7 @@ pub enum ParsedCondition {
     /// `game::dungeon::has_completed_dungeon`, so the readings cannot drift.
     CompletedDungeon {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        specific: Option<crate::game::dungeon::DungeonId>,
+        specific: Option<crate::types::dungeon::DungeonId>,
     },
     /// CR 702.178a: True when the SOURCE's player has max speed — its
     /// controller on the battlefield, its owner anywhere else, per the "Max
@@ -21963,7 +22019,7 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // here would install a no-op ability while the top-level effect
             // stays `Effect::ApplyPerpetual` (never `Effect::Unimplemented`), so
             // coverage/`cargo semantic-audit` would keep reporting the card as
-            // fully supported. Reuse `game::coverage::ability_tree_any` -- the
+            // fully supported. Reuse `types::ability_visit::ability_tree_any` -- the
             // single walker authority -- rather than reimplementing tree
             // recursion here. Rejecting here propagates through the `Result`
             // collect in `try_parse_perpetual_grant_ability`, which fails the
@@ -21987,7 +22043,7 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // `game::coverage::collect_unimplemented_from_tree`, which checks
             // both `def.effect` and `def.cost` for the same reason.
             ContinuousModification::GrantAbility { definition }
-                if crate::game::coverage::ability_tree_any(&definition, &|d| {
+                if crate::types::ability_visit::ability_tree_any(&definition, &|d| {
                     matches!(&*d.effect, Effect::Unimplemented { .. })
                         || matches!(&d.cost, Some(AbilityCost::Unimplemented { .. }))
                 }) =>
@@ -22040,7 +22096,7 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // larger project; reject here for now rather than ship a false
             // green, mirroring the sibling `Effect::Unimplemented` gate above.
             ContinuousModification::GrantAbility { definition }
-                if crate::game::coverage::ability_tree_any(&definition, &|d| {
+                if crate::types::ability_visit::ability_tree_any(&definition, &|d| {
                     matches!(
                         &*d.effect,
                         Effect::GenericEffect { static_abilities, .. }
@@ -22062,7 +22118,7 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // multi-quote grant) while the top-level effect stays
             // `Effect::ApplyPerpetual`, so coverage would keep reporting the
             // card as fully supported. Reuse
-            // `game::coverage::ability_tree_any` — the single walker authority
+            // `types::ability_visit::ability_tree_any` — the single walker authority
             // — over the `AbilityDefinition`-shaped `execute`. Rejecting here
             // propagates through the `Result` collect in
             // `try_parse_perpetual_grant_ability`, which fails the whole clause
@@ -22078,7 +22134,7 @@ impl TryFrom<ContinuousModification> for PerpetualGrantModification {
             // grant time) does not apply.
             ContinuousModification::GrantTrigger { trigger }
                 if trigger.execute.as_deref().is_none_or(|execute| {
-                    crate::game::coverage::ability_tree_any(execute, &|d| {
+                    crate::types::ability_visit::ability_tree_any(execute, &|d| {
                         matches!(&*d.effect, Effect::Unimplemented { .. })
                     })
                 }) =>
@@ -22386,7 +22442,7 @@ pub enum EntryAttackDestination {
     PlayerOrPlaneswalker,
     /// The instruction fixes a single destination.
     Exact {
-        target: crate::game::combat::AttackTarget,
+        target: crate::types::attack_target::AttackTarget,
     },
 }
 
@@ -24749,7 +24805,7 @@ pub enum Effect {
     /// CR 601.2f: "The next [type] spell you cast this turn [has keyword/can't be countered/etc.]."
     /// Creates a one-shot modifier applied when the player casts their next qualifying spell.
     GrantNextSpellAbility {
-        modifier: crate::types::game_state::NextSpellModifier,
+        modifier: crate::types::game_state_kinds::NextSpellModifier,
         /// CR 601.2f + CR 115.1: whose next spell receives the modifier.
         /// `Controller` = "the next spell you cast"; `Target` = "the next
         /// spell they cast / that player casts" (the player this ability
@@ -25245,7 +25301,7 @@ pub enum Effect {
     VentureIntoDungeon,
     /// CR 701.49d: Venture into a specific dungeon (e.g., "venture into the Undercity").
     VentureInto {
-        dungeon: crate::game::dungeon::DungeonId,
+        dungeon: crate::types::dungeon::DungeonId,
     },
     /// CR 726.1 + CR 726.2: Take the initiative. Grants the initiative
     /// designation and triggers venture into Undercity.
@@ -26323,7 +26379,7 @@ pub enum Effect {
     /// CR 730.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
-        to: crate::types::game_state::DayNight,
+        to: crate::types::game_state_kinds::DayNight,
     },
     /// CR 110.2: Give control of target permanent to a specified recipient player.
     /// Unlike GainControl (controller takes), GiveControl transfers to a different player.
@@ -34413,6 +34469,105 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
     .is_break()
 }
 
+/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
+/// mana, and it's not a loyalty ability (CR 606.2). Deliberately EXCLUDES the
+/// fourth criterion ("its cost and effect don't move any card to or from a
+/// library"), which is why this is NOT the mana-ability test and must never be
+/// used for activation routing — use [`is_mana_ability`] for that.
+///
+/// This exists because `game::mana_abilities::is_renewable_mana_ability` asks a different question:
+/// "is this permanent part of a standing manabase?" A Millikin
+/// ("{T}, Mill a card: Add {C}") stops being a rules mana ability under the
+/// library clause but does not stop being a manabase permanent. Composing the
+/// development predicate on the rules predicate would delete Millikin, Deranged
+/// Assistant, and Codie from `phase-ai`'s `is_intrinsic_mana_source` ->
+/// `card_value::mana_role` -> mulligan `keep_tier`, for a reason unrelated to
+/// manabase development.
+///
+/// CR 605.3b: Mana abilities produce mana and resolve immediately without using
+/// the stack.
+/// CR 605.1a: A mana ability cannot have targets. `Effect::Mana` carries a
+/// `ManaTargetRole` naming its recipient and/or count-source player targets;
+/// any declared role means the ability targets and must use the stack. The
+/// `multi_target` mechanism is checked alongside it.
+pub(crate) fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
+    // CR 605.1a: A mana ability "doesn't require a target." Read the ROLE's
+    // declared filters: ANY declared role — recipient or count source — means
+    // the ability names a target and therefore uses the stack (Jeska's Will
+    // mode 1: "Add {R} for each card in target opponent's hand").
+    // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
+    // makes this not-a-mana-ability under today's behavior, and this change
+    // must not widen mana-ability status for any shipping card.
+    let target_attached = match &*ability_def.effect {
+        Effect::Mana { target, .. } => target.as_ref().and_then(|r| r.declared_filters().next()),
+        _ => return false,
+    };
+    // CR 605.1a: A targeted mana-producing ability is not a mana ability.
+    // Reject both the explicit `multi_target` mechanism and the embedded
+    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
+    // card in target opponent's hand" — the spell targets, so it must use the
+    // stack and is not a mana ability under CR 605).
+    if ability_def.multi_target.is_some() || target_attached.is_some() {
+        return false;
+    }
+    // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
+    // that happens to add mana — e.g. Chandra, Bold Pyromancer's `[+1]: Add
+    // {R}{R}` — is NOT a mana ability: it uses the stack and obeys loyalty-ability
+    // timing (CR 606.3, sorcery speed, once per turn). Excluding it here keeps it
+    // off the instant-speed mana-ability path.
+    // CR 606: a loyalty ability adjusts loyalty as its cost — exclude it here.
+    if cost_has_component(&ability_def.cost, |c| {
+        matches!(c, AbilityCost::Loyalty { .. })
+    }) {
+        return false;
+    }
+    true
+}
+
+/// CR 605.1a: the single authority for "is this activated ability a mana
+/// ability?" — all four criteria.
+///
+/// CR 605.1a (final sentence): "Do not take into account replacement effects
+/// that may apply, other than self-replacement effects, when evaluating these
+/// criteria." This function is a pure function of the printed
+/// `AbilityDefinition` AST — it takes no `&GameState` and therefore CANNOT
+/// observe a replacement effect. That purity IS the implementation of the
+/// clause, not an accident of the signature: do NOT add a `&GameState`
+/// parameter or consult the replacement registry here. Self-replacement effects
+/// (CR 614.15), which the rule DOES admit, are printed on the ability itself and
+/// so are already in the AST this function reads — see the
+/// `Effect::Counter { countered_spell_zone }` arm of
+/// `Effect::moves_card_to_or_from_library`, which counts Memory Lapse's
+/// "instead" precisely because it is a self-replacement effect.
+///
+/// CR 605.2 is the second reason the signature must stay pure: "A mana ability
+/// remains a mana ability even if the game state doesn't allow it to produce
+/// mana." A classification that could read game state would invite exactly the
+/// state-dependent answer CR 605.2 forbids. (This is also why `Effect::Dig` is
+/// unconditionally true: its only non-moving configuration is state-dependent.)
+pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
+    produces_mana_on_activation(ability_def)
+        // CR 605.1a: "...and its cost and effect don't move any card to or from
+        // a library." Chromatic Sphere ("{1}, {T}, Sacrifice this artifact: Add
+        // one mana of any color. Draw a card.") is the canonical effect case;
+        // Millikin ("{T}, Mill a card: Add {C}") is the cost-side case.
+        //
+        // The cost axis runs off its OWN walk, not the root cost alone: CR
+        // 602.1a scopes "its cost" to the activation cost, but CR 118.12a ->
+        // CR 118.12 makes an `unless [player] pays` action a cost paid AT
+        // RESOLUTION, which CR 608.2c places under "its effect" — as are the
+        // costs on chain links.
+        //
+        // NOT reclassified, and each for a different CR reason:
+        //  - Chromatic Star  — the draw is a separate ChangesZone trigger.
+        //  - Barbed Sextant  — CR 603.7a, a delayed triggered ability.
+        //  - Shaun & Rebecca — CR 603.12, a reflexive triggered ability.
+        //  - Gilanra         — CR 603.3, a TriggerOnSpend mana-spend grant.
+        //  - The Secret Lair — CR 701.22a, Scry reorders WITHIN a library.
+        && !cost_moves_card_to_or_from_library(ability_def)
+        && !chain_moves_card_to_or_from_library(ability_def)
+}
+
 /// CR 605.1a: semantic support check for a complete activated ability,
 /// including mana produced after another instruction. The legacy inline router
 /// (`is_mana_ability`) requires a Mana root; using that narrower admission here
@@ -34687,7 +34842,7 @@ impl Serialize for AbilityDefinition {
         Outer {
             repr,
             consumes_source: self.consumes_source(),
-            is_mana_ability: crate::game::mana_abilities::is_mana_ability(self),
+            is_mana_ability: is_mana_ability(self),
         }
         .serialize(s)
     }
@@ -35849,7 +36004,7 @@ pub enum AbilityCondition {
     /// the categorical boundary keeps them siblings.
     CompletedDungeon {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        specific: Option<crate::game::dungeon::DungeonId>,
+        specific: Option<crate::types::dungeon::DungeonId>,
     },
     /// CR 608.2c: "If [target] has [keyword], [override effect] instead"
     /// Checked at resolution time against the first resolved object target's keywords.
@@ -35956,7 +36111,7 @@ pub enum AbilityCondition {
     /// alternative-cast `variant` this turn. Parameterized by `CastingVariant`
     /// so every "cast via X this turn" history query shares one variant.
     SpellCastWithVariantThisTurn {
-        variant: crate::types::game_state::CastingVariant,
+        variant: crate::types::game_state_kinds::CastingVariant,
     },
     /// CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase of the turn".
     /// Gates a follow-up effect on whether this is the first combat phase started this turn.
@@ -36033,7 +36188,7 @@ pub enum AbilityCondition {
     DayNightIsNeither,
     /// CR 731.1: True when the game has the given day/night designation.
     DayNightIs {
-        state: crate::types::game_state::DayNight,
+        state: crate::types::game_state_kinds::DayNight,
     },
     /// CR 608.2c: Ordinary resolution-time condition (not an intervening-if
     /// condition under CR 603.4) gating on how many times THIS printed ability
@@ -37002,7 +37157,7 @@ pub struct SpellContext {
     /// payment (a permission source sacrificed for mana). `None` for every other
     /// cast.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graveyard_permission_authority: Option<crate::types::game_state::CastingVariant>,
+    pub graveyard_permission_authority: Option<crate::types::game_state_kinds::CastingVariant>,
     /// CR 601.2f + CR 601.2h + CR 614.1c: the announced graveyard permission's
     /// terms (its extra cost and "enters with a counter" rider) as they were
     /// when the cast was announced, applied even if the permission's source
@@ -37562,7 +37717,7 @@ pub enum TriggerCondition {
     /// Parameterized by `CastingVariant` so every "cast via X this turn"
     /// history query shares one variant.
     SpellCastWithVariantThisTurn {
-        variant: crate::types::game_state::CastingVariant,
+        variant: crate::types::game_state_kinds::CastingVariant,
     },
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
@@ -37574,7 +37729,7 @@ pub enum TriggerCondition {
     /// Annihilation") is expressed via `Not { Box::new(CompletedDungeon { specific }) }`.
     CompletedDungeon {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        specific: Option<crate::game::dungeon::DungeonId>,
+        specific: Option<crate::types::dungeon::DungeonId>,
     },
     /// CR 110.5b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
@@ -38698,7 +38853,7 @@ pub struct TriggerDefinition {
     /// and an unlock trigger fires only for its own door's event. `None` for
     /// every non-Room trigger: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub room_door: Option<crate::game::game_object::RoomDoor>,
+    pub room_door: Option<crate::types::object_data::RoomDoor>,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
@@ -39341,7 +39496,7 @@ impl TriggerDefinition {
     }
 
     /// CR 709.5: tag this trigger as living on the given Room half.
-    pub fn room_door(mut self, door: crate::game::game_object::RoomDoor) -> Self {
+    pub fn room_door(mut self, door: crate::types::object_data::RoomDoor) -> Self {
         self.room_door = Some(door);
         self
     }
@@ -39593,7 +39748,7 @@ pub struct StaticDefinition {
     /// functions only while that half is unlocked. `None` for every non-Room
     /// static: no door gating.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub room_door: Option<crate::game::game_object::RoomDoor>,
+    pub room_door: Option<crate::types::object_data::RoomDoor>,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub granting_object: Option<ObjectIncarnationRef>,
@@ -39792,7 +39947,7 @@ impl StaticDefinition {
 
     /// CR 709.5 + CR 709.5c: Stamp the Room half this static's text lives on
     /// (see the `room_door` field doc). Mirrors `TriggerDefinition::room_door`.
-    pub fn room_door(mut self, door: crate::game::game_object::RoomDoor) -> Self {
+    pub fn room_door(mut self, door: crate::types::object_data::RoomDoor) -> Self {
         self.room_door = Some(door);
         self
     }
@@ -40512,7 +40667,7 @@ pub struct ReplacementDefinition {
     /// replacements (e.g., Doubling Season) ordered before Chatterfang are
     /// reflected in the Squirrel count per CR 616.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_token_spec: Option<Box<crate::types::proposed_event::TokenSpec>>,
+    pub additional_token_spec: Option<Box<crate::types::token_spec::TokenSpec>>,
     /// CR 614.1a + CR 111.1: Ensure-all token-creation replacement. Used by
     /// Academy Manufactor ("If you would create a Clue, Food, or Treasure
     /// token, instead create one of each"). Each listed spec whose subtype
@@ -40526,7 +40681,7 @@ pub struct ReplacementDefinition {
     /// field is *conditional* on subtype absence. The two fields are
     /// orthogonal — a single replacement may set either, but not both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ensure_token_specs: Option<Vec<crate::types::proposed_event::TokenSpec>>,
+    pub ensure_token_specs: Option<Vec<crate::types::token_spec::TokenSpec>>,
     /// CR 614.1a + CR 122.1a: Counter-type discriminator for `AddCounter`
     /// replacements that explicitly name a counter type in their Oracle text
     /// ("If one or more +1/+1 counters …" — Hardened Scales; "If one or more
@@ -40818,20 +40973,6 @@ impl ReplacementDefinition {
         self
     }
 
-    /// CR 201.5a: the context `valid_card` is read in, naming this replacement's granter.
-    pub(crate) fn valid_card_context(
-        &self,
-        state: &super::game_state::GameState,
-        source_id: ObjectId,
-        controller: Option<PlayerId>,
-    ) -> FilterContext<'static> {
-        match controller {
-            Some(controller) => FilterContext::from_source_with_controller(source_id, controller),
-            None => FilterContext::from_source(state, source_id),
-        }
-        .with_granting_object(self.granting_object)
-    }
-
     pub fn description(mut self, desc: String) -> Self {
         self.description = Some(desc);
         self
@@ -41061,7 +41202,7 @@ impl ReplacementDefinition {
     /// the primary `CreateToken` event (Chatterfang Squirrels, Donatello
     /// Mutagen). The stored spec's `source_id` / `controller` are placeholders
     /// overwritten with the replacement source at apply time.
-    pub fn additional_token_spec(mut self, spec: crate::types::proposed_event::TokenSpec) -> Self {
+    pub fn additional_token_spec(mut self, spec: crate::types::token_spec::TokenSpec) -> Self {
         self.additional_token_spec = Some(Box::new(spec));
         self
     }
@@ -41069,10 +41210,7 @@ impl ReplacementDefinition {
     /// CR 614.1a + CR 111.1: Attach the ensure-all token-spec list (Manufactor).
     /// At apply time, only specs whose subtype is missing from the proposed
     /// event's `TokenSpec.subtypes` are emitted.
-    pub fn ensure_token_specs(
-        mut self,
-        specs: Vec<crate::types::proposed_event::TokenSpec>,
-    ) -> Self {
+    pub fn ensure_token_specs(mut self, specs: Vec<crate::types::token_spec::TokenSpec>) -> Self {
         self.ensure_token_specs = Some(specs);
         self
     }
@@ -45511,6 +45649,10 @@ fn is_false(value: &bool) -> bool {
 }
 
 fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+pub(crate) fn is_zero_usize(value: &usize) -> bool {
     *value == 0
 }
 
@@ -50328,6 +50470,16 @@ mod tests {
             FilterProp::CombatRelation {
                 relation: CombatRelation::BlockingOrBlockedBy,
                 subject: CombatRelationSubject::ParentTarget,
+            },
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockedBySubject { scope: None },
+                subject: CombatRelationSubject::Source,
+            },
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockedBySubject {
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::Source,
             },
             FilterProp::BlockStatus {
                 status: AttackerBlockStatus::Unblocked,

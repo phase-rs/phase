@@ -17,7 +17,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::Supertype;
 use crate::types::counter::CounterType;
-use crate::types::game_state::DistributionUnit;
+use crate::types::game_state_kinds::DistributionUnit;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::mana::ManaCost;

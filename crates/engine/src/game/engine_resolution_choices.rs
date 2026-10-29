@@ -1,4 +1,5 @@
 // engine-citation-gate: symbol anchors only
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::RandomDraw;
 use std::collections::{HashMap, HashSet};
 

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::action_rejection::ActionRejection;
 use crate::types::events::{GameEvent, LibrarySearchCardFaceView, LibrarySearchCardView};
 use crate::types::game_state::{
@@ -4728,6 +4729,7 @@ fn redact_zone_change_record(record: &mut crate::types::game_state::ZoneChangeRe
     record.linked_exile_snapshot.clear();
     record.is_token = false;
     record.combat_status = Default::default();
+    record.block_pairs.clear();
     record.co_departed.clear();
 }
 

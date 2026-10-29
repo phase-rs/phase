@@ -4,6 +4,7 @@
 
 use engine::game::effects::attach::attach_to;
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};

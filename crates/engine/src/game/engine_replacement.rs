@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
     Effect, EffectKind, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,

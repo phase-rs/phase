@@ -40935,7 +40935,7 @@ fn parse_card(
 fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
-            relation: CombatRelation::BlockedBySubject { scope },
+            relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
             subject: CombatRelationSubject::Source,
         }]),
     )

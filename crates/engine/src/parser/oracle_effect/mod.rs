@@ -154,7 +154,7 @@ use crate::types::ability::DoubleTarget;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::contest::ContestKind;
 use crate::types::counter::CounterType;
-use crate::types::game_state::{NextSpellModifier, RetargetScope};
+use crate::types::game_state_kinds::{NextSpellModifier, RetargetScope};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
@@ -6850,7 +6850,7 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let register_bending = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::RegisterBending {
-            kind: crate::types::events::BendingType::Air,
+            kind: crate::types::event_kinds::BendingType::Air,
         },
     );
 
@@ -6932,7 +6932,7 @@ fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
     let register_bending = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::RegisterBending {
-            kind: crate::types::events::BendingType::Earth,
+            kind: crate::types::event_kinds::BendingType::Earth,
         },
     );
 
@@ -19331,7 +19331,7 @@ fn parse_threshold_land_balance_ir(
         )
         .player_scope(Some(PlayerFilter::PerformedActionThisWay {
             relation: PlayerRelation::All,
-            action: crate::types::events::PlayerActionKind::SearchedLibrary,
+            action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
         }))
         .push();
 
@@ -19454,7 +19454,7 @@ fn parse_uneven_land_search_ir(
     )
     .player_scope(PlayerFilter::PerformedActionThisWay {
         relation: PlayerRelation::All,
-        action: crate::types::events::PlayerActionKind::SearchedLibrary,
+        action: crate::types::event_kinds::PlayerActionKind::SearchedLibrary,
     });
     // The final "searched this way" shuffle is a distinct instruction, not a
     // result-delivery continuation. It remains physically attached as the

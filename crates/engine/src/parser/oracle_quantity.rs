@@ -48,7 +48,7 @@ use crate::types::ability::{
     TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::counter::CounterType;
-use crate::types::events::PlayerActionKind;
+use crate::types::event_kinds::PlayerActionKind;
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
