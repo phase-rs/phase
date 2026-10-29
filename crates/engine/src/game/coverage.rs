@@ -14782,10 +14782,11 @@ mod tests {
                             }),
                         "{name}: the scoped node carries the unsupported boundary child"
                     );
-                    let handlers: Vec<String> = super::extract_gap_details(&[item.clone()])
-                        .into_iter()
-                        .map(|gap| gap.handler)
-                        .collect();
+                    let handlers: Vec<String> =
+                        super::extract_gap_details(std::slice::from_ref(&item))
+                            .into_iter()
+                            .map(|gap| gap.handler)
+                            .collect();
                     assert!(
                         handlers
                             .iter()
