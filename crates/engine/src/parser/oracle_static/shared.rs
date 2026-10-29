@@ -6181,7 +6181,9 @@ pub(crate) fn parse_creatures_you_control_that_clause<'a>(
 ) -> Option<(TargetFilter, &'a str)> {
     let (mut properties, consumed) = parse_that_clause_suffix(lower, None)?;
     if is_other {
-        properties.push(FilterProp::Another);
+        // Match the full-subject owner: source exclusion belongs to the head,
+        // before the relative clause appends its attachment/property predicate.
+        properties.insert(0, FilterProp::Another);
     }
     Some((
         TargetFilter::Typed(

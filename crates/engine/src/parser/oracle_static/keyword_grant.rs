@@ -306,7 +306,23 @@ fn parse_graveyard_granted_keyword_phrase(
     .ok()?;
     let keyword_text = keyword_text.trim();
     let lower = keyword_text.to_lowercase();
+    // Lexical nomination also accepts unfinished tokens. Publication requires
+    // an inline cost introduction, rather than metadata's colon encoding.
     let (_, tail) = nom_on_lower(keyword_text, &lower, parse_graveyard_granted_keyword_kind)?;
+    let (tail, dash) = alt((
+        value(
+            Some(()),
+            (space0, tag::<_, _, OracleError<'_>>("—"), space0),
+        ),
+        value(None, space1),
+    ))
+    .parse(tail)
+    .ok()?;
+    if dash.is_none() {
+        // The shared mana grammar uses uppercase symbols. The strict keyword
+        // owner below still proves the complete cost and any permitted tail.
+        nom_primitives::parse_mana_cost(&tail.to_ascii_uppercase()).ok()?;
+    }
     if tail.trim().is_empty() {
         return None;
     }
@@ -2840,12 +2856,22 @@ fn complete_modification_clause(
                 ));
             }
             if let Some(quantity_text) = nom_tag_lower(rest, &rest.to_lowercase(), " for each ") {
-                if let Ok((tail, QuantityRef::CountersOn { .. })) =
-                    super::oracle_nom::quantity::parse_for_each_clause_ref(quantity_text)
-                {
+                if let Some((quantity @ QuantityRef::CountersOn { .. }, tail)) = nom_on_lower(
+                    quantity_text,
+                    &quantity_text.to_lowercase(),
+                    nom_quantity::parse_for_each_clause_ref,
+                ) {
                     if !tail.trim().is_empty() {
                         return None;
                     }
+                    let mut mods = Vec::new();
+                    push_dynamic_pt_modifications(
+                        &mut mods,
+                        power,
+                        toughness,
+                        QuantityExpr::Ref { qty: quantity },
+                    );
+                    return (!mods.is_empty()).then_some((mods, verb));
                 }
                 if let Some(quantity) =
                     super::oracle_quantity::parse_for_each_clause_expr_deferred(quantity_text)

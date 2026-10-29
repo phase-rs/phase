@@ -1,5 +1,5 @@
 use super::anthem::*;
-use crate::types::keywords::ProtectionTarget;
+use crate::types::keywords::{EmbalmCost, EscapeCost, FlashbackCost, ProtectionTarget};
 
 fn assert_whole_conditional_refusal(source: &str) {
     let text = format!("{source}\nFlying");
@@ -500,6 +500,84 @@ fn grant_root_frames_preserve_strict_unknown_and_empty_sources() {
         }
     ));
     assert_eq!(parse_static_line_multi(ordinary), vec![complete]);
+}
+
+// SHAPE: inline declarations need real cost text; metadata's colon encoding
+// cannot certify a complete off-zone grant. The independent line stays typed.
+#[test]
+fn dedicated_grant_cost_boundaries_preserve_whole_sources_across_keyword_kinds() {
+    for (name, zone, expected) in [
+        (
+            "flashback",
+            "graveyard",
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::generic(2))),
+        ),
+        (
+            "escape",
+            "graveyard",
+            Keyword::Escape(EscapeCost::Mana(ManaCost::generic(2))),
+        ),
+        ("mayhem", "graveyard", Keyword::Mayhem(ManaCost::generic(2))),
+        (
+            "scavenge",
+            "graveyard",
+            Keyword::Scavenge(ManaCost::generic(2)),
+        ),
+        ("encore", "graveyard", Keyword::Encore(ManaCost::generic(2))),
+        (
+            "embalm",
+            "graveyard",
+            Keyword::Embalm(EmbalmCost::Mana(ManaCost::generic(2))),
+        ),
+        ("foretell", "hand", Keyword::Foretell(ManaCost::generic(2))),
+        ("miracle", "hand", Keyword::Miracle(ManaCost::generic(2))),
+    ] {
+        let phrase = format!("{name} {{2}}");
+        assert_eq!(
+            crate::parser::oracle_keyword::parse_router_keyword_fragment(&phrase),
+            Some(expected.clone()),
+            "the shared strict fragment must retain the actual mana cost"
+        );
+        assert!(
+            crate::parser::oracle_keyword::parse_router_keyword_fragment(&format!(
+                "{phrase} unexplained"
+            ))
+            .is_none()
+        );
+        let positive = format!("Each nonland card in your {zone} has {phrase}.");
+        let definition = super::keyword_grant::try_parse_graveyard_keyword_grant_source(&positive)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            definition.modifications,
+            vec![ContinuousModification::AddKeyword { keyword: expected }]
+        );
+        assert_eq!(parse_static_line(&positive), Some(definition.clone()));
+        assert_eq!(parse_static_line_multi(&positive), vec![definition]);
+
+        for declaration in [
+            format!("{name}: Draw a card"),
+            format!("{name} : Draw a card"),
+            format!("{name}:{{2}}"),
+            format!("{name}ish {{2}}"),
+            format!("{name} nonsense"),
+            name.to_owned(),
+        ] {
+            let body = format!("Each nonland card in your {zone} has {declaration}.");
+            for source in [
+                body.clone(),
+                format!("As long as you have seven or more cards in hand, {body}"),
+            ] {
+                assert!(
+                    matches!(super::keyword_grant::try_parse_graveyard_keyword_grant_source(&source), Some(Err(original)) if original == source),
+                    "{source}"
+                );
+                assert!(parse_static_line(&source).is_none(), "{source}");
+                assert!(parse_static_line_multi(&source).is_empty(), "{source}");
+                assert_whole_conditional_refusal(&source);
+            }
+        }
+    }
 }
 
 // SHAPE: list-boundary evidence comes from the existing relative grammar,
@@ -34072,6 +34150,215 @@ fn continuous_gets_for_each_counter_on_source_equipment() {
     );
 }
 
+// SHAPE: counter nouns bridge case without changing source/pronoun provenance
+// or lowercasing other quantity owners' named populations.
+#[test]
+fn complete_counter_pumps_preserve_raw_case_scope_and_whole_quantity() {
+    for object in [
+        "this Equipment",
+        "this Artifact",
+        "this Permanent",
+        "~",
+        "it",
+    ] {
+        for (counter, counter_type) in [
+            ("counter", None),
+            (
+                "charge counter",
+                Some(CounterType::Generic("charge".into())),
+            ),
+        ] {
+            let predicate = format!("gets +1/+2 for each {counter} on {object}");
+            let quantity = QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: if object == "it" {
+                        ObjectScope::Anaphoric
+                    } else {
+                        ObjectScope::Source
+                    },
+                    counter_type: counter_type.clone(),
+                },
+            };
+            assert_eq!(
+                parse_complete_continuous_modifications(&predicate),
+                Some(vec![
+                    ContinuousModification::AddDynamicPower {
+                        value: quantity.clone()
+                    },
+                    ContinuousModification::AddDynamicToughness {
+                        value: QuantityExpr::Multiply {
+                            inner: Box::new(quantity),
+                            factor: 2
+                        }
+                    },
+                ]),
+                "{predicate}"
+            );
+            let source = format!("Equipped creature {predicate}.");
+            let definition = parse_static_line(&source).expect(&source);
+            let quantity = QuantityExpr::Ref {
+                qty: QuantityRef::CountersOn {
+                    scope: if object == "it" {
+                        ObjectScope::Recipient
+                    } else {
+                        ObjectScope::Source
+                    },
+                    counter_type,
+                },
+            };
+            assert_eq!(
+                definition.modifications,
+                vec![
+                    ContinuousModification::AddDynamicPower {
+                        value: quantity.clone()
+                    },
+                    ContinuousModification::AddDynamicToughness {
+                        value: QuantityExpr::Multiply {
+                            inner: Box::new(quantity),
+                            factor: 2
+                        }
+                    },
+                ],
+                "{source}"
+            );
+            assert_eq!(parse_static_line_multi(&source), vec![definition]);
+            for tail in [
+                " unexplained",
+                " if an unexplained condition",
+                " until an unexplained duration",
+            ] {
+                let hostile = format!("{predicate}{tail}");
+                assert!(
+                    parse_complete_continuous_modifications(&hostile).is_none(),
+                    "{hostile}"
+                );
+                assert!(
+                    parse_static_line(&format!("Equipped creature {hostile}.")).is_none(),
+                    "{hostile}"
+                );
+                assert!(
+                    parse_static_line_multi(&format!("Equipped creature {hostile}.")).is_empty(),
+                    "{hostile}"
+                );
+                assert!(
+                    parse_complete_continuous_modifications(&format!(
+                        "has vigilance and {hostile}"
+                    ))
+                    .is_none(),
+                    "{hostile}"
+                );
+                assert!(
+                    parse_complete_continuous_modifications(&format!(
+                        "{hostile} and has \"{{T}}: Draw a card.\""
+                    ))
+                    .is_none(),
+                    "{hostile}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gavel_counter_pump_component_uses_public_equip_and_real_counter_producers() {
+    // Supplemental component witness: the pump line is verbatim Gavel text,
+    // parsed before fixture construction to exercise its raw-case entry seam.
+    // Equip {3} is a separate modeled fixture ability, not a full-Gavel claim.
+    let pump =
+        parse_static_line("Equipped creature gets +1/+1 for each counter on this Equipment.")
+            .expect("raw-case untyped Gavel pump component");
+    let equip = crate::parser::oracle::try_parse_equip_lowered("Equip {3}").unwrap();
+    let player = crate::game::scenario::P0;
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_artifact_to_hand_from_oracle(player, "Counter pump component", "")
+        .with_subtypes(vec!["Equipment"])
+        .with_mana_cost(ManaCost::generic(2))
+        .with_static_definition(pump.clone())
+        .with_ability_definition(equip)
+        .id();
+    let other = scenario
+        .add_artifact_from_oracle(player, "Other counter pump component", "")
+        .with_subtypes(vec!["Equipment"])
+        .with_static_definition(pump)
+        .id();
+    let host = scenario
+        .add_creature(player, "Artifact host", 2, 3)
+        .as_artifact_creature()
+        .id();
+    let charge = CounterType::Generic("charge".into());
+    scenario.with_counter(host, charge.clone(), 7);
+    scenario.with_counter(other, charge.clone(), 4);
+    let producers = (0..3).map(|_| {
+        scenario.add_creature_from_oracle(player, "Coretapper", 1, 1,
+            "{T}: Put a charge counter on target artifact.\nSacrifice this creature: Put two charge counters on target artifact.")
+            .as_artifact_creature().with_subtypes(vec!["Myr"]).id()
+    }).collect::<Vec<_>>();
+    scenario.with_mana_pool(
+        player,
+        (0..5)
+            .map(|_| {
+                crate::types::mana::ManaUnit::new(
+                    crate::types::mana::ManaType::Colorless,
+                    crate::types::identifiers::ObjectId(999),
+                    false,
+                    vec![],
+                )
+            })
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner
+        .cast(source)
+        .resolve()
+        .assert_zone(&[source], Zone::Battlefield);
+    let equipped = runner.activate(source, 0).target_object(host).resolve();
+    assert!(matches!(
+        equipped.final_waiting_for(),
+        crate::types::game_state::WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&source].attached_to, Some(host));
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "paid cast and equip"
+    );
+    assert_eq!(
+        (
+            runner.state().objects[&host].power,
+            runner.state().objects[&host].toughness
+        ),
+        (Some(2), Some(3))
+    );
+    for (producer, target, count) in [
+        (producers[0], source, 1),
+        (producers[1], host, 8),
+        (producers[2], other, 5),
+    ] {
+        runner.activate(producer, 0).target_object(target).resolve();
+        assert_eq!(
+            runner.state().objects[&target].counters.get(&charge),
+            Some(&count)
+        );
+        // CR 122.1 + CR 611.3a: only the live granting source's count pumps
+        // this host; neither its own counters nor another Equipment's do.
+        assert_eq!(
+            (
+                runner.state().objects[&host].power,
+                runner.state().objects[&host].toughness
+            ),
+            (Some(3), Some(4))
+        );
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            crate::types::game_state::WaitingFor::Priority { .. }
+        ));
+    }
+}
+
 #[test]
 fn level_up_enchanted_creature_grant_attack_trigger_parses_multiply_counter() {
     use crate::types::ability::{AbilityCondition, Comparator, Effect, QuantityExpr};
@@ -44185,8 +44472,8 @@ fn complete_publication_reverse_members_asymmetric_axes_and_complete_quoted_tran
             );
         }
     }
-    let quote="gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on ~.\"";
-    let complete = parse_complete_continuous_modifications(quote).unwrap();
+    let quote = format!("gets +1/+0 for each blood counter on this Equipment and has \"{{T}}, Sacrifice a creature: Put a blood counter on {}.\"", crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER);
+    let complete = parse_complete_continuous_modifications(&quote).unwrap();
     assert_eq!(complete.len(), 2);
     let ContinuousModification::GrantAbility { definition } = &complete[1] else {
         panic!("full quoted ability")
@@ -44201,6 +44488,26 @@ fn complete_publication_reverse_members_asymmetric_axes_and_complete_quoted_tran
         definition.effect.as_ref(),
         Effect::PutCounter {
             target: TargetFilter::GrantingObject { bound: None },
+            ..
+        }
+    ));
+    // CR 201.5a + CR 201.5b: the granter marker above and host self-reference
+    // remain distinct even in otherwise identical complete granted programs.
+    let host_quote = "gets +1/+0 for each blood counter on this Equipment and has \"{T}, Sacrifice a creature: Put a blood counter on ~.\"";
+    let host_complete = parse_complete_continuous_modifications(host_quote).unwrap();
+    assert_eq!(host_complete.len(), 2);
+    assert_eq!(host_complete[0], complete[0]);
+    let ContinuousModification::GrantAbility {
+        definition: host_definition,
+    } = &host_complete[1]
+    else {
+        panic!("full host quoted ability")
+    };
+    assert_eq!(host_definition.cost, definition.cost);
+    assert!(matches!(
+        host_definition.effect.as_ref(),
+        Effect::PutCounter {
+            target: TargetFilter::SelfRef,
             ..
         }
     ));
