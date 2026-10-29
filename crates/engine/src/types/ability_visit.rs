@@ -1612,7 +1612,8 @@ pub(crate) fn visit_resolved_replacements(
                 }
                 for spec in definition
                     .additional_token_spec
-                    .iter()
+                    .as_deref()
+                    .into_iter()
                     .chain(definition.ensure_token_specs.iter().flatten())
                 {
                     for value in &spec.characteristics.keywords {

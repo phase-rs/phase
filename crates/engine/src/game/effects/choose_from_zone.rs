@@ -1226,7 +1226,9 @@ fn advance_per_player_iteration_in_occurrence(
                     capture_per_player_trigger_context(state);
                     state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
                         return_result_occurrence: super::retained_return_result_occurrence(
-                            state, ability,
+                            state,
+                            ability,
+                            declarations,
                         )?,
                         player: maker,
                         candidates: eligible,

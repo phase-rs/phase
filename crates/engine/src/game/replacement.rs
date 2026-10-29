@@ -3536,12 +3536,15 @@ fn apply_shield_counter_replacement(
             // CR 510.2 + CR 122.1c: one shield counter prevents all simultaneous
             // combat damage dealt to the permanent in the batch. Defer counter
             // removal until the post-batch aggregation fires exactly once.
-            if let Some(tally) = state.combat_prevention_tally.as_mut() {
-                *tally
-                    .entry(AppliedReplacementKey::for_event_in_state(
-                        state, &event, rid,
-                    ))
-                    .or_insert(0) += amount as i32;
+            let combat_prevention_key = state
+                .combat_prevention_tally
+                .as_ref()
+                .map(|_| AppliedReplacementKey::for_event_in_state(state, &event, rid));
+            if let (Some(key), Some(tally)) = (
+                combat_prevention_key,
+                state.combat_prevention_tally.as_mut(),
+            ) {
+                *tally.entry(key).or_insert(0) += amount as i32;
                 return Err(ApplyResult::Prevented);
             }
 
@@ -10124,7 +10127,7 @@ fn extract_etb_counters_from_effect(
 /// onto the ProposedEvent, and by `find_applicable_replacements` to detect Optional
 /// replacements whose decline branch would be a no-op (CR 614.7).
 #[derive(Debug, Clone, Default)]
-pub(super) struct EventModifiers {
+pub(crate) struct EventModifiers {
     etb_tap_state: EtbTapState,
     etb_counters: Vec<(CounterType, u32)>,
     redirect_zone: Option<Zone>,
@@ -10204,7 +10207,7 @@ impl EventModifiers {
     /// CR 614.1c: Walk the ability's sub_ability chain and find the first effect
     /// that is NOT a pure event modifier. Returns `None` when the entire chain is
     /// modifiers (shock land class) or when there is no ability at all.
-    pub(super) fn first_non_modifier_ability(
+    pub(crate) fn first_non_modifier_ability(
         ability: Option<&AbilityDefinition>,
     ) -> Option<&AbilityDefinition> {
         let mut current = ability?;
@@ -11713,11 +11716,19 @@ pub(crate) fn immediate_opportunity_gain_rider(
     definition: &ReplacementDefinition,
 ) -> bool {
     matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
-        && state.replacement_rider(definition).is_some_and(|rider| {
-            rider.repeat_for.is_none()
-                && !rider_reflects_per_event_damage_source(rider)
-                && matches!(rider.effect, Effect::GainLife { .. })
-        })
+        && state
+            .replacement_rider(definition)
+            .is_some_and(|rider| immediate_opportunity_gain_rider_program(definition, rider))
+}
+
+pub(crate) fn immediate_opportunity_gain_rider_program(
+    definition: &ReplacementDefinition,
+    rider: &ResolvedAbility,
+) -> bool {
+    matches!(definition.shield_kind, ShieldKind::PreventionOneShot)
+        && rider.repeat_for.is_none()
+        && !rider_reflects_per_event_damage_source(rider)
+        && matches!(rider.effect, Effect::GainLife { .. })
 }
 
 /// CR 615.5 + CR 615.8 + CR 119.9: one gain for the complete prevented instance.
@@ -12839,7 +12850,7 @@ pub(crate) fn replacement_id_for_key(
                     {
                         return None;
                     }
-                    object.replacement_definitions.iter().position(|definition| matches!(definition.origin,
+                    object.replacement_definitions.iter_all().position(|definition| matches!(definition.origin,
                         crate::types::ability::ReplacementOrigin::Resolution { installation: Some(ordinal) } if ordinal == index))?
                 }
                 None => {

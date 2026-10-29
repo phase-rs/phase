@@ -11,8 +11,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     CounterCostRootSubtree, DeferredLifeCostResume, GameState, PendingCostMoveResume,
-    PendingCounterPostAction, PendingReplacement, TokenEntryEventEmission, UnrepresentablePolicy,
-    WaitingFor,
+    PendingCounterPostAction, PendingReplacement, UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;

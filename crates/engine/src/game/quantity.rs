@@ -11,9 +11,9 @@ use crate::game::filter::{
     matches_target_filter, matches_target_filter_in_population,
     matches_target_filter_on_attack_declaration_record,
     matches_target_filter_on_counter_added_record, matches_target_filter_on_damage_record_source,
-    matches_target_filter_on_zone_change_record, player_matches_target_filter_in_state,
-    shared_quality_characteristic_reads, spell_record_matches_filter,
-    target_filter_characteristic_reads_at, type_filter_matches, CharacteristicKinds, FilterContext,
+    matches_target_filter_on_zone_change_record, shared_quality_characteristic_reads,
+    spell_record_matches_filter, target_filter_characteristic_reads_at, type_filter_matches,
+    CharacteristicKinds, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::game::targeting::TriggeringSpell;

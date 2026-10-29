@@ -23,7 +23,7 @@ use super::ability::{
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, Comparator,
     ContinuousModification, ControlWindow, CopiableValues, CopyChooseScope, CopyScale,
     CopyTargetPurpose, CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition,
-    DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration, EffectKind,
+    DelayedTriggerKind, DigRestOrder, DigRestSplitScope, Duration, Effect, EffectKind,
     EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
     LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
     ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
@@ -32384,6 +32384,13 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
             }
         }
     }
+    let arena: Box<im::Vector<ResolvedAbility>> = value
+        .get("replacement_continuations")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| format!("retained replacement arena: {error}"))?
+        .unwrap_or_default();
     let mut errors = Vec::new();
     let mut installed_updates = Vec::new();
     visit(value, "$", &mut |node, path| {
@@ -32447,9 +32454,15 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                                 || !rider_keys.insert(*key)
                                 || !map.iter().any(|(owned, definition)| {
                                     owned == key
-                                        && crate::game::replacement::immediate_opportunity_gain_rider(
-                                            definition,
-                                        )
+                                        && definition
+                                            .runtime_execute
+                                            .and_then(|id| usize::try_from(id.0).ok())
+                                            .and_then(|index| arena.get(index))
+                                            .is_some_and(|rider| {
+                                                crate::game::replacement::immediate_opportunity_gain_rider_program(
+                                                    definition, rider,
+                                                )
+                                            })
                                 })
                         })
                     }) {

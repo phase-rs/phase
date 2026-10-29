@@ -22700,20 +22700,32 @@ pub(crate) fn perform_collected_player_scope_sacrifices_with_completion(
         source_id,
         source_controller,
     );
-    match perform_player_scope_sacrifices(state, &ability, selections, Some(completion), events)? {
-        PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
-            Ok(PendingPlayerScopeSacrificeOutcome::PausedForReplacement)
-        }
-        PlayerScopeSacrificePerformOutcome::Completed {
-            events_before_sacrifice,
-            events_after_sacrifice,
-            sacrificed_count,
-        } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
-            events_before_sacrifice,
-            events_after_sacrifice,
-            sacrificed_count,
-        }),
-    }
+    with_instruction_result_entry(
+        state,
+        &ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, ability, declarations| match perform_player_scope_sacrifices(
+            state,
+            ability,
+            selections,
+            Some(completion),
+            events,
+            declarations,
+        )? {
+            PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
+                Ok(PendingPlayerScopeSacrificeOutcome::PausedForReplacement)
+            }
+            PlayerScopeSacrificePerformOutcome::Completed {
+                events_before_sacrifice,
+                events_after_sacrifice,
+                sacrificed_count,
+            } => Ok(PendingPlayerScopeSacrificeOutcome::Completed {
+                events_before_sacrifice,
+                events_after_sacrifice,
+                sacrificed_count,
+            }),
+        },
+    )
 }
 
 fn should_collect_player_scope_sacrifice_choices(ability: &ResolvedAbility) -> bool {
@@ -22826,15 +22838,23 @@ pub(crate) fn advance_pending_player_scope_sacrifice_choice(
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<PendingPlayerScopeSacrificeOutcome>, EffectError> {
-    let occurrence = state
-        .pending_player_scope_sacrifice_choice
-        .as_ref()
-        .and_then(|pending| pending.return_result_occurrence);
+    let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() else {
+        return Ok(None);
+    };
+    let occurrence = pending.return_result_occurrence;
+    let admitted = owned_cursor_declarations(state, occurrence, &pending.ability)?;
     with_inherited_return_result_occurrence(state, occurrence, |state| {
         if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
             validate_addressed_quantity_reads(state, &pending.ability)?;
         }
-        advance_player_scope_sacrifice_in_occurrence(state, player, source_id, chosen, events)
+        advance_player_scope_sacrifice_in_occurrence(
+            state,
+            player,
+            source_id,
+            chosen,
+            events,
+            (&admitted.0, &admitted.1),
+        )
     })
 }
 
@@ -22844,6 +22864,7 @@ fn advance_player_scope_sacrifice_in_occurrence(
     source_id: ObjectId,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<Option<PendingPlayerScopeSacrificeOutcome>, EffectError> {
     // CR 101.4: Resume the APNAP choice walk until every player has chosen or a
     // nested replacement choice pauses the simultaneous action.
@@ -22896,6 +22917,7 @@ fn advance_player_scope_sacrifice_in_occurrence(
         pending.selections,
         Some(pending.completion),
         events,
+        declarations,
     )? {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => Ok(Some(
             PendingPlayerScopeSacrificeOutcome::PausedForReplacement,
@@ -22916,21 +22938,23 @@ pub(crate) fn drain_pending_player_scope_sacrifice_after_replacement(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
-    let occurrence = state
-        .pending_player_scope_sacrifice_choice
-        .as_ref()
-        .and_then(|pending| pending.return_result_occurrence);
+    let Some(pending) = state.pending_player_scope_sacrifice_choice.as_ref() else {
+        return Ok(PendingPlayerScopeSacrificeOutcome::WaitingForNextChoice);
+    };
+    let occurrence = pending.return_result_occurrence;
+    let admitted = owned_cursor_declarations(state, occurrence, &pending.ability)?;
     with_inherited_return_result_occurrence(state, occurrence, |state| {
         if let Some(pending) = &state.pending_player_scope_sacrifice_choice {
             validate_addressed_quantity_reads(state, &pending.ability)?;
         }
-        drain_player_scope_sacrifice_in_occurrence(state, events)
+        drain_player_scope_sacrifice_in_occurrence(state, events, (&admitted.0, &admitted.1))
     })
 }
 
 fn drain_player_scope_sacrifice_in_occurrence(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    declarations: AdmittedInstructionResult<'_>,
 ) -> Result<PendingPlayerScopeSacrificeOutcome, EffectError> {
     // CR 101.4: After a CR 616.1 replacement choice resumes one selected
     // sacrifice, continue the remaining already-announced simultaneous action.
@@ -22951,6 +22975,7 @@ fn drain_player_scope_sacrifice_in_occurrence(
         pending.selections,
         Some(pending.completion),
         events,
+        declarations,
     )? {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
             Ok(PendingPlayerScopeSacrificeOutcome::PausedForReplacement)
@@ -68169,14 +68194,22 @@ mod resolution_progress_contract_tests {
 
         let after = ResolvedAbility::new(Effect::Clash, vec![], source, P0).sub_ability(life(3));
         assert_eq!(
-            start_player_scope_sacrifice_choices(
+            with_instruction_result_entry(
                 runner.state_mut(),
                 &ability,
-                P0,
-                &[P1],
-                Some(Box::new(after)),
-                &mut events,
-                1
+                crate::types::ability::InstructionResultEntry::Independent,
+                |state, ability, declarations| {
+                    start_player_scope_sacrifice_choices(
+                        state,
+                        ability,
+                        P0,
+                        &[P1],
+                        Some(Box::new(after)),
+                        &mut events,
+                        1,
+                        declarations,
+                    )
+                },
             )
             .unwrap(),
             ResolutionProgress::Queued
