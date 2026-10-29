@@ -414,6 +414,27 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
+/// CR 118.6 + CR 202.1b: "An ability can also have an unpayable cost if its cost
+/// is based on the mana cost of an object with no mana cost." True when `cost` is
+/// a placeholder bound to the recipient's MANA COST (`SelfManaCost`,
+/// `SelfManaCostReduced`) and the recipient has none, so the concretized
+/// `ManaCost::NoCost` would otherwise read as "pay nothing" on the activated-
+/// ability payment path. `SelfManaValue` is excluded: a no-mana-cost object's
+/// mana value is 0 (CR 202.3a), which is a payable {0}.
+pub(crate) fn self_mana_cost_is_unpayable(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    matches!(
+        cost,
+        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. }
+    ) && matches!(
+        resolve_keyword_mana_cost(state, object_id, cost),
+        ManaCost::NoCost
+    )
+}
+
 /// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
 /// anywhere in an `AbilityCost` tree before affordability or payment. The mana
 /// payment path treats those placeholders as free, so every payable cost must

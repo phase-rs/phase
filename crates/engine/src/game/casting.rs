@@ -534,6 +534,15 @@ fn runtime_granted_graveyard_activated_abilities(
         .into_iter()
         .filter(|keyword| !obj.base_keywords.iter().any(|printed| printed == keyword))
         .filter_map(|keyword| {
+            // CR 118.6: an unearth granted with a cost "equal to its mana cost" on a
+            // card with NO mana cost (Dryad Arbor) has an unpayable cost. Concretizing
+            // it would yield `ManaCost::NoCost`, which the payment path reads as free,
+            // so the ability is never offered instead.
+            if let Keyword::Unearth(cost) = &keyword {
+                if super::keywords::self_mana_cost_is_unpayable(state, source_id, cost) {
+                    return None;
+                }
+            }
             // CR 702.84a / CR 702.128a / CR 702.129a / CR 702.141a: Unearth / Embalm /
             // Eternalize / Encore granted with a self-referential cost ("equal to its
             // mana cost" or "where X is its mana value") carry `ManaCost::SelfManaCost`

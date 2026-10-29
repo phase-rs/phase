@@ -581,6 +581,90 @@ fn granted_self_cost_unearth_costs_the_card_mana_cost() {
     }
 }
 
+/// CR 118.6 + CR 202.1b: a self-cost unearth on a card with NO mana cost (Dryad
+/// Arbor) has an unpayable cost, so it is never offered and can't be activated —
+/// it must not resolve to a free activation. The control, Ornithopter, has a
+/// printed {0}: its self-cost unearth is a payable {0} and returns it.
+#[test]
+fn granted_self_cost_unearth_on_a_card_with_no_mana_cost_is_unpayable() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let grantor = s.add_creature(P0, "Grantor", 1, 1).id();
+    let arbor = s
+        .add_creature_to_graveyard(P0, "Dryad Arbor", 1, 1)
+        .as_land()
+        .as_creature()
+        .with_subtypes(vec!["Forest", "Dryad"])
+        .with_mana_cost(ManaCost::NoCost)
+        .id();
+    let thopter = s
+        .add_creature_to_graveyard(P0, "Ornithopter", 0, 2)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Thopter"])
+        .with_mana_cost(cost(0, vec![]))
+        .from_oracle_text("Flying")
+        .id();
+    let mut r = s.build();
+    for card in [arbor, thopter] {
+        r.state_mut().add_transient_continuous_effect(
+            grantor,
+            P0,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificObject { id: card },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Unearth(ManaCost::SelfManaCost),
+            }],
+            None,
+        );
+    }
+    engine::game::layers::flush_layers(r.state_mut());
+
+    // Reach guards: the recipients' mana-cost representations, and the grant on both.
+    assert_eq!(r.state().objects[&arbor].mana_cost, ManaCost::NoCost);
+    assert_eq!(r.state().objects[&thopter].mana_cost, cost(0, vec![]));
+    for card in [arbor, thopter] {
+        assert!(object_has_effective_keyword_kind(
+            r.state(),
+            card,
+            KeywordKind::Unearth
+        ));
+    }
+    assert_eq!(
+        r.state().players[0].mana_pool.total(),
+        0,
+        "no mana available"
+    );
+
+    // Control: Ornithopter's {0} unearth is offered with no mana and returns it.
+    let index = sole_unearth_offer(&r, thopter);
+    assert_eq!(mana_cost_of(&r, thopter, index), cost(0, vec![]));
+
+    // CR 118.6: Dryad Arbor's unearth is unpayable — not offered, and an
+    // activation attempt at the index a granted ability would occupy is refused.
+    assert!(
+        offered_indices(&r, arbor).is_empty(),
+        "an unearth based on a missing mana cost must not be offered"
+    );
+    let arbor_index = r.state().objects[&arbor].abilities.len();
+    assert!(
+        r.act(GameAction::ActivateAbility {
+            source_id: arbor,
+            ability_index: arbor_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .is_err(),
+        "the unpayable unearth can't be activated"
+    );
+    assert_eq!(r.state().objects[&arbor].zone, Zone::Graveyard);
+    assert!(r.state().stack.is_empty());
+
+    activate(&mut r, thopter, index);
+    r.advance_until_stack_empty();
+    assert_settled(&r);
+    assert_eq!(r.state().objects[&thopter].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&arbor].zone, Zone::Graveyard);
+}
+
 // ---------------------------------------------------------------------------
 // Controls
 // ---------------------------------------------------------------------------
