@@ -50379,10 +50379,10 @@ mod tests {
     /// the value an absent key already decodes to: `next_delayed_trigger_token`
     /// carries a plain `#[serde(default)]` (so absent means `0`), and
     /// `normalize_delayed_trigger_allocators` collapses both `0` and the absent
-    /// case to `1` for a payload with no install roots. The positive marker is
-    /// removed deliberately so this helper models an old, unmarked capture and
-    /// exercises the compatibility fingerprint rather than the new provenance
-    /// gate.
+    /// case to `1` for a payload with no install roots. Both positive markers,
+    /// `wire_projection` and `viewer_projection`, are removed deliberately so
+    /// this helper models an old, unmarked capture and exercises the
+    /// compatibility fingerprint rather than the new provenance gate.
     ///
     /// So this payload is DECODE-IDENTICAL to the redacted one and differs only
     /// in whether the guard's conjunction holds. It measures what the same bytes
@@ -50394,6 +50394,7 @@ mod tests {
             .as_object_mut()
             .expect("the client wire payload is a JSON object");
         object.remove("wire_projection");
+        object.remove("viewer_projection");
         object.insert(
             "next_delayed_trigger_token".to_string(),
             serde_json::Value::from(0),
@@ -51170,8 +51171,9 @@ mod tests {
     /// V16. The discriminating legacy-fallback row. UNREDACTED this state is
     /// REFUSED; an unmarked redacted copy would decode silently, with the CR
     /// 603.2 ordinary vs CR 603.7 delayed firing classification gone from the
-    /// parked continuation. The positive marker restores refusal for current
-    /// wires, while the helper below removes it to keep the fallback proven.
+    /// parked continuation. The positive markers restore refusal for current
+    /// wires, while the helper below removes both `wire_projection` and
+    /// `viewer_projection` to keep the fallback proven.
     ///
     /// The reach-guard is a REFUSAL, not an admission, and that is the point: the
     /// claim is not "a payload is refused", it is "the redaction converts a
@@ -51213,8 +51215,9 @@ mod tests {
 
         let wire = client_wire_value(&state);
 
-        // The defect, exhibited rather than asserted: with the guard's
-        // conjunction broken by one restored key, these same bytes DECODE, and
+        // The defect, exhibited rather than asserted: remove both positive
+        // markers to model an old, unmarked capture, then break the fingerprint
+        // conjunction with one restored key. These redacted bytes DECODE, and
         // the parked continuation's firing is gone.
         let bypassed = serde_json::from_value::<PersistedGameState>(
             with_the_projection_guard_bypassed(wire.clone()),
@@ -51337,8 +51340,9 @@ mod tests {
 
         let wire = client_wire_value(&state);
 
-        // Measures the legacy downstream string with the positive marker
-        // removed and the historical stack carrier restored, so the
+        // Measures the legacy downstream string with both positive markers
+        // (`wire_projection` and `viewer_projection`) removed and the historical
+        // stack carrier restored, so the
         // `!contains` clause below is a discriminated claim rather than a
         // sentence that is true of any refusal whatsoever.
         let bypassed = serde_json::from_value::<PersistedGameState>(

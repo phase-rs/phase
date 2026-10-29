@@ -535,10 +535,26 @@ mod tests {
             };
             assert_eq!(branches.len(), 2);
             assert!(context.counter_removal_result.is_some());
-            assert!(branches.iter().all(|branch| matches!(
-                branch.effect.count_expr(),
-                Some(QuantityExpr::Fixed { value: 3 })
-            )));
+            match (branches[0].effect.as_ref(), branches[1].effect.as_ref()) {
+                (
+                    Effect::RemoveCounter {
+                        counter_type: Some(remove_kind),
+                        count: QuantityExpr::Fixed { value: 3 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                    Effect::PutCounter {
+                        counter_type: add_kind,
+                        count: QuantityExpr::Fixed { value: 3 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                ) => {
+                    assert_eq!(remove_kind, &CounterType::Generic("charge".into()));
+                    assert_eq!(add_kind, &CounterType::Generic("charge".into()));
+                }
+                effects => {
+                    panic!("expected removal then addition of three charge counters: {effects:?}")
+                }
+            }
             assert_eq!(runner.state().players[0].mana_pool.total(), 0);
             for n in 0..4 {
                 create_object(
