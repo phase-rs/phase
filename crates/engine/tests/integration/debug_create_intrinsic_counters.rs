@@ -41,7 +41,7 @@ use engine::types::ability::AbilityCost;
 use engine::types::actions::{DebugAction, DebugCardCreationKind, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -455,7 +455,8 @@ fn raw_debug_placement_installs_printed_loyalty_without_a_replacement_choice() {
 /// CR 310.4b + CR 310.4c: Invasion of Amonkhet (printed defense 4) enters with
 /// four defense counters. On the consulting routes (card and token) the
 /// CR 614.12a protector choice pauses the entry before it enters, and the
-/// counters survive the resume. On the raw route the counters are installed
+/// counters survive the resume, after which its ETB trigger (CR 603.6a) waits
+/// on the stack. On the raw route the counters are installed
 /// directly, and they are what damage removes: Shock deals 2 damage to the
 /// battle, which removes two defense counters (CR 120.3h + CR 310.6).
 ///
@@ -501,7 +502,18 @@ fn debug_created_battle_enters_with_printed_defense_counters() {
             "{row}: {}",
             short(&runner.state().waiting_for)
         );
-        assert!(runner.state().stack.is_empty(), "{row}: the stack is empty");
+        // CR 603.6a: "When this Siege enters, each player mills three cards,
+        // ..." triggers once the resumed entry completes, so its one ETB
+        // trigger waits on the stack.
+        let stack = &runner.state().stack;
+        assert_eq!(stack.len(), 1, "{row}: only the Siege's ETB trigger");
+        assert!(
+            matches!(
+                stack[0].kind,
+                StackEntryKind::TriggeredAbility { source_id, .. } if source_id == siege
+            ),
+            "{row}: the stack entry is the Siege's triggered ability"
+        );
         assert!(
             runner.state().resolution_stack.is_empty(),
             "{row}: the parked entry resumed and finished"
