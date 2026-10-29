@@ -1193,6 +1193,12 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
+    // Historical aggregates require the selected departure and former-controller
+    // context; the context-free parser deliberately refuses their surface.
+    if nom_quantity::is_historical_zone_aggregate(&text.to_lowercase()) {
+        return parse_quantity_ref_with_context(text, ctx).map(|qty| QuantityExpr::Ref { qty });
+    }
+
     match nom_quantity::parse_quantity_ref.parse(text) {
         Ok((rest, qty)) if rest.is_empty() => {
             return Some(QuantityExpr::Ref {
@@ -10183,10 +10189,19 @@ mod departure_context_grammar_tests {
                             Some((ClauseId(23), Zone::Battlefield, Zone::Exile));
                         context.declared_player_scope = Some(ControllerRef::ScopedPlayer);
                         context.prior_player_declaration = true;
+                        let before = format!("{context:?}");
                         let quantity = parse_quantity_ref_with_context(&phrase, &mut context)
                             .unwrap_or_else(|| {
                                 panic!("complete compositional historical phrase: {phrase}")
                             });
+                        assert_eq!(
+                            parse_cda_quantity_with_context(&phrase, &mut context),
+                            Some(QuantityExpr::Ref {
+                                qty: quantity.clone()
+                            }),
+                            "CDA must preserve the complete contextual historical operand: {phrase}"
+                        );
+                        assert_eq!(format!("{context:?}"), before);
                         let QuantityRef::ZoneChangeAggregate {
                             source,
                             from,
@@ -10230,6 +10245,7 @@ mod departure_context_grammar_tests {
         let phrase = "the total power of creatures you controlled that were exiled this way";
         let mut context = ParseContext::default();
         assert!(parse_quantity_ref_with_context(phrase, &mut context).is_none());
+        assert!(parse_cda_quantity_with_context(phrase, &mut context).is_none());
         context.chain_zone_result = Some((ClauseId(0), Zone::Battlefield, Zone::Exile));
         let first = parse_quantity_ref_with_context(phrase, &mut context).unwrap();
         assert_eq!(
@@ -10237,6 +10253,27 @@ mod departure_context_grammar_tests {
             Some(ReturnResultId(0)),
             "zero is valid when it is the actual selected clause id"
         );
+        let before_composed = format!("{context:?}");
+        assert_eq!(
+            parse_cda_quantity_with_context(&format!("twice {phrase}"), &mut context),
+            Some(QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref { qty: first.clone() })
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity_with_context(&format!("half {phrase}, rounded up"), &mut context),
+            Some(QuantityExpr::DivideRounded {
+                inner: Box::new(QuantityExpr::Ref { qty: first.clone() }),
+                divisor: 2,
+                rounding: RoundingMode::Up
+            })
+        );
+        assert!(
+            parse_cda_quantity_with_context(&format!("twice {phrase} tomorrow"), &mut context)
+                .is_none()
+        );
+        assert_eq!(format!("{context:?}"), before_composed);
         for malformed in [
             "the total power of you controlled that were exiled this way",
             "the total power of nonsuchnoun you controlled that were exiled this way",
@@ -10247,14 +10284,24 @@ mod departure_context_grammar_tests {
             "the total power of creatures they controlled that were exiled this way",
         ] {
             let before = context.chain_zone_result;
+            let complete_before = format!("{context:?}");
             assert!(
                 parse_quantity_ref_with_context(malformed, &mut context).is_none(),
                 "strict complete refusal: {malformed}"
             );
+            assert!(
+                parse_cda_quantity_with_context(malformed, &mut context).is_none(),
+                "CDA must retain strict complete refusal: {malformed}"
+            );
+            assert_eq!(format!("{context:?}"), complete_before);
             assert_eq!(context.chain_zone_result, before);
             assert_eq!(
                 parse_quantity_ref_with_context(phrase, &mut context),
                 Some(first.clone())
+            );
+            assert_eq!(
+                parse_cda_quantity_with_context(phrase, &mut context),
+                Some(QuantityExpr::Ref { qty: first.clone() })
             );
         }
         for (from, to) in [
@@ -10263,23 +10310,36 @@ mod departure_context_grammar_tests {
         ] {
             let mut incompatible = context.clone();
             incompatible.chain_zone_result = Some((ClauseId(0), from, to));
+            let before = format!("{incompatible:?}");
             assert!(parse_quantity_ref_with_context(phrase, &mut incompatible).is_none());
+            assert!(parse_cda_quantity_with_context(phrase, &mut incompatible).is_none());
+            assert_eq!(format!("{incompatible:?}"), before);
         }
         let mut same_body = context.clone_player_antecedents();
         assert_eq!(
             parse_quantity_ref_with_context(phrase, &mut same_body),
             Some(first.clone())
         );
+        assert_eq!(
+            parse_cda_quantity_with_context(phrase, &mut same_body),
+            Some(QuantityExpr::Ref { qty: first.clone() })
+        );
         let kept =
             context.with_player_antecedents(|body| parse_quantity_ref_with_context(phrase, body));
-        assert_eq!(kept, Some(first));
+        assert_eq!(kept, Some(first.clone()));
+        let kept_cda =
+            context.with_player_antecedents(|body| parse_cda_quantity_with_context(phrase, body));
+        assert_eq!(kept_cda, Some(QuantityExpr::Ref { qty: first }));
         for mut independent in [
             context.clone_for_independent_body(),
             context.clone_throwaway(),
             ParseContext::default(),
         ] {
             assert_eq!(independent.chain_zone_result, None);
+            let before = format!("{independent:?}");
             assert!(parse_quantity_ref_with_context(phrase, &mut independent).is_none());
+            assert!(parse_cda_quantity_with_context(phrase, &mut independent).is_none());
+            assert_eq!(format!("{independent:?}"), before);
         }
         assert_eq!(
             context.chain_zone_result,
