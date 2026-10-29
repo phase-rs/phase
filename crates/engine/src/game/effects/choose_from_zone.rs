@@ -1920,11 +1920,10 @@ fn publish_gathered_pick(
         Some(ZoneChoiceGatherRole::Opens) => {
             super::publish_fresh_tracked_set(state, picked);
         }
-        Some(ZoneChoiceGatherRole::Joins) => {
-            if !picked.is_empty() {
-                super::publish_tracked_set(state, picked);
-            }
+        Some(ZoneChoiceGatherRole::Joins) if !picked.is_empty() => {
+            super::publish_tracked_set(state, picked);
         }
+        Some(ZoneChoiceGatherRole::Joins) => {}
     }
 }
 

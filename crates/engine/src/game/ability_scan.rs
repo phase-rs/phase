@@ -1827,9 +1827,9 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             filter,
             candidate_source,
             reciprocal_role,
-            // Names only the tracked set the pick is published into; the pool
-            // is read via `candidate_source`, and neither role reads the set.
-            gather_role: _,
+            // `..` covers `gather_role`: it names only the tracked set the pick
+            // is published into; the pool is read via `candidate_source`, and
+            // neither role reads the set.
             ..
         } => {
             let mut acc = Axes::NONE;
