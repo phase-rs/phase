@@ -38,9 +38,10 @@
 //!   per module its definitions, `use` entries, child modules and impl blocks, with a resolver
 //!   for `crate` / `self` / `super` chains, imported names, child modules, globs and
 //!   longest-prefix item resolution. A `#[macro_export]` macro is also an item of the crate
-//!   root, and a bare name nothing binds resolves to a crate-root macro of that name, as an
-//!   invocation reaches one through textual scope. A `macro_rules!` in `types/` whose body
-//!   declares `struct <Ident>` defines that struct at each invocation (`GameState`). A unit is a
+//!   root, and a bare name nothing binds is taken as a crate-root macro of that name when one
+//!   exists (an over-approximation: Rust reaches it bare only through an import). A
+//!   `macro_rules!` in `types/` whose body declares `struct <Ident>` defines that struct at
+//!   each invocation (`GameState`). A unit is a
 //!   `types/` item's definition or body, a member of a `types/`-located impl on it, or a
 //!   `types/` macro (`macro_rules!` or item-level invocation); its references are its resolved
 //!   paths and its `serde` attribute path strings. The state layer T is the fixpoint of
@@ -2466,8 +2467,8 @@ impl LayerIndex {
             .collect()
     }
 
-    /// A bare name that resolves to nothing, as a crate-root macro of that name: the macro a
-    /// bare invocation reaches through textual scope.
+    /// A bare name that resolves to nothing, taken as a crate-root macro of that name when one
+    /// exists: an over-approximation, since Rust reaches such a macro bare only through an import.
     fn root_macro(&self, segs: &[String]) -> Option<Target> {
         let [name] = segs else {
             return None;

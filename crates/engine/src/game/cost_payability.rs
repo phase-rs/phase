@@ -1113,7 +1113,7 @@ pub trait AbilityCostPayability {
     /// separately through the mana-payment flow.
     ///
     /// Ability-agnostic entry point for costs paid outside the activated-ability
-    /// pipeline (spell costs): delegates to [`AbilityCostLegPayability::is_payable_in`] with no
+    /// pipeline (spell costs): delegates to `AbilityCostLegPayability::is_payable_in` with no
     /// activation index and [`ObjectLegPayment::Unguided`] object legs.
     /// Callers that KNOW the ability whose cost this is (the activation
     /// pipeline) must use [`Self::is_payable_for_activation`] instead so CR 106.6
