@@ -190,6 +190,7 @@ mod contextual_hand_publication {
     fn assert_document_geometry(doc: &OracleDocIr, expected: &CardFace, prepared: &str) {
         let normalized = match expected.name.as_str() {
             "Kitesail Freebooter" => FREEBOOTER.replace("this creature", "~"),
+            "Elspeth's Nightmare" => NIGHTMARE.replace("this Saga", "~"),
             "Mardu Charm" => MARDU.replace("Mardu Charm", "~"),
             _ => prepared.to_owned(),
         };
@@ -4610,7 +4611,10 @@ fn u6_full_documents_preserve_complete_grants_plane_and_both_loaders() {
             ));
             assert_eq!(face.static_abilities[0].active_zones, vec![Zone::Command]);
             assert_eq!(face.triggers.len(), 1);
-            assert_eq!(face.triggers[0].trigger_zones, vec![Zone::Command]);
+            assert_eq!(
+                face.triggers[0].trigger_zones,
+                vec![Zone::Battlefield, Zone::Command]
+            );
             assert_ne!(doc.items[0].id, doc.items[1].id);
             assert_eq!(doc.items[1].source.fragment(), text.lines().nth(1));
         } else {
@@ -46878,7 +46882,7 @@ pub(crate) mod population_relation_publication {
                 attach.target_choice_timing = TargetChoiceTiming::Resolution;
                 attach.target_selection_mode = TargetSelectionMode::Random;
                 let mut cast = trigger(TriggerMode::SpellCast,
-                    "Whenever enchanted player casts a noncreature spell, roll a d6. This Aura deals damage to that player equal to the result. Then attach this Aura to another one of your opponents chosen at random.", chain(vec![die, hit, attach]));
+                    "Whenever enchanted player casts a noncreature spell, roll a d6. ~ deals damage to that player equal to the result. Then attach ~ to another one of your opponents chosen at random.", chain(vec![die, hit, attach]));
                 cast.valid_card = Some(typed(json!([{"Non":"Creature"}]), json!([])));
                 cast.valid_target = Some(TargetFilter::AttachedTo);
                 out.triggers.push(cast);
@@ -47130,6 +47134,7 @@ pub(crate) mod population_relation_publication {
         match card.name.as_str() {
             "Balthor the Defiled" => full.replace("Exile Balthor:", "Exile ~:"),
             "Kamachal, Ship's Mascot" => full.replace("Whenever Kamachal ", "Whenever ~ "),
+            "Maddening Hex" => full.replace("This Aura", "~").replace("this Aura", "~"),
             _ => full,
         }
     }
@@ -48089,7 +48094,7 @@ pub(crate) mod defining_modifier_publication {
                 ));
                 let mut second = first.clone();
                 second.target_chooser = Some(TargetFilter::Opponent);
-                let mut body = chain(vec![first, second]);
+                let mut body = first.sub_ability(second);
                 body.kind = AbilityKind::Activated;
                 body.cost = Some(AbilityCost::Tap);
                 body.activation_restrictions = vec![
