@@ -258,13 +258,29 @@ pub(crate) mod tests {
         use crate::types::actions::GameAction;
         use crate::types::game_state::WaitingFor;
         let life = runner.state().players[0].life;
+        assert_eq!(cards.len(), 2);
         let mut prompts = 0;
-        let mut queued_priority_reached = false;
+        let mut pending_prefixes = [false; 2];
+        let mut completion_events = Vec::new();
         let mut completed = false;
         for step in 0..50 {
+            let delivered = cards
+                .iter()
+                .filter(|card| runner.state().objects[*card].zone == Zone::Exile)
+                .count();
+            if delivered < cards.len() {
+                // CR 608.2c + CR 117.2e: neither later instruction may run
+                // while any actual sought member is still pending delivery.
+                assert_eq!(runner.state().players[0].life, life);
+                for card in cards {
+                    assert!(runner.state().objects[card].perpetual_mods.is_empty());
+                }
+            }
             let action = match runner.state().waiting_for {
                 WaitingFor::ReplacementChoice { .. } => {
                     prompts += 1;
+                    assert!(delivered < cards.len(), "a real sought member remains pending");
+                    pending_prefixes[delivered] = true;
                     assert_eq!(runner.state().players[0].life, life);
                     for card in cards {
                         assert!(runner.state().objects[card].perpetual_mods.is_empty());
@@ -281,29 +297,83 @@ pub(crate) mod tests {
                     completed = true;
                     break;
                 }
-                WaitingFor::Priority { .. } => {
-                    queued_priority_reached |= runner.state().stack.is_empty()
-                        && !runner.state().resolution_stack.is_empty();
-                    GameAction::PassPriority
-                }
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
                 ref other => panic!(
                     "sought completion step={step}; wait={other:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}",
                     runner.state().stack, runner.state().resolution_stack,
                     runner.state().resolving_stack_entry, runner.state().return_result_frames
                 ),
             };
-            runner.act(action).unwrap();
+            completion_events.extend(runner.act(action).unwrap().events);
         }
         assert!(completed,
             "sought completion exhausted 50 actions; wait={:?}; main={:?}; resolution={:?}; resolving={:?}; frames={:?}; active={:?}; pending={:?}",
             runner.state().waiting_for, runner.state().stack, runner.state().resolution_stack,
             runner.state().resolving_stack_entry, runner.state().return_result_frames,
             runner.state().active_return_result_occurrence, runner.state().pending_resolution_completion);
-        assert!(
-            queued_priority_reached,
-            "actual queued Priority boundary was reached"
+        assert_eq!(
+            pending_prefixes,
+            [true, true],
+            "first and final member each pause"
         );
-        assert!(prompts >= 1);
+        assert!(prompts >= 2);
+        let mut deliveries = Vec::new();
+        for card in cards {
+            let positions = completion_events.iter().enumerate().filter_map(|(index, event)| {
+                matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Library), to: Zone::Exile, .. } if object_id == card).then_some(index)
+            }).collect::<Vec<_>>();
+            assert_eq!(
+                positions.len(),
+                1,
+                "each actual sought member is publicly delivered once"
+            );
+            deliveries.push(positions[0]);
+        }
+        let final_delivery = *deliveries.iter().max().unwrap();
+        let gains = completion_events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(
+                    event,
+                    GameEvent::LifeChanged {
+                        player_id: PlayerId(0),
+                        amount: 7,
+                        ..
+                    }
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let grants = completion_events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ApplyPerpetual,
+                        ..
+                    }
+                )
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            gains.len(),
+            1,
+            "the life instruction completes exactly once"
+        );
+        assert_eq!(
+            grants.len(),
+            1,
+            "the second sought grant completes exactly once"
+        );
+        assert!(final_delivery < gains[0], "final delivery precedes gain 7");
+        assert!(
+            gains[0] < grants[0],
+            "gain 7 precedes the second sought grant"
+        );
         assert_eq!(runner.state().players[0].life, life + 7);
         for card in cards {
             assert_eq!(runner.state().objects[card].zone, Zone::Exile);

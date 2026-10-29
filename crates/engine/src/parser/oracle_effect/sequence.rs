@@ -2349,6 +2349,27 @@ fn complete_continuous_sentence(text: &str) -> bool {
     crate::parser::oracle_static::parse_complete_continuous_modifications(predicate).is_some()
 }
 
+/// CR 107.3c + CR 608.2c: a relative population predicate still belongs to
+/// its definition. Only an independent instruction may terminate that operand.
+pub(super) fn parse_independent_where_x_continuation(
+    input: &str,
+) -> OracleResult<'_, ClauseBoundary> {
+    let (instruction, (_, connector, _)) = (
+        multispace0,
+        opt(alt((
+            value(ClauseBoundary::Comma, tag("and ")),
+            value(ClauseBoundary::Then, tag("then ")),
+        ))),
+        multispace0,
+    )
+        .parse(input)?;
+    not(crate::parser::oracle_target::parse_relative_card_continuation_head).parse(instruction)?;
+    if !starts_clause_text_or_conjugated(instruction) {
+        return Err(oracle_err(instruction));
+    }
+    Ok((instruction, connector.unwrap_or(ClauseBoundary::Comma)))
+}
+
 fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(ClauseBoundary, usize)> {
     if complete_continuous_sentence(&format!("{current},{remainder}")) {
         return None;
@@ -2357,6 +2378,28 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     let trimmed = remainder.trim_start();
     let whitespace_len = remainder.len() - trimmed.len();
     let trimmed_lower = trimmed.to_ascii_lowercase();
+
+    // CR 608.2c + CR 611.2a + CR 613.4b: a complete duration-framed
+    // continuous operation retains its definition and releases a later action.
+    // Conditional/delayed bodies cannot satisfy the complete subject owner.
+    if let Some((_, body)) = super::lower::strip_leading_duration(current) {
+        let body_lower = body.to_ascii_lowercase();
+        if complete_continuous_sentence(body)
+            && super::lower::strip_terminal_where_x(TextPair::new(body, &body_lower)).is_some_and(
+                |(_, expression)| {
+                    super::lower::parse_where_x_quantity_expression(&expression).is_some()
+                },
+            )
+        {
+            let remainder_lower = remainder.to_ascii_lowercase();
+            if let Ok((instruction, boundary)) =
+                parse_independent_where_x_continuation(&remainder_lower)
+            {
+                let consumed = remainder.len() - instruction.len();
+                return Some((boundary, remainder[..consumed].chars().count()));
+            }
+        }
+    }
 
     // CR 118.14 + CR 609.4b: ", and mana of any type can be spent to cast that
     // spell" / ", and you may spend mana as though it were mana of any color to
@@ -11864,6 +11907,134 @@ mod tests {
             .into_iter()
             .map(|c| c.text)
             .collect()
+    }
+
+    #[test]
+    fn where_x_continuation_requires_an_independent_instruction() {
+        for (prefix, boundary) in [
+            ("", ClauseBoundary::Comma),
+            ("and ", ClauseBoundary::Comma),
+            ("then ", ClauseBoundary::Then),
+        ] {
+            let text = format!("\t{prefix}draw a card");
+            let (instruction, actual) = parse_independent_where_x_continuation(&text).unwrap();
+            assert_eq!(instruction, "draw a card", "{text}");
+            assert_eq!(actual, boundary, "{text}");
+            assert_eq!(
+                text[..text.len() - instruction.len()].chars().count(),
+                1 + prefix.chars().count()
+            );
+        }
+        for text in [
+            "",
+            " ",
+            "and/or",
+            "and have",
+            "have an Adventure",
+            "are sorcery cards",
+            "then have",
+            "and/or have an unknown adventure",
+        ] {
+            assert!(
+                parse_independent_where_x_continuation(text).is_err(),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn leading_duration_where_x_only_releases_a_complete_continuous_body() {
+        let body = "creatures you control have base power and toughness X/X, where X is the number of creatures you control";
+        assert!(
+            complete_continuous_sentence(body),
+            "positive complete continuous owner"
+        );
+        for (connector, expected) in [
+            ("", ClauseBoundary::Comma),
+            ("and ", ClauseBoundary::Comma),
+            ("then ", ClauseBoundary::Then),
+        ] {
+            let head = format!("Until end of turn, {body}");
+            let tail = format!("\t{connector}draw a card");
+            assert_eq!(
+                split_comma_clause_boundary(&head, &tail),
+                Some((expected, 1 + connector.chars().count()))
+            );
+        }
+        // Prefix owners retain their complete dependent chain (CR 608.2c).
+        for prefix in [
+            "If you control a creature",
+            "At the beginning of the next end step",
+            "Until end of turn, if you control a creature",
+            "Until end of turn, at the beginning of the next end step",
+        ] {
+            let head = format!("{prefix}, {body}");
+            assert!(
+                starts_prefix_clause(&head.to_ascii_lowercase()),
+                "prefix owner reached: {head}"
+            );
+            assert_eq!(
+                split_comma_clause_boundary(&head, " then draw a card"),
+                None,
+                "{head}"
+            );
+            let source = format!("{head}, then draw a card");
+            assert_eq!(
+                clause_texts(&source),
+                vec![source.clone()],
+                "complete dependent source retained: {source}"
+            );
+        }
+        for prefix in [
+            "If you control a creature",
+            "At the beginning of the next end step",
+        ] {
+            let source = format!("{prefix}, {body}, then draw a card.");
+            let parsed = parse_effect_chain(&source, AbilityKind::Spell);
+            assert!(
+                !crate::parser::oracle::has_unimplemented(&parsed),
+                "supported dependent chain: {source}: {parsed:#?}"
+            );
+            let dependent =
+                if let Effect::CreateDelayedTrigger { effect, .. } = parsed.effect.as_ref() {
+                    assert!(
+                        parsed.sub_ability.is_none(),
+                        "no unconditional tail escapes the trigger: {source}"
+                    );
+                    effect.as_ref()
+                } else {
+                    assert!(
+                        parsed.condition.is_some(),
+                        "conditional owner reached: {source}"
+                    );
+                    &parsed
+                };
+            assert!(
+                matches!(dependent.effect.as_ref(), Effect::GenericEffect { .. }),
+                "complete continuous head reached: {source}: {dependent:#?}"
+            );
+            let tail = dependent
+                .sub_ability
+                .as_deref()
+                .expect("complete dependent Draw retained");
+            assert!(
+                matches!(
+                    tail.effect.as_ref(),
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller
+                    }
+                ),
+                "{source}: {tail:#?}"
+            );
+            assert!(tail.sub_ability.is_none(), "{source}");
+        }
+        for source in [
+            "Create a 1/1 creature token with \"Until end of turn, creatures you control have base power and toughness X/X, where X is the number of creatures you control, then draw a card.\"",
+            "Draw a card (until end of turn, creatures you control have base power and toughness X/X, where X is the number of creatures you control, then draw a card)",
+        ] {
+            assert_eq!(clause_texts(source), vec![source.to_string()], "{source}");
+        }
     }
 
     // CR 707.9a: a copy-effect except clause that ends in ", and has <keyword>"

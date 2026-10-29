@@ -27847,7 +27847,7 @@ mod bounded_offer_conjunct_tests {
                 }
                 // POSITIVE CONTROL for the zero census below: a token that IS present in
                 // production, counted by this very walker under this very filter.
-                if line.contains("fn resolve_chain_body(") {
+                if line.contains("fn resolve_owned_chain_body(") {
                     control_hits += 1;
                 }
                 for (i, (needle, _)) in predicates.iter().enumerate() {
@@ -27861,7 +27861,7 @@ mod bounded_offer_conjunct_tests {
 
         assert_eq!(
             control_hits, 1,
-            "POSITIVE CONTROL: the walker+filter must find `fn resolve_chain_body(` exactly \
+            "POSITIVE CONTROL: the walker+filter must find `fn resolve_owned_chain_body(` exactly \
              once in production source. A zero below is only meaningful with a live instrument"
         );
 

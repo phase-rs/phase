@@ -672,16 +672,16 @@ fn handle_opponent_may_choice_inner(
         if let Some(frame) = state.active_optional_effect_frame().cloned() {
             let (program, declarations) = owned.as_ref().expect("authenticated optional frame");
             let admitted = (program, declarations);
-            let mut ability = Box::new(project_opponent_may_accepted_ability(
-                &frame.ability,
-                promptee,
-            ));
+            let mut scoped_optional = frame.ability.clone();
+            scoped_optional.set_scoped_player_recursive(promptee);
+            scoped_optional.context.accepting_player = Some(promptee);
             // CR 608.2d: a player cannot accept an exact resolution-time
             // selection they cannot make. This query deliberately recognizes
             // only counted `their graveyard` exile instructions; every
             // adjacent optional effect stays on the established path below.
             if crate::game::effects::change_zone::exact_scoped_graveyard_exile_is_infeasible(
-                state, &ability,
+                state,
+                &scoped_optional,
             ) == Some(true)
             {
                 if let Some((&next, rest)) = remaining.split_first() {
@@ -710,6 +710,10 @@ fn handle_opponent_may_choice_inner(
                 return Ok(state.waiting_for.clone());
             }
 
+            let mut ability = Box::new(project_opponent_may_accepted_ability(
+                &frame.ability,
+                promptee,
+            ));
             let target_selection = match &ability.effect {
                 // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
                 // sacrifice or single-target tap cost. Tap requires an untapped

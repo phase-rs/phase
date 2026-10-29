@@ -5764,14 +5764,31 @@ fn candlekeep_board(
     populated: bool,
     recipients: bool,
 ) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, ObjectId) {
+    candlekeep_board_from_source(populated, recipients, CANDLEKEEP)
+}
+
+fn candlekeep_board_from_source(
+    populated: bool,
+    recipients: bool,
+    source: &str,
+) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     mana(&mut scenario, 5);
     let spell = scenario
         .add_spell_to_hand(P0, "Candlekeep Inspiration", false)
         .with_mana_cost(blue_cost(4, 1))
-        .from_oracle_text(CANDLEKEEP)
+        .from_oracle_text(source)
         .id();
+    for player in [P0, P1] {
+        for index in 0..3 {
+            scenario.add_spell_to_library_top(
+                player,
+                &format!("Excluded library instant {index}"),
+                true,
+            );
+        }
+    }
     let mut controlled = Vec::new();
     if recipients {
         controlled.push(scenario.add_creature(P0, "Own recipient", 6, 7).id());
@@ -5802,9 +5819,15 @@ fn candlekeep_board(
         scenario.add_spell_to_hand(P0, "Hand instant", true);
     }
     let mut runner = scenario.build();
+    // CR 109.4: stale off-zone controller fields cannot replace ownership.
+    // Three owned members and two foreign decoys give different wrong counts.
+    for object in runner.state_mut().objects.values_mut() {
+        if matches!(object.zone, Zone::Exile | Zone::Graveyard) {
+            object.controller = if object.owner == P0 { P1 } else { P0 };
+        }
+    }
     for id in adventure_ids {
         let object = runner.state_mut().objects.get_mut(&id).unwrap();
-        object.controller = P1;
         object.back_face = Some(BackFaceData {
             name: "Adventure alternative".into(),
             layout_kind: Some(LayoutKind::Adventure),
@@ -5849,6 +5872,144 @@ fn candlekeep_population_base_pt() {
         .find(|o| o.name == "Own opponent-controlled")
         .unwrap();
     assert_eq!((other.power, other.toughness), (Some(10), Some(11)));
+}
+
+/// CR 608.2c + CR 608.2h + CR 613.4b + CR 121.1: the synthetic later
+/// instruction delivers one card after applying the complete printed population.
+#[test]
+fn candlekeep_population_then_draw_completes_both_instructions() {
+    let body = CANDLEKEEP.trim_end_matches('.');
+    for separator in [", ", ", and ", ", then ", ". "] {
+        let source = format!("{body}{separator}draw a card.");
+        let (mut runner, spell, controlled, opponent, _) =
+            candlekeep_board_from_source(true, true, &source);
+        let outcome = runner.cast(spell).resolve();
+        for id in controlled {
+            outcome.assert_power_toughness(id, 3, 3);
+        }
+        outcome.assert_power_toughness(opponent, 8, 9);
+        let other = outcome
+            .state()
+            .objects
+            .values()
+            .find(|object| object.name == "Own opponent-controlled")
+            .unwrap();
+        outcome.assert_power_toughness(other.id, 10, 11);
+        outcome.assert_hand_drawn(P0, 1);
+        outcome.assert_hand_drawn(P1, 0);
+        outcome.assert_zone(&[spell], Zone::Graveyard);
+        assert!(outcome.state().stack.is_empty(), "{source}");
+        assert!(outcome.state().resolution_stack.is_empty(), "{source}");
+        assert!(
+            matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+            "{source}"
+        );
+    }
+}
+
+/// CR 700.11 + CR 111.6 + CR 107.3c + CR 614.1c: actual public zone-change
+/// actions define the current-turn history before the synthetic counter entry.
+#[test]
+fn enters_with_defined_descended_history_keeps_bare_and_twice_x() {
+    for populated in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let entries: Vec<_> = ["X", "twice X"].into_iter().map(|count| {
+            scenario.add_creature_to_hand_from_oracle(P0, &format!("Synthetic {count} history entrant"), 1, 1, &format!("This creature enters with {count} +1/+1 counters on it, where X is the number of times you descended this turn.")).with_mana_cost(ManaCost::generic(0)).id()
+        }).collect();
+        let own_cards = [
+            scenario
+                .add_enchantment_from_oracle(P0, "History card one", "")
+                .id(),
+            scenario
+                .add_artifact_from_oracle(P0, "History card two", "")
+                .id(),
+        ];
+        let foreign = scenario
+            .add_artifact_from_oracle(P1, "Foreign history decoy", "")
+            .id();
+        let spawn = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic history token",
+                true,
+                "Create a 1/1 green Saproling creature token.",
+            )
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let kills: Vec<_> = (0..4)
+            .map(|_| {
+                scenario
+                    .add_spell_to_hand_from_oracle(
+                        P0,
+                        "Synthetic history destroy",
+                        true,
+                        "Destroy target permanent.",
+                    )
+                    .with_mana_cost(ManaCost::generic(0))
+                    .id()
+            })
+            .collect();
+        let recover = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Synthetic history recovery",
+                true,
+                "Return target permanent card from your graveyard to your hand.",
+            )
+            .with_mana_cost(ManaCost::generic(0))
+            .id();
+        let mut runner = scenario.build();
+        let created = runner.cast(spawn).resolve();
+        assert!(matches!(
+            created.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+        let token = created
+            .state()
+            .objects
+            .values()
+            .find(|object| object.is_token && object.zone == Zone::Battlefield)
+            .expect("public token creation reached")
+            .id;
+        let targets: Vec<_> = if populated {
+            vec![own_cards[0], own_cards[1], foreign, token]
+        } else {
+            vec![foreign, token]
+        };
+        for (kill, target) in kills.into_iter().zip(targets) {
+            let killed = runner.cast(kill).target_object(target).resolve();
+            assert_eq!(killed.events().iter().filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Graveyard, .. } if *object_id == target)).count(), 1, "actual history event for {target:?}");
+            assert!(matches!(
+                killed.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            assert!(killed.state().stack.is_empty());
+        }
+        if populated {
+            let recovered = runner.cast(recover).target_object(own_cards[0]).resolve();
+            recovered.assert_zone(&[own_cards[0]], Zone::Hand);
+            recovered.assert_zone(&[own_cards[1]], Zone::Graveyard);
+            assert!(matches!(
+                recovered.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+        }
+        for (entrant, multiplier) in entries.into_iter().zip([1, 2]) {
+            let outcome = runner.cast(entrant).resolve();
+            outcome.assert_zone(&[entrant], Zone::Battlefield);
+            assert_eq!(
+                outcome.counters(entrant, CounterType::Plus1Plus1),
+                if populated { 2 * multiplier } else { 0 }
+            );
+            assert!(outcome.state().stack.is_empty());
+            assert!(outcome.state().resolution_stack.is_empty());
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+        }
+    }
 }
 
 #[test]

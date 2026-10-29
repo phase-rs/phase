@@ -22893,49 +22893,68 @@ mod tests {
         );
     }
 
-    /// CR 107.3 + CR 107.3i: a bare X count IS the where-X definition, read by
-    /// the enters-with where-X reader (the reading this clause always had), so
-    /// "the number of times you descended this turn" binds (probed value
-    /// below). The shared where-X reader does not read that definition (reach
-    /// guard), so the twice-X sibling, which binds through the shared reader,
-    /// fails closed (probed: `None`) — an intentional, honest decline rather
-    /// than a guess. SYNTHETIC: no printed card has this shape.
+    /// CR 700.11 + CR 111.6 + CR 107.3c + CR 107.3i: every reader retains the
+    /// complete permanent-card history definition; twice X doubles that count.
+    /// SYNTHETIC enters text composes the printed Mycotyrant definition.
     #[test]
     fn enters_with_bare_x_keeps_the_enters_with_where_x_reader() {
         const DESCENDED: &str = "the number of times you descended this turn.";
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: None,
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Permanent],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::NonToken,
+                        FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        },
+                    ],
+                }),
+            },
+        };
         assert_eq!(
             crate::parser::oracle_effect::lower::parse_where_x_quantity_expression(DESCENDED),
-            None,
-            "reach guard: the shared where-X reader does not read {DESCENDED:?}"
+            Some(expected.clone())
+        );
+        assert_eq!(
+            crate::parser::oracle_effect::lower::parse_where_x_quantity_core(DESCENDED),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            parse_enters_where_x_tail_quantity(DESCENDED),
+            Some(expected.clone())
         );
         assert_eq!(
             enters_with_count(&format!(
                 "This creature enters with X +1/+1 counters on it, where X is {DESCENDED}"
             )),
-            QuantityExpr::Ref {
-                qty: QuantityRef::ZoneChangeCountThisTurn {
-                    from: None,
-                    to: Some(Zone::Graveyard),
-                    filter: TargetFilter::Typed(TypedFilter {
-                        type_filters: vec![TypeFilter::Permanent],
-                        controller: None,
-                        properties: vec![
-                            FilterProp::NonToken,
-                            FilterProp::Owned {
-                                controller: ControllerRef::You,
-                            },
-                        ],
-                    }),
-                },
+            expected.clone()
+        );
+        assert_eq!(
+            enters_with_count(&format!(
+                "This creature enters with twice X +1/+1 counters on it, where X is {DESCENDED}"
+            )),
+            QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(expected)
             }
         );
-        assert!(parse_replacement_line(
-            &format!(
-                "This creature enters with twice X +1/+1 counters on it, where X is {DESCENDED}"
-            ),
-            "Test Creature",
-        )
-        .is_none());
+        let unknown = "the number of times you descended this turn inexplicably";
+        assert!(
+            crate::parser::oracle_effect::lower::parse_where_x_quantity_core(unknown).is_none()
+        );
+        for count in ["X", "twice X"] {
+            assert!(parse_replacement_line(
+                &format!(
+                    "This creature enters with {count} +1/+1 counters on it, where X is {unknown}."
+                ),
+                "Test Creature"
+            )
+            .is_none());
+        }
     }
 
     /// CR 107.3 + CR 614.1c: Scarlet Spider's printed Oracle line (verbatim

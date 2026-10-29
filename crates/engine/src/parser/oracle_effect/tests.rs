@@ -24472,13 +24472,11 @@ fn excluded_transform_clauses_keep_base_behavior() {
 
 #[test]
 fn razorgrass_invoker_subject_pump_keeps_base_behavior() {
-    // Residual (labelled, not a spec claim): the subject-compound lowering
-    // gives the `Pump` the untyped `TargetFilter::Any`, so an announced count
-    // would be inert (the slot would offer every target while the effect still
-    // reads the subject's referent). The write-side guard declines it and the
-    // ability keeps base behavior. Follow-up: lower the subject conjunct's
-    // "other target creature" into the Pump's typed filter, then lift the
-    // `Any` guard.
+    // SHAPE + coverage honesty: the old Any-Pump reference was wrong. CR 608.2c
+    // requires the entire compound instruction; CR 115.1c requires the other
+    // creature to be an announced target. Until both recipients are bound,
+    // preserve the complete unsupported subject instead of a permissive pump.
+    // The historical test name remains stable for the verification inventory.
     let parsed = parse_card(
         "Vigilance (Attacking doesn't cause this creature to tap.)\n{8}: This creature and up to one other target creature each get +3/+3 until end of turn.",
         "Razorgrass Invoker",
@@ -24486,31 +24484,57 @@ fn razorgrass_invoker_subject_pump_keeps_base_behavior() {
         &["Creature"],
     );
     let defs = all_ability_defs(&parsed);
-    let pumps: Vec<_> = defs
-        .iter()
-        .copied()
-        .filter(|def| matches!(def.effect.as_ref(), Effect::Pump { .. }))
-        .collect();
-    assert_eq!(pumps.len(), 1, "{defs:#?}");
-    assert!(
-        matches!(
-            pumps[0].effect.as_ref(),
-            Effect::Pump {
-                target: TargetFilter::Any,
-                ..
-            }
-        ),
-        "{:#?}",
-        pumps[0]
+    assert_eq!(defs.len(), 1, "{parsed:#?}");
+    let activated = defs[0];
+    assert_eq!(activated.kind, AbilityKind::Activated);
+    assert_eq!(
+        activated.effect.as_ref(),
+        &Effect::unimplemented(
+            "unbound_subject",
+            "~ and up to one other target creature each get +3/+3"
+        )
     );
-    assert_eq!(pumps[0].multi_target, None, "{:#?}", pumps[0]);
-    assert!(!pumps[0].optional_targeting);
+    // CR 602.1a: the printed activation cost remains intact despite the gap.
+    assert_eq!(
+        activated.cost,
+        Some(AbilityCost::Mana {
+            cost: ManaCost::generic(8)
+        })
+    );
+    // CR 611.2a: refusing the subject must retain its stated duration.
+    assert_eq!(activated.duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(
+        activated.description.as_deref(),
+        Some("{8}: ~ and up to one other target creature each get +3/+3 until end of turn.")
+    );
+    assert!(activated.sub_ability.is_none());
+    assert!(activated.else_ability.is_none());
+    assert_eq!(activated.multi_target, None);
+    assert!(!activated.optional_targeting);
     assert!(
-        chain_defs(pumps[0])
-            .iter()
-            .all(|def| !matches!(def.effect.as_ref(), Effect::Unimplemented { .. })),
-        "{:#?}",
-        pumps[0]
+        defs.iter().all(|def| !matches!(
+            def.effect.as_ref(),
+            Effect::Pump { .. } | Effect::PumpAll { .. }
+        )),
+        "the unsupported compound must not become an Any-Pump: {defs:#?}"
+    );
+    // CR 702.20b: the independent Vigilance keyword is still recognized.
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Vigilance]);
+    let face = CardFace {
+        name: "Razorgrass Invoker".to_string(),
+        oracle_text: Some("Vigilance (Attacking doesn't cause this creature to tap.)\n{8}: This creature and up to one other target creature each get +3/+3 until end of turn.".to_string()),
+        keywords: parsed.extracted_keywords,
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        ..Default::default()
+    };
+    assert!(card_face_has_unimplemented_parts(&face), "{face:#?}");
+    assert_eq!(
+        crate::game::coverage::card_face_gaps(&face),
+        vec!["Effect:unbound_subject".to_string()],
+        "the complete card must remain explicitly unsupported: {face:#?}"
     );
 }
 
@@ -49777,9 +49801,10 @@ fn perpetual_parser_maps_modify_pt() {
         }
     ));
 
+    // The subject binder refuses an unbound pronoun before the perpetual owner.
     assert_eq!(
         parse_effect("it perpetually gets +3/+0."),
-        Effect::unimplemented("perpetual_modify_pt", "it perpetually gets +3/+0")
+        Effect::unimplemented("unbound_subject", "it perpetually gets +3/+0")
     );
 
     let e = parse_effect("Target creature an opponent controls perpetually gets -1/-2.");
@@ -87164,8 +87189,8 @@ fn perpetual_conjunct_after_life_gain_keeps_the_life_gain() {
 /// letting the generic pump drop "perpetually" and turn a permanent edit into an
 /// until-end-of-turn one.
 ///
-/// The unbound bare "it" retains its exact gap; the comma-joined return sibling
-/// supplies the identity and still reaches a real `ApplyPerpetual`.
+/// The unbound bare "it" retains its exact subject-binding gap; the comma-joined
+/// return sibling supplies the identity and still reaches a real `ApplyPerpetual`.
 #[test]
 fn a_perpetual_pt_clause_never_lowers_to_a_plain_pump() {
     for text in [
@@ -87194,7 +87219,7 @@ fn a_perpetual_pt_clause_never_lowers_to_a_plain_pump() {
     let unbound = parse_effect_chain("it perpetually gets +1/+1", AbilityKind::Spell);
     assert_eq!(
         unbound.effect.as_ref(),
-        &Effect::unimplemented("perpetual_modify_pt", "it perpetually gets +1/+1")
+        &Effect::unimplemented("unbound_subject", "it perpetually gets +1/+1")
     );
     assert!(unbound.sub_ability.is_none());
     for text in ["return ~ to the battlefield, and it perpetually gets +1/+1"] {
@@ -97559,13 +97584,19 @@ fn duration_repair_conditional_members_keep_local_windows_in_both_chain_modes() 
         );
         assert_eq!(nodes[1].duration, Some(Duration::UntilEndOfTurn));
         assert!(nodes[0].condition.is_none());
+        // CR 109.2: the creature in this presence gate is on the battlefield.
         let gate = StaticCondition::IsPresent {
             filter: Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::WithKeyword {
-                        value: Keyword::Flying,
-                    }]),
+                    .properties(vec![
+                        FilterProp::WithKeyword {
+                            value: Keyword::Flying,
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
             )),
         };
         for (index, node) in nodes.into_iter().enumerate() {

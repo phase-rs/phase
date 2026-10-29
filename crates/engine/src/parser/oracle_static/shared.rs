@@ -2259,25 +2259,17 @@ pub(crate) fn parse_tiered_enters_with_additional_counters_pattern(
 /// CR 207.2c: An ability word is italicized flavor text with no rules meaning
 /// (e.g. `Chroma`, `Metalcraft`, `Fateful hour`, and the set-specific `Protector`
 /// / `Proclamator Hailer`). The subject-anchored static parsers match their
-/// subject at the *start* of the line, so a leading ability-word label like
-/// `"Chroma — Each creature you control gets ..."` prevents them from firing and
-/// the whole static silently drops. When the ordinary dispatch classifies
-/// nothing, strip a *recognized* ability-word label — whitelist-gated through the
-/// shared `is_known_ability_word` authority, exactly as the token-grant path in
-/// `keyword_grant.rs` does — and re-enter the dispatch once on the body.
-///
-/// This is a strict fallback: any line the dispatch already parses is returned
-/// untouched, so no existing coverage can regress. The stripped body carries no
-/// further label, so `strip_ability_word_with_name` yields `None` on the retry
-/// and the recursion terminates after a single hop.
+/// subject at the start of the line. Recognize the frame through the shared
+/// `is_known_ability_word` authority; unknown labels retain their full source.
+/// Complete full-source owners precede this frame, and its body re-enters the
+/// multi dispatcher before any generic single-result fallback can claim it.
 pub(super) fn known_static_ability_word_body(text: &str) -> Option<String> {
     let (ability_word, body) = super::oracle_modal::strip_ability_word_with_name(text)?;
     super::oracle_modal::is_known_ability_word(&ability_word).then_some(body)
 }
 
 pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
-    let mut defs = parse_static_line_multi_dispatch(text);
-    if !defs.is_empty() {
+    if let Some(mut defs) = parse_static_line_multi_special_owners(text) {
         append_cant_have_keyword_denials(text, &mut defs);
         return defs;
     }
@@ -2289,6 +2281,8 @@ pub(crate) fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition>
         }
         return defs;
     }
+    let mut defs = parse_static_line_multi_dispatch(text);
+    append_cant_have_keyword_denials(text, &mut defs);
     defs
 }
 
@@ -3105,26 +3099,38 @@ fn parse_compound_spell_and_ability_cost_tax(text: &str) -> Option<Vec<StaticDef
     Some(vec![cast_def, activate_def])
 }
 
-fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
+/// Complete source owners retain precedence over generic ability-word framing.
+/// `Some(empty)` is an owned refusal, particularly for off-zone grant sources.
+fn parse_static_line_multi_special_owners(text: &str) -> Option<Vec<StaticDefinition>> {
     if let Some(result) = super::oracle::try_parse_graveyard_keyword_source_with_label(text) {
-        return result.into_iter().collect();
+        return Some(result.into_iter().collect());
     }
     let stripped = strip_reminder_text(text);
     let lower = stripped.to_lowercase();
     let tp = TextPair::new(&stripped, &lower);
 
     if let Some(definition) = super::evasion::parse_combat_tax_static(&tp, &stripped) {
-        return vec![definition];
+        return Some(vec![definition]);
     }
 
     // Preserve the complete class owners' canonical affected filters and
     // top-level combat modes before publishing generic hosted members.
     if let Some(definitions) = parse_color_conditional_keyword_grants(&stripped) {
-        return definitions;
+        return Some(definitions);
     }
     if let Some(definitions) = try_split_grant_and_dual_gated_combat(&tp, &stripped) {
+        return Some(definitions);
+    }
+    None
+}
+
+fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
+    if let Some(definitions) = parse_static_line_multi_special_owners(text) {
         return definitions;
     }
+    let stripped = strip_reminder_text(text);
+    let lower = stripped.to_lowercase();
+    let tp = TextPair::new(&stripped, &lower);
 
     // CR 611.3a: hosted member predicates stay live, with their own complete
     // recipient and board gates. No prefix is published on a refused member.
@@ -3729,8 +3735,12 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         }
     }
 
-    // Fall back to the single-return parser.
-    parse_static_line(text).into_iter().collect()
+    // The outer multi transaction owns framing. Retrying a label through the
+    // public single API here could preempt that transaction with a partial body.
+    super::parse_static_line_unframed_ir(text)
+        .map(|ir| lower_static_ir(&ir))
+        .into_iter()
+        .collect()
 }
 
 /// CR 613.1f / CR 702: "... can't have or gain [keyword]" (Theros Archetype cycle,
