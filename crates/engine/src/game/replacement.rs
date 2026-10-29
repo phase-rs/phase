@@ -14009,6 +14009,14 @@ pub(crate) fn validate_remembered_replacement(
     }
 }
 
+fn replacement_preference_hash_input(preference: &ReplacementAutoChoiceKey) -> String {
+    // Saves retain explicit native-source null as provenance. Only the hash image
+    // omits that new default marker to preserve existing opaque preference IDs.
+    serde_json::to_string(preference)
+        .expect("replacement key serializes")
+        .replace("{\"selected_damage_source\":null,\"event\":", "{\"event\":")
+}
+
 /// Validate before storing; the ordinary replacement handler owns event delivery.
 pub(crate) fn remember_replacement_choice(
     state: &mut GameState,
@@ -14055,8 +14063,8 @@ pub(crate) fn remember_replacement_choice(
         candidates: key.candidates.iter().map(preference_identity).collect(),
         ..key.clone()
     };
-    let encoded = serde_json::to_vec(&preference).expect("replacement key serializes");
-    let id = ReplacementAutoChoiceId(format!("r{:x}", Sha256::digest(encoded)));
+    let encoded = replacement_preference_hash_input(&preference);
+    let id = ReplacementAutoChoiceId(format!("r{:x}", Sha256::digest(encoded.as_bytes())));
     state
         .replacement_auto_choices
         .push(ReplacementAutoChoiceRecord {
@@ -30335,6 +30343,30 @@ mod auto_choice_identity_tests {
             if differing_rider {
                 assert!(!same_identity_set(&rebuilt, &record.key.candidates));
                 assert!(preference_bijection(&record.key.candidates, &rebuilt).is_none());
+                bolt_bear(&mut runner, bolts[1], bear);
+                let WaitingFor::ReplacementChoice {
+                    player, candidates, ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("a changed rider must require a fresh public choice");
+                };
+                assert_eq!(*player, P0);
+                assert_eq!(candidates.len(), 2);
+                assert_eq!(counters(runner.state(), bear), 3);
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+                runner.advance_until_stack_empty();
+                // CR 615.5 + CR 615.6: prevention adds its rider's counters,
+                // and the prevented damage never marks the creature.
+                assert_eq!(counters(runner.state(), bear), 6);
+                assert_eq!(runner.state().objects[&bear].damage_marked, 0);
+                assert!(runner.state().stack.is_empty());
+                assert!(runner.state().resolution_stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
                 continue;
             }
             assert!(!same_identity_set(&rebuilt, &record.key.candidates));
@@ -30360,19 +30392,31 @@ mod auto_choice_identity_tests {
             assert!(preference_bijection(&record.key.candidates, &alien_copy).is_none());
 
             let mut stale_tail = GameRunner::from_state(runner.state().clone());
+            stale_tail.state_mut().replacement_auto_choices.clear();
+            assert!(stale_tail.state().replacement_auto_choices.is_empty());
             stale_tail.state_mut().replacement_auto_choice_tail = Some(ReplacementAutoChoiceTail {
                 player: record.key.player,
-                event: record.key.event,
+                event: record.key.event.clone(),
                 remaining: record.key.candidates.clone(),
             });
             bolt_bear(&mut stale_tail, bolts[1], bear);
-            assert!(
-                matches!(
-                    stale_tail.state().waiting_for,
-                    WaitingFor::ReplacementChoice { .. }
-                ),
-                "a preference-equivalent reinstall cannot authorize the old event tail"
-            );
+            let WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                remember_identity: Some(current),
+                ..
+            } = &stale_tail.state().waiting_for
+            else {
+                panic!("a preference-equivalent reinstall cannot authorize the old event tail");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(candidates.len(), 2);
+            assert_eq!(current.candidates.len(), 2);
+            assert!(same_identity_set(&current.candidates, &rebuilt));
+            assert!(!same_identity_set(
+                &current.candidates,
+                &record.key.candidates
+            ));
             assert!(stale_tail.state().replacement_auto_choice_tail.is_none());
             assert_eq!(counters(stale_tail.state(), bear), 3);
             stale_tail
@@ -30380,7 +30424,34 @@ mod auto_choice_identity_tests {
                 .unwrap();
             stale_tail.advance_until_stack_empty();
             assert_eq!(counters(stale_tail.state(), bear), 6);
+            assert_eq!(stale_tail.state().objects[&bear].damage_marked, 0);
+            assert!(stale_tail.state().stack.is_empty());
             assert!(stale_tail.state().resolution_stack.is_empty());
+            assert!(matches!(
+                stale_tail.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+
+            let mut preference_and_tail = GameRunner::from_state(runner.state().clone());
+            preference_and_tail.state_mut().replacement_auto_choice_tail =
+                Some(ReplacementAutoChoiceTail {
+                    player: record.key.player,
+                    event: record.key.event.clone(),
+                    remaining: record.key.candidates.clone(),
+                });
+            bolt_bear(&mut preference_and_tail, bolts[1], bear);
+            assert!(matches!(
+                preference_and_tail.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+            assert_eq!(preference_and_tail.state().objects[&bear].damage_marked, 0);
+            assert_eq!(counters(preference_and_tail.state(), bear), 6);
+            assert_eq!(
+                preference_and_tail.state().replacement_auto_choices,
+                vec![record.clone()]
+            );
+            assert!(preference_and_tail.state().stack.is_empty());
+            assert!(preference_and_tail.state().resolution_stack.is_empty());
 
             bolt_bear(&mut runner, bolts[1], bear);
             assert!(
@@ -30390,6 +30461,9 @@ mod auto_choice_identity_tests {
             );
             assert_eq!(runner.state().objects[&bear].damage_marked, 0);
             assert_eq!(counters(runner.state(), bear), 6);
+            assert_eq!(runner.state().replacement_auto_choices, vec![record]);
+            assert!(runner.state().stack.is_empty());
+            assert!(runner.state().resolution_stack.is_empty());
         }
     }
 
@@ -30441,6 +30515,14 @@ mod auto_choice_identity_tests {
             }
         }
         assert!(!names_rider(&serde_json::to_value(&key).unwrap()));
+        let saved_key = serde_json::to_value(&key).unwrap();
+        for candidate in saved_key["candidates"].as_array().unwrap() {
+            let definition = candidate["data"]["definition"].as_object().unwrap();
+            assert_eq!(
+                definition.get("selected_damage_source"),
+                Some(&serde_json::Value::Null)
+            );
+        }
         runner
             .act(GameAction::ChooseReplacementAndRemember {
                 choice: ReplacementAutoChoice::Order { order: vec![0, 1] },
@@ -30450,6 +30532,302 @@ mod auto_choice_identity_tests {
             runner.state().replacement_auto_choices[0].id.0,
             "r5cb2a4e985b2814dbce4d5d4c6521ec5d539b0f90b74feb454e24d0fab0feb74"
         );
+        let saved_record =
+            serde_json::to_value(&runner.state().replacement_auto_choices[0]).unwrap();
+        for candidate in saved_record["key"]["candidates"].as_array().unwrap() {
+            let definition = candidate["data"]["definition"].as_object().unwrap();
+            assert_eq!(
+                definition.get("selected_damage_source"),
+                Some(&serde_json::Value::Null)
+            );
+        }
+    }
+
+    #[test]
+    fn native_preference_hash_image_keeps_independent_exact_bytes_and_candidate_order() {
+        // Literal hash bytes predate the native-source save marker. This fixture
+        // is deliberately independent of the hash encoder and its rewrite.
+        let expected = concat!(
+            r#"{"player":0,"event":"GainLife","kind":{"type":"Order"},"candidates":["#,
+            r#"{"type":"Definition","data":{"source":{"object_id":1,"incarnation":0},"index":0,"definition":{"event":"GainLife","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":null,"condition":null}}},"#,
+            r#"{"type":"Definition","data":{"source":{"object_id":2,"incarnation":4},"index":1,"definition":{"event":"LoseLife","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":null,"condition":null}}}]}"#,
+        );
+        let key: ReplacementAutoChoiceKey = serde_json::from_str(expected).unwrap();
+        let saved = serde_json::to_string(&key).unwrap();
+        assert_eq!(
+            saved
+                .matches(r#"{"selected_damage_source":null,"event":"#)
+                .count(),
+            2
+        );
+        assert_eq!(
+            replacement_preference_hash_input(&key).as_bytes(),
+            expected.as_bytes()
+        );
+        let mut reversed = key.clone();
+        reversed.candidates.reverse();
+        assert_ne!(replacement_preference_hash_input(&reversed), expected);
+        assert_ne!(
+            Sha256::digest(replacement_preference_hash_input(&reversed).as_bytes()),
+            Sha256::digest(expected.as_bytes())
+        );
+        let mut changed = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
+            &mut changed.candidates[0]
+        else {
+            unreachable!()
+        };
+        definition.quantity_modification = Some(QuantityModification::Plus { value: 2 });
+        assert_ne!(replacement_preference_hash_input(&changed), expected);
+        assert_ne!(
+            Sha256::digest(replacement_preference_hash_input(&changed).as_bytes()),
+            Sha256::digest(expected.as_bytes())
+        );
+    }
+
+    #[test]
+    fn native_preference_hash_image_recurses_and_preserves_escaped_description_and_opaque_value() {
+        // Typed definitions occur in both an execute program and a decline
+        // program. The quoted lookalike is text, including slash/newline/Unicode.
+        let expected = concat!(
+            r#"{"player":0,"event":"GainLife","kind":{"type":"Order"},"candidates":[{"type":"Definition","data":{"source":{"object_id":1,"incarnation":0},"index":0,"definition":{"event":"GainLife","execute":{"kind":"Spell","effect":{"type":"AddTargetReplacement","replacement":{"event":"LoseLife","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":"{\"selected_damage_source\":null,\"event\":\\雪\n","condition":null},"target":{"type":"None"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false},"#,
+            r#""mode":{"type":"Optional","decline":{"kind":"Spell","effect":{"type":"AddTargetReplacement","replacement":{"event":"AddCounter","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":null,"condition":null},"target":{"type":"None"}},"cost":null,"sub_ability":null,"duration":null,"description":null,"target_prompt":null,"condition":null,"optional_targeting":false,"optional":false,"forward_result":false}},"valid_card":null,"description":null,"condition":null}}}]}"#,
+        );
+        let key: ReplacementAutoChoiceKey = serde_json::from_str(expected).unwrap();
+        let saved = serde_json::to_string(&key).unwrap();
+        assert_eq!(
+            saved
+                .matches(r#"{"selected_damage_source":null,"event":"#)
+                .count(),
+            3
+        );
+        let image = replacement_preference_hash_input(&key);
+        assert_eq!(image.as_bytes(), expected.as_bytes());
+        let decoded: serde_json::Value = serde_json::from_str(&image).unwrap();
+        assert_eq!(
+            decoded["candidates"][0]["data"]["definition"]["execute"]["effect"]["replacement"]
+                ["description"],
+            "{\"selected_damage_source\":null,\"event\":\\雪\n"
+        );
+
+        // This is also a feature-graph guard: preserve_order would emit the
+        // hostile insertion order and invalidate the reserved-prefix premise.
+        let mut opaque = serde_json::Map::new();
+        opaque.insert("selected_damage_source".into(), serde_json::Value::Null);
+        opaque.insert("event".into(), serde_json::json!("opaque"));
+        let opaque = serde_json::Value::Object(opaque);
+        let opaque_bytes = serde_json::to_string(&opaque).unwrap();
+        assert_eq!(
+            opaque_bytes,
+            r#"{"event":"opaque","selected_damage_source":null}"#
+        );
+        assert!(!opaque_bytes.contains(r#"{"selected_damage_source":null,"event":"#));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&opaque_bytes).unwrap(),
+            opaque
+        );
+    }
+
+    #[test]
+    fn preference_hash_image_keeps_some_capture_authority_while_normalizing_its_native_child() {
+        use crate::types::ability::{AbilityKind, RestrictionExpiry, TriggerDefinition};
+        use crate::types::triggers::TriggerMode;
+
+        let child = ReplacementDefinition::new(ReplacementEvent::LoseLife);
+        let child_expected = r#"{"event":"LoseLife","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":null,"condition":null}"#;
+        let child_saved = serde_json::to_string(&child).unwrap();
+        assert_eq!(
+            child_saved,
+            r#"{"selected_damage_source":null,"event":"LoseLife","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":null,"condition":null}"#
+        );
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature(P0, "Captured source", 2, 2)
+            .with_trigger_definition(TriggerDefinition::new(TriggerMode::DamageDone).execute(
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::AddTargetReplacement {
+                        replacement: Box::new(child),
+                        target: TargetFilter::None,
+                    },
+                ),
+            ))
+            .id();
+        let runner = scenario.build();
+        let capture = crate::game::triggers::trigger_source_context_for_latch(
+            runner.state(),
+            &runner.state().objects[&source],
+        );
+        assert_eq!(capture.trigger_entries.len(), 1);
+        let capture_saved = serde_json::to_string(&capture).unwrap();
+        assert_eq!(capture_saved.matches(&child_saved).count(), 1);
+        // Independently substitute the entire known child fixture, preserving
+        // every other capture byte; do not derive expected bytes via the prefix.
+        let capture_expected = capture_saved.replacen(&child_saved, child_expected, 1);
+        let native_expected = r#"{"event":"AddCounter","execute":null,"mode":{"type":"Mandatory"},"valid_card":null,"description":null,"condition":null}"#;
+        let mut selected = ReplacementDefinition::new(ReplacementEvent::GainLife);
+        selected.selected_damage_source = Some(capture.clone());
+        selected.expiry = Some(RestrictionExpiry::EndOfTurn);
+        let key = ReplacementAutoChoiceKey {
+            player: P0,
+            event: ReplacementEvent::GainLife,
+            kind: ReplacementChoiceKind::Order,
+            candidates: vec![
+                ReplacementAutoChoiceIdentity::Definition {
+                    source: ObjectIncarnationRef::of(ObjectId(1), 0),
+                    index: 0,
+                    occurrence: None,
+                    definition: Box::new(selected),
+                    rider: None,
+                },
+                ReplacementAutoChoiceIdentity::Definition {
+                    source: ObjectIncarnationRef::of(ObjectId(2), 4),
+                    index: 1,
+                    occurrence: None,
+                    definition: Box::new(ReplacementDefinition::new(ReplacementEvent::AddCounter)),
+                    rider: None,
+                },
+            ],
+        };
+        let expected = format!(
+            concat!(
+                r#"{{"player":0,"event":"GainLife","kind":{{"type":"Order"}},"candidates":[{{"type":"Definition","data":{{"source":{{"object_id":1,"incarnation":0}},"index":0,"definition":{{"selected_damage_source":{},"event":"GainLife","execute":null,"mode":{{"type":"Mandatory"}},"valid_card":null,"description":null,"condition":null,"expiry":{{"type":"EndOfTurn"}}}}}}}},"#,
+                r#"{{"type":"Definition","data":{{"source":{{"object_id":2,"incarnation":4}},"index":1,"definition":{}}}}}]}}"#,
+            ),
+            capture_expected, native_expected,
+        );
+        let image = replacement_preference_hash_input(&key);
+        assert_eq!(image.as_bytes(), expected.as_bytes());
+        let saved = serde_json::to_value(&key).unwrap();
+        let selected_saved =
+            &saved["candidates"][0]["data"]["definition"]["selected_damage_source"];
+        assert_eq!(selected_saved, &serde_json::to_value(&capture).unwrap());
+        let saved_child =
+            &selected_saved["trigger_entries"][0]["definition"]["execute"]["effect"]["replacement"];
+        assert_eq!(
+            saved_child
+                .as_object()
+                .unwrap()
+                .get("selected_damage_source"),
+            Some(&serde_json::Value::Null)
+        );
+        assert_eq!(
+            saved["candidates"][1]["data"]["definition"]
+                .as_object()
+                .unwrap()
+                .get("selected_damage_source"),
+            Some(&serde_json::Value::Null)
+        );
+        let tail = ReplacementAutoChoiceTail {
+            player: key.player,
+            event: key.event.clone(),
+            remaining: key.candidates.clone(),
+        };
+        let saved_tail = serde_json::to_value(tail).unwrap();
+        assert_eq!(
+            saved_tail["remaining"][1]["data"]["definition"]
+                .as_object()
+                .unwrap()
+                .get("selected_damage_source"),
+            Some(&serde_json::Value::Null)
+        );
+
+        // CR 400.7 + CR 609.7a + CR 611.2a: occurrence, selected source and
+        // duration remain distinct authority. A rider's program also remains
+        // part of the preference rather than an allocation handle (CR 615.5).
+        let mut changed_source = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { source, .. } =
+            &mut changed_source.candidates[0]
+        else {
+            unreachable!()
+        };
+        source.incarnation += 1;
+        let mut changed_capture = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
+            &mut changed_capture.candidates[0]
+        else {
+            unreachable!()
+        };
+        definition
+            .selected_damage_source
+            .as_mut()
+            .unwrap()
+            .identity
+            .reference
+            .incarnation += 1;
+        let mut changed_expiry = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
+            &mut changed_expiry.candidates[0]
+        else {
+            unreachable!()
+        };
+        definition.expiry = Some(RestrictionExpiry::EndOfCombat);
+        let mut changed_rider = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { rider, .. } =
+            &mut changed_rider.candidates[0]
+        else {
+            unreachable!()
+        };
+        *rider = Some(Box::new(ResolvedAbility::new(
+            Effect::NoOp,
+            vec![],
+            capture.identity.reference.object_id,
+            P0,
+        )));
+        let mut changed_kind = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
+            &mut changed_kind.candidates[0]
+        else {
+            unreachable!()
+        };
+        definition.shield_kind = ShieldKind::Prevention {
+            amount: PreventionAmount::All,
+        };
+        for changed in [
+            changed_source,
+            changed_capture,
+            changed_expiry,
+            changed_rider,
+            changed_kind,
+        ] {
+            let changed_image = replacement_preference_hash_input(&changed);
+            assert_ne!(changed_image, image);
+            assert_ne!(
+                Sha256::digest(changed_image.as_bytes()),
+                Sha256::digest(image.as_bytes())
+            );
+            assert!(preference_bijection(&key.candidates, &changed.candidates).is_none());
+        }
+        let mut continuous = key.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } =
+            &mut continuous.candidates[0]
+        else {
+            unreachable!()
+        };
+        definition.shield_kind = ShieldKind::Redirection {
+            recipient: DamageRedirectTarget::Controller,
+            amount: PreventionAmount::All,
+            lifetime: RedirectionLifetime::Continuous,
+        };
+        let mut once = continuous.clone();
+        let ReplacementAutoChoiceIdentity::Definition { definition, .. } = &mut once.candidates[0]
+        else {
+            unreachable!()
+        };
+        definition.shield_kind = ShieldKind::Redirection {
+            recipient: DamageRedirectTarget::Controller,
+            amount: PreventionAmount::All,
+            lifetime: RedirectionLifetime::OneOpportunity,
+        };
+        assert_ne!(
+            replacement_preference_hash_input(&continuous),
+            replacement_preference_hash_input(&once)
+        );
+        assert_ne!(
+            Sha256::digest(replacement_preference_hash_input(&continuous).as_bytes()),
+            Sha256::digest(replacement_preference_hash_input(&once).as_bytes())
+        );
+        assert!(preference_bijection(&continuous.candidates, &once.candidates).is_none());
     }
 }
 
