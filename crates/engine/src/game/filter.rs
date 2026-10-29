@@ -27954,3 +27954,40 @@ mod attached_set_host_filter_tests {
         ));
     }
 }
+
+/// Tests relocated from `parser::oracle_trigger`'s `attached_set_trigger_tests` module.
+#[cfg(test)]
+mod parser_oracle_trigger_tests {
+    use crate::parser::oracle_trigger::parse_trigger_line;
+    use crate::types::ability::{TargetFilter, TypeFilter};
+
+    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
+    /// becomes-target subject, while "a creature" stays a bare permanent type.
+    #[test]
+    fn becomes_target_subject_keeps_card_qualifier() {
+        let card = parse_trigger_line(
+            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
+            "Test",
+        );
+        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
+            panic!("expected typed subject, got {:?}", card.valid_card);
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
+            card.valid_card.as_ref().unwrap()
+        ));
+
+        let bare = parse_trigger_line(
+            "Whenever a creature becomes the target of a spell or ability, draw a card.",
+            "Test",
+        );
+        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
+            panic!("expected typed subject, got {:?}", bare.valid_card);
+        };
+        assert!(!typed.type_filters.contains(&TypeFilter::Card));
+        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
+            bare.valid_card.as_ref().unwrap()
+        ));
+    }
+}

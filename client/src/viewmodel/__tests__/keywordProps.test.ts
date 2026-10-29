@@ -235,7 +235,7 @@ describe("formatKeywordManaCost", () => {
 /**
  * Driven by `keyword-payload-wire.json`, which the engine writes from its own
  * serializer (`keyword_payload_wire_golden_matches_the_client_fixture` in
- * crates/engine/src/types/keywords.rs fails when it drifts). Hand-written
+ * crates/engine/src/parser/oracle_keyword.rs fails when it drifts). Hand-written
  * payloads here once used a shape the engine never emits.
  */
 describe("keyword detail over the engine's keyword payload golden", () => {

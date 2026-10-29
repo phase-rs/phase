@@ -2484,7 +2484,7 @@ fn unmask_keyword_action_walker_names(text: String, originals: &[String]) -> Str
 ///
 /// Naming all three entry points here makes the leak surface auditable from the
 /// constant itself. The standing completeness authority for the display channel
-/// is not this comment: it is `parser::oracle::tests::render_net_effect_carrier_census`
+/// is not this comment: it is `parser_oracle::render_net_effect_carrier_census` (integration)
 /// (a new `Effect` variant, or a new variant on an intermediate payload enum,
 /// reds it), `parser::oracle::tests::render_net_reaches_every_nested_description_carrier`
 /// (a new description-bearing FIELD on an existing carrier reds it), and the

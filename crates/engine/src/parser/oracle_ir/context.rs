@@ -95,7 +95,7 @@ pub(crate) fn bind_controller_phrase(
 
 /// Parser-only lookahead for token body clauses split across adjacent sentences.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TokenPtFollowup {
+pub enum TokenPtFollowup {
     PowerToughness { power: PtValue, toughness: PtValue },
 }
 
@@ -110,7 +110,7 @@ pub(crate) enum TokenPtFollowup {
 /// instead of binding its source to `Any`. A typed scope rather than a bare bool
 /// per the codebase's "typed enum over bool" convention.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum TriggerConditionScope {
+pub enum TriggerConditionScope {
     /// A trigger printed on the card. Delayed-only anaphoric subjects stay `Unknown`.
     #[default]
     Printed,
@@ -160,7 +160,7 @@ pub(crate) enum TriggerConditionScope {
 ///      appears. No other site runs a speculative sub-parse against the real
 ///      `&mut ctx` while this gate is `ChainBound`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ChosenColorQualifierScope {
+pub enum ChosenColorQualifierScope {
     /// Default, and the value every `ParseContext::default()` carries — which
     /// is every `parse_type_phrase_folding` call site, by construction of the wrapper
     /// in `oracle_target.rs`. The printed form must NOT be consumed here.
@@ -193,7 +193,7 @@ pub(crate) enum ChosenColorQualifierScope {
 /// (including the case where its nearest zone choice is some other shape).
 /// Consumers must match the carried source EXPLICITLY.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PriorZoneChoicePartition {
+pub struct PriorZoneChoicePartition {
     /// The `candidate_source` of that `ChooseFromZone` clause — i.e. where the
     /// partitioned pile came from (`CostPaidObjects` for Coin of Fate's
     /// cost-exiled pair, `Legacy` for Wake to Slaughter's, …).
@@ -226,7 +226,7 @@ pub(crate) struct PriorZoneChoicePartition {
 /// (a speculative probe, a branch alternative). Both reset this field; a plain
 /// `.clone()` continues the same body.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
+pub struct TriggerZoneChangeProvenance(Option<(Zone, Zone)>);
 
 impl TriggerZoneChangeProvenance {
     /// No enclosing zone-change authority.
@@ -267,7 +267,7 @@ pub enum BareCardAggregateBinding {
 /// runtime, so that clause's slots and every later slot are recorded without
 /// an index — they still take part in ambiguity checks but cannot be bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DeclaredSlotRegistry {
+pub enum DeclaredSlotRegistry {
     /// A clause shape whose declared numbering this walk cannot reproduce
     /// (multi-slot effects, else-branches, …). Nothing binds.
     Indeterminate,
@@ -283,7 +283,7 @@ impl Default for DeclaredSlotRegistry {
 
 /// One announced target slot of an earlier clause.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DeclaredSlotEntry {
+pub struct DeclaredSlotEntry {
     /// The declared-slot index (the `declared_targets_in_chain` numbering),
     /// `None` past the stable prefix.
     pub index: Option<usize>,
@@ -294,7 +294,7 @@ pub(crate) struct DeclaredSlotEntry {
 /// CR 700.2: the body a [`ParseContext`] parses — a whole ability, or one mode
 /// of a modal spell or ability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum BodyScope {
+pub enum BodyScope {
     #[default]
     WholeAbility,
     ModalMode,
@@ -303,7 +303,7 @@ pub(crate) enum BodyScope {
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
 /// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConditionObjectAntecedent {
+pub enum ConditionObjectAntecedent {
     /// CR 509.3c: the attacker of a bare "<creature> becomes blocked" condition.
     BlockedAttacker,
 }
@@ -313,7 +313,7 @@ pub(crate) enum ConditionObjectAntecedent {
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ParseContext {
+pub struct ParseContext {
     /// The current subject (resolved target — "it", "that creature").
     pub subject: Option<TargetFilter>,
     /// Card name for self-reference (~) normalization.

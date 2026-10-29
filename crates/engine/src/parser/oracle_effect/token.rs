@@ -4361,7 +4361,7 @@ mod tests {
         use crate::types::mana::ManaColor;
 
         assert!(
-            crate::game::token_presets::known_token_body_by_name("Bear").is_none(),
+            crate::types::token_presets::known_token_body_by_name("Bear").is_none(),
             "Bear has multiple catalog bodies and must not pick the first one"
         );
 

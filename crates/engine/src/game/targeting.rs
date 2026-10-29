@@ -9388,3 +9388,59 @@ mod attacked_referent_targeting_tests {
         );
     }
 }
+
+/// Tests relocated from `parser::oracle_effect`'s `exile_graveyard_origin_shape` test module.
+#[cfg(test)]
+mod parser_oracle_effect_tests {
+    use crate::game::scenario::{GameScenario, P0, P1};
+    use crate::parser::oracle_effect::parse_effect_chain;
+    use crate::parser::oracle_effect::test_helpers::compose;
+    use crate::parser::oracle_ir::context::ParseContext;
+    use crate::types::ability::{AbilityKind, EffectScope, TargetFilter, TypedFilter};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::TargetRef;
+
+    #[test]
+    fn shape_positive_zone_stays_outside_negated_class_and_enumerates_real_graveyard() {
+        let mut s = GameScenario::new();
+        let own = s
+            .add_creature_to_graveyard(P0, "Own artifact", 2, 2)
+            .as_artifact()
+            .id();
+        let wrong = s
+            .add_creature_to_graveyard(P1, "Opponent artifact", 2, 2)
+            .as_artifact()
+            .id();
+        let creature = s.add_creature_to_graveyard(P0, "Own creature", 2, 2).id();
+        let battlefield = s
+            .add_creature(P0, "Battlefield artifact", 2, 2)
+            .as_artifact()
+            .id();
+        let class = TargetFilter::Not {
+            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+        };
+        let (_, target) = compose(
+            class,
+            "target noncreature card from your graveyard",
+            " from your graveyard",
+            EffectScope::Single,
+            &ParseContext::default(),
+        );
+        assert!(
+            matches!(&target, TargetFilter::And { filters } if matches!(filters[0], TargetFilter::Not { .. }))
+        );
+        let r = s.build();
+        let def = parse_effect_chain("Exile target creature.", AbilityKind::Spell);
+        let ability = crate::game::ability_utils::build_resolved_from_def(&def, ObjectId(0), P0);
+        let legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+            r.state(),
+            &target,
+            &ability,
+            P0,
+        );
+        assert_eq!(legal, vec![TargetRef::Object(own)]);
+        for id in [wrong, creature, battlefield] {
+            assert!(!legal.contains(&TargetRef::Object(id)));
+        }
+    }
+}

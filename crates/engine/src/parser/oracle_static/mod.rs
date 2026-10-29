@@ -261,5 +261,13 @@ pub(crate) fn lower_static_ir(ir: &StaticIr) -> crate::types::ability::StaticDef
 #[cfg(test)]
 mod tests;
 
+/// Test helpers shared by `tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    /// The interposed player class Weathered Sentinels prints, shared by every
+    /// static-side row below so the three-production rows cannot drift from the card.
+    pub const P3_SEG: &str = "players who attacked you during their last turn";
+}
+
 #[cfg(test)]
 mod snapshot_tests;

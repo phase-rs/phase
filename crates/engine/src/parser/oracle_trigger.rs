@@ -4447,7 +4447,7 @@ fn parse_illegal_targets_disposition(input: &str) -> OracleResult<'_, IllegalTar
 /// sentence unit of the body. Any other position returns the text unchanged
 /// with the default disposition (fail closed: the sentence stays in the chain
 /// as a strict failure).
-fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
+pub fn extract_illegal_targets_disposition(text: &str) -> (String, IllegalTargetsDisposition) {
     let Some(last_unit) = split_sentence_units(text).pop() else {
         return (text.to_string(), IllegalTargetsDisposition::DoesNotResolve);
     };
@@ -24264,6 +24264,39 @@ fn parse_control_none_filter(text: &str) -> Option<TargetFilter> {
 #[path = "oracle_trigger_tests.rs"]
 mod tests;
 
+/// Test helpers shared by `oracle_trigger_tests.rs` and the tests relocated out of it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    /// Verbatim from Scryfall (`cards/named?exact=Gilded%20Drake`).
+    pub const GILDED_DRAKE_TEXT: &str =
+        "Flying\nWhen this creature enters, exchange control of this \
+    creature and up to one target creature an opponent controls. If you don't or can't make an \
+    exchange, sacrifice this creature. This ability still resolves if its target becomes illegal.";
+
+    /// Parse `text` through the whole-card pipeline as a Drake creature and return
+    /// its single trigger's execute.
+    pub fn drake_shaped_trigger_execute(text: &str) -> AbilityDefinition {
+        let parsed = parse_oracle_text(
+            text,
+            "Gilded Drake",
+            &[],
+            &["Creature".to_string()],
+            &["Drake".to_string()],
+        );
+        let [trigger] = parsed.triggers.as_slice() else {
+            panic!("expected exactly one trigger, got {:?}", parsed.triggers);
+        };
+        trigger
+            .execute
+            .as_deref()
+            .cloned()
+            .expect("the trigger has an execute")
+    }
+}
+
 /// Snapshot tests locking current trigger parser output before the IR split.
 /// These verify behavioral parity: identical snapshots before and after the
 /// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
@@ -25412,36 +25445,6 @@ mod attached_set_trigger_tests {
             FilterProp::AttachedTo {
                 to: AttachmentReferent::Host { filter }
             } if **filter == TargetFilter::Typed(TypedFilter::creature())
-        ));
-    }
-
-    /// CR 109.2: "a creature card" keeps its `Card` qualifier on a
-    /// becomes-target subject, while "a creature" stays a bare permanent type.
-    #[test]
-    fn becomes_target_subject_keeps_card_qualifier() {
-        let card = parse_trigger_line(
-            "Whenever a creature card becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &card.valid_card else {
-            panic!("expected typed subject, got {:?}", card.valid_card);
-        };
-        assert!(typed.type_filters.contains(&TypeFilter::Card));
-        assert!(typed.type_filters.contains(&TypeFilter::Creature));
-        assert!(!crate::game::filter::filter_denotes_battlefield_permanent(
-            card.valid_card.as_ref().unwrap()
-        ));
-
-        let bare = parse_trigger_line(
-            "Whenever a creature becomes the target of a spell or ability, draw a card.",
-            "Test",
-        );
-        let Some(TargetFilter::Typed(typed)) = &bare.valid_card else {
-            panic!("expected typed subject, got {:?}", bare.valid_card);
-        };
-        assert!(!typed.type_filters.contains(&TypeFilter::Card));
-        assert!(crate::game::filter::filter_denotes_battlefield_permanent(
-            bare.valid_card.as_ref().unwrap()
         ));
     }
 }

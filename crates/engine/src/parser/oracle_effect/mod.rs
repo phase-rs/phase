@@ -37379,7 +37379,7 @@ fn is_exile_effect(effect: &Effect) -> bool {
 /// - Watcher for Tomorrow: "put the exiled card" is a `ChangeZoneAll` LTB
 ///   emission site, a THIRD anaphor location this helper's caller does not yet
 ///   route through `resolve_singular_exiled_card_target`.
-fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
+pub fn chain_clause_is_exile_producer(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || matches!(
             effect,
@@ -37738,8 +37738,8 @@ fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<Control
 ///
 /// The `publishes_exiled_cause_at_resolution` ⟶ `this_way_cause_for_effect`
 /// correspondence is pinned by
-/// `exiled_cause_publishers_all_stamp_exiled_at_runtime` in this module's tests.
-pub(super) fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
+/// `exiled_cause_publishers_all_stamp_exiled_at_runtime` in `game::effects`'s `parser_oracle_effect_tests`.
+pub fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
     matches!(
         effect,
         Effect::ChangeZone {
@@ -37771,7 +37771,7 @@ pub(super) fn publishes_exiled_cause_at_resolution(effect: &Effect) -> bool {
 /// `publish_fresh_tracked_set`, not classified here. See
 /// `oracle_effect/tests.rs::counter_less_keeper_sibling_still_grants_the_selfref_prohibition`
 /// for the measured argument against widening this predicate.
-fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
+pub fn publishes_tracked_set_from_resolution(effect: &Effect) -> bool {
     is_exile_effect(effect)
         || publishes_exiled_cause_at_resolution(effect)
         || is_battlefield_return_effect(effect)
@@ -42494,7 +42494,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 /// stamps into the `AbilityShellIr` between them, which is why the conversion is
 /// byte-identical for the whole *class* of text the recognizer handles rather
 /// than merely for today's corpus.
-pub(crate) fn parse_effect_chain_with_context(
+pub fn parse_effect_chain_with_context(
     text: &str,
     kind: AbilityKind,
     ctx: &mut ParseContext,
@@ -51575,6 +51575,126 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 #[cfg(test)]
 mod tests;
 
+/// Test helpers shared by this module's tests and the tests relocated out of them.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_helpers {
+    use super::*;
+    use crate::parser::oracle::ParsedAbilities;
+
+    pub fn compose(
+        target: TargetFilter,
+        base: &str,
+        rem: &str,
+        scope: EffectScope,
+        ctx: &ParseContext,
+    ) -> (Option<Zone>, TargetFilter) {
+        compose_exile_graveyard_origin_and_target(
+            Some(Zone::Graveyard),
+            target,
+            base,
+            rem,
+            ctx,
+            scope,
+        )
+    }
+
+    /// The exact condition the conditional damage-form must carry on BOTH riders:
+    /// the "it's a creature" gate converted from a reveal-context CoreType into a
+    /// present-target match against the spell's chosen damage target (CR 109.2 +
+    /// CR 608.2c). NOT `None`, NOT `RevealedHasCardType` (which evaluates
+    /// always-false for a damage spell and would silently drop the riders).
+    pub fn expected_creature_target_match() -> AbilityCondition {
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::creature()),
+            use_lki: true,
+            subject_slot: None,
+        }
+    }
+
+    /// The `name` of an honest refusal node, or `None` for any other effect. The
+    /// scope arms below are distinguished by name, so a test that only counted
+    /// `Unimplemented` nodes could not tell one refusal branch from another.
+    pub fn unimplemented_name(def: &AbilityDefinition) -> Option<&str> {
+        match &*def.effect {
+            Effect::Unimplemented { name, .. } => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Shared boon-test traversal: collects `def` and everything reachable through
+    /// modal branches, chained siblings, and mode abilities. `descend_boon`
+    /// additionally walks granted-trigger bodies — grant/phantom collectors pass
+    /// `true` (the whole tree is one search space); gap-name collectors pass
+    /// `false` to keep the outer/inner split (`outer_gap_names` never descends
+    /// into inners; those are `inner_gap_names`' job).
+    pub fn collect_test_tree<'a>(
+        def: &'a AbilityDefinition,
+        descend_boon: bool,
+        out: &mut Vec<&'a AbilityDefinition>,
+    ) {
+        out.push(def);
+        if descend_boon {
+            if let Effect::CreateBoon { trigger, .. } = def.effect.as_ref() {
+                if let Some(execute) = trigger.execute.as_deref() {
+                    collect_test_tree(execute, descend_boon, out);
+                }
+            }
+        }
+        if let Effect::ChooseOneOf { branches, .. } = def.effect.as_ref() {
+            for branch in branches {
+                collect_test_tree(branch, descend_boon, out);
+            }
+        }
+        for child in [def.sub_ability.as_deref(), def.else_ability.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            collect_test_tree(child, descend_boon, out);
+        }
+        for mode in &def.mode_abilities {
+            collect_test_tree(mode, descend_boon, out);
+        }
+    }
+
+    /// Root walk shared by every whole-tree boon collector: abilities, triggers,
+    /// AND replacements (a grant or gap hiding in a replacement body is still in
+    /// the tree). `descend_boon` keeps the outer/inner split — grant/phantom
+    /// collectors pass `true`, `outer_gap_names` passes `false`.
+    pub fn collect_parsed_roots<'a>(
+        parsed: &'a ParsedAbilities,
+        descend_boon: bool,
+        out: &mut Vec<&'a AbilityDefinition>,
+    ) {
+        for ability in &parsed.abilities {
+            collect_test_tree(ability, descend_boon, out);
+        }
+        for trigger in &parsed.triggers {
+            if let Some(execute) = trigger.execute.as_deref() {
+                collect_test_tree(execute, descend_boon, out);
+            }
+        }
+        for replacement in &parsed.replacements {
+            if let Some(execute) = replacement.execute.as_deref() {
+                collect_test_tree(execute, descend_boon, out);
+            }
+        }
+    }
+
+    pub fn boon_strings(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    /// Gap names anywhere OUTSIDE boon-inner bodies (the granting clauses).
+    /// Never descends into `CreateBoon` inners — those are `inner_gap_names`' job.
+    pub fn outer_gap_names(parsed: &ParsedAbilities) -> Vec<String> {
+        let mut defs = Vec::new();
+        collect_parsed_roots(parsed, false, &mut defs);
+        defs.into_iter()
+            .filter_map(|def| unimplemented_name(def).map(str::to_string))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod reveal_this_way_tests;
 
@@ -53082,15 +53202,11 @@ mod scan_at_random_authority_tests {
 /// kind names, which fail closed as an engine limitation.
 #[cfg(test)]
 mod additional_phase_recipient_subject_tests {
-    use crate::game::ability_utils::{build_resolved_from_def, build_target_slots};
-    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::parser::oracle::parse_oracle_text;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, ContinuousModification, ControllerRef,
-        Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, QuantityExpr, QuantityRef, TargetFilter,
-        TargetRef, TypedFilter,
+        Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, QuantityExpr, TargetFilter, TypedFilter,
     };
-    use crate::types::identifiers::ObjectId;
     use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
@@ -53321,112 +53437,6 @@ mod additional_phase_recipient_subject_tests {
             // A nonempty, category-specific gap proves the affected chain
             // reached this family and contains no granted phase or step.
             assert_eq!(recipients("Synthetic Probe", "Sorcery", None, text), vec![None], "{text:?}");
-        }
-    }
-
-    #[test]
-    fn synthetic_isolated_production_grants_preserve_bound_fields_and_targets() {
-        let state = GameScenario::new().build();
-        let phase_anchor = crate::types::ability::ExtraPhaseAnchor::ThisPhase { named: None };
-        let step_anchor = crate::types::ability::ExtraPhaseAnchor::ThisStep;
-        for (text, recipient, count, segment, after, legal_targets) in [
-            (
-                "You get an additional upkeep step after this phase.",
-                ExtraPhaseRecipient::Controller,
-                QuantityExpr::Fixed { value: 1 },
-                TurnSegment::CreatedPhase(Phase::Upkeep),
-                phase_anchor.clone(),
-                vec![],
-            ),
-            (
-                "You get an additional combat phase after this phase.",
-                ExtraPhaseRecipient::Controller,
-                QuantityExpr::Fixed { value: 1 },
-                TurnSegment::Phase(PhaseGroup::Combat),
-                phase_anchor.clone(),
-                vec![],
-            ),
-            (
-                "There is an additional upkeep step after this step.",
-                ExtraPhaseRecipient::NoPlayer,
-                QuantityExpr::Fixed { value: 1 },
-                TurnSegment::Step(Phase::Upkeep),
-                step_anchor.clone(),
-                vec![],
-            ),
-            (
-                "After this phase, there are three additional combat phases.",
-                ExtraPhaseRecipient::NoPlayer,
-                QuantityExpr::Fixed { value: 3 },
-                TurnSegment::Phase(PhaseGroup::Combat),
-                phase_anchor.clone(),
-                vec![],
-            ),
-            (
-                "After this step, you get two additional upkeep steps.",
-                ExtraPhaseRecipient::Controller,
-                QuantityExpr::Fixed { value: 2 },
-                TurnSegment::Step(Phase::Upkeep),
-                step_anchor,
-                vec![],
-            ),
-            (
-                "You get that many additional upkeep steps after this phase.",
-                ExtraPhaseRecipient::Controller,
-                QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
-                TurnSegment::CreatedPhase(Phase::Upkeep),
-                phase_anchor.clone(),
-                vec![],
-            ),
-            (
-                "Target player gets an additional combat phase after this phase.",
-                ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Player),
-                QuantityExpr::Fixed { value: 1 },
-                TurnSegment::Phase(PhaseGroup::Combat),
-                phase_anchor.clone(),
-                vec![TargetRef::Player(P0), TargetRef::Player(P1)],
-            ),
-            (
-                "Target opponent gets an additional combat phase after this phase.",
-                ExtraPhaseRecipient::TargetedPlayer(TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                )),
-                QuantityExpr::Fixed { value: 1 },
-                TurnSegment::Phase(PhaseGroup::Combat),
-                phase_anchor,
-                vec![TargetRef::Player(P1)],
-            ),
-        ] {
-            let parsed = parse_oracle_text(text, "Synthetic Probe", &[], &["Sorcery".into()], &[]);
-            assert_eq!(parsed.abilities.len(), 1, "{text:?}");
-            let def = &parsed.abilities[0];
-            assert_eq!(
-                *def.effect,
-                Effect::AdditionalPhase {
-                    recipient,
-                    count,
-                    segment,
-                    after,
-                    followed_by: vec![],
-                    attacker_restriction: None,
-                },
-                "{text:?}"
-            );
-            assert!(
-                def.sub_ability.is_none() && def.else_ability.is_none(),
-                "{text:?}"
-            );
-            let resolved = build_resolved_from_def(def, ObjectId(0), P0);
-            let slots = build_target_slots(state.state(), &resolved).expect("target slots build");
-            if legal_targets.is_empty() {
-                assert!(slots.is_empty(), "{text:?}");
-            } else {
-                assert_eq!(slots.len(), 1, "{text:?}");
-                assert!(!slots[0].optional, "{text:?}");
-                assert_eq!(slots[0].legal_targets, legal_targets, "{text:?}");
-            }
         }
     }
 
@@ -53767,26 +53777,9 @@ mod additional_phase_recipient_subject_tests {
 
 #[cfg(test)]
 mod exile_graveyard_origin_shape {
+    use super::test_helpers::compose;
     use super::*;
-    use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::types::{TargetRef, TypeFilter};
-
-    fn compose(
-        target: TargetFilter,
-        base: &str,
-        rem: &str,
-        scope: EffectScope,
-        ctx: &ParseContext,
-    ) -> (Option<Zone>, TargetFilter) {
-        compose_exile_graveyard_origin_and_target(
-            Some(Zone::Graveyard),
-            target,
-            base,
-            rem,
-            ctx,
-            scope,
-        )
-    }
+    use crate::types::TypeFilter;
 
     #[test]
     fn shape_composer_admits_complete_attachment_class_and_scoped_authority() {
@@ -54009,50 +54002,6 @@ mod exile_graveyard_origin_shape {
                 ),
                 (Some(Zone::Graveyard), target)
             );
-        }
-    }
-
-    #[test]
-    fn shape_positive_zone_stays_outside_negated_class_and_enumerates_real_graveyard() {
-        let mut s = GameScenario::new();
-        let own = s
-            .add_creature_to_graveyard(P0, "Own artifact", 2, 2)
-            .as_artifact()
-            .id();
-        let wrong = s
-            .add_creature_to_graveyard(P1, "Opponent artifact", 2, 2)
-            .as_artifact()
-            .id();
-        let creature = s.add_creature_to_graveyard(P0, "Own creature", 2, 2).id();
-        let battlefield = s
-            .add_creature(P0, "Battlefield artifact", 2, 2)
-            .as_artifact()
-            .id();
-        let class = TargetFilter::Not {
-            filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
-        };
-        let (_, target) = compose(
-            class,
-            "target noncreature card from your graveyard",
-            " from your graveyard",
-            EffectScope::Single,
-            &ParseContext::default(),
-        );
-        assert!(
-            matches!(&target, TargetFilter::And { filters } if matches!(filters[0], TargetFilter::Not { .. }))
-        );
-        let r = s.build();
-        let def = parse_effect_chain("Exile target creature.", AbilityKind::Spell);
-        let ability = crate::game::ability_utils::build_resolved_from_def(&def, ObjectId(0), P0);
-        let legal = crate::game::targeting::find_legal_targets_for_ability_with_controller(
-            r.state(),
-            &target,
-            &ability,
-            P0,
-        );
-        assert_eq!(legal, vec![TargetRef::Object(own)]);
-        for id in [wrong, creature, battlefield] {
-            assert!(!legal.contains(&TargetRef::Object(id)));
         }
     }
 
