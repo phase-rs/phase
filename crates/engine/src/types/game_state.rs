@@ -32128,6 +32128,44 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 }
             }
         }
+        // The path is the untouched lexical witness above. Project only its
+        // actual edges from the original root, using the production handoff;
+        // an equal subtree elsewhere cannot authorize this candidate.
+        fn project_lexical_owner(
+            mut owner: ResolvedAbility,
+            path: &str,
+        ) -> Option<ResolvedAbility> {
+            if path.is_empty() {
+                return Some(owner);
+            }
+            let mut steps = path.strip_prefix('/')?.split('/');
+            while let Some(step) = steps.next() {
+                owner = match step {
+                    "sub_ability" => crate::game::effects::project_own_resolution_chain_child(
+                        &owner,
+                        ChainStep::SubAbility,
+                    )?,
+                    "else_ability" => crate::game::effects::project_own_resolution_chain_child(
+                        &owner,
+                        ChainStep::ElseAbility,
+                    )?,
+                    "coin_branch_target_abilities" => {
+                        let index = steps.next()?.parse::<usize>().ok()?;
+                        if steps.next()? != "1" {
+                            return None;
+                        }
+                        owner
+                            .coin_branch_target_abilities
+                            .get(index)?
+                            .1
+                            .as_ref()
+                            .clone()
+                    }
+                    _ => return None,
+                };
+            }
+            Some(owner)
+        }
         fn normalize_region(node: &mut Value, qualifier: &Value) {
             if node.pointer("/effect/type").and_then(Value::as_str) == Some("ChooseDamageSource") {
                 return;
@@ -32241,7 +32279,25 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 ) else {
                     continue;
                 };
-                let mut owner_raw = node.clone();
+                let mut owner_raw = original_root.clone();
+                // Preserve the raw omitted-chooser distinction before typed
+                // defaults are materialized, in this exact lexical region only.
+                if let Some(region) = owner_raw.pointer_mut(&format!("{origin_path}/sub_ability")) {
+                    normalize_region(region, &qualifier);
+                }
+                crate::types::ability::normalize_legacy_damage_source_program(&mut owner_raw);
+                let Some(owner) = serde_json::from_value::<ResolvedAbility>(owner_raw)
+                    .ok()
+                    .and_then(|root| project_lexical_owner(root, &instruction_path))
+                else {
+                    continue;
+                };
+                let Ok(mut owner_raw) = serde_json::to_value(owner) else {
+                    continue;
+                };
+                // Normalize the projected copy so inherited inputs receive the
+                // same historical recheck as the pending copy. The lexical
+                // path and its original selection witness above stay untouched.
                 normalize_region(&mut owner_raw, &qualifier);
                 crate::types::ability::normalize_legacy_damage_source_program(&mut owner_raw);
                 let Ok(owner) = serde_json::from_value::<ResolvedAbility>(owner_raw) else {
@@ -32269,7 +32325,10 @@ fn prepare_damage_source_authority(value: &mut serde_json::Value) -> Result<(), 
                 // Compare complete inputs and meaning, after the SAME historical
                 // normalization, instead of selecting the first equal outcome.
                 let mut tail_witness = false;
-                if let Some(tail) = owner.sub_ability.as_deref() {
+                if let Some(tail) = crate::game::effects::project_own_resolution_chain_child(
+                    &owner,
+                    ChainStep::SubAbility,
+                ) {
                     let actual_parents = value
                         .get(frames_key)
                         .and_then(|stack| stack.get("frames"))

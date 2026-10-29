@@ -159,6 +159,24 @@ pub(crate) fn pending_die_admitted_program(
     )
 }
 
+/// Read the complete input only after authenticating this actual held carrier,
+/// including its progress and independent admitted program when it has one.
+pub(crate) fn validated_pending_die_input<'a>(
+    state: &GameState,
+    pending: &'a PendingDieRoll,
+) -> Result<&'a ResolvedAbility, EffectError> {
+    pending_die_admitted_program(state, pending)?;
+    captured_die_input(
+        pending.retained_input.as_deref(),
+        pending.source_id,
+        pending.controller,
+        &pending.targets,
+        &pending.chain_root_targets,
+        &pending.results_table,
+        pending.modifier.as_ref(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn recover_die_input(
     state: &GameState,

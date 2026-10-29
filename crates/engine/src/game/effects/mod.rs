@@ -132,7 +132,7 @@ use crate::types::ability::{AttackSubject, CombatHistoryScope};
 use crate::types::events::{ClashResult, GameEvent, PlayerActionKind};
 use crate::types::format::ZoneScope;
 use crate::types::game_state::{
-    AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, ContinuationXAnnouncement,
+    AutoMayChoice, CastOfferKind, ChainStep, ClauseMinimumSnapshot, ContinuationXAnnouncement,
     CreatedTokenSeatsHandoff, DayNight, DiscardBatchCursor, GameState, LKISnapshot,
     ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation, PendingCostMoveResume,
     PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
@@ -3140,30 +3140,41 @@ fn visit_instruction_result_child_projections(
     program: &ResolvedAbility,
     visit: &mut impl FnMut(&ResolvedAbility) -> bool,
 ) -> bool {
-    for (is_sub, child) in program
-        .sub_ability
-        .iter()
-        .map(|child| (true, child))
-        .chain(program.else_ability.iter().map(|child| (false, child)))
-    {
-        if child
-            .condition
-            .as_ref()
-            .is_some_and(AbilityCondition::has_when_you_do_marker)
-            || (is_sub && program.effect.sub_ability_resolves_later(child.sub_link))
-        {
-            continue;
-        }
-        let mut child = (**child).clone();
-        project_parent_chain_context(&mut child, program, None, None);
-        if should_propagate_parent_targets(program, &child) {
-            child.replace_target_occurrences(inherited_parent_occurrences(program, &child));
-        }
-        if visit(&child) {
+    for step in [ChainStep::SubAbility, ChainStep::ElseAbility] {
+        if project_own_resolution_chain_child(program, step).is_some_and(|child| visit(&child)) {
             return true;
         }
     }
     false
+}
+
+/// Project one ordinary handoff from its original parent. The caller selects
+/// the actual structural edge; later registrations and reflexive roots do not
+/// belong to this resolution's input custody.
+pub(crate) fn project_own_resolution_chain_child(
+    parent: &ResolvedAbility,
+    step: ChainStep,
+) -> Option<ResolvedAbility> {
+    let child = match step {
+        ChainStep::SubAbility => parent.sub_ability.as_deref()?,
+        ChainStep::ElseAbility => parent.else_ability.as_deref()?,
+        ChainStep::CoinBranch(_) => return None,
+    };
+    if child
+        .condition
+        .as_ref()
+        .is_some_and(AbilityCondition::has_when_you_do_marker)
+        || (step == ChainStep::SubAbility
+            && parent.effect.sub_ability_resolves_later(child.sub_link))
+    {
+        return None;
+    }
+    let mut projected = child.clone();
+    project_parent_chain_context(&mut projected, parent, None, None);
+    if should_propagate_parent_targets(parent, &projected) {
+        projected.replace_target_occurrences(inherited_parent_occurrences(parent, &projected));
+    }
+    Some(projected)
 }
 
 pub(crate) fn instruction_result_program_projects_to(

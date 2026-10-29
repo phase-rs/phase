@@ -847,8 +847,16 @@ pub(crate) fn validate_pending_coin_flip(
                     &pending.branch_context,
                 )
                 .is_ok())
+                || [
+                    crate::types::game_state::ChainStep::SubAbility,
+                    crate::types::game_state::ChainStep::ElseAbility,
+                ]
+                .into_iter()
+                .filter_map(|step| super::project_own_resolution_chain_child(node, step))
+                .any(|child| matches_owner(&child, pending))
                 || node
-                    .target_children()
+                    .coin_branch_target_abilities
+                    .iter()
                     .any(|(_, child)| matches_owner(child, pending))
         }
         // This is the sole installed stack-resolution carrier. Unrelated
@@ -960,9 +968,6 @@ fn matches_direct_die_branch_owner(
     installed: &ResolvedAbility,
     pending: &PendingCoinFlip,
 ) -> bool {
-    use crate::types::ability_visit::{direct_nodes, DefinitionNode, ResolutionScope};
-    use std::ops::ControlFlow;
-
     let Some(parent) = state.resolution_stack.direct_coin_die_parent(pending) else {
         return false;
     };
@@ -997,69 +1002,41 @@ fn matches_direct_die_branch_owner(
         node: &ResolvedAbility,
         parent: &crate::types::resolution::PendingDieRoll,
     ) -> bool {
-        (node.source_id == parent.source_id
+        node.source_id == parent.source_id
             && node.controller == parent.controller
             && node.targets == parent.targets
             && node.context.chain_root_targets == parent.chain_root_targets
             && node.return_result_process == parent.expected_return_result_process
             && matches!(&node.effect, Effect::RollDie { sides, modifier, results, .. }
-                if *sides == parent.sides && modifier == &parent.modifier && results == &parent.results_table))
-            || node
-                .sub_ability
-                .as_deref()
-                .is_some_and(|child| installed_roll_matches(child, parent))
-            || node
-                .else_ability
-                .as_deref()
-                .is_some_and(|child| installed_roll_matches(child, parent))
+                if *sides == parent.sides && modifier == &parent.modifier && results == &parent.results_table)
     }
-    if !installed_roll_matches(installed, parent) {
+    let Some(input) = parent.retained_input.as_deref() else {
+        return false;
+    };
+    // The existing full projection also accounts for typed runtime selections
+    // made by preceding instructions. Raw subtree equality would erase that
+    // legitimate input evolution; a partial source/table match would not prove X.
+    if !super::visit_instruction_result_program_projections_for_cursor(
+        installed,
+        input,
+        &mut |node| {
+            installed_roll_matches(node, parent)
+                && super::instruction_result_projection_eq(node, input)
+        },
+    ) {
         return false;
     }
-    let effect = Effect::RollDie {
-        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
-        sides: parent.sides,
-        modifier: parent.modifier.clone(),
-        results: parent.results_table.clone(),
+    let Ok(input) = super::roll_die::validated_pending_die_input(state, parent) else {
+        return false;
     };
-    let mut coherent = false;
-    let _ = direct_nodes::visit_effect_scoped(
-        &effect,
-        ResolutionScope::OwnResolutionOnly,
-        &mut |node| {
-            let DefinitionNode::Ability(definition) = node else {
-                return ControlFlow::Continue(());
-            };
-            if definition != selected.effect.as_ref()
-                || !matches!(definition.effect.as_ref(), Effect::FlipCoins { .. })
-            {
-                return ControlFlow::Continue(());
-            }
-            let mut expected =
-                crate::game::ability_utils::build_resolved_from_def_with_targets_and_chain_root(
-                    definition,
-                    parent.source_id,
-                    parent.controller,
-                    parent.targets.clone(),
-                    parent.chain_root_targets.clone(),
-                );
-            expected.bind_return_result_process(parent.expected_return_result_process);
-            crate::game::ability_utils::inherit_result_branch_source_identity(state, &mut expected);
-            coherent = matches!(&expected.effect, Effect::FlipCoins { win_effect, lose_effect, .. }
-            if win_effect == &pending.win_effect && lose_effect == &pending.lose_effect)
-                && crate::game::ability_utils::validate_retained_coin_target_custody(
-                    &expected,
-                    &pending.branch_context,
-                )
-                .is_ok();
-            if coherent {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
-            }
-        },
-    );
-    coherent
+    let expected = super::roll_die::build_die_result(&selected.effect, input);
+    matches!(&expected.effect, Effect::FlipCoins { win_effect, lose_effect, .. }
+        if win_effect == &pending.win_effect && lose_effect == &pending.lose_effect)
+        && crate::game::ability_utils::validate_retained_coin_target_custody(
+            &expected,
+            &pending.branch_context,
+        )
+        .is_ok()
 }
 
 pub fn resume_after_keep(
@@ -1170,6 +1147,209 @@ mod admitted_branch_public_tests {
     use crate::types::mana::{ManaCost, ManaType, ManaUnit};
     use crate::types::phase::Phase;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn paid_x_coin_custody_uses_projected_parent_and_complete_die_input() {
+        // Supplemental typed compositions exercise the same real paid
+        // activation and public keep path with two different announced inputs.
+        for through_die in [false, true] {
+            for x in [3, 4] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                scenario.add_artifact_from_oracle(
+                    P0,
+                    "Krark's Thumb",
+                    "If you would flip a coin, instead flip two coins and ignore one.",
+                );
+                let chosen_source = scenario
+                    .add_artifact_from_oracle(P1, "Chosen X-input source", "")
+                    .id();
+                scenario.add_artifact_from_oracle(P1, "Other X-input source", "");
+                let gain = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::Variable { name: "X".into() },
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                );
+                let coin = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::FlipCoins {
+                        flips: CoinFlipRun::single(),
+                        win_effect: Some(Box::new(gain.clone())),
+                        lose_effect: Some(Box::new(gain)),
+                        flipper: TargetFilter::Controller,
+                    },
+                );
+                let child = if through_die {
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::RollDie {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            sides: 1,
+                            modifier: None,
+                            results: vec![DieResultBranch {
+                                min: 1,
+                                max: 1,
+                                effect: Box::new(coin),
+                            }],
+                        },
+                    )
+                } else {
+                    coin
+                };
+                let root = AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::ChooseDamageSource {
+                        source_filter: TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Artifact)
+                                .controller(ControllerRef::Opponent),
+                        ),
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![crate::types::mana::ManaCostShard::X],
+                    },
+                })
+                .sub_ability(child);
+                let source = scenario
+                    .add_artifact_from_oracle(P0, "Supplemental paid X coin", "")
+                    .with_ability_definition(root)
+                    .id();
+                scenario.with_mana_pool(
+                    P0,
+                    (0..=x)
+                        .map(|_| ManaUnit::new(ManaType::Black, source, false, Vec::new()))
+                        .collect(),
+                );
+                let mut runner = scenario.build();
+                runner.activate(source, 0).x(x).resolve();
+                let WaitingFor::DamageSourceChoice { options, .. } = &runner.state().waiting_for
+                else {
+                    panic!("the paid activation must reach its actual source choice");
+                };
+                let selected = options
+                    .iter()
+                    .find(|option| option.identity.reference.object_id == chosen_source)
+                    .unwrap()
+                    .identity
+                    .reference;
+                runner
+                    .act(GameAction::ChooseDamageSource { source: selected })
+                    .unwrap();
+                let paused = runner.state().clone();
+                assert!(matches!(
+                    paused.waiting_for,
+                    WaitingFor::CoinFlipKeepChoice { player: P0, keep_count: 1, ref results }
+                        if results.len() == 2
+                ));
+                assert_eq!(paused.players[0].mana_pool.total(), 0);
+                let installed = paused
+                    .resolving_stack_entry
+                    .as_ref()
+                    .unwrap()
+                    .ability()
+                    .unwrap();
+                assert_eq!(installed.ability_index, Some(0));
+                assert_eq!(installed.sub_ability.as_ref().unwrap().ability_index, None);
+                let pending = paused.active_coin_flip_frame().unwrap();
+                assert_eq!(pending.branch_context.coin_branch_target_abilities.len(), 2);
+                for (_, body) in &pending.branch_context.coin_branch_target_abilities {
+                    assert_eq!(body.chosen_x, Some(x));
+                    assert_eq!(body.ability_index, Some(0));
+                }
+                if through_die {
+                    let die = paused
+                        .resolution_stack
+                        .direct_coin_die_parent(pending)
+                        .unwrap();
+                    assert_eq!(die.retained_input.as_ref().unwrap().chosen_x, Some(x));
+                    assert_eq!(
+                        die.retained_input
+                            .as_ref()
+                            .unwrap()
+                            .context
+                            .damage_source_choice
+                            .as_ref()
+                            .unwrap()
+                            .source
+                            .as_ref()
+                            .unwrap()
+                            .identity
+                            .reference,
+                        selected,
+                    );
+                }
+                let answer = GameAction::SelectCoinFlips {
+                    keep_indices: vec![1],
+                };
+                let mut hostile = paused.clone();
+                let mut coin = hostile.take_active_coin_flip_frame().unwrap().unwrap();
+                for (_, body) in &mut coin.branch_context.coin_branch_target_abilities {
+                    body.set_chosen_x_recursive(99);
+                }
+                if through_die {
+                    // Correlated child/parent-input forgery still lacks the
+                    // independent original installed program's announced X.
+                    let mut die = hostile.take_active_die_roll_frame().unwrap().unwrap();
+                    die.retained_input
+                        .as_mut()
+                        .unwrap()
+                        .set_chosen_x_recursive(99);
+                    hostile.push_die_roll_frame(die);
+                }
+                hostile.push_coin_flip_frame(coin);
+                let before = serde_json::to_value(&hostile).unwrap();
+                let rng_before = hostile.rng.get_word_pos();
+                assert!(crate::game::engine::apply(&mut hostile, P0, answer.clone()).is_err());
+                assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+                assert_eq!(hostile.rng.get_word_pos(), rng_before);
+                assert!(serde_json::from_value::<GameState>(before).is_err());
+                for restore_kind in 0..3 {
+                    let restored = match restore_kind {
+                        0 => {
+                            serde_json::from_value(serde_json::to_value(&paused).unwrap()).unwrap()
+                        }
+                        1 => serde_json::from_value::<TrustedGameStateEnvelope>(
+                            serde_json::to_value(TrustedGameStateEnvelope::capture(paused.clone()))
+                                .unwrap(),
+                        )
+                        .unwrap()
+                        .into_game_state(),
+                        _ => {
+                            serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                                serde_json::to_value(
+                                    crate::types::resolution::ResolutionStateWire::from_game_state(
+                                        paused.clone(),
+                                    ),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state()
+                        }
+                    };
+                    let mut resumed = GameRunner::from_state(restored);
+                    resumed.act(answer.clone()).unwrap();
+                    resumed.advance_until_stack_empty();
+                    // CR 107.3a + CR 608.2c: the paid activation's announced X
+                    // remains the input of its selected gain instruction.
+                    assert_eq!(resumed.life(P0), 20 + x as i32);
+                    assert!(matches!(
+                        resumed.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(resumed.state().stack.is_empty());
+                    assert!(resumed.state().resolution_stack.is_empty());
+                    assert!(resumed.state().return_result_frames.is_empty());
+                }
+            }
+        }
+    }
 
     #[test]
     fn departure_public_coin_branch_reloads_and_reads_its_parent_program() {
