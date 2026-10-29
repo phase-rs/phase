@@ -9100,7 +9100,11 @@ mod damage_opportunity_public_remainder_tests {
                 events.extend(runner.act(GameAction::PassPriority).unwrap().events);
             }
             assert_eq!(runner.life(P1), 2, "CR 120.4d: remaining damage five and prevention gain five share the modified event outside combat too");
-            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 5, .. } if *player_id == P1)).count(), 1);
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::LifeChanged { player_id, amount: 5, .. } if *player_id == P1)).count(), 1,
+                "events={events:?}; waiting={:?}; pending_replacement={:?}; pending_combat_lifelink={:?}; resolution_stack={:?}; owed_final_part={:?}",
+                runner.state().waiting_for, runner.state().pending_replacement,
+                runner.state().pending_combat_lifelink, runner.state().resolution_stack,
+                runner.state().owed_spell_final_part());
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }

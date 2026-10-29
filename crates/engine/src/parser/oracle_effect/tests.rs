@@ -20701,36 +20701,63 @@ fn protection_from_two_colors_and_path_grants_both_no_color_choice() {
 /// shroud was granted permanently (duration: None).
 #[test]
 fn keyword_grant_with_non_pump_conjunct_keeps_until_end_of_turn() {
-    let def = parse_effect_chain(
-            "This creature gains shroud until end of turn and doesn't untap during your next untap step.",
+    let source = "This creature gains shroud until end of turn and doesn't untap during your next untap step.";
+    for def in [
+        parse_effect_chain(source, AbilityKind::Activated),
+        parse_effect_chain_with_context(
+            source,
             AbilityKind::Activated,
+            &mut ParseContext::default(),
+        ),
+    ] {
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected keyword GenericEffect, got {:?}", def.effect);
+        };
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        assert_eq!(
+            def.duration.clone().or(duration.clone()),
+            Some(Duration::UntilEndOfTurn)
         );
+        assert!(static_abilities.iter().any(|s| s.modifications.contains(
+            &ContinuousModification::AddKeyword {
+                keyword: Keyword::Shroud
+            }
+        )));
 
-    let Effect::GenericEffect {
-        static_abilities,
-        duration,
-        ..
-    } = &*def.effect
-    else {
-        panic!("expected keyword GenericEffect, got {:?}", def.effect);
-    };
-    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
-    assert!(static_abilities.iter().any(|s| s.modifications.contains(
-        &ContinuousModification::AddKeyword {
-            keyword: Keyword::Shroud
-        }
-    )));
-
-    // The "doesn't untap" conjunct must survive as a chained sub_ability —
-    // it must not be silently dropped by the split.
-    let sub = def
-        .sub_ability
-        .as_deref()
-        .expect("non-pump conjunct must be chained as a sub_ability");
+        // The "doesn't untap" conjunct must survive as a chained sub_ability —
+        // it must not be silently dropped by the split.
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("non-pump conjunct must be chained as a sub_ability");
+        assert!(
+            matches!(&*sub.effect, Effect::GenericEffect { .. }),
+            "expected the doesn't-untap conjunct to lower to a restriction GenericEffect, got {:?}",
+            sub.effect
+        );
+    }
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{U}: This creature gains shroud until end of turn and doesn't untap during your next untap step. Tap it. (A creature with shroud can't be the target of spells or abilities.)",
+        "Homarid Warrior", &[], &["Creature".into()], &["Homarid".into(), "Warrior".into()],
+    );
+    assert_eq!(parsed.abilities.len(), 1);
+    let activation = &parsed.abilities[0];
+    assert!(activation.cost.is_some());
     assert!(
-        matches!(&*sub.effect, Effect::GenericEffect { .. }),
-        "expected the doesn't-untap conjunct to lower to a restriction GenericEffect, got {:?}",
-        sub.effect
+        std::iter::successors(Some(activation), |node| node.sub_ability.as_deref()).any(
+            |node| matches!(
+                *node.effect,
+                Effect::SetTapState {
+                    state: TapStateChange::Tap,
+                    ..
+                }
+            )
+        )
     );
 }
 
@@ -21078,9 +21105,12 @@ fn suspend_keyword_grant_carries_permanent_duration() {
         other => panic!("suspend grant must be a GenericEffect, got {other:?}"),
     }
     assert_eq!(
-        def.duration,
+        def.duration.clone().or_else(|| match def.effect.as_ref() {
+            Effect::GenericEffect { duration, .. } => duration.clone(),
+            _ => None,
+        }),
         Some(Duration::Permanent),
-        "the ParsedEffectClause duration must also be Permanent"
+        "the effective suspend grant must be Permanent"
     );
 }
 
@@ -97535,8 +97565,16 @@ fn duration_repair_conditional_members_keep_local_windows_in_both_chain_modes() 
         );
         assert_eq!(nodes[1].duration, Some(Duration::UntilEndOfTurn));
         assert!(nodes[0].condition.is_none());
-        assert!(nodes[1].condition.is_some());
-        for node in nodes {
+        let gate = StaticCondition::IsPresent {
+            filter: Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::WithKeyword {
+                        value: Keyword::Flying,
+                    }]),
+            )),
+        };
+        for (index, node) in nodes.into_iter().enumerate() {
             let Effect::GenericEffect {
                 duration,
                 static_abilities,
@@ -97547,6 +97585,14 @@ fn duration_repair_conditional_members_keep_local_windows_in_both_chain_modes() 
             };
             assert_eq!(*duration, node.duration);
             assert_eq!(static_abilities.len(), 1);
+            assert_eq!(
+                static_abilities[0].condition,
+                (index == 1).then(|| gate.clone())
+            );
+            assert!(!static_abilities[0]
+                .condition
+                .as_ref()
+                .is_some_and(StaticCondition::contains_unrecognized));
         }
     }
     let positive = crate::parser::oracle_static::parse_complete_continuous_members(
@@ -97679,9 +97725,12 @@ fn duration_repair_typed_defaults_respect_outer_and_quoted_body_windows() {
         ("It gains \"When this creature dies, draw a card.\"", Duration::Permanent),
     ] {
         for chain in [parse_effect_chain(source, AbilityKind::Spell), parse_effect_chain_with_context(source, AbilityKind::Spell, &mut ParseContext::default())] {
-            assert_eq!(chain.duration, Some(expected.clone()), "{source}: {chain:#?}");
             let Effect::GenericEffect { duration, static_abilities, .. } = chain.effect.as_ref() else { panic!("{source}: {chain:#?}") };
             assert_eq!(*duration, Some(expected.clone()));
+            assert_eq!(chain.duration.clone().or(duration.clone()), Some(expected.clone()), "{source}: {chain:#?}");
+            if expected != Duration::Permanent {
+                assert_eq!(chain.duration, Some(expected.clone()), "{source}: {chain:#?}");
+            }
             assert!(!static_abilities.is_empty());
             for modification in &static_abilities[0].modifications {
                 if let ContinuousModification::GrantAbility { definition } = modification {
@@ -97723,13 +97772,24 @@ fn duration_repair_fallback_defaults_keep_source_self_and_deferred_guards() {
             Some(&affected),
             &ParseContext::default(),
         );
-        assert_eq!(clause.duration, expected);
+        let Effect::GenericEffect { duration, .. } = &clause.effect else {
+            panic!("{clause:#?}")
+        };
+        assert_eq!(*duration, expected);
+        assert_eq!(clause.duration.clone().or(duration.clone()), expected);
     }
     let positive = parse_effect_chain(
         "It gains \"When this creature dies, draw a card.\"",
         AbilityKind::Spell,
     );
-    assert_eq!(positive.duration, Some(Duration::Permanent));
+    let Effect::GenericEffect { duration, .. } = positive.effect.as_ref() else {
+        panic!("{positive:#?}")
+    };
+    assert_eq!(*duration, Some(Duration::Permanent));
+    assert_eq!(
+        positive.duration.clone().or(duration.clone()),
+        Some(Duration::Permanent)
+    );
     let mut clause = parsed_clause((*positive.effect).clone());
     if let Effect::GenericEffect { duration, .. } = &mut clause.effect {
         *duration = None;

@@ -10002,7 +10002,7 @@ fn parse_color_relative_clause_suffix(
     Some((props, consumed))
 }
 
-fn parse_relative_clause_intro(trimmed: &str) -> Option<(&str, usize, bool)> {
+pub(crate) fn parse_relative_clause_intro(trimmed: &str) -> Option<(&str, usize, bool)> {
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that aren't ").parse(trimmed) {
         Some((rest, "that aren't ".len(), true))
     } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that isn't ").parse(trimmed) {
@@ -10740,7 +10740,16 @@ pub(crate) fn parse_relative_card_continuation_head(input: &str) -> OracleResult
                 alt((tag(" "), nom::combinator::eof)),
             ),
         ),
-        value((), nom_primitives::parse_article),
+        value(
+            (),
+            terminated(
+                alt((tag("an"), tag("a"))),
+                peek(alt((
+                    nom::character::complete::space1,
+                    nom::combinator::eof,
+                ))),
+            ),
+        ),
         value((), parse_relative_card_leg),
         value((), nom_quantity::parse_card_word),
     ))
@@ -16819,6 +16828,7 @@ mod tests {
                 "have",
                 "are",
                 "a",
+                "an",
                 "cards that have an Adventure",
             ] {
                 let text = format!("{prefix}{continuation}");
@@ -16829,6 +16839,17 @@ mod tests {
             }
         }
         let outside = "that are Fungi, creatures you control have flying";
+        for article in ["a", "an"] {
+            let source = format!("that are Fungi or {article}");
+            assert!(parse_relative_card_filter(&source).is_err(), "{source}");
+        }
+        for word in ["another", "artifactx"] {
+            assert!(
+                parse_relative_card_continuation_head(word).is_err(),
+                "{word}"
+            );
+        }
+        assert!(parse_relative_card_filter("that are Fungi or a Saproling").is_ok());
         assert!(!relative_card_predicate_owns_boundary(
             outside,
             "that are Fungi, creatures you control ".len()

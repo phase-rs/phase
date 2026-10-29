@@ -59,7 +59,13 @@ fn retained_flip_occurrence(
         source_id,
         controller,
     );
-    match classify_instruction_result_invocation(&retained, InstructionResultEntry::SelectedBody)? {
+    match classify_instruction_result_invocation(
+        &retained,
+        InstructionResultEntry::SelectedBody,
+        None,
+    )
+    .map(|(summary, _)| summary)?
+    {
         InstructionResultProcess::Imported { results } => {
             let mut addressed = Vec::new();
             retained.for_each_own_quantity_ref(&mut |reference| {

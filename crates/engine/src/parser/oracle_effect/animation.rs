@@ -201,8 +201,8 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
             _ => None,
         })
         .collect();
-    let (parsed_supertypes, types) = parse_animation_type_parts(
-        rest,
+    let (parsed_supertypes, types) = animation_type_parts(
+        tokens,
         spec.power.is_some()
             || spec.toughness.is_some()
             || spec.dynamic_power.is_some()
@@ -975,6 +975,7 @@ pub(crate) fn parse_becomes_type_modifications(
 /// This prevents misparses like *"this creature becomes a Dragon, gets +5/+3,
 /// and gains flying"* from sweeping `Gets`, `And`, `Gains`, `Flying` in as
 /// AddSubtype modifications — a common coverage false-positive pattern.
+#[cfg(test)]
 fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertype>, Vec<String>) {
     let descriptor = text.trim().trim_end_matches(',').trim();
     if descriptor.is_empty() {
@@ -983,11 +984,20 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
 
     // See parse_becomes_type_modifications for the same forward-parse pattern.
     // oracle_nom/PATTERNS.md ("Optional trailing clause after a token sequence").
-    let tokens = match parse_complete_animation_types(descriptor) {
-        Some(tokens) => tokens,
-        None => return (Vec::new(), Vec::new()),
+    let Ok((_, tokens)) = alt((
+        parse_animation_type_sequence,
+        parse_animation_type_sequence_loose,
+    ))
+    .parse(descriptor) else {
+        return (Vec::new(), Vec::new());
     };
+    animation_type_parts(tokens, infer_creature)
+}
 
+fn animation_type_parts(
+    tokens: Vec<AnimationTypeToken>,
+    infer_creature: bool,
+) -> (Vec<Supertype>, Vec<String>) {
     let mut supertypes = Vec::new();
     let mut core_types = Vec::new();
     let mut subtypes = Vec::new();
@@ -1345,6 +1355,21 @@ mod test_den_bugbear {
     /// produced subtypes ["Dragon", "Gets", "+5/+3", "And", "Gains", "Flying", "Trample"].
     #[test]
     fn animation_types_halts_at_connectives_and_punctuation() {
+        for (descriptor, remainder) in [
+            (
+                "Dragon, gets +5/+3, and gains flying",
+                ", gets +5/+3, and gains flying",
+            ),
+            ("Golem until end of combat", " until end of combat"),
+            ("Cat X/X", " X/X"),
+            ("Shade and gains flying", " and gains flying"),
+        ] {
+            assert_eq!(
+                parse_animation_type_sequence(descriptor).unwrap().0,
+                remainder
+            );
+            assert!(parse_animation_spec(descriptor, &mut ParseContext::default()).is_none());
+        }
         assert_eq!(
             parse_animation_type_parts("Dragon", true).1,
             vec!["Creature", "Dragon"]

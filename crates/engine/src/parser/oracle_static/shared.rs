@@ -3299,11 +3299,11 @@ fn parse_static_line_multi_dispatch(text: &str) -> Vec<StaticDefinition> {
         if let Some(mut defs) =
             parse_compound_subject_keyword_static(&split.canonical, &canon_lower)
         {
-            let condition = parse_static_condition(&split.condition_text).unwrap_or(
-                StaticCondition::Unrecognized {
-                    text: split.condition_text.clone(),
-                },
-            );
+            let Some(condition) = parse_static_condition(&split.condition_text)
+                .filter(|condition| !condition.contains_unrecognized())
+            else {
+                return Vec::new();
+            };
             for def in &mut defs {
                 if def.condition.is_none() {
                     def.condition = Some(condition.clone());

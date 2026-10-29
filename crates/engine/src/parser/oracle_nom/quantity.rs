@@ -214,8 +214,26 @@ mod outer_domain_quantity_tests {
             ("your opponents control", ControllerRef::Opponent),
         ] {
             let source = format!("the number of other creatures {words} that are Spirits and/or enchantments from your hand, tail");
-            let expected = QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(TypedFilter {
+            let filter = if controller == ControllerRef::SourceChosenPlayer {
+                TargetFilter::And {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::creature()
+                                .controller(controller.clone())
+                                .properties(vec![FilterProp::Another]),
+                        ),
+                        TargetFilter::Or {
+                            filters: vec![
+                                TargetFilter::Typed(TypedFilter::new(TypeFilter::Subtype(
+                                    "Spirit".into(),
+                                ))),
+                                TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment)),
+                            ],
+                        },
+                    ],
+                }
+            } else {
+                TargetFilter::Typed(TypedFilter {
                     type_filters: vec![
                         TypeFilter::AnyOf(vec![
                             TypeFilter::Subtype("Spirit".into()),
@@ -225,8 +243,9 @@ mod outer_domain_quantity_tests {
                     ],
                     controller: Some(controller),
                     properties: vec![FilterProp::Another],
-                }),
+                })
             };
+            let expected = QuantityRef::ObjectCount { filter };
             assert_eq!(
                 parse_quantity_ref_before_outer_domain(&source, hand_boundary),
                 Ok(("from your hand, tail", expected))
@@ -345,13 +364,24 @@ mod outer_domain_quantity_tests {
                 vec![],
             ),
         ] {
-            let expected = QuantityRef::ObjectCount {
-                filter: TargetFilter::Typed(TypedFilter {
+            // allow-noncombinator: test fixture selects a derived union reference, not production parsing.
+            let filter = if operand == "the number of artifacts and/or creatures you control" {
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(
+                            TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                        ),
+                        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                    ],
+                }
+            } else {
+                TargetFilter::Typed(TypedFilter {
                     type_filters,
                     controller: Some(ControllerRef::You),
                     properties,
-                }),
+                })
             };
+            let expected = QuantityRef::ObjectCount { filter };
             assert_eq!(
                 parse_quantity_ref_before_outer_domain(
                     &format!("{operand} from your hand"),
@@ -3098,8 +3128,10 @@ fn parse_number_of_controlled_type_with_keyword(input: &str) -> OracleResult<'_,
 /// source via `ChosenAttribute::Player` (Skyshroud War Beast, Lost Order of
 /// Jarkeld), distinct from the controller ("you control").
 fn parse_number_of_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    if let Ok(parsed) = parse_qualified_controlled_type(input) {
-        return Ok(parsed);
+    match parse_qualified_controlled_type(input) {
+        Ok(parsed) => return Ok(parsed),
+        Err(error @ (nom::Err::Failure(_) | nom::Err::Incomplete(_))) => return Err(error),
+        Err(nom::Err::Error(_)) => {}
     }
 
     let (rest, head) = parse_type_filter_word(input)?;
@@ -3383,6 +3415,21 @@ fn parse_qualified_controlled_type(input: &str) -> OracleResult<'_, QuantityRef>
         attach_property_to_quantity_filter(&mut filter, prop);
     }
     attach_controller_to_quantity_filter(&mut filter, controller);
+    // CR 109.2 + CR 608.2c: the relative restricts the complete controlled
+    // head. Once its intro owns the suffix, an unfinished leg is terminal.
+    let relative_input = rest.trim_start();
+    let rest = if crate::parser::oracle_target::parse_relative_clause_intro(relative_input)
+        .is_some_and(|(_, _, negated)| !negated)
+    {
+        let (rest, relative) =
+            cut(crate::parser::oracle_target::parse_relative_card_filter).parse(relative_input)?;
+        filter = TargetFilter::And {
+            filters: vec![filter, relative],
+        };
+        rest
+    } else {
+        rest
+    };
     Ok((rest, QuantityRef::ObjectCount { filter }))
 }
 

@@ -32210,8 +32210,7 @@ mod tests {
             baldric.replacements
         );
 
-        // Sibling: Elderscale Wurm's gate parses (the body declines), so the
-        // guard does not take the line — today's static stays.
+        // Sibling: a typed gate cannot implement the declined replacement body.
         const ELDERSCALE_LINE: &str = "As long as you have 7 or more life, damage that would reduce your life total to less than 7 reduces it to 7 instead.";
         let elderscale = parse_oracle_text(
             "Trample\nWhen this creature enters, if your life total is less than 7, your life total becomes 7.\nAs long as you have 7 or more life, damage that would reduce your life total to less than 7 reduces it to 7 instead.",
@@ -32224,7 +32223,7 @@ mod tests {
             elderscale
                 .statics
                 .iter()
-                .any(|s| s.description.as_deref() == Some(ELDERSCALE_LINE)),
+                .all(|s| s.description.as_deref() != Some(ELDERSCALE_LINE)),
             "{:?}",
             elderscale.statics
         );
@@ -32232,7 +32231,10 @@ mod tests {
             elderscale
                 .abilities
                 .iter()
-                .all(|a| a.description.as_deref() != Some(ELDERSCALE_LINE)),
+                .filter(|a| a.description.as_deref() == Some(ELDERSCALE_LINE)
+                    && a.effect.unimplemented_description().is_some())
+                .count()
+                == 1,
             "{:?}",
             elderscale.abilities
         );

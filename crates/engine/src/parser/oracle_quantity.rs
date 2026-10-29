@@ -338,10 +338,10 @@ pub(crate) fn parse_quantity_ref_with_context(
     }
 
     // Try nom combinator first for simple exact-match patterns.
-    if let Ok((rest, qty)) = nom_quantity::parse_quantity_ref.parse(trimmed) {
-        if rest.is_empty() {
-            return Some(canonicalize_quantity_ref(qty));
-        }
+    match nom_quantity::parse_quantity_ref.parse(trimmed) {
+        Ok((rest, qty)) if rest.is_empty() => return Some(canonicalize_quantity_ref(qty)),
+        Ok(_) | Err(nom::Err::Error(_)) => {}
+        Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
     }
 
     // Complex patterns requiring type phrase parsing or counter normalization.
@@ -844,12 +844,14 @@ pub(crate) fn parse_quantity_ref_with_context(
         // shared for-each referent combinator so the source- and recipient-pronoun
         // authorities stay in one building block; require a full consume so the
         // generic type-phrase fall-through is unshadowed.
-        if let Ok((rest_after, qty)) = nom_quantity::parse_for_each_clause_ref.parse(rest) {
+        match nom_quantity::parse_for_each_clause_ref.parse(rest) {
             // trim() matches the sibling completeness checks (470/482/489/527) and
             // tolerates trailing whitespace.
-            if rest_after.trim().is_empty() {
+            Ok((rest_after, qty)) if rest_after.trim().is_empty() => {
                 return Some(canonicalize_quantity_ref(qty));
             }
+            Ok(_) | Err(nom::Err::Error(_)) => {}
+            Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
         }
         let (filter, remainder) = parse_type_phrase_folding_with_ctx(rest, ctx);
         // CR 109.1: `parse_type_phrase_folding_with_ctx` always returns `TargetFilter::Typed`,
@@ -1191,12 +1193,14 @@ pub(crate) fn parse_cda_quantity_with_context(
         }
     }
 
-    if let Ok((rest, qty)) = nom_quantity::parse_quantity_ref.parse(text) {
-        if rest.is_empty() {
+    match nom_quantity::parse_quantity_ref.parse(text) {
+        Ok((rest, qty)) if rest.is_empty() => {
             return Some(QuantityExpr::Ref {
                 qty: canonicalize_quantity_ref(qty),
             });
         }
+        Ok(_) | Err(nom::Err::Error(_)) => {}
+        Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
     }
 
     if let Some(qty) = parse_milled_this_way_count(text) {
@@ -3723,13 +3727,13 @@ fn parse_for_each_clause_with_they_controller(
         return Some(qty);
     }
 
-    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref_with_context(
+    match nom_quantity::parse_for_each_clause_ref_with_context(
         clause,
         &for_each_anaphor_context(ctx, &antecedents),
     ) {
-        if rest.is_empty() {
-            return Some(qty);
-        }
+        Ok((rest, qty)) if rest.is_empty() => return Some(qty),
+        Ok(_) | Err(nom::Err::Error(_)) => {}
+        Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
     }
 
     // CR 608.2c + CR 122.1: bare "counter[s] removed" (Blademane Baku) — an
@@ -4018,10 +4022,10 @@ fn parse_for_each_clause_with_they_controller(
 
     // Delegate to the nom for-each clause parser for patterns it covers
     // (e.g. "counter on this equipment" — any-counter source form).
-    if let Ok((rest, qty)) = nom_quantity::parse_for_each_clause_ref.parse(clause) {
-        if rest.is_empty() {
-            return Some(qty);
-        }
+    match nom_quantity::parse_for_each_clause_ref.parse(clause) {
+        Ok((rest, qty)) if rest.is_empty() => return Some(qty),
+        Ok(_) | Err(nom::Err::Error(_)) => {}
+        Err(nom::Err::Failure(_) | nom::Err::Incomplete(_)) => return None,
     }
 
     // Compose with parse_quantity_ref for named quantity patterns like
@@ -6054,6 +6058,44 @@ mod tests {
                 scope: ObjectScope::Target
             })
         );
+    }
+
+    #[test]
+    fn committed_relative_refusal_survives_legacy_quantity_adapters() {
+        let positive = "the number of creatures the chosen player controls";
+        assert!(parse_quantity_ref(positive).is_some());
+        assert!(parse_cda_quantity(positive).is_some());
+        assert!(parse_for_each_clause("creatures the chosen player controls").is_some());
+        for suffix in [
+            "that are",
+            "that are Spirits or a",
+            "that are Spirits or an",
+            "that are Spirits or unknown",
+        ] {
+            let operand = format!("creatures the chosen player controls {suffix}");
+            let quantity = format!("the number of {operand}");
+            let mut context = ParseContext {
+                relative_player_scope: Some(ControllerRef::DefendingPlayer),
+                ..Default::default()
+            };
+            let original = format!("{context:?}");
+            assert!(
+                parse_quantity_ref_with_context(&quantity, &mut context).is_none(),
+                "{quantity}"
+            );
+            assert_eq!(format!("{context:?}"), original);
+            assert!(
+                parse_cda_quantity_with_context(&quantity, &mut context).is_none(),
+                "{quantity}"
+            );
+            assert_eq!(format!("{context:?}"), original);
+            assert!(
+                parse_for_each_clause_with_context(&operand, &context).is_none(),
+                "{operand}"
+            );
+            assert_eq!(format!("{context:?}"), original);
+            assert!(parse_for_each_clause(&operand).is_none(), "{operand}");
+        }
     }
 
     #[test]

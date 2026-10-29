@@ -24501,7 +24501,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         ];
 
         for (name, oracle, keyword_names, core_types, subtypes) in rows {
+            eprintln!("max-speed {name}: beforeparse");
             let face = max_speed_matrix_face(name, oracle, keyword_names, core_types, subtypes);
+            eprintln!("max-speed {name}: afterparse");
 
             // Positive reach guard: the row's own parse must contain at least
             // one HasMaxSpeed leaf before coverage classifies it — otherwise a
@@ -24515,7 +24517,9 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 "{name}: parse must surface a HasMaxSpeed leaf before coverage is meaningful"
             );
 
+            eprintln!("max-speed {name}: beforecoverage");
             let card = coverage_result_for_face(face);
+            eprintln!("max-speed {name}: aftercoverage");
             assert!(
                 card.supported,
                 "{name}: expected supported=true, gaps: {:?}",

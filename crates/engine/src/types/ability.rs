@@ -17126,7 +17126,12 @@ fn validate_persistent_result_definition_node(
             // This raw runtime body is absent from the printed-definition visitor.
             // It executes later as an independent invocation, never as a caller import.
             if let Some(body) = &definition.runtime_execute {
-                classify_instruction_result_invocation(body, InstructionResultEntry::Independent)?;
+                classify_instruction_result_invocation(
+                    body,
+                    InstructionResultEntry::Independent,
+                    None,
+                )
+                .map(|(summary, _)| summary)?;
             }
             Ok(())
         }
@@ -17170,7 +17175,29 @@ pub(crate) fn validate_instruction_result_effect_context(
             });
         }
     };
-    effect.for_each_source_only_player_quantity_ref(&mut check_source_only);
+    // The Mana role is evaluated against the actual resolving executable.
+    // Its produced-value surveys and every other source-only consumer retain
+    // their existing refusal policy.
+    let source_only_mana;
+    let predicate_effect = if matches!(
+        effect,
+        Effect::Mana {
+            target: Some(_),
+            ..
+        }
+    ) {
+        source_only_mana = {
+            let mut effect = effect.clone();
+            if let Effect::Mana { target, .. } = &mut effect {
+                *target = None;
+            }
+            effect
+        };
+        &source_only_mana
+    } else {
+        effect
+    };
+    predicate_effect.for_each_source_only_player_quantity_ref(&mut check_source_only);
     effect.for_each_resolution_quantity_expr(&mut |quantity| {
         quantity.for_each_source_only_player_quantity_ref(&mut check_source_only);
     });
@@ -17575,7 +17602,8 @@ fn validate_persistent_result_payloads(effect: &Effect) -> Result<(), EffectErro
     error.map_or(Ok(()), Err)
 }
 
-type ResultProducerEnvironment = std::collections::BTreeMap<ReturnResultId, Option<(Zone, Zone)>>;
+pub(crate) type ResultProducerEnvironment =
+    std::collections::BTreeMap<ReturnResultId, Option<(Zone, Zone)>>;
 
 impl AbilityCondition {
     fn for_each_source_only_object_quantity_ref(&self, f: &mut dyn FnMut(&QuantityRef)) {
@@ -17637,23 +17665,49 @@ fn validate_result_process(
     root: ResultScopeNode<'_>,
     incoming: &ResultProducerEnvironment,
     entry: InstructionResultEntry,
-) -> Result<InstructionResultProcess, EffectError> {
-    let mut local = ResultProducerEnvironment::new();
-    collect_local_result_declarations(root, &mut local)?;
+    prior: Option<(&ResultProducerEnvironment, &ResultProducerEnvironment)>,
+) -> Result<(InstructionResultProcess, ResultProducerEnvironment), EffectError> {
+    let mut remaining = ResultProducerEnvironment::new();
+    collect_local_result_declarations(root, &mut remaining)?;
+    let local = if let Some((namespace, completed)) = prior {
+        if remaining
+            .iter()
+            .any(|(id, zones)| namespace.get(id) != Some(zones))
+            || completed
+                .iter()
+                .any(|(id, zones)| namespace.get(id) != Some(zones))
+        {
+            return Err(EffectError::InvalidParam(
+                "instruction-result cursor conflicts with admitted declarations".into(),
+            ));
+        }
+        namespace.clone()
+    } else {
+        remaining.clone()
+    };
     let mut seen = incoming.clone();
+    if let Some((_, completed)) = prior {
+        seen.extend(completed.iter().map(|(id, zones)| (*id, *zones)));
+    }
     // Local addresses belong to this invocation's namespace. An enclosing
     // equal integer cannot satisfy a read before this process's declaration.
-    seen.retain(|id, _| !local.contains_key(id));
+    seen.retain(|id, _| !remaining.contains_key(id));
     let mut imports = BTreeSet::new();
     validate_result_process_node(root, &local, &mut seen, entry, &mut imports)?;
     if !local.is_empty() {
-        Ok(InstructionResultProcess::Local {
-            declarations: local.keys().copied().collect(),
-        })
+        Ok((
+            InstructionResultProcess::Local {
+                declarations: local.keys().copied().collect(),
+            },
+            local,
+        ))
     } else if !imports.is_empty() {
-        Ok(InstructionResultProcess::Imported { results: imports })
+        Ok((
+            InstructionResultProcess::Imported { results: imports },
+            local,
+        ))
     } else {
-        Ok(InstructionResultProcess::Unused)
+        Ok((InstructionResultProcess::Unused, local))
     }
 }
 
@@ -17774,12 +17828,13 @@ fn validate_result_process_node(
                     nested,
                     &ResultProducerEnvironment::new(),
                     InstructionResultEntry::Independent,
+                    None,
                 )
                 .map(|_| ())
             } else if child_local.is_empty() {
                 validate_result_process_node(nested, local, &mut seen.clone(), entry, imports)
             } else {
-                validate_result_process(nested, seen, InstructionResultEntry::SelectedBody)
+                validate_result_process(nested, seen, InstructionResultEntry::SelectedBody, None)
                     .map(|_| ())
             }
         });
@@ -17796,6 +17851,7 @@ fn validate_result_process_node(
                 child,
                 &ResultProducerEnvironment::new(),
                 InstructionResultEntry::Independent,
+                None,
             )?;
         } else {
             validate_result_process_node(child, local, seen, entry, imports)?;
@@ -17812,7 +17868,9 @@ pub fn validate_instruction_result_definition(
         ResultScopeNode::Definition(root),
         &ResultProducerEnvironment::new(),
         InstructionResultEntry::Independent,
+        None,
     )
+    .map(|(summary, _)| summary)
 }
 
 /// The selected entry can be a read-only import. Its caller supplies the exact
@@ -17820,11 +17878,13 @@ pub fn validate_instruction_result_definition(
 pub(crate) fn classify_instruction_result_invocation(
     root: &ResolvedAbility,
     entry: InstructionResultEntry,
-) -> Result<InstructionResultProcess, EffectError> {
+    prior: Option<(&ResultProducerEnvironment, &ResultProducerEnvironment)>,
+) -> Result<(InstructionResultProcess, ResultProducerEnvironment), EffectError> {
     validate_result_process(
         ResultScopeNode::Resolved(root),
         &ResultProducerEnvironment::new(),
         entry,
+        prior,
     )
 }
 
@@ -57641,7 +57701,9 @@ mod targeted_departure_declaration_tests {
             InstructionResultEntry::ResumeOwned,
         ] {
             assert_eq!(
-                classify_instruction_result_invocation(&resolved, entry).unwrap(),
+                classify_instruction_result_invocation(&resolved, entry, None)
+                    .map(|(summary, _)| summary)
+                    .unwrap(),
                 expected
             );
         }
@@ -57746,8 +57808,10 @@ mod targeted_departure_declaration_tests {
             );
             assert!(classify_instruction_result_invocation(
                 &resolved,
-                InstructionResultEntry::Independent
+                InstructionResultEntry::Independent,
+                None
             )
+            .map(|(summary, _)| summary)
             .is_err());
         }
     }
@@ -57832,8 +57896,10 @@ mod targeted_departure_declaration_tests {
             );
             assert!(classify_instruction_result_invocation(
                 &resolved,
-                InstructionResultEntry::Independent
+                InstructionResultEntry::Independent,
+                None
             )
+            .map(|(summary, _)| summary)
             .is_err());
         }
     }
@@ -59348,8 +59414,13 @@ mod departure_raw_runtime_replacement_tests {
             "the stored program is an independent invocation"
         );
         assert!(validate_persistent_result_payloads(&handle.effect).is_ok());
-        classify_instruction_result_invocation(&snapshot, InstructionResultEntry::Independent)
-            .expect("the separately owned complete program validates in its own domain");
+        classify_instruction_result_invocation(
+            &snapshot,
+            InstructionResultEntry::Independent,
+            None,
+        )
+        .map(|(summary, _)| summary)
+        .expect("the separately owned complete program validates in its own domain");
         handle.clear_return_result_process_recursive();
         assert_eq!(
             handle, before,

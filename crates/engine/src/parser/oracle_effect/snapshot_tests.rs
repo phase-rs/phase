@@ -2021,7 +2021,6 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
     );
 
     let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
-    assert_eq!(subtype_followup.duration, Some(Duration::Permanent));
     let Effect::GenericEffect {
         static_abilities,
         duration,
@@ -2032,6 +2031,10 @@ fn returned_creatures_can_receive_counters_and_additive_type_followup() {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
     };
     assert_eq!(*duration, Some(Duration::Permanent));
+    assert_eq!(
+        subtype_followup.duration.clone().or(duration.clone()),
+        Some(Duration::Permanent)
+    );
     assert_eq!(*target, None);
     assert!(static_abilities.iter().any(|static_def| {
         matches!(
@@ -2112,7 +2115,6 @@ fn returned_target_can_receive_contracted_additive_type_followup() {
     );
 
     let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
-    assert_eq!(subtype_followup.duration, Some(Duration::Permanent));
     let Effect::GenericEffect {
         static_abilities,
         duration,
@@ -2123,6 +2125,10 @@ fn returned_target_can_receive_contracted_additive_type_followup() {
         panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
     };
     assert_eq!(*duration, Some(Duration::Permanent));
+    assert_eq!(
+        subtype_followup.duration.clone().or(duration.clone()),
+        Some(Duration::Permanent)
+    );
     assert_eq!(*target, Some(TargetFilter::ParentTarget));
     assert!(static_abilities.iter().any(|static_def| {
         static_def.modifications.iter().any(|modification| {

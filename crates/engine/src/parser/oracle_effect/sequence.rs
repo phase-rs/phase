@@ -1817,9 +1817,15 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         // correct `affected` filter inherited from the subject.
                         let have_base_pt_continuation =
                             starts_have_base_power_toughness(remainder_trimmed);
-                        let complete_continuous_conjunct = complete_continuous_sentence(&format!(
-                            "{before_and} and {remainder_trimmed}"
-                        ));
+                        // CR 611.2a + CR 502.3: the typed next-untap rider has
+                        // its own window; complete grant admission must not
+                        // suppress the existing subject-preserving split.
+                        let untap_restriction_prepend =
+                            untap_restriction_conjunct_prepend(before_and, remainder_trimmed);
+                        let complete_continuous_conjunct = untap_restriction_prepend.is_none()
+                            && complete_continuous_sentence(&format!(
+                                "{before_and} and {remainder_trimmed}"
+                            ));
                         let continuous_modifier_conjunct = (starts_you_control_subject_predicate(&before_lower)
                                 // CR 611.2c: become plus grant is one frozen
                                 // continuous population, with one duration.
@@ -1983,12 +1989,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                                             remainder_trimmed,
                                         )
                                     })
-                                    .or_else(|| {
-                                        untap_restriction_conjunct_prepend(
-                                            before_and,
-                                            remainder_trimmed,
-                                        )
-                                    })
+                                    .or(untap_restriction_prepend)
                             {
                                 push_clause_chunk(
                                     &mut chunks,

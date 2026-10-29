@@ -1864,12 +1864,11 @@ fn target_ref_matches_resolved_filter_with_context(
             ),
             None => false,
         },
-        TargetRef::Player(player) => super::filter::player_matches_target_filter_in_state(
+        TargetRef::Player(player) => super::filter::player_matches_target_filter_with_context(
             state,
             target_filter,
             *player,
-            ctx.source_controller,
-            Some(ctx.source_id),
+            ctx,
         ),
     }
 }

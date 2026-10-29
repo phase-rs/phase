@@ -257,8 +257,10 @@ fn resolve_branch_in_occurrence(
     let local_branch = matches!(
         crate::types::ability::classify_instruction_result_invocation(
             &build_resolved_from_def(branch, source_id, controller),
-            crate::types::ability::InstructionResultEntry::SelectedBody
-        )?,
+            crate::types::ability::InstructionResultEntry::SelectedBody,
+            None
+        )
+        .map(|(summary, _)| summary)?,
         crate::types::ability::InstructionResultProcess::Local { .. }
     );
     let is_final_chooser = remaining_players.is_empty();

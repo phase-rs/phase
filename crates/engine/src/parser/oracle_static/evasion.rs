@@ -1079,7 +1079,16 @@ pub(crate) fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDe
         .len();
     let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
     let mut defs = parse_static_line_multi(&line_a);
-    if defs.is_empty() {
+    // CR 611.3a + CR 509.1c: the complete primary must represent its live
+    // condition and effect before it can lend either to a combat requirement.
+    if defs.is_empty()
+        || defs.iter().any(|def| {
+            def.condition
+                .as_ref()
+                .is_some_and(StaticCondition::contains_unrecognized)
+                || (matches!(def.mode, StaticMode::Continuous) && def.modifications.is_empty())
+        })
+    {
         return None;
     }
     for def in &mut defs {

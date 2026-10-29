@@ -1,6 +1,38 @@
 use super::anthem::*;
 use crate::types::keywords::ProtectionTarget;
 
+fn assert_whole_conditional_refusal(source: &str) {
+    let text = format!("{source}\nFlying");
+    let normalized =
+        crate::parser::oracle_util::normalize_card_name_refs(&text, "Conditional refusal");
+    let mut doc = crate::parser::oracle::parse_oracle_ir(
+        &text,
+        "Conditional refusal",
+        &[],
+        &["Creature".into()],
+        &[],
+    );
+    assert_eq!(doc.source_text, text);
+    assert_eq!(doc.items.len(), 2);
+    let first = &doc.items[0];
+    let line = normalized.lines().next().unwrap();
+    assert_eq!(first.source.fragment(), Some(line));
+    assert_eq!(first.source.span().start_byte, 0);
+    assert_eq!(first.source.span().end_byte, line.len());
+    assert_ne!(first.id, doc.items[1].id);
+    assert_eq!(doc.items[1].source.fragment(), Some("Flying"));
+    let parsed = crate::parser::oracle::lower_oracle_ir(&mut doc);
+    assert!(parsed.statics.is_empty());
+    assert_eq!(parsed.extracted_keywords, vec![Keyword::Flying]);
+    assert_eq!(parsed.abilities.len(), 1);
+    assert_eq!(parsed.abilities[0].description.as_deref(), Some(line));
+    assert!(parsed.abilities[0]
+        .effect
+        .unimplemented_description()
+        .is_some());
+    assert!(parsed.abilities[0].sub_ability.is_none());
+}
+
 #[test]
 fn complete_keyword_removal_keeps_parameterized_kinds_and_refuses_unknown_members() {
     use crate::types::keywords::{ProtectionTarget, WardCost};
@@ -9489,17 +9521,11 @@ fn compound_subject_comma_adjectives_without_coordinator_stay_one_subject() {
 
 #[test]
 fn static_as_long_as_unrecognized_condition() {
-    // Conditions the parser cannot yet decompose fall through to Unrecognized.
-    // The whole "As long as X, Y" string is captured permissively so the effect still fires.
-    let def = parse_static_line(
-        "As long as you cast this spell from exile, enchanted creature gets +1/+1.",
-    )
-    .unwrap();
-    assert_eq!(def.mode, StaticMode::Continuous);
-    assert!(matches!(
-        def.condition,
-        Some(StaticCondition::Unrecognized { .. })
-    ));
+    let source = "As long as you cast this spell from exile, enchanted creature gets +1/+1.";
+    assert!(parse_static_line(source).is_none());
+    assert!(parse_static_line_multi(source).is_empty());
+    assert_whole_conditional_refusal(source);
+    assert!(parse_static_line("As long as ~ is enchanted, ~ gets +1/+1.").is_some());
 }
 
 /// CR 401.1 + CR 401.5: Mul Daya Channelers — a leading "As long as the top card
@@ -9565,19 +9591,14 @@ fn static_top_of_library_black_gate_vampire_nocturnus() {
 
 #[test]
 fn static_enchanted_or_equipped_stays_unrecognized() {
-    // Novice Knight: "As long as this creature is enchanted or equipped, ~ has
-    // first strike." The rhs "equipped" elides its subject, so the disjunction
-    // cannot be decomposed — the whole condition falls through to Unrecognized
-    // (no regression: it is Unrecognized today, and the new bare "is enchanted"
-    // arm intentionally does NOT salvage half of it).
-    let def =
-        parse_static_line("As long as this creature is enchanted or equipped, ~ has first strike.")
-            .unwrap();
-    assert_eq!(def.mode, StaticMode::Continuous);
-    assert!(matches!(
-        def.condition,
-        Some(StaticCondition::Unrecognized { .. })
-    ));
+    // Synthetic first-strike fixture: the elided disjunction remains unsupported.
+    let source = "As long as this creature is enchanted or equipped, ~ has first strike.";
+    assert!(parse_static_line(source).is_none());
+    assert!(parse_static_line_multi(source).is_empty());
+    assert_whole_conditional_refusal(source);
+    let control = parse_static_line("As long as ~ is enchanted, ~ has first strike.").unwrap();
+    assert!(!control.modifications.is_empty());
+    assert!(!control.condition.as_ref().unwrap().contains_unrecognized());
 }
 
 #[test]
@@ -37949,6 +37970,7 @@ fn inverted_bare_self_fails_closed_on_untypeable_condition() {
     use crate::parser::oracle_ir::doc::{OracleNodeIr, OracleSourceSpan};
 
     let source = "As long as the moon is in the seventh house, it must be blocked if able.";
+    assert!(parse_static_line(source).is_none());
     let defs = parse_static_line_multi(source);
     assert!(
         defs.is_empty(),
@@ -39402,7 +39424,14 @@ fn subject_led_cant_be_blocked_payment_gate_defers_without_inventing_evasion() {
         "Creatures you control can't be blocked unless defending player pays {2}.",
     )
     .expect("subject-led evasion line should parse");
-    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeBlocked,
+        "source={:?}, definition={def:#?}, condition={:?}, modifications={:?}",
+        "Creatures you control can't be blocked unless defending player pays {2}.",
+        def.condition,
+        def.modifications
+    );
     let Some(StaticCondition::Not { condition }) = def.condition.as_ref() else {
         panic!(
             "the gap marker MUST be Not-wrapped — a bare Unrecognized evaluates true              and would grant unconditional evasion, got {:?}",
@@ -39431,7 +39460,14 @@ fn subject_led_cant_be_blocked_state_backed_gate_still_passes_through() {
         "Creatures you control can't be blocked as long as you control a Forest.",
     )
     .expect("subject-led conditional evasion should parse");
-    assert_eq!(def.mode, StaticMode::CantBeBlocked);
+    assert_eq!(
+        def.mode,
+        StaticMode::CantBeBlocked,
+        "source={:?}, definition={def:#?}, condition={:?}, modifications={:?}",
+        "Creatures you control can't be blocked as long as you control a Forest.",
+        def.condition,
+        def.modifications
+    );
     assert!(
         matches!(def.condition, Some(StaticCondition::IsPresent { .. })),
         "a board-state gate is a pure function of game state and must survive the          enforcement-point gate unchanged, got {:?}",
@@ -40077,10 +40113,8 @@ fn bello_verbatim_line_retains_each_compound_subject_owner() {
 /// `Effect::Unimplemented` rather than becoming a silent no-op that reports as
 /// supported.
 ///
-/// PAIRED POSITIVE REACH-GUARD (mandatory): the remainder alone is asserted to
-/// parse to `Some(Continuous, [])`, proving the recursion reached a real parse
-/// and was refused by the `!modifications.is_empty()` gate — not vacuously
-/// because the peel itself failed to fire.
+/// PAIRED POSITIVE REACH-GUARD: a meaningful typed remainder and its explicit
+/// turn-window peel still publish their complete modification.
 #[test]
 fn during_your_turn_unenforceable_remainder_stays_unsupported() {
     const ELVISH_REFUELER_LINE: &str = "During your turn, as long as you haven't activated an \
@@ -40094,18 +40128,18 @@ fn during_your_turn_unenforceable_remainder_stays_unsupported() {
         "an unenforceable recursed static must not be accepted through the window"
     );
 
-    let remainder_def = parse_static_line(ELVISH_REFUELER_REMAINDER)
-        .expect("reach-guard: the bare remainder must still parse on its own");
-    assert_eq!(
-        remainder_def.mode,
-        StaticMode::Continuous,
-        "{remainder_def:?}"
-    );
-    assert!(
-        remainder_def.modifications.is_empty(),
-        "reach-guard: the remainder must be the zero-modification shape the gate refuses: {:?}",
-        remainder_def.modifications
-    );
+    assert!(parse_static_line(ELVISH_REFUELER_REMAINDER).is_none());
+    assert_whole_conditional_refusal(ELVISH_REFUELER_LINE);
+    let remainder = "~ has first strike";
+    let control = parse_static_line(remainder).unwrap();
+    assert!(!control.modifications.is_empty());
+    let scoped = format!("During your turn, {remainder}");
+    let scoped_lower = scoped.to_lowercase();
+    let (body, _) = parse_leading_turn_scope(&scoped_lower).unwrap();
+    assert_eq!(body, remainder);
+    let windowed = parse_static_line(&scoped).unwrap();
+    assert_eq!(windowed.modifications, control.modifications);
+    assert_eq!(windowed.condition, Some(StaticCondition::DuringYourTurn));
 }
 
 /// V5b — HOSTILE / silently-inert gate: a remainder that DOES carry
@@ -41192,22 +41226,12 @@ fn defender_exception_rules_bearing_remainder_composes_both_halves() {
 
 #[test]
 fn novice_knight_leading_condition_form_fails_closed() {
-    let def = parse_static_line(
-        "As long as this creature is enchanted or equipped, it can attack as though it didn't have defender.",
-    )
-    .expect("arm 2b: Novice Knight's verbatim printed line");
-    assert_eq!(def.mode, StaticMode::CanAttackWithDefender);
-    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
-    assert_eq!(
-        def.condition,
-        Some(StaticCondition::Not {
-            condition: Box::new(StaticCondition::Unrecognized {
-                text: "this creature is enchanted or equipped".to_string(),
-            }),
-        }),
-        "the inert marker, NOT a bare Unrecognized: a bare one evaluates TRUE, which \
-         made this printed gate an unconditional attack permission"
-    );
+    let source =
+        "As long as this creature is enchanted or equipped, it can attack as though it didn't have defender.";
+    assert!(parse_static_line(source).is_none());
+    assert!(parse_static_line_multi(source).is_empty());
+
+    assert_whole_conditional_refusal(source);
 
     // PAIRED POSITIVE CONTROL, SAME PRODUCTION, SAME FIXTURE: arm 1's plain form.
     assert_eq!(

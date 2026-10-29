@@ -10155,12 +10155,15 @@ fn aura_can_enchant_referenced_target(
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
-        TargetRef::Player(player_id) => player_matches_target_filter_in_state(
+        TargetRef::Player(player_id) => player_matches_target_filter_with_context(
             state,
             enchant_filter,
             *player_id,
-            Some(aura.controller),
-            Some(aura_id),
+            &FilterContext {
+                source_id: aura_id,
+                source_controller: Some(aura.controller),
+                ..FilterContext::from_source_context(source)
+            },
         ),
     }
 }
@@ -10318,8 +10321,10 @@ fn damage_recipient_matches(
     else {
         return false;
     };
+    let mut ctx = FilterContext::from_source_context(source);
+    ctx.source_controller = Some(reference);
     matches!(record.target, TargetRef::Player(pid)
-        if crate::game::effects::matches_player_scope(state, pid, scope, reference, source.id))
+        if crate::game::effects::matches_player_scope_with_context(state, pid, scope, &ctx))
 }
 
 /// Check if an object satisfies a single FilterProp.
@@ -10488,13 +10493,17 @@ fn matches_filter_prop_known(
         // player predicate. Delegates to the single-authority player-scope matcher
         // (obj.controller as the candidate; source controller/id for opponent-relative
         // inner filters like OpponentDealtDamage).
-        FilterProp::ControllerMatches { player } => crate::game::effects::matches_player_scope(
-            state,
-            obj.controller,
-            player,
-            source.controller.unwrap_or(obj.controller),
-            source.id,
-        ),
+        FilterProp::ControllerMatches { player } => {
+            crate::game::effects::matches_player_scope_with_context(
+                state,
+                obj.controller,
+                player,
+                &FilterContext {
+                    source_controller: Some(source.controller.unwrap_or(obj.controller)),
+                    ..FilterContext::from_source_context(source)
+                },
+            )
+        }
         // CR 305.1 + CR 601.2a: "played by" entry replacements (Uphill Battle).
         FilterProp::WasPlayed => obj.played_from_zone.is_some() || obj.cast_from_zone.is_some(),
         // CR 508.1b: Attacking creatures may be scoped by defending player
@@ -13143,6 +13152,44 @@ pub fn player_matches_target_filter_in_state(
     source_controller: Option<PlayerId>,
     source_id: Option<ObjectId>,
 ) -> bool {
+    let Some(source_id) = source_id else {
+        return player_matches_target_filter_with(
+            filter,
+            player_id,
+            source_controller,
+            &|controller, player| crate::game::players::is_opponent(state, controller, player),
+            &|_, _| false,
+        );
+    };
+    let mut ctx = FilterContext::from_source(state, source_id);
+    ctx.source_controller = source_controller;
+    player_matches_target_filter_with_context(state, filter, player_id, &ctx)
+}
+
+pub(crate) fn player_matches_target_filter_with_context(
+    state: &GameState,
+    filter: &TargetFilter,
+    player_id: PlayerId,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let source_controller = ctx.source_controller;
+    let mut available = true;
+    filter.for_each_nested_quantity_ref(&mut |reference| {
+        if reference.instruction_result_id().is_some()
+            && ctx.ability.is_none_or(|ability| {
+                !crate::game::effects::addressed_quantity_ref_is_available(
+                    state,
+                    reference,
+                    ability.return_result_process,
+                )
+            })
+        {
+            available = false;
+        }
+    });
+    if !available {
+        return false;
+    }
     player_matches_target_filter_with(
         filter,
         player_id,
@@ -13163,11 +13210,8 @@ pub fn player_matches_target_filter_in_state(
         // re-implementing any predicate here. `source_controller` is CR 109.5
         // "you": with no controller the payload's `relation` axis is unanswerable,
         // so fail closed — likewise with no source object.
-        &|player, candidate| match (source_controller, source_id) {
-            (Some(controller), Some(source)) => crate::game::effects::matches_player_scope(
-                state, candidate, player, controller, source,
-            ),
-            _ => false,
+        &|player, candidate| {
+            crate::game::effects::matches_player_scope_with_context(state, candidate, player, ctx)
         },
     )
 }
@@ -13239,6 +13283,13 @@ fn player_matches_target_filter_with(
         // point, fail-closed in the stateless one) — see the two call sites above
         // for why this is injected rather than resolved inline.
         TargetFilter::PlayerMatching { player } => matches_player_scope(player, player_id),
+        TargetFilter::Not { filter } => !player_matches_target_filter_with(
+            filter,
+            player_id,
+            source_controller,
+            is_opponent,
+            matches_player_scope,
+        ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
             player_matches_target_filter_with(
                 f,

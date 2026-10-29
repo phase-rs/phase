@@ -3028,6 +3028,8 @@ pub struct ReturnResultProcessId(pub u64);
 pub struct ReturnResultFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process: Option<ReturnResultProcessId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) declarations: Option<crate::types::ability::ResultProducerEnvironment>,
     pub results: BTreeMap<ReturnResultId, InstructionResult>,
 }
 
@@ -3037,6 +3039,8 @@ enum ReturnResultFrameWire {
     Owned {
         #[serde(default)]
         process: Option<ReturnResultProcessId>,
+        #[serde(default, deserialize_with = "deserialize_result_declarations")]
+        declarations: Option<crate::types::ability::ResultProducerEnvironment>,
         #[serde(deserialize_with = "deserialize_instruction_results")]
         results: BTreeMap<ReturnResultId, InstructionResult>,
     },
@@ -3069,12 +3073,48 @@ where
         .collect()
 }
 
+fn deserialize_result_declarations<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::types::ability::ResultProducerEnvironment>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            let values: BTreeMap<String, Option<(Zone, Zone)>> =
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+            values
+                .into_iter()
+                .map(|(id, zones)| {
+                    let parsed = id.parse::<u32>().map_err(serde::de::Error::custom)?;
+                    if parsed.to_string() != id {
+                        return Err(serde::de::Error::custom(
+                            "noncanonical result declaration id",
+                        ));
+                    }
+                    Ok((ReturnResultId(parsed), zones))
+                })
+                .collect()
+        })
+        .transpose()
+}
+
 impl From<ReturnResultFrameWire> for ReturnResultFrame {
     fn from(wire: ReturnResultFrameWire) -> Self {
         match wire {
-            ReturnResultFrameWire::Owned { process, results } => Self { process, results },
+            ReturnResultFrameWire::Owned {
+                process,
+                declarations,
+                results,
+            } => Self {
+                process,
+                declarations,
+                results,
+            },
             ReturnResultFrameWire::Legacy(results) => Self {
                 process: None,
+                declarations: None,
                 results,
             },
         }
@@ -3288,6 +3328,18 @@ pub struct PendingExileFromTopUntil {
 }
 
 impl PendingContinuation {
+    pub(crate) fn new_owned(
+        chain: Box<ResolvedAbility>,
+        state: &GameState,
+        declarations: &crate::types::ability::ResultProducerEnvironment,
+    ) -> Result<Self, crate::types::ability::EffectError> {
+        let occurrence =
+            crate::game::effects::retained_return_result_occurrence(state, &chain, declarations)?;
+        let mut pending = Self::new(chain, state);
+        pending.return_result_occurrence = occurrence;
+        Ok(pending)
+    }
+
     pub(crate) fn player_scope_queue_end(
         placeholder: Box<ResolvedAbility>,
         state: &GameState,
@@ -16099,7 +16151,9 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 crate::types::ability::classify_instruction_result_invocation(
                     ability,
                     crate::types::ability::InstructionResultEntry::Independent,
+                    None,
                 )
+                .map(|(summary, _)| summary)
                 .map_err(|error| error.to_string())?;
             }
         }
@@ -16112,7 +16166,9 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         crate::types::ability::classify_instruction_result_invocation(
             root,
             crate::types::ability::InstructionResultEntry::Independent,
+            None,
         )
+        .map(|(summary, _)| summary)
         .map_err(|error| error.to_string())?;
     }
     let counter_reader_waits_for = |source_id: ObjectId| {
@@ -16392,7 +16448,9 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
             let summary = crate::types::ability::classify_instruction_result_invocation(
                 ability,
                 crate::types::ability::InstructionResultEntry::ResumeOwned,
+                None,
             )
+            .map(|(summary, _)| summary)
             .map_err(|error| error.to_string())?;
             if occurrence.is_none()
                 && matches!(
@@ -16419,9 +16477,13 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
         let mut resolved =
             crate::game::ability_utils::build_resolved_from_def(definition, source, controller);
         resolved.bind_return_result_process(expected_process);
-        if let InstructionResultProcess::Imported { .. } =
-            classify_instruction_result_invocation(&resolved, InstructionResultEntry::SelectedBody)
-                .map_err(|error| error.to_string())?
+        if let InstructionResultProcess::Imported { .. } = classify_instruction_result_invocation(
+            &resolved,
+            InstructionResultEntry::SelectedBody,
+            None,
+        )
+        .map(|(summary, _)| summary)
+        .map_err(|error| error.to_string())?
         {
             crate::game::effects::validate_selected_instruction_result_owner(
                 state, &resolved, occurrence,
@@ -61324,7 +61386,9 @@ mod restored_exact_attack_authority_tests {
                 classify_instruction_result_invocation(
                     entry.ability().unwrap(),
                     InstructionResultEntry::Independent,
+                    None
                 )
+                .map(|(summary, _)| summary)
                 .unwrap(),
                 InstructionResultProcess::Unused,
             );
@@ -61379,7 +61443,9 @@ mod restored_exact_attack_authority_tests {
                 classify_instruction_result_invocation(
                     entry.ability().unwrap(),
                     InstructionResultEntry::Independent,
+                    None
                 )
+                .map(|(summary, _)| summary)
                 .unwrap(),
                 InstructionResultProcess::Unused,
                 "observer continuations retain attack events without result owners",
@@ -63095,6 +63161,7 @@ mod departure_process_saved_authority_tests {
         let records = InstructionResult::ZoneChanges(vec![]);
         let owned = ReturnResultFrame {
             process: Some(ReturnResultProcessId(5)),
+            declarations: None,
             results: [(result, records.clone())].into_iter().collect(),
         };
         let current: ReturnResultFrame =

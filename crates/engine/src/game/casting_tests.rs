@@ -27982,8 +27982,9 @@ fn drive_deadly(
     runner: &mut crate::game::scenario::GameRunner,
     deadly: ObjectId,
     pay_evidence: bool,
-) {
+) -> Vec<String> {
     use crate::types::ability::TargetRef;
+    let mut history = Vec::new();
     let card_id = runner.state().objects[&deadly].card_id;
     runner
         .act(GameAction::CastSpell {
@@ -27993,7 +27994,13 @@ fn drive_deadly(
             payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Deadly cast accepted");
-    for _ in 0..25 {
+    for step in 0..25 {
+        history.push(format!(
+            "step={step}; pay_evidence={pay_evidence}; prompt={:?}; stack={:?}; resolution={:?}",
+            runner.state().waiting_for,
+            runner.state().stack,
+            runner.state().resolution_stack
+        ));
         match runner.state().waiting_for.clone() {
             WaitingFor::TargetSelection {
                 target_slots,
@@ -28016,6 +28023,7 @@ fn drive_deadly(
                     bears.is_some(),
                     "seed must have a Grizzly Bears legal target"
                 );
+                history.push(format!("selected target seed={bears:?}"));
                 runner
                     .act(GameAction::ChooseTarget { target: bears })
                     .expect("seed target accepted");
@@ -28032,6 +28040,10 @@ fn drive_deadly(
                     .into_iter()
                     .find(|id| runner.state().objects[id].name == "Grizzly Bears")
                     .expect("seed choice offers a Grizzly Bears");
+                history.push(format!(
+                    "selected zone seed={:?}",
+                    runner.state().objects[&bears]
+                ));
                 runner
                     .act(GameAction::SelectCards { cards: vec![bears] })
                     .expect("untargeted seed exile accepted");
@@ -28060,6 +28072,7 @@ fn drive_deadly(
             other => panic!("unexpected Deadly prompt: {other:?}"),
         }
     }
+    history
 }
 
 #[test]
@@ -28189,14 +28202,16 @@ fn deadly_cover_up_case_b_evidence_exiles_owner_zones_and_draws() {
         deadly,
         p1_lib_before,
     ) = deadly_fixture();
-    drive_deadly(&mut runner, deadly, true);
+    let history = drive_deadly(&mut runner, deadly, true);
 
     // Seed + search: all three P1 same-named Bears (2 GY + 1 hand) exiled.
     for id in p1_gy_bears {
         assert_eq!(
             runner.state().objects[&id].zone,
             Zone::Exile,
-            "P1 GY Bears exiled (seed + search)"
+            "P1 GY Bears exiled (seed + search); history={history:?}; seed={:?}; waiting={:?}; stack={:?}; resolution={:?}",
+            runner.state().objects[&id], runner.state().waiting_for,
+            runner.state().stack, runner.state().resolution_stack
         );
     }
     assert_eq!(

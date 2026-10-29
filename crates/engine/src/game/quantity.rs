@@ -3811,11 +3811,29 @@ pub fn resolve_quantity_with_ctx(
     controller: PlayerId,
     ctx: QuantityContext,
 ) -> i32 {
+    resolve_quantity_with_ctx_and_ability(state, expr, controller, ctx, None)
+}
+
+pub(crate) fn resolve_quantity_with_ctx_and_ability(
+    state: &GameState,
+    expr: &QuantityExpr,
+    controller: PlayerId,
+    ctx: QuantityContext,
+    ability: Option<&ResolvedAbility>,
+) -> i32 {
     match expr {
         QuantityExpr::Fixed { value } => *value,
-        QuantityExpr::Ref { qty } => resolve_ref(state, qty, controller, ctx, &[], None, None),
+        QuantityExpr::Ref { qty } => resolve_ref(
+            state,
+            qty,
+            controller,
+            ctx,
+            ability.map_or(&[], |ability| ability.targets.as_slice()),
+            ability.and_then(|ability| ability.chosen_x),
+            ability,
+        ),
         other => fold_compose(other, |inner| {
-            resolve_quantity_with_ctx(state, inner, controller, ctx.clone())
+            resolve_quantity_with_ctx_and_ability(state, inner, controller, ctx.clone(), ability)
         }),
     }
 }
@@ -7817,12 +7835,11 @@ fn damage_record_target_matches(
                 }
             }
             let remainder: &TargetFilter = stripped.as_ref().unwrap_or(filter);
-            player_matches_target_filter_in_state(
+            super::filter::player_matches_target_filter_with_context(
                 state,
                 remainder,
                 player_id,
-                filter_ctx.source_controller,
-                Some(filter_ctx.source_id),
+                &filter_ctx,
             )
         }
     }
@@ -27642,6 +27659,7 @@ mod departure_source_boundary_tests {
             ReturnResultOccurrenceId(1),
             ReturnResultFrame {
                 process: Some(ReturnResultProcessId(5)),
+                declarations: None,
                 results: [(ReturnResultId(7), InstructionResult::ZoneChanges(vec![]))]
                     .into_iter()
                     .collect(),

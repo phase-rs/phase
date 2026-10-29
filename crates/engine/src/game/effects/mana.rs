@@ -473,7 +473,9 @@ pub(crate) fn validate_mana_choice_response(
     crate::types::ability::classify_instruction_result_invocation(
         &current,
         crate::types::ability::InstructionResultEntry::ResumeOwned,
-    )?;
+        None,
+    )
+    .map(|(summary, _)| summary)?;
     let mut failure = None;
     let mut invalid = None;
     for_each_mana_choice_response_quantity(ability, prompt, &mut |reference| {
@@ -4721,10 +4723,24 @@ mod tests {
             else {
                 unreachable!()
             };
-            assert_eq!(
-                resolve_quantity_with_targets(runner.state(), count, ability),
-                expected_count
+            let mut observed = runner.state().clone();
+            let observed_count = super::super::with_inherited_return_result_occurrence(
+                &mut observed,
+                Some(*occurrence),
+                |state| {
+                    validate_mana_choice_response(
+                        state,
+                        ability,
+                        &ManaChoicePrompt::SingleColor {
+                            options: options.clone(),
+                        },
+                        Some(*occurrence),
+                    )
+                    .expect("the observed count uses the actual retained prompt owner");
+                    resolve_quantity_with_targets(state, count, ability)
+                },
             );
+            assert_eq!(observed_count, expected_count);
             let saved = serde_json::to_value(runner.state()).unwrap();
             *runner.state_mut() = serde_json::from_value(saved)
                 .expect("same-source activation keeps its new independent process");
@@ -5330,7 +5346,7 @@ mod tests {
         // Supplemental canonical direct-resolution fixture: the real complete
         // producer executes here; only the resolving recipient-role predicate
         // reads its result. The latched one-unit count supplies no authority.
-        for empty in [false, true] {
+        for (empty, public) in [(false, false), (true, false), (false, true), (true, true)] {
             let (mut foreign, foreign_spell, _, _) = departure_dynamic_mana_runner(4, true, false);
             let WaitingFor::ChooseManaColor {
                 return_result_occurrence: Some(foreign_occurrence),
@@ -5350,9 +5366,6 @@ mod tests {
             assert_eq!(foreign.state().players[0].mana_pool.total(), 7);
             let mut scenario = GameScenario::new();
             scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
-            let source = scenario
-                .add_artifact_from_oracle(P0, "Supplemental canonical role reader", "")
-                .id();
             if !empty {
                 scenario.add_creature(P0, "Centaur Courser", 3, 3);
                 scenario.add_creature(P0, "Grizzly Bears", 2, 2);
@@ -5397,16 +5410,121 @@ mod tests {
                 },
             );
             let producer: Effect = serde_json::from_value(serde_json::json!({"type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile", "target": TargetFilter::Typed(TypedFilter::creature())})).unwrap();
-            let mut root = AbilityDefinition::new(AbilityKind::Spell, producer);
+            let mut root = AbilityDefinition::new(
+                if public {
+                    AbilityKind::Activated
+                } else {
+                    AbilityKind::Spell
+                },
+                producer,
+            );
             root.declares_return_result = Some(ReturnResultId(7));
-            root.sub_ability = Some(Box::new(mana));
+            root.sub_ability = Some(Box::new(if public {
+                root.cost = Some(crate::types::ability::AbilityCost::Mana {
+                    cost: ManaCost::Cost {
+                        generic: 1,
+                        shards: vec![],
+                    },
+                });
+                AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChooseOneOf {
+                        chooser: PlayerFilter::Opponent,
+                        branches: vec![
+                            AbilityDefinition::new(
+                                AbilityKind::Spell,
+                                Effect::GainLife {
+                                    player: TargetFilter::Controller,
+                                    amount: QuantityExpr::Fixed { value: 1 },
+                                },
+                            ),
+                            mana,
+                        ],
+                        kind: crate::types::ability::ChooseOneOfKind::Ordinary,
+                    },
+                )
+            } else {
+                mana
+            }));
+            let source = if public {
+                scenario
+                    .add_artifact_from_oracle(P0, "Supplemental canonical role reader", "")
+                    .with_ability_definition(root.clone())
+                    .id()
+            } else {
+                scenario
+                    .add_artifact_from_oracle(P0, "Supplemental canonical role reader", "")
+                    .id()
+            };
+            if public {
+                scenario.with_mana_pool(
+                    P0,
+                    vec![ManaUnit::new(ManaType::Black, source, false, vec![])],
+                );
+            }
             let mut runner = scenario.build();
-            let mut executable =
-                crate::game::ability_utils::build_resolved_from_def(&root, source, P0);
-            executable.push_target(TargetRef::Player(P1));
+            let original_source = runner.state().objects[&source].clone();
             let mut events = vec![];
-            super::super::resolve_ability_chain(runner.state_mut(), &executable, &mut events, 0)
+            if public {
+                events.extend(
+                    runner
+                        .act(GameAction::ActivateAbility {
+                            source_id: source,
+                            ability_index: 0,
+                            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                        })
+                        .unwrap()
+                        .events,
+                );
+                for _ in 0..8 {
+                    if matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ChooseOneOfBranch { .. }
+                    ) {
+                        break;
+                    }
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+                }
+                let WaitingFor::ChooseOneOfBranch {
+                    player: P1,
+                    return_result_occurrence: Some(occurrence),
+                    expected_return_result_process: Some(process),
+                    controller: P0,
+                    source_id,
+                    ..
+                } = &runner.state().waiting_for
+                else {
+                    panic!("the paid public producer must reach P1's ordinary branch choice");
+                };
+                assert_eq!(*source_id, source);
+                let frame = &runner.state().return_result_frames[occurrence];
+                assert_eq!(frame.process, Some(*process));
+                assert!(
+                    matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 3 })
+                );
+                assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+                events.extend(
+                    runner
+                        .act(GameAction::ChooseBranch { index: 1 })
+                        .unwrap()
+                        .events,
+                );
+            } else {
+                let mut executable =
+                    crate::game::ability_utils::build_resolved_from_def(&root, source, P0);
+                executable.push_target(TargetRef::Player(P1));
+                super::super::resolve_ability_chain(
+                    runner.state_mut(),
+                    &executable,
+                    &mut events,
+                    0,
+                )
                 .unwrap();
+            }
             assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::ZoneChanged { record, .. } if record.from_zone == Some(Zone::Battlefield) && record.to_zone == Zone::Exile)).count(), if empty { 0 } else { 3 });
             let WaitingFor::ChooseManaColor {
                 player,
@@ -5558,6 +5676,14 @@ mod tests {
             assert_eq!(units[0].color, ManaType::Green);
             assert_eq!(units[0].source_id, source);
             assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&source].controller,
+                original_source.controller
+            );
+            assert_eq!(
+                runner.state().objects[&source].incarnation,
+                original_source.incarnation
+            );
             assert!(matches!(
                 runner.state().waiting_for,
                 WaitingFor::Priority { .. }

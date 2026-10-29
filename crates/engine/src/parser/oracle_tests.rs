@@ -3530,6 +3530,7 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
         let card: crate::database::mtgjson::AtomicCard = serde_json::from_str(metadata).unwrap();
         let expected: serde_json::Value = serde_json::from_str(expected_json).unwrap();
         let text = card.text.as_deref().unwrap();
+        let normalized = normalize_card_name_refs(text, &card.name);
         let mut doc = parse_oracle_ir(
             text,
             &card.name,
@@ -3538,6 +3539,7 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
             &card.subtypes,
         );
         let mut ids = std::collections::HashSet::new();
+        assert_eq!(doc.source_text, text);
         let mut previous = None;
         for item in &doc.items {
             assert!(ids.insert(item.id));
@@ -3545,7 +3547,7 @@ fn grant_foreign_roots_keep_complete_documents_and_loader_components() {
             assert!(span.is_exact());
             assert_eq!(
                 item.source.fragment(),
-                Some(&text[span.start_byte..span.end_byte])
+                Some(&normalized[span.start_byte..span.end_byte])
             );
             let position = (span.first_line, span.ordinal_within_span);
             assert!(previous.is_none_or(|old| old < position));
@@ -3846,7 +3848,12 @@ fn relative_predicate_cost_keeps_full_sailors_document() {
     let text = card.text.as_deref().unwrap();
     let cost_source = text.lines().next().unwrap();
     let ward_source = "Ward {4} (Whenever ~ becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)";
-    let normalized = format!("{cost_source}\n{ward_source}");
+    let normalized = normalize_card_name_refs(text, &card.name);
+    assert_eq!(normalized, format!("{cost_source}\n{ward_source}"));
+    assert_ne!(
+        normalized, text,
+        "the reminder's self-reference shortens the parser buffer"
+    );
     let mut doc = parse_oracle_ir(
         text,
         &card.name,
@@ -3944,7 +3951,7 @@ fn relative_predicate_cost_keeps_full_sailors_document() {
     assert_eq!(doc.items.len(), 3);
     assert_eq!(doc.items[2].source.fragment(), Some(neighbor));
     assert_eq!(doc.items[2].source.span().first_line, 2);
-    assert_eq!(doc.items[2].source.span().start_byte, text.len() + 1);
+    assert_eq!(doc.items[2].source.span().start_byte, normalized.len() + 1);
     assert_ne!(doc.items[1].id, doc.items[2].id);
 }
 
@@ -4112,6 +4119,7 @@ fn off_zone_grant_does_not_claim_conditional_static_documents() {
     ] {
         let card: crate::database::mtgjson::AtomicCard = serde_json::from_str(metadata).unwrap();
         let text = card.text.as_deref().unwrap();
+        let normalized = normalize_card_name_refs(text, &card.name);
         let keywords = card.keywords.as_deref().unwrap_or(&[]);
         let expected: serde_json::Value = serde_json::from_str(expected_json).unwrap();
         let expected_statics: Vec<StaticDefinition> =
@@ -4135,7 +4143,7 @@ fn off_zone_grant_does_not_claim_conditional_static_documents() {
             previous = Some(position);
             assert_eq!(
                 item.source.fragment(),
-                Some(&text[span.start_byte..span.end_byte])
+                Some(&normalized[span.start_byte..span.end_byte])
             );
             assert!(
                 !matches!(item.node, OracleNodeIr::Unsupported { .. }),
@@ -5000,7 +5008,12 @@ fn u5_full_documents_publish_both_halves_at_the_original_source() {
                 Effect::PutCounter { .. }
             ));
         } else {
-            assert!(parsed.extracted_keywords.contains(&Keyword::Trample));
+            let keyword = doc
+                .items
+                .iter()
+                .find(|item| item.source.fragment() == Some("Trample"))
+                .unwrap();
+            assert_eq!(keyword.source.span().first_line, 0);
             if name == "Leviathan" {
                 let trigger = &parsed.triggers[0];
                 assert_eq!(trigger.phase, Some(crate::types::phase::Phase::Upkeep));
@@ -5070,6 +5083,9 @@ fn u5_full_documents_publish_both_halves_at_the_original_source() {
             }
         }
         let face = complete_publication_native_face(name, text, &types, &subtypes);
+        if name != "Grimgrin, Corpse-Born" {
+            assert!(face.keywords.contains(&Keyword::Trample));
+        }
         assert_eq!(face.oracle_text.as_deref(), Some(text));
         assert_eq!(face.mana_cost, parse_mana_symbols(mana).unwrap().0);
         assert_eq!(
@@ -5226,8 +5242,13 @@ fn u5_invalid_singleton_payment_publication_keeps_the_whole_original_body() {
                 &[],
             );
             assert_eq!(doc.source_text, source);
+            let flying = doc
+                .items
+                .iter()
+                .find(|item| item.source.fragment() == Some("Flying"))
+                .unwrap();
+            assert_eq!(flying.source.span().first_line, 0);
             let parsed = lower_oracle_ir(&mut doc);
-            assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
             assert_eq!(parsed.triggers.len(), 1);
             let root = parsed.triggers[0].execute.as_deref().unwrap();
             let Effect::Unimplemented { name, description } = &*root.effect else {
@@ -5253,6 +5274,7 @@ fn u5_invalid_singleton_payment_publication_keeps_the_whole_original_body() {
                 }))
                 .unwrap();
             let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+            assert!(face.keywords.contains(&Keyword::Flying));
             assert_eq!(face.triggers, parsed.triggers);
             assert!(crate::game::coverage::card_face_has_unimplemented_parts(
                 &face
@@ -5304,8 +5326,13 @@ fn u5_printed_ziatora_keeps_its_full_reflexive_source_and_independent_keyword() 
         &atomic.subtypes,
     );
     assert_eq!(doc.source_text, SOURCE);
+    let flying = doc
+        .items
+        .iter()
+        .find(|item| item.source.fragment() == Some("Flying"))
+        .unwrap();
+    assert_eq!(flying.source.span().first_line, 0);
     let parsed = lower_oracle_ir(&mut doc);
-    assert!(parsed.extracted_keywords.contains(&Keyword::Flying));
     assert_eq!(parsed.triggers.len(), 1);
     let root = parsed.triggers[0].execute.as_deref().unwrap();
     assert!(root.optional);
@@ -5318,6 +5345,7 @@ fn u5_printed_ziatora_keeps_its_full_reflexive_source_and_independent_keyword() 
         Some(AbilityCondition::WhenYouDo)
     );
     let face = crate::database::synthesis::build_oracle_face(&atomic, None);
+    assert!(face.keywords.contains(&Keyword::Flying));
     assert_eq!(face.oracle_text.as_deref(), Some(SOURCE));
     assert_eq!(face.triggers, parsed.triggers);
     assert_eq!(face.abilities, parsed.abilities);
@@ -6283,7 +6311,7 @@ fn numeric_gain_outer_ownership_preserves_complete_chains() {
                     }
                 ),
                 _ => matches!(*conditional.effect, Effect::Draw { .. }),
-            });
+            }, "name={name}, prefix={prefix:?}, source={source:?}, conditional={conditional:#?}, parsed={parsed:#?}");
             if name == "Survival Cache" {
                 assert!(parsed.extracted_keywords.contains(&Keyword::Rebound));
             }
@@ -20002,6 +20030,24 @@ fn skemfar_shadowsage_gain_mode_parses_shared_creature_type_count() {
         panic!("expected GainLife, got {:?}", r.abilities[0].effect);
     };
     assert_shared_creature_type_max(amount);
+    let loss = parse("Each opponent loses X life, where X is the greatest number of creatures you control that have a creature type in common.", "Skemfar Shadowsage", &[], &["Creature"], &["Elf", "Cleric"]);
+    let Effect::LoseLife { amount, .. } = loss.abilities[0].effect.as_ref() else {
+        panic!("{loss:#?}")
+    };
+    assert_shared_creature_type_max(amount);
+    let full = parse("When this creature enters, choose one —\n• Each opponent loses X life, where X is the greatest number of creatures you control that have a creature type in common.\n• You gain X life, where X is the greatest number of creatures you control that have a creature type in common.", "Skemfar Shadowsage", &[], &["Creature"], &["Elf", "Cleric"]);
+    assert!(full.statics.is_empty() && full.abilities.is_empty());
+    assert_eq!(full.triggers.len(), 1);
+    let modes = &full.triggers[0].execute.as_ref().unwrap().mode_abilities;
+    assert_eq!(modes.len(), 2);
+    let Effect::LoseLife { amount, .. } = modes[0].effect.as_ref() else {
+        panic!("{modes:#?}")
+    };
+    assert_shared_creature_type_max(amount);
+    let Effect::GainLife { amount, .. } = modes[1].effect.as_ref() else {
+        panic!("{modes:#?}")
+    };
+    assert_shared_creature_type_max(amount);
 }
 
 #[test]
@@ -20015,6 +20061,14 @@ fn basalt_ravager_damage_parses_shared_creature_type_count() {
         );
     let Effect::DealDamage { amount, .. } = &*r.abilities[0].effect else {
         panic!("expected DealDamage, got {:?}", r.abilities[0].effect);
+    };
+    assert_shared_creature_type_max(amount);
+    let full = parse("When this creature enters, it deals X damage to any target, where X is the greatest number of creatures you control that have a creature type in common.", "Basalt Ravager", &[], &["Creature"], &["Giant", "Wizard"]);
+    assert!(full.statics.is_empty() && full.abilities.is_empty());
+    assert_eq!(full.triggers.len(), 1);
+    let body = full.triggers[0].execute.as_ref().unwrap();
+    let Effect::DealDamage { amount, .. } = body.effect.as_ref() else {
+        panic!("{body:#?}")
     };
     assert_shared_creature_type_max(amount);
 }
@@ -33045,15 +33099,18 @@ fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
         "unexpected condition warning: {:?}",
         parsed.parse_warnings
     );
-    assert!(parsed.abilities.iter().any(|ability| {
-        matches!(
-            &*ability.effect,
-            Effect::GenericEffect { static_abilities, .. }
-                if static_abilities
-                    .iter()
-                    .any(|static_def| static_def.mode == StaticMode::MustAttack)
-        )
-    }));
+    assert!(
+        parsed.abilities.iter().any(|ability| {
+            matches!(
+                &*ability.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|static_def| static_def.mode == StaticMode::MustAttack)
+            )
+        }),
+        "source={oracle:?}, parsed={parsed:#?}"
+    );
 }
 
 #[test]
@@ -45638,16 +45695,32 @@ fn duration_repair_full_printed_cohort_keeps_windows_and_whole_loader_values() {
         assert!(parsed.abilities.len() + parsed.triggers.len() + parsed.statics.len() > 0);
         let value = serde_json::to_value(&face).unwrap();
         for path in paths {
-            assert_eq!(
-                value.pointer(path).and_then(serde_json::Value::as_str),
-                Some(expected),
-                "{} {path}: {value:#}",
-                face.name
-            );
             let owner = path.strip_suffix("/duration").unwrap();
             let node = value.pointer(owner).unwrap();
             // Every carrier assertion has an executable positive reach guard.
             let effect = node.get("effect").unwrap_or(node);
+            if expected == "Permanent" && effect["type"] == "GenericEffect" {
+                // CR 611.2a: an unstated window is embedded indefinitely;
+                // resolution gives any stated wrapper duration precedence.
+                assert_eq!(effect["duration"], "Permanent", "{} {path}", face.name);
+                let ability = owner
+                    .strip_suffix("/effect")
+                    .and_then(|owner| value.pointer(owner))
+                    .unwrap_or(node);
+                assert_eq!(
+                    ability["duration"].as_str().or(effect["duration"].as_str()),
+                    Some(expected),
+                    "{} {path}: {value:#}",
+                    face.name
+                );
+            } else {
+                assert_eq!(
+                    value.pointer(path).and_then(serde_json::Value::as_str),
+                    Some(expected),
+                    "{} {path}: {value:#}",
+                    face.name
+                );
+            }
             assert!(
                 matches!(
                     effect["type"].as_str(),
@@ -45706,7 +45779,6 @@ fn duration_repair_full_printed_cohort_keeps_windows_and_whole_loader_values() {
         }
         if face.card_type.subtypes == ["Licid"] {
             let root = &face.abilities[0];
-            assert_eq!(root.duration, Some(Duration::Permanent));
             assert!(root.cost.is_some());
             let Effect::GenericEffect {
                 static_abilities,
@@ -45718,6 +45790,10 @@ fn duration_repair_full_printed_cohort_keeps_windows_and_whole_loader_values() {
                 panic!("{}", face.name)
             };
             assert_eq!(*duration, Some(Duration::Permanent));
+            assert_eq!(
+                root.duration.clone().or(duration.clone()),
+                Some(Duration::Permanent)
+            );
             assert!(end_cost.is_some());
             assert!(static_abilities[0].modifications.iter().any(
                 |m| matches!(m, ContinuousModification::AddSubtype { subtype } if subtype == "Aura")

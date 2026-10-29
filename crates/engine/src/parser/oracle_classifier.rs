@@ -618,6 +618,10 @@ const STATIC_PREFIX_PATTERNS: &[&str] = &[
 ];
 
 pub(crate) fn is_static_pattern(lower: &str) -> bool {
+    // CR 113.3c + CR 608.2c: a terminal quantity definition qualifies the
+    // instruction; its relative predicate cannot classify the outer head.
+    let outer = super::oracle_effect::lower::strip_terminal_where_x(TextPair::new(lower, lower));
+    let lower = outer.as_ref().map_or(lower, |(head, _)| head.lower);
     if lower_starts_with(lower, "target") {
         return false;
     }
@@ -1426,6 +1430,23 @@ pub(crate) fn is_effect_sentence_candidate(lower: &str) -> bool {
 mod tests {
     use super::nom_primitives::strip_double_quoted_spans;
     use super::*;
+
+    #[test]
+    fn terminal_where_x_operand_does_not_classify_the_outer_instruction() {
+        for head in [
+            "~ deals X damage to any target",
+            "you gain X life",
+            "each opponent loses X life",
+        ] {
+            let source = format!("{head}, where X is the greatest number of creatures you control that have a creature type in common.");
+            assert!(!is_static_pattern(&source.to_lowercase()), "{source}");
+        }
+        assert!(is_static_pattern(
+            "creatures you control get +x/+x, where x is the number of lands you control."
+        ));
+        // A following independent instruction is outside a terminal definition.
+        assert!(is_static_pattern("you gain x life, where x is the number of lands you control, creatures you control have flying."));
+    }
 
     #[test]
     fn outer_instruction_head_is_anchored_and_completion_independent() {

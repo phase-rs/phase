@@ -525,6 +525,41 @@ pub fn matches_player_scope(
     controller: PlayerId,
     source_id: ObjectId,
 ) -> bool {
+    matches_player_scope_with_context(
+        state,
+        player,
+        scope,
+        &filter::FilterContext::from_source_with_controller(source_id, controller),
+    )
+}
+
+pub(crate) fn matches_player_scope_with_context(
+    state: &GameState,
+    player: PlayerId,
+    scope: &PlayerFilter,
+    ctx: &filter::FilterContext<'_>,
+) -> bool {
+    let Some(controller) = ctx.source_controller else {
+        return false;
+    };
+    let source_id = ctx.source_id;
+    let mut available = true;
+    scope.for_each_nested_quantity_ref(&mut |reference| {
+        if reference.instruction_result_id().is_some()
+            && ctx.ability.is_none_or(|ability| {
+                !addressed_quantity_ref_is_available(
+                    state,
+                    reference,
+                    ability.return_result_process,
+                )
+            })
+        {
+            available = false;
+        }
+    });
+    if !available {
+        return false;
+    }
     state
         .players
         .iter()
@@ -544,13 +579,13 @@ pub fn matches_player_scope(
                     // `speed_effects::players_for_filter` instead, which is
                     // authoritative for `AllExcept` effect-iteration.
                     PlayerFilter::AllExcept { exclude } => {
-                        !matches_player_scope(state, p.id, exclude, controller, source_id)
+                        !matches_player_scope_with_context(state, p.id, exclude, ctx)
                     }
                     // CR 102.1 + CR 608.2c: predicate form of the union — a
                     // player matches when any member names it.
                     PlayerFilter::AnyOf { filters } => filters
                         .iter()
-                        .any(|f| matches_player_scope(state, p.id, f, controller, source_id)),
+                        .any(|f| matches_player_scope_with_context(state, p.id, f, ctx)),
                     // CR 102.2 / CR 102.3: "opponent" is a game-topology
                     // relation, not raw player-ID inequality. In team
                     // multiplayer a teammate is neither the controller nor an
@@ -753,15 +788,20 @@ pub fn matches_player_scope(
                     } => {
                         crate::game::players::matches_relation(state, p.id, controller, *relation)
                             && {
-                                let threshold = crate::game::quantity::resolve_quantity_with_ctx(
-                                    state,
-                                    value,
-                                    controller,
-                                    crate::game::quantity::QuantityContext {
-                                        scoped_player: Some(p.id),
-                                        ..crate::game::quantity::QuantityContext::new(source_id)
-                                    },
-                                );
+                                let threshold =
+                                    crate::game::quantity::resolve_quantity_with_ctx_and_ability(
+                                        state,
+                                        value,
+                                        controller,
+                                        crate::game::quantity::QuantityContext {
+                                            scoped_player: Some(p.id),
+                                            trigger_source: ctx.trigger_source.cloned(),
+                                            recipient: ctx.recipient_id,
+                                            granting_object: ctx.granting_object,
+                                            ..crate::game::quantity::QuantityContext::new(source_id)
+                                        },
+                                        ctx.ability,
+                                    );
                                 candidate_player_scalar_with_state(state, p, controller, attr)
                                     .is_some_and(|lhs| comparator.evaluate(lhs, threshold))
                             }
@@ -1896,6 +1936,14 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         }) {
             return;
         }
+        let pending = state
+            .active_ability_continuation()
+            .expect("checked continuation");
+        let Ok(declarations) =
+            owned_cursor_declarations(state, pending.return_result_occurrence, &pending.chain)
+        else {
+            return;
+        };
         // Each sidecar channel is extended only when it is live: the linked
         // batch when the detached tail holds a linked-exile consumer, the
         // created-token union when the driver opened it.
@@ -2036,12 +2084,20 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                         chain.context.forwarded_result_context.clone();
                     // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                     settle_entries_before_instruction(state, events, &remaining, None);
-                    chain_progress = resolve_ability_chain_step(state, &remaining, events, 1).ok();
+                    chain_progress = resolve_owned_ability_chain_step(
+                        state,
+                        &remaining,
+                        events,
+                        1,
+                        &declarations,
+                    )
+                    .ok();
                 }
             } else {
                 // CR 603.10 + CR 608.2c: the choice-driven instruction just completed; its entries are observed before the resumed chain runs.
                 settle_entries_before_instruction(state, events, &chain, None);
-                chain_progress = resolve_ability_chain_step(state, &chain, events, 1).ok();
+                chain_progress =
+                    resolve_owned_ability_chain_step(state, &chain, events, 1, &declarations).ok();
             }
         }
         if let Some(source_id) = state
@@ -2083,6 +2139,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                     handoff,
                     events,
                     1,
+                    &declarations,
                 )
                 .ok();
             }
@@ -2216,6 +2273,7 @@ fn retire_unreferenced_return_result_frames(state: &mut GameState) {
 
 fn begin_return_result_occurrence(
     state: &mut GameState,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<
     (
         Option<ReturnResultOccurrenceId>,
@@ -2242,6 +2300,7 @@ fn begin_return_result_occurrence(
         id,
         ReturnResultFrame {
             process: Some(process),
+            declarations: Some(declarations.clone()),
             results: Default::default(),
         },
     );
@@ -2252,7 +2311,11 @@ fn begin_return_result_occurrence(
 fn with_iteration_return_result_occurrence<T>(
     state: &mut GameState,
     ability: &ResolvedAbility,
-    run: impl FnOnce(&mut GameState, &ResolvedAbility) -> Result<T, EffectError>,
+    run: impl FnOnce(
+        &mut GameState,
+        &ResolvedAbility,
+        &crate::types::ability::ResultProducerEnvironment,
+    ) -> Result<T, EffectError>,
 ) -> Result<T, EffectError> {
     with_instruction_result_entry(
         state,
@@ -2266,20 +2329,24 @@ fn with_instruction_result_entry<T>(
     state: &mut GameState,
     ability: &ResolvedAbility,
     entry: crate::types::ability::InstructionResultEntry,
-    run: impl FnOnce(&mut GameState, &ResolvedAbility) -> Result<T, EffectError>,
+    run: impl FnOnce(
+        &mut GameState,
+        &ResolvedAbility,
+        &crate::types::ability::ResultProducerEnvironment,
+    ) -> Result<T, EffectError>,
 ) -> Result<T, EffectError> {
     use crate::types::ability::{
         classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
     };
-    let summary = classify_instruction_result_invocation(ability, entry)?;
+    let (summary, declarations) = classify_instruction_result_invocation(ability, entry, None)?;
     let mut executable = ability.clone();
     let previous = match summary {
-        InstructionResultProcess::Local { .. } if entry != InstructionResultEntry::ResumeOwned => {
-            let (previous, process) = begin_return_result_occurrence(state)?;
+        InstructionResultProcess::Local { .. } => {
+            let (previous, process) = begin_return_result_occurrence(state, &declarations)?;
             executable.bind_return_result_process(Some(process));
             previous
         }
-        InstructionResultProcess::Local { .. } | InstructionResultProcess::Imported { .. } => {
+        InstructionResultProcess::Imported { .. } => {
             let occurrence = state.active_return_result_occurrence.ok_or_else(|| {
                 EffectError::InvalidParam("missing selected instruction-result occurrence".into())
             })?;
@@ -2302,10 +2369,80 @@ fn with_instruction_result_entry<T>(
             state.active_return_result_occurrence.take()
         }
     };
-    let result = run(state, &executable);
+    let result = run(state, &executable, &declarations);
     state.active_return_result_occurrence = previous;
     retire_unreferenced_return_result_frames(state);
     result
+}
+
+pub(crate) fn owned_cursor_declarations(
+    state: &GameState,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    ability: &ResolvedAbility,
+) -> Result<crate::types::ability::ResultProducerEnvironment, EffectError> {
+    if !crate::types::game_state::has_return_result_metadata(ability) {
+        return Ok(Default::default());
+    }
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        occurrence,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+            ability.return_result_process,
+        ),
+    )
+    .map_err(EffectError::InvalidParam)?;
+    let declarations = frame.declarations.clone().ok_or_else(|| {
+        EffectError::InvalidParam(
+            "instruction-result cursor has no recovered declaration origin".into(),
+        )
+    })?;
+    validate_owned_instruction_result_cursor(state, ability, occurrence, &declarations)?;
+    Ok(declarations)
+}
+
+fn completed_instruction_result_declarations(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
+) -> Result<crate::types::ability::ResultProducerEnvironment, EffectError> {
+    if declarations.is_empty() {
+        return Ok(Default::default());
+    }
+    let frame = crate::types::game_state::checked_return_result_frame(
+        state,
+        occurrence,
+        crate::types::game_state::ReturnResultFrameAccess::LegacyCompatible(
+            ability.return_result_process,
+        ),
+    )
+    .map_err(EffectError::InvalidParam)?;
+    if frame.declarations.as_ref() != Some(declarations) {
+        return Err(EffectError::InvalidParam(
+            "instruction-result cursor declaration owner mismatch".into(),
+        ));
+    }
+    Ok(declarations
+        .iter()
+        .filter(|(id, _)| frame.results.contains_key(id))
+        .map(|(id, zones)| (*id, *zones))
+        .collect())
+}
+
+fn validate_owned_instruction_result_cursor(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    occurrence: Option<ReturnResultOccurrenceId>,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
+) -> Result<crate::types::ability::InstructionResultProcess, EffectError> {
+    let completed =
+        completed_instruction_result_declarations(state, ability, occurrence, declarations)?;
+    crate::types::ability::classify_instruction_result_invocation(
+        ability,
+        crate::types::ability::InstructionResultEntry::ResumeOwned,
+        Some((declarations, &completed)),
+    )
+    .map(|(summary, _)| summary)
 }
 
 pub(crate) fn addressed_quantity_ref_is_available(
@@ -2326,7 +2463,8 @@ pub(crate) fn validate_selected_instruction_result_owner(
         classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
     };
     if let InstructionResultProcess::Imported { results } =
-        classify_instruction_result_invocation(ability, InstructionResultEntry::SelectedBody)?
+        classify_instruction_result_invocation(ability, InstructionResultEntry::SelectedBody, None)?
+            .0
     {
         let mut addressed = Vec::new();
         ability.for_each_own_quantity_ref(&mut |reference| {
@@ -2532,11 +2670,15 @@ pub(crate) fn validate_definition_waiting_for_result_owner(
 pub(crate) fn retained_return_result_occurrence(
     state: &GameState,
     ability: &ResolvedAbility,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<Option<ReturnResultOccurrenceId>, EffectError> {
-    use crate::types::ability::{
-        classify_instruction_result_invocation, InstructionResultEntry, InstructionResultProcess,
-    };
-    match classify_instruction_result_invocation(ability, InstructionResultEntry::ResumeOwned)? {
+    use crate::types::ability::InstructionResultProcess;
+    match validate_owned_instruction_result_cursor(
+        state,
+        ability,
+        state.active_return_result_occurrence,
+        declarations,
+    )? {
         InstructionResultProcess::Unused => Ok(None),
         InstructionResultProcess::Local { .. } => {
             (if ability.has_addressed_zone_result_read() {
@@ -3154,30 +3296,38 @@ mod revealed_instruction_authority_tests {
             &reader
         ));
         let enclosing = state.active_return_result_occurrence;
-        with_iteration_return_result_occurrence(state, &reader, |child, executable| {
-            assert_eq!(child.active_return_result_occurrence, enclosing);
-            assert_eq!(named_revealed_members(child, executable)?.len(), 1);
-            Ok(())
-        })
+        with_iteration_return_result_occurrence(
+            state,
+            &reader,
+            |child, executable, declarations| {
+                assert_eq!(child.active_return_result_occurrence, enclosing);
+                assert_eq!(named_revealed_members(child, executable)?.len(), 1);
+                Ok(())
+            },
+        )
         .unwrap();
         let local = crate::game::ability_utils::build_resolved_from_def(
             &parsed.abilities[0],
             ObjectId(100),
             PlayerId(0),
         );
-        with_iteration_return_result_occurrence(state, &local, |child, executable| {
-            assert_ne!(child.active_return_result_occurrence, enclosing);
-            publish_reveal_result_for_ability(child, executable, Vec::new())?;
-            assert_eq!(
-                crate::game::quantity::resolve_quantity_with_targets(child, lhs, &reader),
-                0
-            );
-            assert_eq!(
-                crate::game::quantity::resolve_quantity_with_targets(child, rhs, &reader),
-                0
-            );
-            Ok(())
-        })
+        with_iteration_return_result_occurrence(
+            state,
+            &local,
+            |child, executable, declarations| {
+                assert_ne!(child.active_return_result_occurrence, enclosing);
+                publish_reveal_result_for_ability(child, executable, Vec::new())?;
+                assert_eq!(
+                    crate::game::quantity::resolve_quantity_with_targets(child, lhs, &reader),
+                    0
+                );
+                assert_eq!(
+                    crate::game::quantity::resolve_quantity_with_targets(child, rhs, &reader),
+                    0
+                );
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(state.active_return_result_occurrence, enclosing);
         assert_eq!(named_revealed_members(state, &reader).unwrap().len(), 1);
@@ -4354,8 +4504,14 @@ fn drain_active_repeat_for_in_occurrence(state: &mut GameState, events: &mut Vec
             let progress = match with_iteration_return_result_occurrence(
                 state,
                 iter_effective,
-                |state, executable| {
-                    let progress = resolve_ability_chain_step(state, executable, events, 1)?;
+                |state, executable, declarations| {
+                    let progress = resolve_owned_ability_chain_step(
+                        state,
+                        executable,
+                        events,
+                        1,
+                        declarations,
+                    )?;
                     let next = iteration + 1;
                     if progress.is_pending() && next < total_iterations {
                         park_repeat_for_after_current_iteration(
@@ -6156,6 +6312,7 @@ fn resolve_sub_with_missing_forward_result(
     effect_context_object: Option<&CostPaidObjectSnapshot>,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<ResolutionProgress, EffectError> {
     let mut bound_sub = sub.clone();
     bind_forwarded_generic_self_ref(&mut bound_sub);
@@ -6164,7 +6321,13 @@ fn resolve_sub_with_missing_forward_result(
         remaining.context.forwarded_result_context = Some(Box::new(
             ForwardedResultContext::from_object_ids(state, &[]),
         ));
-        return resolve_ability_chain_step(state, &remaining, events, depth + 1);
+        return resolve_owned_ability_chain_step(
+            state,
+            &remaining,
+            events,
+            depth + 1,
+            declarations,
+        );
     }
     Ok(ResolutionProgress::Complete)
 }
@@ -17140,6 +17303,7 @@ fn drive_empty_reciprocal_producer(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<Option<ResolutionProgress>, EffectError> {
     if !matches!(
         ability.effect,
@@ -17169,7 +17333,14 @@ fn drive_empty_reciprocal_producer(
     match opponents.as_slice() {
         [] => {
             if let Some(tail) = consumer.sub_ability.as_deref() {
-                return resolve_ability_chain_step(state, tail, events, depth + 1).map(Some);
+                return resolve_owned_ability_chain_step(
+                    state,
+                    tail,
+                    events,
+                    depth + 1,
+                    declarations,
+                )
+                .map(Some);
             }
         }
         [opponent] => {
@@ -17193,7 +17364,11 @@ fn drive_empty_reciprocal_producer(
         _ => {
             prepend_to_pending_continuation(state, consumer.clone());
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
-                return_result_occurrence: retained_return_result_occurrence(state, consumer)?,
+                return_result_occurrence: retained_return_result_occurrence(
+                    state,
+                    consumer,
+                    declarations,
+                )?,
                 player: ability.controller,
                 candidates: opponents,
                 ability: Box::new(consumer.clone()),
@@ -18364,10 +18539,18 @@ fn drive_repeat_for_outermost(
         let mut iter_ability = effective.clone();
         iter_ability.repeat_for = None;
         let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
-        let progress =
-            with_iteration_return_result_occurrence(state, &iter_ability, |state, executable| {
-                let progress =
-                    resolve_chain_body(state, executable, events, depth, payment_choice.take())?;
+        let progress = with_iteration_return_result_occurrence(
+            state,
+            &iter_ability,
+            |state, executable, declarations| {
+                let progress = resolve_owned_chain_body(
+                    state,
+                    executable,
+                    events,
+                    depth,
+                    payment_choice.take(),
+                    declarations,
+                )?;
                 let next_iteration = iteration + 1;
                 if progress.is_pending() && next_iteration < base_iterations {
                     park_repeat_for_after_current_iteration(
@@ -18385,7 +18568,8 @@ fn drive_repeat_for_outermost(
                     );
                 }
                 Ok(progress)
-            })?;
+            },
+        )?;
         if progress.is_pending() {
             return Ok(progress);
         }
@@ -19953,12 +20137,13 @@ fn resolve_after_scope_with_created_seats(
     handoff: Option<CreatedTokenSeatsHandoff>,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<ResolutionProgress, EffectError> {
     let Some(handoff) = handoff else {
-        return resolve_ability_chain_step(state, after_scope, events, depth);
+        return resolve_owned_ability_chain_step(state, after_scope, events, depth, declarations);
     };
     let prior = state.resolving_created_token_seats.replace(handoff);
-    let outcome = resolve_ability_chain_step(state, after_scope, events, depth);
+    let outcome = resolve_owned_ability_chain_step(state, after_scope, events, depth, declarations);
     state.resolving_created_token_seats = prior;
     outcome
 }
@@ -20729,6 +20914,7 @@ fn perform_player_scope_sacrifices(
     mut selections: Vec<(PlayerId, Vec<ObjectId>)>,
     completion: Option<PendingPlayerScopeSacrificeCompletion>,
     events: &mut Vec<GameEvent>,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<PlayerScopeSacrificePerformOutcome, EffectError> {
     let mut completion = completion.unwrap_or_default();
     // A resumed replacement has already delivered its selected ZoneChange into
@@ -20790,7 +20976,9 @@ fn perform_player_scope_sacrifices(
                     state.pending_player_scope_sacrifice_choice =
                         Some(PendingPlayerScopeSacrificeChoice {
                             return_result_occurrence: retained_return_result_occurrence(
-                                state, ability,
+                                state,
+                                ability,
+                                declarations,
                             )?,
                             ability: Box::new(ability.clone()),
                             remaining_players: vec![],
@@ -21130,6 +21318,7 @@ fn start_player_scope_sacrifice_choices(
     after_scope: Option<Box<ResolvedAbility>>,
     events: &mut Vec<GameEvent>,
     depth: u32,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 101.4: If multiple players make choices for one instruction, choices
     // are announced in APNAP order before the simultaneous action happens.
@@ -21145,7 +21334,9 @@ fn start_player_scope_sacrifice_choices(
                 state.pending_player_scope_sacrifice_choice =
                     Some(PendingPlayerScopeSacrificeChoice {
                         return_result_occurrence: retained_return_result_occurrence(
-                            state, template,
+                            state,
+                            template,
+                            declarations,
                         )?,
                         ability: Box::new(template.clone()),
                         remaining_players: matching_players[i + 1..].to_vec(),
@@ -21160,13 +21351,20 @@ fn start_player_scope_sacrifice_choices(
         }
     }
 
-    match perform_player_scope_sacrifices(state, template, selections, None, events)? {
+    match perform_player_scope_sacrifices(state, template, selections, None, events, declarations)?
+    {
         PlayerScopeSacrificePerformOutcome::PausedForReplacement => {
             return Ok(ResolutionProgress::Waiting)
         }
         PlayerScopeSacrificePerformOutcome::Completed { .. } => {
             if let Some(after_scope) = after_scope {
-                return resolve_ability_chain_step(state, &after_scope, events, depth + 1);
+                return resolve_owned_ability_chain_step(
+                    state,
+                    &after_scope,
+                    events,
+                    depth + 1,
+                    declarations,
+                );
             }
         }
     }
@@ -22057,8 +22255,9 @@ pub fn resolve_ability_chain(
         state,
         ability,
         crate::types::ability::InstructionResultEntry::Independent,
-        |state, executable| {
-            resolve_ability_chain_step(state, executable, events, depth).map(|_| ())
+        |state, executable, declarations| {
+            resolve_owned_ability_chain_step(state, executable, events, depth, declarations)
+                .map(|_| ())
         },
     )
 }
@@ -22073,8 +22272,9 @@ pub(crate) fn resolve_selected_ability_chain(
         state,
         ability,
         crate::types::ability::InstructionResultEntry::SelectedBody,
-        |state, executable| {
-            resolve_ability_chain_step(state, executable, events, depth).map(|_| ())
+        |state, executable, declarations| {
+            resolve_owned_ability_chain_step(state, executable, events, depth, declarations)
+                .map(|_| ())
         },
     )
 }
@@ -22089,7 +22289,9 @@ pub(crate) fn resolve_selected_ability_chain_step(
         state,
         ability,
         crate::types::ability::InstructionResultEntry::SelectedBody,
-        |state, executable| resolve_ability_chain_step(state, executable, events, depth),
+        |state, executable, declarations| {
+            resolve_owned_ability_chain_step(state, executable, events, depth, declarations)
+        },
     )
 }
 
@@ -22103,8 +22305,9 @@ pub(crate) fn resolve_resume_owned_ability_chain(
         state,
         ability,
         crate::types::ability::InstructionResultEntry::ResumeOwned,
-        |state, executable| {
-            resolve_ability_chain_step(state, executable, events, depth).map(|_| ())
+        |state, executable, declarations| {
+            resolve_owned_ability_chain_step(state, executable, events, depth, declarations)
+                .map(|_| ())
         },
     )
 }
@@ -22120,16 +22323,23 @@ pub(crate) fn resolve_resume_owned_ability_chain_with_payment_choice(
         state,
         ability,
         crate::types::ability::InstructionResultEntry::ResumeOwned,
-        |state, executable| match payment_choice {
-            Some(AutoMayChoice::Decline) => {
-                resolve_unpaid_unless_ability_chain(state, executable, events, depth)
-            }
+        |state, executable, declarations| match payment_choice {
+            Some(AutoMayChoice::Decline) => resolve_ability_chain_with_payment_choice(
+                state,
+                executable,
+                events,
+                depth,
+                Some(AutoMayChoice::Decline),
+                declarations,
+            )
+            .map(|_| ()),
             None | Some(AutoMayChoice::Accept) => resolve_ability_chain_with_payment_choice(
                 state,
                 executable,
                 events,
                 depth,
                 payment_choice,
+                declarations,
             )
             .map(|_| ()),
         },
@@ -22142,7 +22352,34 @@ pub(crate) fn resolve_ability_chain_step(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<ResolutionProgress, EffectError> {
-    resolve_ability_chain_with_payment_choice(state, ability, events, depth, None)
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, ability, declarations| {
+            resolve_owned_ability_chain_step(state, ability, events, depth, declarations)
+        },
+    )
+}
+
+fn resolve_owned_ability_chain_step(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
+) -> Result<ResolutionProgress, EffectError> {
+    resolve_ability_chain_with_payment_choice(state, ability, events, depth, None, declarations)
+}
+
+pub(crate) fn resolve_carrier_owned_ability_chain(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
+) -> Result<(), EffectError> {
+    resolve_owned_ability_chain_step(state, ability, events, depth, declarations).map(|_| ())
 }
 
 /// CR 118.12a + CR 701.6a: the stack objects (by id) that an unless-paused
@@ -22186,14 +22423,13 @@ pub(crate) fn resolve_unpaid_unless_ability_chain(
     events: &mut Vec<GameEvent>,
     depth: u32,
 ) -> Result<(), EffectError> {
-    resolve_ability_chain_with_payment_choice(
+    resolve_resume_owned_ability_chain_with_payment_choice(
         state,
         ability,
         events,
         depth,
         Some(AutoMayChoice::Decline),
     )
-    .map(|_| ())
 }
 
 /// What a depth-0 chain entry does with the root's `forwarded_result_context`.
@@ -22221,7 +22457,7 @@ pub(crate) fn resolve_flip_branch_chain(
         state,
         ability,
         crate::types::ability::InstructionResultEntry::SelectedBody,
-        |state, executable| {
+        |state, executable, declarations| {
             resolve_ability_chain_with_root_result(
                 state,
                 executable,
@@ -22229,6 +22465,7 @@ pub(crate) fn resolve_flip_branch_chain(
                 0,
                 None,
                 RootForwardedResult::Retain,
+                declarations,
             )
         },
     )
@@ -22240,6 +22477,7 @@ fn resolve_ability_chain_with_payment_choice(
     events: &mut Vec<GameEvent>,
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<ResolutionProgress, EffectError> {
     resolve_ability_chain_with_root_result(
         state,
@@ -22248,6 +22486,7 @@ fn resolve_ability_chain_with_payment_choice(
         depth,
         payment_choice,
         RootForwardedResult::Discard,
+        declarations,
     )
 }
 
@@ -22258,10 +22497,13 @@ fn resolve_ability_chain_with_root_result(
     depth: u32,
     mut payment_choice: Option<AutoMayChoice>,
     root_result: RootForwardedResult,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<ResolutionProgress, EffectError> {
-    crate::types::ability::classify_instruction_result_invocation(
+    validate_owned_instruction_result_cursor(
+        state,
         ability,
-        crate::types::ability::InstructionResultEntry::ResumeOwned,
+        state.active_return_result_occurrence,
+        declarations,
     )?;
     // CR 608.2c: A forwarded result belongs to one resolution chain. A root
     // ability can be resumed from serialized state, so discard any stale value
@@ -22382,19 +22624,27 @@ fn resolve_ability_chain_with_root_result(
             "repeat_for (count) and repeat_until (predicate) are mutually exclusive"
         );
         match ability.repeat_until.clone() {
-            None => resolve_chain_body(state, ability, events, depth, payment_choice),
+            None => resolve_owned_chain_body(
+                state,
+                ability,
+                events,
+                depth,
+                payment_choice,
+                declarations,
+            ),
             Some(RepeatContinuation::ControllerChoice) => {
                 let stack_depth_before_iteration = state.resolution_stack.capture_child_boundary();
                 let progress = with_iteration_return_result_occurrence(
                     state,
                     ability,
-                    |state, executable| {
-                        let progress = resolve_chain_body(
+                    |state, executable, declarations| {
+                        let progress = resolve_owned_chain_body(
                             state,
                             executable,
                             events,
                             depth,
                             payment_choice.take(),
+                            declarations,
                         )?;
                         if progress.is_pending() {
                             park_repeat_until_after_inner_pause(
@@ -22443,13 +22693,14 @@ fn resolve_ability_chain_with_root_result(
                 let (progress, verdict) = with_iteration_return_result_occurrence(
                     state,
                     ability,
-                    |state, executable| {
-                        let progress = resolve_chain_body(
+                    |state, executable, declarations| {
+                        let progress = resolve_owned_chain_body(
                             state,
                             executable,
                             events,
                             depth,
                             payment_choice.take(),
+                            declarations,
                         )?;
                         if progress.is_pending() {
                             park_repeat_until_after_inner_pause(
@@ -22545,13 +22796,14 @@ fn resolve_ability_chain_with_root_result(
                     let (progress, repeat) = with_iteration_return_result_occurrence(
                         state,
                         &body,
-                        |state, executable| {
-                            let progress = resolve_chain_body(
+                        |state, executable, declarations| {
+                            let progress = resolve_owned_chain_body(
                                 state,
                                 executable,
                                 events,
                                 depth,
                                 payment_choice.take(),
+                                declarations,
                             )?;
                             if progress.is_pending() {
                                 let mut paused = executable.clone();
@@ -22958,12 +23210,31 @@ pub(crate) fn counter_exile_rider_runs_tail(link: SubAbilityLink, effect: &Effec
 /// iteratively. The `depth == 0` prelude (state-clearing, the resolution
 /// counter, the BeginGame/Mulligan guards) runs once in `resolve_ability_chain`
 /// and is intentionally NOT repeated per iteration.
+#[cfg(test)]
 fn resolve_chain_body(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     depth: u32,
     payment_choice: Option<AutoMayChoice>,
+) -> Result<ResolutionProgress, EffectError> {
+    with_instruction_result_entry(
+        state,
+        ability,
+        crate::types::ability::InstructionResultEntry::Independent,
+        |state, ability, declarations| {
+            resolve_owned_chain_body(state, ability, events, depth, payment_choice, declarations)
+        },
+    )
+}
+
+fn resolve_owned_chain_body(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+    payment_choice: Option<AutoMayChoice>,
+    declarations: &crate::types::ability::ResultProducerEnvironment,
 ) -> Result<ResolutionProgress, EffectError> {
     // CR 702.185a: old typed delayed roots acquire the same selected-result
     // dependency before they attempt the move. No historical move is inferred.
@@ -23131,7 +23402,8 @@ fn resolve_chain_body(
         // pair does not itself pause), stash the untouched remainder as a
         // continuation, mirroring the §5472 pending-continuation stash pattern.
         for (i, sub) in narrowed_subs.iter().enumerate() {
-            progress = resolve_ability_chain_step(state, sub, events, depth + 1)?;
+            progress =
+                resolve_owned_ability_chain_step(state, sub, events, depth + 1, declarations)?;
             if progress.is_pending() {
                 let mut tail: Option<Box<ResolvedAbility>> = None;
                 for remaining in narrowed_subs[i + 1..].iter().rev() {
@@ -23202,7 +23474,13 @@ fn resolve_chain_body(
                     subject: None,
                 });
                 if let Some(after_fanout) = after_fanout {
-                    progress = resolve_ability_chain_step(state, &after_fanout, events, depth + 1)?;
+                    progress = resolve_owned_ability_chain_step(
+                        state,
+                        &after_fanout,
+                        events,
+                        depth + 1,
+                        declarations,
+                    )?;
                 }
                 return Ok(progress);
             }
@@ -23249,11 +23527,12 @@ fn resolve_chain_body(
                         }
                         record_player_actions_performed(state, &events[events_before_fanout..]);
                         if let Some(after_fanout) = after_fanout {
-                            progress = resolve_ability_chain_step(
+                            progress = resolve_owned_ability_chain_step(
                                 state,
                                 &after_fanout,
                                 events,
                                 depth + 1,
+                                declarations,
                             )?;
                         }
                     }
@@ -23264,7 +23543,13 @@ fn resolve_chain_body(
                 let mut narrowed = per_target.clone();
                 narrowed.set_unpinned_targets(vec![TargetRef::Player(*pid)]);
                 narrowed.multi_target = None;
-                progress = resolve_ability_chain_step(state, &narrowed, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &narrowed,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
 
                 // CR 608.2c: If an inner effect paused on a player choice (e.g.
                 // `WaitingFor::DiscardChoice` when a targeted player must pick
@@ -23293,7 +23578,13 @@ fn resolve_chain_body(
             }
             if progress == ResolutionProgress::Complete {
                 if let Some(after_fanout) = after_fanout {
-                    progress = resolve_ability_chain_step(state, &after_fanout, events, depth + 1)?;
+                    progress = resolve_owned_ability_chain_step(
+                        state,
+                        &after_fanout,
+                        events,
+                        depth + 1,
+                        declarations,
+                    )?;
                 }
             }
             return Ok(progress);
@@ -23363,7 +23654,13 @@ fn resolve_chain_body(
             if next.sub_link == SubAbilityLink::SequentialSibling {
                 let mut sibling = next.as_ref().clone();
                 apply_parent_chain_context(&mut sibling, ability, None, state);
-                progress = resolve_ability_chain_step(state, &sibling, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &sibling,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
             }
         }
         return Ok(progress);
@@ -23451,7 +23748,13 @@ fn resolve_chain_body(
             );
             state.clause_minimum_snapshot = None;
             if let Some(after_scope) = after_scope {
-                progress = resolve_ability_chain_step(state, &after_scope, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &after_scope,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
             }
             return Ok(progress);
         }
@@ -23478,6 +23781,7 @@ fn resolve_chain_body(
                 after_scope,
                 events,
                 depth,
+                declarations,
             )?;
             return Ok(progress);
         }
@@ -23555,8 +23859,13 @@ fn resolve_chain_body(
                         );
                         state.clause_minimum_snapshot = None;
                         if let Some(after_scope) = after_scope {
-                            progress =
-                                resolve_ability_chain_step(state, &after_scope, events, depth + 1)?;
+                            progress = resolve_owned_ability_chain_step(
+                                state,
+                                &after_scope,
+                                events,
+                                depth + 1,
+                                declarations,
+                            )?;
                         }
                     }
                 }
@@ -23659,7 +23968,8 @@ fn resolve_chain_body(
                 continue;
             };
             let seat_events_before = events.len();
-            progress = resolve_ability_chain_step(state, &scoped, events, depth + 1)?;
+            progress =
+                resolve_owned_ability_chain_step(state, &scoped, events, depth + 1, declarations)?;
             if collects_seat_results {
                 let created = created_token_union_from_events(state, &events[seat_events_before..]);
                 extend_seat_created_tokens(&mut seat_results, *pid, created);
@@ -23693,7 +24003,7 @@ fn resolve_chain_body(
                     });
                 if handed_to_discard_batch {
                     let return_result_occurrence =
-                        retained_return_result_occurrence(state, ability)?;
+                        retained_return_result_occurrence(state, ability, declarations)?;
                     if let Some(batch) = state.pending_discard_batch.as_mut() {
                         // Widen the batch's pre-pause window from this seat's
                         // own emissions to the whole clause's span: the earlier
@@ -23835,6 +24145,7 @@ fn resolve_chain_body(
                     handoff,
                     events,
                     depth + 1,
+                    declarations,
                 )?;
             }
         } else if after_scope_owned_by_sidecar {
@@ -23903,6 +24214,7 @@ fn resolve_chain_body(
                                 events,
                                 depth,
                                 payment_choice,
+                                declarations,
                             );
                         }
                         _ => {
@@ -23982,7 +24294,13 @@ fn resolve_chain_body(
                 )? {
                     return Ok(ResolutionProgress::Waiting);
                 }
-                progress = resolve_ability_chain_step(state, &else_resolved, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &else_resolved,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
             } else if let Some(sub) = ability.sub_ability.as_deref().and_then(|sub| {
                 // CR 608.2c: skipping an instruction also skips its dependent
                 // resolution steps, but not the next printed instruction.
@@ -24102,7 +24420,13 @@ fn resolve_chain_body(
                     if is_ordinal_sequential_sibling {
                         apply_parent_chain_context(&mut sub_resolved, ability, None, state);
                     }
-                    progress = resolve_ability_chain_step(state, &sub_resolved, events, depth + 1)?;
+                    progress = resolve_owned_ability_chain_step(
+                        state,
+                        &sub_resolved,
+                        events,
+                        depth + 1,
+                        declarations,
+                    )?;
                 }
             }
             return Ok(progress);
@@ -24608,6 +24932,7 @@ fn resolve_chain_body(
                         events,
                         depth,
                         payment_choice,
+                        declarations,
                     );
                 }
                 _ => {
@@ -24671,6 +24996,7 @@ fn resolve_chain_body(
                             events,
                             depth,
                             payment_choice,
+                            declarations,
                         );
                     }
                     _ => {
@@ -24725,7 +25051,14 @@ fn resolve_chain_body(
                     // `Stack` is the non-asking timing here; nothing reads it as
                     // a stack-target declaration after the body re-entry.
                     bound.target_choice_timing = TargetChoiceTiming::Stack;
-                    return resolve_chain_body(state, &bound, events, depth, payment_choice);
+                    return resolve_owned_chain_body(
+                        state,
+                        &bound,
+                        events,
+                        depth,
+                        payment_choice,
+                        declarations,
+                    );
                 }
                 [only] => {
                     // Re-enter the body, not the chain entry: the depth-0
@@ -24739,7 +25072,14 @@ fn resolve_chain_body(
                     // dependents ("that creature").
                     bound.context.forwarded_result_context = None;
                     bound.set_unpinned_targets(vec![TargetRef::Object(*only)]);
-                    return resolve_chain_body(state, &bound, events, depth, payment_choice);
+                    return resolve_owned_chain_body(
+                        state,
+                        &bound,
+                        events,
+                        depth,
+                        payment_choice,
+                        declarations,
+                    );
                 }
                 _ => {
                     let mut parked = ability.clone();
@@ -24779,7 +25119,14 @@ fn resolve_chain_body(
                 // this resolution and must not run twice.
                 let mut bound = ability.clone();
                 bound.set_unpinned_targets(candidates);
-                return resolve_chain_body(state, &bound, events, depth, payment_choice);
+                return resolve_owned_chain_body(
+                    state,
+                    &bound,
+                    events,
+                    depth,
+                    payment_choice,
+                    declarations,
+                );
             }
             _ => {
                 let mut parked = ability.clone();
@@ -25220,12 +25567,13 @@ fn resolve_chain_body(
                     progress = with_iteration_return_result_occurrence(
                         state,
                         &full_chain_iteration,
-                        |state, executable| {
-                            let progress = resolve_ability_chain_step(
+                        |state, executable, declarations| {
+                            let progress = resolve_owned_ability_chain_step(
                                 state,
                                 executable,
                                 events,
                                 depth.max(1),
+                                declarations,
                             )?;
                             if progress.is_pending() {
                                 iteration_parked = park_remaining(state, executable, false);
@@ -25241,12 +25589,13 @@ fn resolve_chain_body(
                     progress = with_iteration_return_result_occurrence(
                         state,
                         iter_effective,
-                        |state, executable| {
-                            let progress = resolve_ability_chain_step(
+                        |state, executable, declarations| {
+                            let progress = resolve_owned_ability_chain_step(
                                 state,
                                 executable,
                                 events,
                                 depth.max(1),
+                                declarations,
                             )?;
                             if progress.is_pending() {
                                 iteration_parked = park_remaining(state, executable, false);
@@ -25307,7 +25656,7 @@ fn resolve_chain_body(
                         with_iteration_return_result_occurrence(
                             state,
                             iter_effective,
-                            |state, executable| {
+                            |state, executable, declarations| {
                                 let step = resolve_effect_step(state, executable, events)?;
                                 if step.progress.is_pending() {
                                     iteration_parked =
@@ -25683,7 +26032,7 @@ fn resolve_chain_body(
     // continue the printed reciprocal instruction and present any required
     // resolution-time choice before evaluating its optional return.
     if let Some(reciprocal_progress) =
-        drive_empty_reciprocal_producer(state, ability, events, depth)?
+        drive_empty_reciprocal_producer(state, ability, events, depth, declarations)?
     {
         return Ok(reciprocal_progress);
     }
@@ -26204,8 +26553,13 @@ fn resolve_chain_body(
                                 )
                             })?;
                             state.active_paid_resolution_offer_tail = Some(offer_id);
-                            let result =
-                                resolve_ability_chain_step(state, &tail, events, depth + 1);
+                            let result = resolve_owned_ability_chain_step(
+                                state,
+                                &tail,
+                                events,
+                                depth + 1,
+                                declarations,
+                            );
                             // Clear before propagating every success/error/paused
                             // result so no later or nested trigger can inherit it.
                             state.active_paid_resolution_offer_tail = None;
@@ -26216,7 +26570,13 @@ fn resolve_chain_body(
                             record_tail_installs_on_paid_offer(state, offer_id);
                             result?
                         } else {
-                            resolve_ability_chain_step(state, &tail, events, depth + 1)?
+                            resolve_owned_ability_chain_step(
+                                state,
+                                &tail,
+                                events,
+                                depth + 1,
+                                declarations,
+                            )?
                         };
                     // CR 603.7a + CR 608.2c: metadata registration must precede
                     // the cast, but completing it does not settle the open offer.
@@ -26345,7 +26705,13 @@ fn resolve_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
-                progress = resolve_ability_chain_step(state, &tail, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &tail,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
             }
             return Ok(progress);
         }
@@ -26443,7 +26809,13 @@ fn resolve_chain_body(
                             append_to_pending_continuation(state, Some(Box::new(resolved)));
                         }
                     } else {
-                        progress = resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
+                        progress = resolve_owned_ability_chain_step(
+                            state,
+                            &resolved,
+                            events,
+                            depth + 1,
+                            declarations,
+                        )?;
                     }
                 } else if let Some(ref tail) = sub.sub_ability {
                     // CR 608.2c (read the whole text; follow instructions in the order
@@ -26538,8 +26910,13 @@ fn resolve_chain_body(
                                 append_to_pending_continuation(state, Some(Box::new(resolved)));
                             }
                         } else {
-                            progress =
-                                resolve_ability_chain_step(state, &resolved, events, depth + 1)?;
+                            progress = resolve_owned_ability_chain_step(
+                                state,
+                                &resolved,
+                                events,
+                                depth + 1,
+                                declarations,
+                            )?;
                         }
                     }
                 }
@@ -26932,8 +27309,13 @@ fn resolve_chain_body(
                     )? {
                         return Ok(ResolutionProgress::Waiting);
                     }
-                    progress =
-                        resolve_ability_chain_step(state, &else_resolved, events, depth + 1)?;
+                    progress = resolve_owned_ability_chain_step(
+                        state,
+                        &else_resolved,
+                        events,
+                        depth + 1,
+                        declarations,
+                    )?;
                 } else if let Some(ref next) = sub.sub_ability {
                     // CR 608.2c: A separate-sentence sibling after the gated sub is
                     // the next independent instruction ("...in the order written")
@@ -26980,11 +27362,12 @@ fn resolve_chain_body(
                                 current = sibling.sub_ability.as_ref();
                                 continue;
                             }
-                            progress = resolve_ability_chain_step(
+                            progress = resolve_owned_ability_chain_step(
                                 state,
                                 &sibling_resolved,
                                 events,
                                 depth + 1,
+                                declarations,
                             )?;
                             break;
                         }
@@ -27091,7 +27474,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &prepared, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &prepared,
+                events,
+                depth + 1,
+                declarations,
+            )?;
             return Ok(progress);
         }
 
@@ -27126,7 +27515,13 @@ fn resolve_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
-                progress = resolve_ability_chain_step(state, &sub_with_sources, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &sub_with_sources,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
                 return Ok(progress);
             }
         }
@@ -27159,6 +27554,7 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 events,
                 depth,
+                declarations,
             );
         }
 
@@ -27193,7 +27589,8 @@ fn resolve_chain_body(
             // validation already removed illegal occurrences from the child.
             let mut child = sub.as_ref().clone();
             apply_parent_chain_context(&mut child, ability, effect_context_object.as_ref(), state);
-            progress = resolve_ability_chain_step(state, &child, events, depth + 1)?;
+            progress =
+                resolve_owned_ability_chain_step(state, &child, events, depth + 1, declarations)?;
         } else if ability.forward_result
             && forwarded_objects.is_empty()
             && matches!(
@@ -27226,8 +27623,13 @@ fn resolve_chain_body(
                 trailing_resolved.context.forwarded_result_context = Some(Box::new(
                     ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 ));
-                progress =
-                    resolve_ability_chain_step(state, &trailing_resolved, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &trailing_resolved,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
             }
         } else if ability.forward_result
             && forwarded_objects.is_empty()
@@ -27248,6 +27650,7 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 events,
                 depth,
+                declarations,
             );
         } else if ability.forward_result {
             let mut sub_with_context = sub.as_ref().clone();
@@ -27273,7 +27676,13 @@ fn resolve_chain_body(
                 ForwardedResultContext::from_object_ids(state, &forwarded_objects),
                 attachment_candidates,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_context,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty()
             && !state.last_revealed_ids.is_empty()
             && effect_writes_last_revealed_ids(&ability.effect)
@@ -27304,7 +27713,13 @@ fn resolve_chain_body(
                 state,
             );
             stamp_parent_target_iteration_members(&mut sub_with_targets);
-            progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_targets,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::Draw { .. })
@@ -27328,7 +27743,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_targets,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::ExileTop { .. })
@@ -27354,7 +27775,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_targets,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty() && effect_uses_implicit_tracked_set_targets(&sub.effect) {
             let mut sub_with_context = sub.as_ref().clone();
             apply_parent_chain_context(
@@ -27363,7 +27790,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_context,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty() && !ability.targets.is_empty() {
             let mut sub_with_targets = sub.as_ref().clone();
             // CR 115.6 + CR 608.2c (issue #5281): Inherit the parent instruction's
@@ -27455,7 +27888,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_targets,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty()
             && ability.targets.is_empty()
             && effect_refs_parent_target(&sub.effect)
@@ -27476,7 +27915,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_referent, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_referent,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         } else if sub.targets.is_empty()
             && ability.targets.is_empty()
             && effect_refs_parent_target(&sub.effect)
@@ -27495,8 +27940,13 @@ fn resolve_chain_body(
                     effect_context_object.as_ref(),
                     state,
                 );
-                progress =
-                    resolve_ability_chain_step(state, &trailing_resolved, events, depth + 1)?;
+                progress = resolve_owned_ability_chain_step(
+                    state,
+                    &trailing_resolved,
+                    events,
+                    depth + 1,
+                    declarations,
+                )?;
             }
         } else {
             // Propagate SpellContext so additional_cost_paid and other flags
@@ -27509,7 +27959,13 @@ fn resolve_chain_body(
                 effect_context_object.as_ref(),
                 state,
             );
-            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+            progress = resolve_owned_ability_chain_step(
+                state,
+                &sub_with_context,
+                events,
+                depth + 1,
+                declarations,
+            )?;
         }
     }
 
@@ -62132,7 +62588,7 @@ mod tests {
         );
         let mut ability = build_resolved_from_def(&definition, source, P0);
         ability.declares_return_result = Some(ReturnResultId(17));
-        with_instruction_result_entry(&mut state, &ability, InstructionResultEntry::Independent, |state, body| {
+        with_instruction_result_entry(&mut state, &ability, InstructionResultEntry::Independent, |state, body, _declarations| {
             let occurrence = state.active_return_result_occurrence.unwrap();
             assert!(!state.return_result_frames[&occurrence].results.contains_key(&ReturnResultId(17)));
             assert!(optional_effect_is_infeasible(state, body));
@@ -66542,7 +66998,7 @@ mod departure_process_entry_tests {
             source,
             P0,
         )));
-        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable| {
+        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, executable, declarations| {
             let mut events = vec![];
             change_zone::resolve(state, executable, &mut events)?;
             assert_eq!(state.objects[&four].zone, Zone::Exile);
@@ -66625,7 +67081,7 @@ mod departure_process_entry_tests {
     ) {
         let mut state = GameState::new_two_player(42);
         let root = producer(7);
-        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, body| {
+        with_instruction_result_entry(&mut state, &root, InstructionResultEntry::Independent, |state, body, _declarations| {
             let occurrence = state.active_return_result_occurrence.unwrap();
             let process = body.return_result_process.unwrap();
             publish_return_result(state, occurrence, ReturnResultId(7), Some(process), vec![])?;
@@ -66658,6 +67114,7 @@ mod departure_process_entry_tests {
             ReturnResultOccurrenceId(11),
             ReturnResultFrame {
                 process: Some(ReturnResultProcessId(37)),
+                declarations: None,
                 results: [(
                     ReturnResultId(9),
                     crate::types::game_state::InstructionResult::ZoneChanges(vec![]),
@@ -66689,7 +67146,7 @@ mod departure_process_entry_tests {
             let mut state = base.clone();
             let before = serde_json::to_value(&state).unwrap();
             let mut entered = false;
-            let result = with_instruction_result_entry(&mut state, &root, entry, |_, _| {
+            let result = with_instruction_result_entry(&mut state, &root, entry, |_, _, _| {
                 entered = true;
                 Ok(())
             });
@@ -66715,7 +67172,7 @@ mod departure_process_entry_tests {
             &mut state,
             &root,
             InstructionResultEntry::SelectedBody,
-            |state, executable| {
+            |state, executable, declarations| {
                 assert_eq!(root.return_result_process, None);
                 let inner_p = executable.return_result_process.unwrap();
                 assert_ne!(inner_p, outer_p);

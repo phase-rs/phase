@@ -9462,7 +9462,6 @@ mod tests {
         let clause =
             try_parse_exiled_this_way_keyword_grant("Cards exiled this way gain suspend", &ctx)
                 .expect("should recognize the unconditional set-referencing suspend grant");
-        assert_eq!(clause.duration, Some(Duration::Permanent));
         // No condition on the unconditional form.
         assert_eq!(clause.condition, None);
         let Effect::GenericEffect {
@@ -9475,6 +9474,10 @@ mod tests {
             panic!("expected GenericEffect, got {:?}", clause.effect);
         };
         assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(
+            clause.duration.clone().or(duration.clone()),
+            Some(Duration::Permanent)
+        );
         assert_eq!(*target, Some(TargetFilter::ParentTarget));
         assert_eq!(static_abilities.len(), 1);
         assert!(static_abilities[0].modifications.iter().any(|m| matches!(
@@ -14058,8 +14061,12 @@ mod retained_shipping_member_tests {
             ("loses all abilities and becomes a green Elk creature with base power and toughness 3/3 until end of turn", Duration::UntilEndOfTurn),
         ] {
             let clause = build_continuous_clause(application.clone(), predicate, &ParseContext::default(), false).unwrap();
-            assert_eq!(clause.duration, Some(expected.clone()));
-            assert!(matches!(clause.effect, Effect::GenericEffect { duration: Some(ref actual), .. } if actual == &expected));
+            let Effect::GenericEffect { duration, .. } = &clause.effect else { panic!("{clause:#?}") };
+            assert_eq!(*duration, Some(expected.clone()));
+            assert_eq!(clause.duration.clone().or(duration.clone()), Some(expected.clone()));
+            if expected != Duration::Permanent {
+                assert_eq!(clause.duration, Some(expected));
+            }
         }
     }
 
