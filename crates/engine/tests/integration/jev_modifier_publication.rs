@@ -1508,10 +1508,85 @@ fn strength_snapshots_three_attackers_and_preserves_trample_until_cleanup() {
 
 #[test]
 fn alpine_moon_removes_land_subtypes_but_keeps_actual_legendary_artifact_axes() {
-    use engine::types::card_type::Supertype;
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
+        ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter,
+        TypedFilter,
+    };
+    use engine::types::card_type::{SubtypeSet, Supertype};
     let moon_face = printed("Alpine Moon");
+    let printed_text = moon_face["text"].as_str().unwrap();
+    let static_text = "Lands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"";
+    assert_eq!(
+        printed_text,
+        format!("As this enchantment enters, choose a nonbasic land card name.\n{static_text}")
+    );
+    let atomic: engine::database::mtgjson::AtomicCard = serde_json::from_value(moon_face).unwrap();
+    let full_face = engine::database::synthesis::build_oracle_face_multi(
+        &atomic,
+        atomic.identifiers.scryfall_oracle_id.clone(),
+    );
+    let first_clause = "As ~ enters, choose a nonbasic land card name.";
+    let mut unsupported = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::unimplemented("unknown", first_clause),
+    );
+    unsupported.description = Some(first_clause.into());
+    assert_eq!(full_face.abilities, vec![unsupported]);
+    assert!(
+        full_face.replacements.is_empty(),
+        "no fabricated name publisher"
+    );
+    assert!(full_face.triggers.is_empty());
+    assert!(full_face.keywords.is_empty());
+    assert_eq!(
+        engine::game::coverage::card_face_gaps(&full_face),
+        vec!["Effect:unknown".to_owned()]
+    );
+    let mut mana_ability = AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::AnyOneColor {
+                count: QuantityExpr::Fixed { value: 1 },
+                color_options: ManaColor::ALL.to_vec(),
+                contribution: ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap);
+    mana_ability.description = Some("{T}: Add one mana of any color.".into());
+    assert_eq!(
+        full_face.static_abilities,
+        vec![StaticDefinition::continuous()
+            .affected(TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::Opponent)),
+                    TargetFilter::HasChosenName,
+                ],
+            })
+            .modifications(vec![
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Land
+                },
+                ContinuousModification::RemoveAllAbilities,
+                ContinuousModification::GrantAbility {
+                    definition: Box::new(mana_ability.clone())
+                },
+            ])
+            .description(static_text.into())]
+    );
+    // The full printed card above retains its known restricted-name gap.
+    // This synthetic control publishes an unrestricted card name and uses
+    // the identical complete printed static companion through public actions.
+    let control_text = format!("As this enchantment enters, choose a card name.\n{static_text}");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
+    // Synthetic Locus subtypes make subtype loss and controller exclusion
+    // observable; neither subtype is claimed to be printed on Minamo.
     let named = scenario
         .add_land_from_oracle(
             P1,
@@ -1519,6 +1594,7 @@ fn alpine_moon_removes_land_subtypes_but_keeps_actual_legendary_artifact_axes() 
             "{T}: Add {U}.\n{U}, {T}: Untap target legendary permanent.",
         )
         .as_legendary()
+        .with_subtypes(vec!["Locus"])
         .id();
     let own = scenario
         .add_land_from_oracle(
@@ -1527,14 +1603,15 @@ fn alpine_moon_removes_land_subtypes_but_keeps_actual_legendary_artifact_axes() 
             "{T}: Add {U}.\n{U}, {T}: Untap target legendary permanent.",
         )
         .as_legendary()
+        .with_subtypes(vec!["Locus"])
         .id();
     let coating = scenario.add_artifact_from_oracle(P0, "Liquimetal Coating", "{T}: Target permanent becomes an artifact in addition to its other types until end of turn.").id();
     let moon = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Alpine Moon",
+            "Synthetic unrestricted name publisher with Alpine static",
             false,
-            moon_face["text"].as_str().unwrap(),
+            &control_text,
         )
         .as_enchantment()
         .with_mana_cost(cost("{R}"))
@@ -1545,11 +1622,15 @@ fn alpine_moon_removes_land_subtypes_but_keeps_actual_legendary_artifact_axes() 
         .card_types
         .core_types
         .contains(&CoreType::Artifact));
+    assert_eq!(
+        runner.state().objects[&named].card_types.subtypes,
+        vec!["Locus".to_owned()]
+    );
     fund(&mut runner, 0, &[ManaType::Red]);
     runner.cast(moon).commit();
     runner.resolve_top();
     let WaitingFor::NamedChoice { player, .. } = &runner.state().waiting_for else {
-        panic!("real nonbasic land name choice");
+        panic!("synthetic unrestricted card name choice");
     };
     assert_eq!(*player, P0);
     runner
@@ -1564,6 +1645,13 @@ fn alpine_moon_removes_land_subtypes_but_keeps_actual_legendary_artifact_axes() 
     assert!(object.card_types.supertypes.contains(&Supertype::Legendary));
     assert!(object.card_types.subtypes.is_empty());
     assert_eq!(object.abilities.len(), 1);
+    assert_eq!(object.abilities[0], mana_ability);
+    assert_eq!(runner.state().objects[&moon].zone, Zone::Battlefield);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(
+        runner.state().objects[&own].card_types.subtypes,
+        vec!["Locus".to_owned()]
+    );
     assert_eq!(
         runner.state().objects[&own].abilities.len(),
         2,

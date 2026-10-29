@@ -46766,6 +46766,7 @@ pub(crate) mod defining_modifier_publication {
         }
         let text = text.replace(name, "~");
         match name {
+            "Alpine Moon" => "As ~ enters, choose a nonbasic land card name.\nLands your opponents control with the chosen name lose all land types and abilities, and they gain \"{T}: Add one mana of any color.\"".to_owned(),
             "Jenny, Generated Anomaly" => text.replace("Jenny", "~"),
             "Francisco, Fowl Marauder" => text.replace("Francisco", "~"),
             "Captain Kathryn Janeway" => text.replace("Captain Janeway", "~"),
@@ -48518,17 +48519,10 @@ pub(crate) mod defining_modifier_publication {
                 }
             }
             "Alpine Moon" => {
-                out.replacements.push(
-                    ReplacementDefinition::new(ReplacementEvent::Moved)
-                        .valid_card(TargetFilter::SelfRef)
-                        .destination_zone(Zone::Battlefield)
-                        .execute(spell(Effect::Choose {
-                            choice_type: ChoiceType::CardName,
-                            persist: true,
-                            selection: TargetSelectionMode::Chosen,
-                        }))
-                        .description(printed_line(name, 0)),
-                );
+                let first_clause = printed_line(name, 0);
+                let mut unsupported = spell(Effect::unimplemented("unknown", &first_clause));
+                unsupported.description = Some(first_clause);
+                out.abilities.push(unsupported);
                 let mut mana_ability = AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::Mana {
@@ -49647,7 +49641,7 @@ pub(crate) mod defining_modifier_publication {
             ],
             "Shay Cormac" => vec![(0, "Spell"), (1, "Trigger"), (2, "Trigger")],
             "The Irencrag" => vec![(0, "Spell"), (1, "Trigger")],
-            "Alpine Moon" => vec![(0, "Replacement"), (1, "Static")],
+            "Alpine Moon" => vec![(0, "Unsupported"), (1, "Static")],
             "Mace of the Valiant" => vec![(0, "Static"), (1, "Trigger"), (2, "Keyword")],
             "Nyxborn Hydra" => vec![
                 (0, "Keyword"),
@@ -49863,21 +49857,34 @@ pub(crate) mod defining_modifier_publication {
                     min_x_value,
                 } => {
                     assert_eq!(category, "Unsupported");
-                    assert_eq!(name, "Sorin's Remastered Manor");
-                    assert_eq!(line, 1);
                     assert_eq!(*min_x_value, 0);
-                    assert_eq!(
-                        unsupported.category,
-                        crate::parser::oracle_ir::doc::UnsupportedAbilityCategory::StaticStructure
-                    );
-                    assert_eq!(unsupported.fragment, printed_line(name, 1));
-                    assert_eq!(
-                        unsupported.description,
-                        format!(
-                            "Static pattern matched but line failed static parser: {}",
-                            printed_line(name, 1)
-                        )
-                    );
+                    match name {
+                        "Sorin's Remastered Manor" => {
+                            assert_eq!(line, 1);
+                            assert_eq!(
+                                unsupported.category,
+                                crate::parser::oracle_ir::doc::UnsupportedAbilityCategory::StaticStructure
+                            );
+                            assert_eq!(unsupported.fragment, printed_line(name, 1));
+                            assert_eq!(
+                                unsupported.description,
+                                format!(
+                                    "Static pattern matched but line failed static parser: {}",
+                                    printed_line(name, 1)
+                                )
+                            );
+                        }
+                        "Alpine Moon" => {
+                            assert_eq!(line, 0);
+                            assert_eq!(
+                                unsupported.category,
+                                crate::parser::oracle_ir::doc::UnsupportedAbilityCategory::Unknown
+                            );
+                            assert_eq!(unsupported.fragment, printed_line(name, 0));
+                            assert_eq!(unsupported.description, printed_line(name, 0));
+                        }
+                        other => panic!("unlisted unsupported source for {other}: {unsupported:?}"),
+                    }
                 }
                 other => panic!("unlisted independent source category for {name}: {other:?}"),
             }
@@ -49909,6 +49916,7 @@ pub(crate) mod defining_modifier_publication {
             let expected_reported_gap = matches!(
                 expected.name.as_str(),
                 "Wall of Vipers"
+                    | "Alpine Moon"
                     | "Martyrdom"
                     | "Sorin's Remastered Manor"
                     | "I'm Going On An Adventure!"
