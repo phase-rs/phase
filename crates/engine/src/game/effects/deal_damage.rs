@@ -9146,7 +9146,6 @@ mod damage_opportunity_public_remainder_tests {
         use crate::types::zones::Zone;
         // Supplemental typed activation: completed result, actual damage
         // replacement choice, generated remainder, then an addressed reader.
-        let mut completed_recipient_pauses = vec![];
         for empty in [false, true] {
             for diverged in [false, true] {
                 let mut scenario = GameScenario::new();
@@ -9262,6 +9261,23 @@ mod damage_opportunity_public_remainder_tests {
                 assert!(
                     matches!(&frame.results[&ReturnResultId(7)], InstructionResult::ZoneChanges(records) if records.len() == if empty { 0 } else { 2 })
                 );
+                let ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount,
+                    is_combat,
+                    ..
+                } = &runner
+                    .state()
+                    .pending_replacement
+                    .as_ref()
+                    .unwrap()
+                    .proposed
+                else {
+                    panic!("the first actual replacement proposes player damage")
+                };
+                let first_damage = (*source_id, target.clone(), *amount, *is_combat);
+                assert_eq!(first_damage, (source, TargetRef::Player(P0), 1, false));
                 let paused = runner.state().clone();
                 let mut hostile = paused.clone();
                 hostile
@@ -9374,6 +9390,16 @@ mod damage_opportunity_public_remainder_tests {
                                 .is_optional
                         );
                         if choices == 1 {
+                            assert!(matches!(
+                                &resumed.state().pending_replacement.as_ref().unwrap().proposed,
+                                ProposedEvent::Damage {
+                                    source_id,
+                                    target: TargetRef::Player(P1),
+                                    amount: 1,
+                                    is_combat: false,
+                                    ..
+                                } if *source_id == source
+                            ));
                             let chain =
                                 &resumed.state().active_ability_continuation().unwrap().chain;
                             assert!(matches!(
@@ -9383,6 +9409,22 @@ mod damage_opportunity_public_remainder_tests {
                                     ..
                                 }
                             ));
+                            // CR 120.4b: the survivor retains the actual first
+                            // event's damage values after replacement selection.
+                            let Effect::ApplyPostReplacementDamage {
+                                context,
+                                target,
+                                amount,
+                                is_combat,
+                            } = &chain.effect
+                            else {
+                                unreachable!()
+                            };
+                            assert_eq!(
+                                (context.source_id, target.clone(), *amount, *is_combat),
+                                first_damage
+                            );
+                            assert_eq!(chain.source_id, first_damage.0);
                             assert!(chain.targets.is_empty());
                             assert_eq!(chain.ability_index, Some(0));
                             assert_eq!(
@@ -9390,7 +9432,6 @@ mod damage_opportunity_public_remainder_tests {
                                 vec![ManaType::Black]
                             );
                             assert_eq!(chain.controller, if diverged { P1 } else { P0 });
-                            completed_recipient_pauses.push((source, resumed.state().clone()));
                             for fault in 0..2 {
                                 let mut hostile = resumed.state().clone();
                                 let chain = &mut hostile
@@ -9419,7 +9460,73 @@ mod damage_opportunity_public_remainder_tests {
                                 assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
                                 assert_eq!(hostile.rng.get_word_pos(), rng);
                             }
+                            let second_pause = resumed.state().clone();
+                            *resumed.state_mut() = if restore_kind == 1 {
+                                serde_json::from_value::<TrustedGameStateEnvelope>(
+                                    serde_json::to_value(TrustedGameStateEnvelope::capture(
+                                        second_pause,
+                                    ))
+                                    .unwrap(),
+                                )
+                                .unwrap()
+                                .into_game_state()
+                            } else if restore_kind == 2 {
+                                serde_json::from_value::<crate::types::resolution::ResolutionStateWire>(
+                                    serde_json::to_value(
+                                        crate::types::resolution::ResolutionStateWire::from_game_state(
+                                            second_pause,
+                                        ),
+                                    )
+                                    .unwrap(),
+                                )
+                                .unwrap()
+                                .into_game_state()
+                            } else {
+                                serde_json::from_value(serde_json::to_value(second_pause).unwrap())
+                                    .unwrap()
+                            };
+                            let chain =
+                                &resumed.state().active_ability_continuation().unwrap().chain;
+                            let Effect::ApplyPostReplacementDamage {
+                                context,
+                                target,
+                                amount,
+                                is_combat,
+                            } = &chain.effect
+                            else {
+                                panic!("the first survivor remains post-replacement after reload")
+                            };
+                            assert_eq!(
+                                (context.source_id, target.clone(), *amount, *is_combat),
+                                first_damage
+                            );
+                            assert_eq!(chain.source_id, first_damage.0);
+                            assert!(chain.targets.is_empty());
                         }
+                        let ProposedEvent::Damage {
+                            source_id,
+                            target,
+                            amount,
+                            is_combat,
+                            ..
+                        } = &resumed
+                            .state()
+                            .pending_replacement
+                            .as_ref()
+                            .unwrap()
+                            .proposed
+                        else {
+                            panic!("each actual replacement proposes player damage")
+                        };
+                        assert_eq!(
+                            (*source_id, target.clone(), *amount, *is_combat),
+                            (
+                                source,
+                                TargetRef::Player(if choices == 0 { P0 } else { P1 }),
+                                1,
+                                false,
+                            )
+                        );
                         delivered.extend(
                             resumed
                                 .act(GameAction::ChooseReplacement { index: 1 })
@@ -9465,6 +9572,22 @@ mod damage_opportunity_public_remainder_tests {
                         })
                         .collect();
                     assert_eq!(damage.len(), 2);
+                    assert_eq!(
+                        delivered
+                            .iter()
+                            .filter(|event| matches!(event, GameEvent::DamageDealt { .. }))
+                            .count(),
+                        2
+                    );
+                    for player in [P0, P1] {
+                        assert_eq!(
+                            damage
+                                .iter()
+                                .filter(|(_, target)| *target == TargetRef::Player(player))
+                                .count(),
+                            1
+                        );
+                    }
                     assert!(damage
                         .iter()
                         .any(|(_, target)| *target == TargetRef::Player(P0)));
@@ -9497,34 +9620,6 @@ mod damage_opportunity_public_remainder_tests {
                     assert_eq!(resumed.state().active_return_result_occurrence, None);
                 }
             }
-        }
-        // This supplemental historical-recipient forgery executes only after
-        // every original public completion and reload assertion above.
-        for (source, mut hostile) in completed_recipient_pauses {
-            let chain = &mut hostile
-                .active_ability_continuation_frame_mut()
-                .unwrap()
-                .pending
-                .chain;
-            let Effect::ApplyPostReplacementDamage { target, .. } = &mut chain.effect else {
-                unreachable!()
-            };
-            *target = TargetRef::Object(source);
-            let before = hostile.clone();
-            let serialized = serde_json::to_value(&hostile).unwrap();
-            let rng = hostile.rng.get_word_pos();
-            assert!(
-                crate::game::engine::apply(
-                    &mut hostile,
-                    P1,
-                    GameAction::ChooseReplacement { index: 1 }
-                )
-                .is_err(),
-                "supplemental post damage historical-recipient forgery"
-            );
-            assert_eq!(hostile, before);
-            assert_eq!(serde_json::to_value(&hostile).unwrap(), serialized);
-            assert_eq!(hostile.rng.get_word_pos(), rng);
         }
     }
 
