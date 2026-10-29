@@ -2340,6 +2340,110 @@ pub(crate) type AdmittedInstructionResult<'a> = (
     &'a crate::types::ability::ResultProducerEnvironment,
 );
 
+/// Capture only the source inputs needed by this invocation's rolling
+/// instructions, before its immutable program is admitted.
+fn prepare_fresh_die_source_input(state: &GameState, ability: &mut ResolvedAbility) {
+    fn own_children(ability: &ResolvedAbility) -> impl Iterator<Item = &ResolvedAbility> {
+        [
+            ability
+                .sub_ability
+                .as_deref()
+                .filter(|child| !ability.effect.sub_ability_resolves_later(child.sub_link)),
+            ability.else_ability.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(
+            ability
+                .coin_branch_target_abilities
+                .iter()
+                .map(|(_, child)| child.as_ref()),
+        )
+        .filter(|child| {
+            !child
+                .condition
+                .as_ref()
+                .is_some_and(crate::types::ability::AbilityCondition::has_when_you_do_marker)
+        })
+    }
+    fn has_own_die(ability: &ResolvedAbility, source: ObjectId) -> bool {
+        if ability.source_id != source {
+            return false;
+        }
+        let found = crate::types::ability_visit::visit_effect_scoped(
+            &ability.effect,
+            crate::types::ability_visit::ResolutionScope::OwnResolutionOnly,
+            &mut |effect| {
+                if matches!(effect, Effect::RollDie { .. }) {
+                    std::ops::ControlFlow::Break(())
+                } else {
+                    std::ops::ControlFlow::Continue(())
+                }
+            },
+        );
+        found.is_break() || own_children(ability).any(|child| has_own_die(child, source))
+    }
+    fn fill_missing(ability: &mut ResolvedAbility, input: &ResolvedAbility) {
+        if ability.source_id != input.source_id {
+            return;
+        }
+        if ability.source_incarnation.is_none() {
+            ability.source_incarnation = ability
+                .trigger_source
+                .as_ref()
+                .map(|source| source.identity.reference.incarnation)
+                .or(input.source_incarnation);
+        }
+        if ability.trigger_source.is_none()
+            && input.trigger_source.as_ref().is_some_and(|source| {
+                Some(source.identity.reference.incarnation) == ability.source_incarnation
+            })
+        {
+            ability.trigger_source = input.trigger_source.clone();
+        }
+        let later_sub = ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|child| ability.effect.sub_ability_resolves_later(child.sub_link));
+        for (child, later) in [
+            (&mut ability.sub_ability, later_sub),
+            (&mut ability.else_ability, false),
+        ] {
+            if let Some(child) = child.as_deref_mut().filter(|child| {
+                !later
+                    && !child.condition.as_ref().is_some_and(
+                        crate::types::ability::AbilityCondition::has_when_you_do_marker,
+                    )
+            }) {
+                fill_missing(child, input);
+            }
+        }
+        for (_, child) in &mut ability.coin_branch_target_abilities {
+            fill_missing(child, input);
+        }
+    }
+    if !has_own_die(ability, ability.source_id) {
+        return;
+    }
+    let mut input = ResolvedAbility::new(
+        Effect::NoOp,
+        Vec::new(),
+        ability.source_id,
+        ability.controller,
+    );
+    input.source_incarnation = ability.source_incarnation;
+    input.trigger_source = ability.trigger_source.clone();
+    if input.source_incarnation.is_none() && input.trigger_source.is_none() {
+        crate::game::ability_utils::inherit_result_branch_source_identity(state, &mut input);
+    } else if input.source_incarnation.is_none() {
+        input.source_incarnation = input
+            .trigger_source
+            .as_ref()
+            .map(|source| source.identity.reference.incarnation);
+    }
+    fill_missing(ability, &input);
+}
+
 fn begin_return_result_occurrence(
     state: &mut GameState,
     program: &ResolvedAbility,
@@ -2397,7 +2501,9 @@ fn begin_test_return_result_occurrence(
         crate::types::ability::InstructionResultEntry::Independent,
         None,
     )?;
-    begin_return_result_occurrence(state, program, &declarations)
+    let mut prepared = program.clone();
+    prepare_fresh_die_source_input(state, &mut prepared);
+    begin_return_result_occurrence(state, &prepared, &declarations)
 }
 
 fn with_iteration_return_result_occurrence<T>(
@@ -2435,8 +2541,10 @@ fn with_instruction_result_entry<T>(
     let mut executable = ability.clone();
     let previous = match summary {
         InstructionResultProcess::Local { .. } => {
+            prepare_fresh_die_source_input(state, &mut executable);
+            state.validate_replacement_program(&executable)?;
             let (previous, process) =
-                begin_return_result_occurrence(state, ability, &declarations)?;
+                begin_return_result_occurrence(state, &executable, &declarations)?;
             executable.bind_return_result_process(Some(process));
             previous
         }
@@ -2485,6 +2593,8 @@ fn with_instruction_result_entry<T>(
             Some(occurrence)
         }
         InstructionResultProcess::Unused => {
+            prepare_fresh_die_source_input(state, &mut executable);
+            state.validate_replacement_program(&executable)?;
             executable.bind_return_result_process(None);
             state.active_return_result_occurrence.take()
         }
@@ -15734,6 +15844,37 @@ fn resolve_owned_effect_step(
 ) -> Result<EffectStep, EffectError> {
     validate_addressed_quantity_reads(state, ability)?;
     match &ability.effect {
+        Effect::CombineHost { .. } | Effect::ChooseAugmentAndCombineWithHost { .. } => {
+            let progress = match &ability.effect {
+                Effect::CombineHost { .. } => crate::game::augment::resolve_combine_host_owned(
+                    state,
+                    ability,
+                    events,
+                    Some(declarations),
+                )?,
+                Effect::ChooseAugmentAndCombineWithHost { .. } => {
+                    crate::game::augment::resolve_choose_augment_and_combine_owned(
+                        state,
+                        ability,
+                        events,
+                        Some(declarations),
+                    )?
+                }
+                _ => unreachable!(),
+            };
+            Ok(EffectStep {
+                progress,
+                result: None,
+                tail: match progress {
+                    ResolutionProgress::Complete => TailOwnership::Caller,
+                    ResolutionProgress::Waiting => TailOwnership::Transferred,
+                    ResolutionProgress::Queued => {
+                        unreachable!("augment parks its generated choice synchronously")
+                    }
+                },
+                damage_opportunity: None,
+            })
+        }
         Effect::RollDie { .. } => Ok(EffectStep {
             progress: roll_die::resolve_step_owned(state, ability, events, declarations)?,
             result: None,
@@ -15902,19 +16043,8 @@ fn resolve_legacy_effect(
         Effect::Myriad => myriad::resolve_owned(state, ability, events, declarations),
         Effect::ExileHaunting { .. } => crate::game::haunt::resolve(state, ability, events),
         Effect::Encore => encore::resolve_owned(state, ability, events, declarations),
-        Effect::CombineHost { .. } => crate::game::augment::resolve_combine_host_owned(
-            state,
-            ability,
-            events,
-            Some(declarations),
-        ),
-        Effect::ChooseAugmentAndCombineWithHost { .. } => {
-            crate::game::augment::resolve_choose_augment_and_combine_owned(
-                state,
-                ability,
-                events,
-                Some(declarations),
-            )
+        Effect::CombineHost { .. } | Effect::ChooseAugmentAndCombineWithHost { .. } => {
+            unreachable!("native augment dispatch precedes the legacy adapter")
         }
         Effect::Meld { .. } => crate::game::meld::perform_meld(state, ability, events),
         Effect::HideawayConceal { .. } => hideaway::resolve(state, ability, events),
@@ -68790,6 +68920,110 @@ mod departure_process_entry_tests {
         let mut ability = ResolvedAbility::new(effect, vec![], ObjectId(100), P0);
         ability.declares_return_result = Some(ReturnResultId(result));
         ability
+    }
+
+    #[test]
+    fn fresh_die_preparation_preserves_every_other_input_and_own_resolution_boundary() {
+        use crate::types::game_state::{StackEntry, StackEntryKind};
+        let source = ObjectId(100);
+        let roll = || {
+            ResolvedAbility::new(
+                Effect::RollDie {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    sides: 1,
+                    results: Vec::new(),
+                    modifier: None,
+                },
+                vec![],
+                source,
+                P0,
+            )
+        };
+        let mut state = GameState::new_two_player(42);
+        let mut actual = roll();
+        actual.source_incarnation = Some(17);
+        actual.announced_source_incarnation = Some(99);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(901),
+            source_id: source,
+            controller: P0,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(actual),
+            },
+        });
+        let mut root = producer(7);
+        root.original_controller = Some(PlayerId(1));
+        root.scoped_player = Some(PlayerId(1));
+        root.chosen_x = Some(4);
+        root.announced_source_incarnation = Some(55);
+        root.context.boon_captured_noted_number = Some(23);
+        root.context.chain_root_targets = vec![TargetRef::Player(PlayerId(1))];
+        let mut die = roll();
+        die.original_controller = Some(PlayerId(1));
+        die.chosen_x = Some(3);
+        die.context.boon_captured_noted_number = Some(31);
+        die.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::NoOp,
+            vec![],
+            ObjectId(101),
+            PlayerId(1),
+        )));
+        die.sub_ability.as_mut().unwrap().sub_ability = Some(Box::new(roll()));
+        root.sub_ability = Some(Box::new(die));
+        let mut expected = root.clone();
+        expected.source_incarnation = Some(17);
+        expected.sub_ability.as_mut().unwrap().source_incarnation = Some(17);
+        with_instruction_result_entry(
+            &mut state,
+            &root,
+            InstructionResultEntry::Independent,
+            |state, executable, (program, _)| {
+                let mut expected = expected.clone();
+                expected.bind_return_result_process(executable.return_result_process);
+                assert!(instruction_result_projection_eq(executable, &expected));
+                assert!(instruction_result_projection_eq(program, executable));
+                assert!(instruction_result_projection_eq(
+                    state.return_result_frames[&state.active_return_result_occurrence.unwrap()]
+                        .admitted_program
+                        .as_deref()
+                        .unwrap(),
+                    executable,
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(root.source_incarnation, None);
+        let mut captured = root.clone();
+        captured.source_incarnation = Some(7);
+        captured.sub_ability.as_mut().unwrap().source_incarnation = Some(8);
+        let before = captured.clone();
+        prepare_fresh_die_source_input(&state, &mut captured);
+        assert!(instruction_result_projection_eq(&captured, &before));
+
+        // The later body's own fresh entry may capture; registering it does not.
+        let mut registered = ResolvedAbility::new(Effect::NoOp, vec![], source, P0);
+        let mut later = roll();
+        later.condition = Some(crate::types::ability::AbilityCondition::WhenYouDo);
+        registered.sub_ability = Some(Box::new(later.clone()));
+        let before = registered.clone();
+        prepare_fresh_die_source_input(&state, &mut registered);
+        assert!(instruction_result_projection_eq(&registered, &before));
+        prepare_fresh_die_source_input(&state, &mut later);
+        assert_eq!(later.source_incarnation, Some(17));
+        for foreign in [false, true] {
+            let mut state = state.clone();
+            let entry = state.resolving_stack_entry.as_mut().unwrap();
+            if foreign {
+                entry.source_id = ObjectId(101);
+            } else if let StackEntryKind::ActivatedAbility { ability, .. } = &mut entry.kind {
+                ability.source_id = ObjectId(101);
+            }
+            let mut input = roll();
+            prepare_fresh_die_source_input(&state, &mut input);
+            assert!(input.source_incarnation.is_none());
+        }
     }
 
     #[test]

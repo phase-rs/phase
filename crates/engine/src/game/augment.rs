@@ -28,7 +28,7 @@ pub fn resolve_combine_host(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    resolve_combine_host_owned(state, ability, events, None)
+    resolve_combine_host_owned(state, ability, events, None).map(|_| ())
 }
 
 pub(crate) fn resolve_combine_host_owned(
@@ -36,7 +36,7 @@ pub(crate) fn resolve_combine_host_owned(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
-) -> Result<(), EffectError> {
+) -> Result<super::effects::ResolutionProgress, EffectError> {
     let (source_kind, host_filter) = match &ability.effect {
         Effect::CombineHost { source, host } => (*source, host.as_ref()),
         _ => {
@@ -52,7 +52,7 @@ pub(crate) fn resolve_combine_host_owned(
             source_id: ability.source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(super::effects::ResolutionProgress::Complete);
     };
 
     let mut hosts = resolved_object_ids_for_filter(state, ability, host_filter);
@@ -71,7 +71,7 @@ pub(crate) fn resolve_combine_host_owned(
                 source_id: ability.source_id,
                 subject: None,
             });
-            Ok(())
+            Ok(super::effects::ResolutionProgress::Complete)
         }
         [host_id] => {
             combine_card_with_host(state, augment_id, *host_id, ability.controller, events);
@@ -80,7 +80,7 @@ pub(crate) fn resolve_combine_host_owned(
                 source_id: ability.source_id,
                 subject: None,
             });
-            Ok(())
+            Ok(super::effects::ResolutionProgress::Complete)
         }
         _ => {
             let continuation = continuation_for_host_choice(ability, augment_id);
@@ -105,7 +105,7 @@ pub(crate) fn resolve_combine_host_owned(
                 source_id: ability.source_id,
                 subject: None,
             });
-            Ok(())
+            Ok(super::effects::ResolutionProgress::Waiting)
         }
     }
 }
@@ -115,7 +115,7 @@ pub fn resolve_choose_augment_and_combine(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    resolve_choose_augment_and_combine_owned(state, ability, events, None)
+    resolve_choose_augment_and_combine_owned(state, ability, events, None).map(|_| ())
 }
 
 pub(crate) fn resolve_choose_augment_and_combine_owned(
@@ -123,7 +123,7 @@ pub(crate) fn resolve_choose_augment_and_combine_owned(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
     admitted: Option<super::effects::AdmittedInstructionResult<'_>>,
-) -> Result<(), EffectError> {
+) -> Result<super::effects::ResolutionProgress, EffectError> {
     let (zones_to_search, filter, host_filter) = match &ability.effect {
         Effect::ChooseAugmentAndCombineWithHost {
             zones,
@@ -148,7 +148,7 @@ pub(crate) fn resolve_choose_augment_and_combine_owned(
                 source_id: ability.source_id,
                 subject: None,
             });
-            Ok(())
+            Ok(super::effects::ResolutionProgress::Complete)
         }
         [augment_id] => {
             let mut direct = ability.clone();
@@ -181,7 +181,7 @@ pub(crate) fn resolve_choose_augment_and_combine_owned(
                 source_id: ability.source_id,
                 subject: None,
             });
-            Ok(())
+            Ok(super::effects::ResolutionProgress::Waiting)
         }
     }
 }
@@ -702,6 +702,53 @@ mod owned_continuation_tests {
             assert_eq!(runner.life(P0), 20);
             assert_eq!(runner.state().return_result_frames.len(), 1);
             let pending = runner.state().active_ability_continuation().unwrap();
+            assert!(
+                matches!(
+                    &pending.chain.effect,
+                    Effect::CombineHost { source: CombineSource::ParentTarget, host }
+                        if choose_augment && **host == TargetFilter::SpecificObject { id: first_host }
+                ) || matches!(
+                    &pending.chain.effect,
+                    Effect::CombineHost { source: CombineSource::SpecificObject { id }, host }
+                        if !choose_augment && *id == first_augment && **host == TargetFilter::ParentTarget
+                )
+            );
+            let tail = pending
+                .chain
+                .sub_ability
+                .as_deref()
+                .expect("generated prompt owns the full authored tail");
+            assert!(matches!(
+                &tail.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneChangeAggregate {
+                            source: ZoneChangeRecordSource::InstructionResult {
+                                result: ReturnResultId(7)
+                            },
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Exile),
+                            function: AggregateFunction::Sum,
+                            property: ObjectProperty::Power,
+                            ..
+                        }
+                    },
+                    ..
+                }
+            ));
+            assert_eq!(
+                runner
+                    .state()
+                    .resolution_stack
+                    .iter()
+                    .filter(|frame| matches!(
+                        frame,
+                        crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
+                    ))
+                    .count(),
+                1,
+                "one complete generated operation owns this prompt"
+            );
             let occurrence = pending.return_result_occurrence;
             let admitted = runner.state().return_result_frames[&occurrence.unwrap()]
                 .admitted_program

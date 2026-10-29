@@ -383,7 +383,8 @@ pub(crate) fn selection_program_owner(
                 && *pending.context == selection.context && pending.continuation == selection.continuation
                 && pending.replacement_applied == selection.replacement_applied
                 && pending.remaining_players == selection.remaining_players && pending.trigger_context == selection.trigger_context));
-    let needs_owner = selection.context.counter_removal_result.is_some()
+    let needs_owner = selection.return_result_occurrence.is_some()
+        || selection.context.counter_removal_result.is_some()
         || selection.branches.iter().any(|definition| {
             let body =
                 build_resolved_from_def(definition, selection.source_id, selection.controller);
@@ -436,7 +437,8 @@ pub(crate) fn selection_program_owner(
             "selected instruction-result program declaration mismatch".into(),
         ));
     }
-    let mut parent = None;
+    state.validate_replacement_program(program)?;
+    let mut parents = Vec::new();
     let mut cursor = ResolvedAbility::new(
         Effect::ChooseOneOf {
             kind: ChooseOneOfKind::Ordinary,
@@ -471,18 +473,27 @@ pub(crate) fn selection_program_owner(
                 && candidate.replacement_applied == selection.replacement_applied
                 && choosing_players(state, candidate, chooser).contains(&selection.player)
             {
-                parent = Some(candidate.clone());
-                true
-            } else {
-                false
+                if !parents
+                    .iter()
+                    .any(|known| super::instruction_result_projection_eq(known, candidate))
+                {
+                    parents.push(candidate.clone());
+                }
             }
+            false
         },
     );
-    let parent = parent.ok_or_else(|| {
+    if parents.len() > 1 {
+        return Err(EffectError::InvalidParam(
+            "selected operation has conflicting admitted parent inputs".into(),
+        ));
+    }
+    let parent = parents.pop().ok_or_else(|| {
         EffectError::InvalidParam(
             "selected instruction-result prompt is not owned by its admitted program".into(),
         )
     })?;
+    state.validate_replacement_program(&parent)?;
     Ok(Some((program.clone(), declarations, parent)))
 }
 
@@ -1002,6 +1013,89 @@ mod tests {
     use crate::types::resolution::FrameKind;
     use crate::types::zones::Zone;
     use crate::types::PlayerId;
+
+    #[test]
+    fn held_choice_deduplicates_complete_parents_and_refuses_conflicting_inputs() {
+        use crate::types::ability::ReturnResultId;
+        for conflicting in [false, true] {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(100),
+                PlayerId(0),
+                "Supplemental complete parent input".into(),
+                Zone::Battlefield,
+            );
+            let producer = |result| {
+                let effect = serde_json::from_value(serde_json::json!({
+                    "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+                    "target":TargetFilter::SpecificObject { id: ObjectId(0) }
+                }))
+                .unwrap();
+                let mut definition = AbilityDefinition::new(AbilityKind::Spell, effect);
+                definition.declares_return_result = Some(ReturnResultId(result));
+                definition
+            };
+            let mut branch = producer(8);
+            branch.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    player: TargetFilter::Controller,
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+            )));
+            let mut choice = ResolvedAbility::new(
+                Effect::ChooseOneOf {
+                    kind: ChooseOneOfKind::Ordinary,
+                    chooser: PlayerFilter::Controller,
+                    branches: vec![branch.clone(), branch],
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            choice.chosen_x = Some(3);
+            let mut root = build_resolved_from_def(&producer(7), source, PlayerId(0));
+            root.sub_ability = Some(Box::new(choice.clone()));
+            if conflicting {
+                choice.chosen_x = Some(4);
+            }
+            root.else_ability = Some(Box::new(choice));
+            super::super::resolve_ability_chain(&mut state, &root, &mut Vec::new(), 0).unwrap();
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::ChooseOneOfBranch {
+                    return_result_occurrence: Some(_),
+                    ..
+                }
+            ));
+            if conflicting {
+                let before = state.clone();
+                let error = apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 })
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("conflicting admitted parent inputs"),
+                    "{error}"
+                );
+                assert_eq!(state, before);
+                let value = serde_json::to_value(&state).unwrap();
+                assert!(serde_json::from_value::<GameState>(value)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("conflicting admitted parent inputs"));
+            } else {
+                let _: GameState =
+                    serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+                apply_as_current(&mut state, GameAction::ChooseBranch { index: 1 }).unwrap();
+                assert_eq!(state.players[0].life, 23);
+                assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+                assert!(state.stack.is_empty());
+                assert!(state.resolution_stack.is_empty());
+                assert!(state.return_result_frames.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn empty_chooser_set_fails_loudly() {

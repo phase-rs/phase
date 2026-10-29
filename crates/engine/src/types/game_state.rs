@@ -17840,6 +17840,8 @@ pub(crate) fn validate_return_result_occurrence_coherence(state: &GameState) -> 
                 )?;
             }
             ResolutionFrame::ChooseOneOf(pending) => {
+                crate::game::effects::choose_one_of::validate_pending_result_owner(state, pending)
+                    .map_err(|error| error.to_string())?;
                 validate_carrier(
                     pending.return_result_occurrence,
                     pending.continuation.as_deref(),

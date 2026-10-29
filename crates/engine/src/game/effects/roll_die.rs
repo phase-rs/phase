@@ -1309,7 +1309,27 @@ mod tests {
                 vec![ManaUnit::new(ManaType::Black, source, false, Vec::new())],
             );
             let mut runner = scenario.build();
-            runner.activate(source, 0).resolve();
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: 0,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            for step in 0..12 {
+                if matches!(runner.state().waiting_for, WaitingFor::DieKeepChoice { .. }) {
+                    break;
+                }
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+                    ),
+                    "paid dice step={step}; waiting={:?}",
+                    runner.state().waiting_for
+                );
+                runner.act(GameAction::PassPriority).unwrap();
+            }
             assert!(
                 matches!(&runner.state().waiting_for, WaitingFor::DieKeepChoice { results, ignore_count: 1, .. } if results == &vec![1, 1, 1])
             );
@@ -2600,6 +2620,467 @@ mod tests {
         });
     }
 
+    #[test]
+    fn detached_full_die_input_recovers_legacy_witnesses_and_rejects_consistent_birth_forgery() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::ability::*;
+        use crate::types::actions::GameAction;
+        use crate::types::zones::Zone;
+        for stale in [false, true] {
+            for captured in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                let source = scenario
+                    .add_creature_to_graveyard(P0, "Detached original source", 2, 2)
+                    .id();
+                scenario.add_card_to_library_top(P0, "Visible scry reach guard");
+                scenario.add_enchantment_from_oracle(P0, "Barbarian Class", "If you would roll one or more dice, instead roll that many dice plus one and ignore the lowest roll.");
+                let mut state = scenario.build().state().clone();
+                let birth = state.objects[&source].incarnation;
+                if stale {
+                    crate::game::zones::move_to_zone(
+                        &mut state,
+                        source,
+                        Zone::Exile,
+                        &mut Vec::new(),
+                    );
+                    crate::game::zones::move_to_zone(
+                        &mut state,
+                        source,
+                        Zone::Graveyard,
+                        &mut Vec::new(),
+                    );
+                    assert_ne!(state.objects[&source].incarnation, birth);
+                }
+                let mut root = self_return_roll(source);
+                let Effect::RollDie { sides, results, .. } = &mut root.effect else {
+                    unreachable!()
+                };
+                *sides = 1;
+                results[0].max = 1;
+                let bounce = (*results[0].effect).clone();
+                let mut row = AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Scry {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                );
+                row.sub_ability = Some(Box::new(bounce));
+                results[0].effect = Box::new(row);
+                let mut producer = crate::game::ability_utils::build_resolved_from_def(
+                    &AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        serde_json::from_value(serde_json::json!({
+                            "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+                            "target":TargetFilter::SpecificObject { id: ObjectId(0) }
+                        }))
+                        .unwrap(),
+                    ),
+                    source,
+                    P0,
+                );
+                producer.declares_return_result = Some(ReturnResultId(7));
+                producer.sub_ability = Some(Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        player: TargetFilter::Controller,
+                        amount: QuantityExpr::Fixed { value: 7 },
+                    },
+                    vec![],
+                    source,
+                    P0,
+                )));
+                root.sub_ability = Some(Box::new(producer));
+                let expected_birth = captured.then_some(birth);
+                if captured {
+                    install_activated_carrier(&mut state, source, birth);
+                }
+                let mut initial_events = Vec::new();
+                super::super::resolve_ability_chain(&mut state, &root, &mut initial_events, 0)
+                    .unwrap();
+                assert!(
+                    matches!(&state.waiting_for, WaitingFor::DieKeepChoice { results, ignore_count: 1, .. } if results == &vec![1, 1])
+                );
+                let pending = state.resolution_stack.active_die_roll().unwrap();
+                let occurrence = pending.return_result_occurrence.unwrap();
+                assert_eq!(
+                    pending.retained_input.as_ref().unwrap().source_incarnation,
+                    expected_birth
+                );
+                assert_eq!(
+                    state.return_result_frames[&occurrence]
+                        .admitted_program
+                        .as_ref()
+                        .unwrap()
+                        .source_incarnation,
+                    expected_birth
+                );
+                state.resolving_stack_entry = None;
+                if !captured {
+                    // A present immutable None cannot acquire a later proxy stamp.
+                    let current_birth = state.objects[&source].incarnation;
+                    install_activated_carrier(&mut state, source, current_birth);
+                }
+                assert!(state.objects[&source].abilities.is_empty());
+                for ingress in 0..3 {
+                    for legacy in ["current", "missing_input", "missing_program"] {
+                        let mut saved = state.clone();
+                        if legacy == "missing_input" {
+                            let mut pending = saved.take_active_die_roll_frame().unwrap().unwrap();
+                            pending.retained_input = None;
+                            saved.push_die_roll_frame(pending);
+                        } else if legacy == "missing_program" {
+                            saved
+                                .return_result_frames
+                                .get_mut(&occurrence)
+                                .unwrap()
+                                .admitted_program = None;
+                        }
+                        let restored = restored_roll(&saved, ingress);
+                        let recovered_input = restored
+                            .resolution_stack
+                            .active_die_roll()
+                            .unwrap()
+                            .retained_input
+                            .as_ref()
+                            .unwrap();
+                        assert_eq!(
+                            recovered_input.source_incarnation, expected_birth,
+                            "{legacy}"
+                        );
+                        let mut runner = GameRunner::from_state(restored);
+                        let mut emitted = runner
+                            .act(GameAction::SelectDieRolls {
+                                ignore_indices: vec![1],
+                            })
+                            .unwrap()
+                            .events;
+                        assert!(
+                            matches!(&runner.state().waiting_for, WaitingFor::ScryChoice { cards, .. } if cards.len() == 1)
+                        );
+                        let paused = runner.state().clone();
+                        let mut hostile = paused.clone();
+                        let mut row = hostile.take_active_ability_continuation().unwrap().unwrap();
+                        assert!(matches!(row.pending.chain.effect, Effect::Bounce { .. }));
+                        assert_eq!(row.pending.chain.source_incarnation, expected_birth);
+                        row.pending
+                            .chain
+                            .set_source_incarnation_recursive(Some(birth + 100));
+                        let mut die = hostile.take_active_die_roll_frame().unwrap().unwrap();
+                        die.retained_input
+                            .as_mut()
+                            .unwrap()
+                            .set_source_incarnation_recursive(Some(birth + 100));
+                        assert_eq!(
+                            die.retained_input.as_ref().unwrap().source_incarnation,
+                            row.pending.chain.source_incarnation
+                        );
+                        hostile.push_die_roll_frame(die);
+                        hostile.push_ability_continuation(row);
+                        let value = serde_json::to_value(&hostile).unwrap();
+                        assert!(serde_json::from_value::<GameState>(value.clone()).is_err());
+                        assert_eq!(serde_json::to_value(&hostile).unwrap(), value);
+                        let before = hostile.clone();
+                        let rng_position = hostile.rng.get_word_pos();
+                        assert!(crate::game::engine::apply(
+                            &mut hostile,
+                            P0,
+                            GameAction::SelectCards { cards: vec![] }
+                        )
+                        .is_err());
+                        assert_eq!(hostile, before);
+                        assert_eq!(serde_json::to_value(&hostile).unwrap(), value);
+                        assert_eq!(hostile.rng.get_word_pos(), rng_position);
+                        *runner.state_mut() = restored_roll(&paused, ingress);
+                        emitted.extend(
+                            runner
+                                .act(GameAction::SelectCards { cards: vec![] })
+                                .unwrap()
+                                .events,
+                        );
+                        runner.advance_until_stack_empty();
+                        assert_eq!(
+                            runner.state().objects[&source].zone,
+                            if stale && captured {
+                                Zone::Graveyard
+                            } else {
+                                Zone::Hand
+                            }
+                        );
+                        assert_eq!(runner.state().players[0].life, 27);
+                        assert_eq!(
+                            emitted
+                                .iter()
+                                .filter(|event| matches!(event, GameEvent::DieRolled { .. }))
+                                .count(),
+                            1
+                        );
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::Priority { .. }
+                        ));
+                        assert!(runner.state().stack.is_empty());
+                        assert!(runner.state().resolution_stack.is_empty());
+                        assert!(runner.state().return_result_frames.is_empty());
+                    }
+                }
+                let mut erased = state.clone();
+                let mut die = erased.take_active_die_roll_frame().unwrap().unwrap();
+                die.retained_input = None;
+                erased.push_die_roll_frame(die);
+                erased
+                    .return_result_frames
+                    .get_mut(&occurrence)
+                    .unwrap()
+                    .admitted_program = None;
+                let value = serde_json::to_value(&erased).unwrap();
+                let before = value.clone();
+                let error = serde_json::from_value::<GameState>(value.clone())
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains("unrecoverable"), "{error}");
+                assert_eq!(value, before);
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_local_choices_keep_original_die_source_and_fresh_child_namespaces() {
+        use crate::game::scenario::{GameRunner, GameScenario, P0};
+        use crate::types::ability::*;
+        use crate::types::actions::GameAction;
+        use crate::types::zones::Zone;
+
+        // Supplemental typed program: every selected body is independently
+        // producing, with no import, counter ticket, or outer continuation.
+        for multiple in [false, true] {
+            for later_carrier in ["original", "changed", "absent"] {
+                for ingress in 0..3 {
+                    let mut scenario = GameScenario::new();
+                    scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+                    let source = scenario
+                        .add_creature_to_graveyard(P0, "Original rolling source", 2, 2)
+                        .id();
+                    let mut state = scenario.build().state().clone();
+                    let original_birth = state.objects[&source].incarnation;
+                    let producer = |id| {
+                        let effect = serde_json::from_value(serde_json::json!({
+                            "type":"ChangeZoneAll", "origin":"Battlefield", "destination":"Exile",
+                            "target": TargetFilter::SpecificObject { id: ObjectId(0) }
+                        }))
+                        .unwrap();
+                        let mut definition = AbilityDefinition::new(AbilityKind::Spell, effect);
+                        definition.declares_return_result = Some(ReturnResultId(id));
+                        definition
+                    };
+                    let mut die = self_return_roll(source);
+                    let Effect::RollDie { results, sides, .. } = &mut die.effect else {
+                        unreachable!()
+                    };
+                    *sides = 1;
+                    let return_source = (*results[0].effect).clone();
+                    results[0].min = 1;
+                    results[0].max = 1;
+                    results[0].effect = Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChooseOneOf {
+                            kind: ChooseOneOfKind::Ordinary,
+                            chooser: PlayerFilter::Controller,
+                            branches: vec![
+                                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp),
+                                return_source,
+                            ],
+                        },
+                    ));
+                    let mut child = producer(8);
+                    child.sub_ability = Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        die.effect,
+                    )));
+                    let mut root = producer(7);
+                    root.sub_ability = Some(Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChooseOneOf {
+                            kind: ChooseOneOfKind::Ordinary,
+                            chooser: if multiple {
+                                PlayerFilter::All
+                            } else {
+                                PlayerFilter::Controller
+                            },
+                            branches: vec![child.clone(), child],
+                        },
+                    )));
+                    let root =
+                        crate::game::ability_utils::build_resolved_from_def(&root, source, P0);
+                    assert!(root.source_incarnation.is_none());
+                    install_activated_carrier(&mut state, source, original_birth);
+                    let mut emitted = Vec::new();
+                    super::super::resolve_ability_chain(&mut state, &root, &mut emitted, 0)
+                        .unwrap();
+                    let WaitingFor::ChooseOneOfBranch {
+                        return_result_occurrence: Some(parent),
+                        continuation: None,
+                        ..
+                    } = state.waiting_for
+                    else {
+                        panic!("terminal ordinary parent choice must be reached");
+                    };
+                    let parent_process = state.return_result_frames[&parent].process.unwrap();
+                    assert_eq!(
+                        state.return_result_frames[&parent]
+                            .admitted_program
+                            .as_ref()
+                            .unwrap()
+                            .source_incarnation,
+                        Some(original_birth)
+                    );
+                    // No resolving entry may relatch the old invocation during the blink.
+                    state.resolving_stack_entry = None;
+                    if later_carrier != "original" {
+                        crate::game::zones::move_to_zone(
+                            &mut state,
+                            source,
+                            Zone::Exile,
+                            &mut emitted,
+                        );
+                        crate::game::zones::move_to_zone(
+                            &mut state,
+                            source,
+                            Zone::Graveyard,
+                            &mut emitted,
+                        );
+                        assert_ne!(state.objects[&source].incarnation, original_birth);
+                    }
+                    match later_carrier {
+                        "original" => install_activated_carrier(&mut state, source, original_birth),
+                        "changed" => {
+                            let birth = state.objects[&source].incarnation;
+                            install_activated_carrier(&mut state, source, birth);
+                        }
+                        "absent" => {}
+                        _ => unreachable!(),
+                    }
+                    let mut runner = GameRunner::from_state(restored_roll(&state, ingress));
+                    let mut child_processes = Vec::new();
+                    for chooser in 0..if multiple { 2 } else { 1 } {
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ChooseOneOfBranch { .. }
+                        ));
+                        emitted.extend(
+                            runner
+                                .act(GameAction::ChooseBranch { index: 1 })
+                                .unwrap()
+                                .events,
+                        );
+                        assert!(matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ChooseOneOfBranch { .. }
+                        ));
+                        let pending_die = runner
+                            .state()
+                            .resolution_stack
+                            .iter()
+                            .find_map(|frame| match frame {
+                                ResolutionFrame::DieRoll(pending) => Some(pending),
+                                _ => None,
+                            })
+                            .expect("actual selected row pauses inside its rolling child");
+                        let child_occurrence = pending_die.return_result_occurrence.unwrap();
+                        let process = runner.state().return_result_frames[&child_occurrence]
+                            .process
+                            .unwrap();
+                        assert_ne!(process, parent_process);
+                        assert!(!child_processes.contains(&process));
+                        child_processes.push(process);
+                        assert_eq!(
+                            pending_die
+                                .retained_input
+                                .as_ref()
+                                .unwrap()
+                                .source_incarnation,
+                            Some(original_birth)
+                        );
+                        assert_eq!(
+                            runner.state().return_result_frames[&child_occurrence]
+                                .admitted_program
+                                .as_ref()
+                                .unwrap()
+                                .source_incarnation,
+                            Some(original_birth)
+                        );
+                        if multiple && chooser == 0 {
+                            let pending_parent = runner
+                                .state()
+                                .resolution_stack
+                                .iter()
+                                .find_map(|frame| match frame {
+                                    ResolutionFrame::ChooseOneOf(pending) => Some(pending),
+                                    _ => None,
+                                })
+                                .expect("remaining chooser is held under the actual child");
+                            assert_eq!(pending_parent.return_result_occurrence, Some(parent));
+                            assert_eq!(
+                                pending_parent.expected_return_result_process,
+                                Some(parent_process)
+                            );
+                            // The valid initial wait independently keeps the parent live;
+                            // the malformed pending carrier must itself be diagnosed.
+                            let mut hostile = runner.state().clone();
+                            let mut guard = state.clone();
+                            std::mem::swap(&mut hostile.waiting_for, &mut guard.waiting_for);
+                            let valid = serde_json::to_value(&hostile).unwrap();
+                            let _: GameState = serde_json::from_value(valid)
+                                .expect("independent genuine initial choice keeps the parent live");
+                            let die = hostile.take_active_die_roll_frame().unwrap().unwrap();
+                            let mut pending = hostile.take_active_choose_one_of().unwrap().unwrap();
+                            pending.context.boon_captured_noted_number = Some(99);
+                            hostile.push_choose_one_of(pending);
+                            hostile.push_die_roll_frame(die);
+                            let before = serde_json::to_value(&hostile).unwrap();
+                            let error = serde_json::from_value::<GameState>(before.clone())
+                                .unwrap_err()
+                                .to_string();
+                            assert!(error.contains("selected instruction-result prompt is not owned by its admitted program"), "{error}");
+                            assert_eq!(serde_json::to_value(&hostile).unwrap(), before);
+                        }
+                        let row_paused = runner.state().clone();
+                        *runner.state_mut() = restored_roll(&row_paused, ingress);
+                        emitted.extend(
+                            runner
+                                .act(GameAction::ChooseBranch { index: 1 })
+                                .unwrap()
+                                .events,
+                        );
+                    }
+                    runner.advance_until_stack_empty();
+                    assert_eq!(
+                        runner.state().objects[&source].zone,
+                        if later_carrier == "original" {
+                            Zone::Hand
+                        } else {
+                            Zone::Graveyard
+                        }
+                    );
+                    assert_eq!(
+                        emitted
+                            .iter()
+                            .filter(|event| matches!(event, GameEvent::DieRolled { .. }))
+                            .count(),
+                        if multiple { 2 } else { 1 }
+                    );
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert!(runner.state().stack.is_empty());
+                    assert!(runner.state().resolution_stack.is_empty());
+                    assert!(runner.state().return_result_frames.is_empty());
+                }
+            }
+        }
+    }
+
     /// CR 706.3b + CR 400.7 + CR 113.7a: a die-result row is part of the ability
     /// that rolled, so "return this card to your hand" in a row of an ACTIVATED
     /// ability acts for the object that activation captured. A card exiled and
@@ -3241,10 +3722,26 @@ mod preroll_tests {
                     }];
                     let event = modified(&mut state);
                     install(&mut state, &caller);
-                    let die = state.die_result_this_resolution;
-                    resume_roll_dice_after_replacement(&mut state, event, &mut events).unwrap();
+                    let snapshot = state.clone();
+                    let serialized_snapshot = serde_json::to_value(&state).unwrap();
+                    let rng_position = state.rng.get_word_pos();
+                    let original_events = events.clone();
+                    assert_eq!(
+                        resume_roll_dice_after_replacement(&mut state, event, &mut events),
+                        Err(EffectError::InvalidParam(
+                            "turn-based die roll has resolution input".into()
+                        ))
+                    );
+                    assert_eq!(state, snapshot);
+                    assert_eq!(serde_json::to_value(&state).unwrap(), serialized_snapshot);
+                    assert_eq!(state.rng.get_word_pos(), rng_position);
+                    assert_eq!(
+                        state.die_result_this_resolution,
+                        snapshot.die_result_this_resolution
+                    );
+                    assert_eq!(events, original_events);
                     assert_scope(&state, &caller);
-                    assert_eq!(state.die_result_this_resolution, die);
+                    continue;
                 } else {
                     let mut runner = GameRunner::from_state(state);
                     events.extend(
