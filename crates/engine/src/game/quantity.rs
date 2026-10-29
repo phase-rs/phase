@@ -6376,7 +6376,7 @@ fn resolve_ref(
             // parser builds only selected-free shapes, and this fail-closed
             // skip covers hand-built in-memory values. Its zero must never
             // count as support.
-            if crate::types::ability::tracked_member_filter_has_unsupported_ref(filter) {
+            if crate::types::ability::member_filter_has_unsupported_selected_ref(filter) {
                 return 0;
             }
             let Some((set_id, ids)) = state.tracked_object_sets.iter().max_by_key(|(id, _)| id.0)
@@ -23399,8 +23399,8 @@ mod tests {
                 },
                 &ability,
             ),
-            0,
-            "the hand-built tracked-size peer refuses the unsupported reference too"
+            1,
+            "the live tracked-size peer still counts the nonsharing artifact"
         );
     }
 
