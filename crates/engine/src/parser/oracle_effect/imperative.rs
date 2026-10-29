@@ -6146,26 +6146,6 @@ fn parse_subject_exile_library_possessive(input: &str) -> OracleResult<'_, Contr
     .parse(input)
 }
 
-/// "N" / "X" in "the top N cards". CR 107.3: an X placeholder stays
-/// `Variable("X")`; the sentence-level where-X binder or the spell's chosen X
-/// supplies its value. The `peek(" ")` is a word boundary so a longer word
-/// starting with "x" is not read as X.
-fn parse_subject_exile_top_n(input: &str) -> OracleResult<'_, QuantityExpr> {
-    alt((
-        map(nom_primitives::parse_number, |n| QuantityExpr::Fixed {
-            value: n as i32,
-        }),
-        map(terminated(tag("x"), peek(tag(" "))), |_| {
-            QuantityExpr::Ref {
-                qty: QuantityRef::Variable {
-                    name: "X".to_string(),
-                },
-            }
-        }),
-    ))
-    .parse(input)
-}
-
 /// The count and possessive of a subject-exile library object: "the top card
 /// of <poss> library", "the top N|X cards of <poss> library", "the top half of
 /// <poss> library, rounded up|down" (whose count reads the possessive itself,
@@ -6189,9 +6169,12 @@ fn parse_subject_exile_library_count(
                 map(preceded(tag("card of "), poss_library()), |p| {
                     (QuantityExpr::Fixed { value: 1 }, Some(p))
                 }),
+                // CR 107.3: an X placeholder stays `Variable("X")`; the
+                // sentence-level where-X binder or the spell's chosen X
+                // supplies its value.
                 map(
                     (
-                        parse_subject_exile_top_n,
+                        nom_quantity::parse_quantity_expr_number,
                         preceded(tag(" cards of "), poss_library()),
                     ),
                     |(q, p)| (q, Some(p)),

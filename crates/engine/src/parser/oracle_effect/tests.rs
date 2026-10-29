@@ -33228,8 +33228,13 @@ fn subject_exile_that_many_cards_from_the_top_is_exile_top() {
         unreachable!("asserted ExileTop above");
     };
     assert!(
-        !matches!(count, QuantityExpr::Fixed { .. }),
-        "\"that many\" must not fall back to a fixed count, got {count:?}"
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount
+            }
+        ),
+        "\"that many\" must stay the event-context amount, got {count:?}"
     );
 }
 
