@@ -8,6 +8,7 @@
 use crate::ai_support::{validated_candidate_actions_for_semantic_owner, CandidateAction};
 use crate::game::effects::resolve_ability_chain;
 use crate::game::engine::apply_interaction_for_simulation;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::flush_layers;
 use crate::game::sba::check_state_based_actions;
 use crate::types::ability::{DamageSource, Effect, ResolvedAbility, TargetFilter, TargetRef};
@@ -359,8 +360,9 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
     //
     // This rail is load-bearing by CONSTRUCTION, not by payload: it holds no matter
     // what those four families come to synthesize. Today none of them carries an
-    // adverse shape (cycling draws, embalm/eternalize/encore copy, plot exiles, equip
-    // attaches), so deleting this rail keeps every current fixture green — which is
+    // adverse shape (cycling draws, embalm/eternalize/encore copy, unearth returns,
+    // scavenge counters, plot exiles, equip attaches), so deleting this rail keeps
+    // every current fixture green — which is
     // exactly why `activation_beyond_printed_abilities_falls_open` pins the index
     // boundary directly rather than pinning a card.
     if let RootBinding::Activation { ability_index, .. } = root {

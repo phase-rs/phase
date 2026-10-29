@@ -667,7 +667,8 @@ pub fn resolve(
     // capture an independent chosen mode.
     //
     // The rider is installed via the SAME `runtime_execute` slot as every other
-    // prevention rider — the resolution-time `ResolvedAbility` payload. The
+    // prevention rider — a handle naming the resolution-time `ResolvedAbility`
+    // payload in `GameState::replacement_continuations`. The
     // applier resolves `EventContextAmount` in the rider against
     // `last_effect_count` (stamped with the prevented amount at apply time), so
     // no parse-time template reconstruction is needed; the whole sub-ability is
@@ -684,7 +685,11 @@ pub fn resolve(
             // to a concrete object when the shield is created so the shield does not depend on
             // a live SOURCE — the same independence, applied here to the parent's referent).
             crate::game::effects::bind_detached_continuation_to_parent(state, ability, &mut rider);
-            shield = shield.runtime_execute(rider);
+            // CR 615.5: install once, before any hosting branch, so every hosted clone of the
+            // shield names the same continuation; a path that hosts nothing leaves the entry
+            // unnamed.
+            let id = state.install_replacement_continuation(rider);
+            shield = shield.runtime_execute(id);
         }
     }
 
@@ -839,6 +844,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::{effects::deal_damage, zones::create_object};
     use crate::types::ability::{
         PreventionAmount, PtValue, QuantityExpr, QuantityRef, ShieldKind, TypedFilter,
@@ -1661,9 +1667,10 @@ mod tests {
 
         // CR 615.5: fire the rider once against the aggregate prevented amount.
         let (rid, &prevented) = tally.iter().next().unwrap();
-        let runtime = state.pending_damage_replacements[rid.index()]
-            .runtime_execute
-            .clone()
+        let runtime = state
+            .replacement_rider(&state.pending_damage_replacements[rid.index()])
+            .cloned()
+            .map(Box::new)
             .unwrap();
         state.last_effect_count = Some(prevented);
         state.install_ready_continuation(
@@ -3239,9 +3246,8 @@ mod tests {
             resolve(&mut state, &ability, &mut events).unwrap();
 
             let shield = &state.objects[&a].replacement_definitions[0];
-            let rider = shield
-                .runtime_execute
-                .as_ref()
+            let rider = state
+                .replacement_rider(shield)
                 .expect("the rider must install as runtime_execute");
             assert_eq!(
                 rider.targets,
@@ -3298,9 +3304,8 @@ mod tests {
             resolve(&mut state, &ability, &mut events).unwrap();
 
             let shield = &state.objects[&a].replacement_definitions[0];
-            let rider = shield
-                .runtime_execute
-                .as_ref()
+            let rider = state
+                .replacement_rider(shield)
                 .expect("the rider must install as runtime_execute");
             assert_eq!(
                 rider.targets,
@@ -3308,6 +3313,73 @@ mod tests {
                 "a two-target parent binds the rider to the WHOLE selected snapshot"
             );
         }
+    }
+
+    /// CR 615.5: a two-target prevention installs its `ContinuationStep` rider once,
+    /// before any hosting branch, so both hosted shields name the same continuation
+    /// and the arena grows by exactly one entry.
+    #[test]
+    fn continuation_rider_installs_once_for_every_hosted_shield() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Test Source".into(),
+            Zone::Battlefield,
+        );
+        let a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bear A".into(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Bear B".into(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::PreventDamage {
+                amount: PreventionAmount::All,
+                amount_dynamic: None,
+                target: TargetFilter::ParentTarget,
+                recipient_scope: EffectScope::Single,
+                scope: PreventionScope::AllDamage,
+                damage_source_filter: None,
+                prevention_duration: None,
+            },
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        )
+        .sub_ability(put_counter_parent_target_rider(source));
+        let arena_before = state.replacement_continuations.len();
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let handle_of = |id: ObjectId| {
+            let defs = &state.objects[&id].replacement_definitions;
+            assert_eq!(defs.len(), 1, "reach guard: {id:?} hosts one shield");
+            defs[0].runtime_execute
+        };
+        let (handle_a, handle_b) = (handle_of(a), handle_of(b));
+        assert!(
+            handle_a.is_some(),
+            "reach guard: the hosted shield names its rider"
+        );
+        assert_eq!(
+            handle_a, handle_b,
+            "both hosted clones of the shield name the one installed continuation"
+        );
+        assert_eq!(
+            state.replacement_continuations.len(),
+            arena_before + 1,
+            "the rider is installed once per resolution, not once per host"
+        );
     }
 
     /// #8777 (H-4b, MG2): the gate and the binding fire identically across the
@@ -3364,9 +3436,8 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         let shield = &state.objects[&a].replacement_definitions[0];
-        let rider = shield
-            .runtime_execute
-            .as_ref()
+        let rider = state
+            .replacement_rider(shield)
             .expect("the ParentTargetSlot rider must install as runtime_execute");
         assert_eq!(
             rider.targets,
@@ -3431,9 +3502,9 @@ mod tests {
             "reach guard: the rider must still install as runtime_execute"
         );
         assert!(
-            shield.runtime_execute.as_ref().unwrap().targets.is_empty(),
+            state.replacement_rider(shield).unwrap().targets.is_empty(),
             "a rider with no parent anaphor must keep an EMPTY targets vector, got {:?}",
-            shield.runtime_execute.as_ref().unwrap().targets
+            state.replacement_rider(shield).unwrap().targets
         );
     }
 
@@ -3477,9 +3548,9 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        let rider = state.objects[&a].replacement_definitions[0]
-            .runtime_execute
-            .clone()
+        let rider = state
+            .replacement_rider(&state.objects[&a].replacement_definitions[0])
+            .cloned()
             .expect("the rider must install as runtime_execute");
         assert!(
             !rider.pinned_object_targets_all_stale(&state),
@@ -3582,9 +3653,8 @@ mod tests {
             .pending_damage_replacements
             .last()
             .expect("reach guard 1: the shield must be installed");
-        let rider = shield
-            .runtime_execute
-            .as_ref()
+        let rider = state
+            .replacement_rider(shield)
             .expect("reach guard 1: the rider must install as runtime_execute");
 
         // Reach guard 2: the gate DID fire — the empty result below is the
@@ -3646,9 +3716,8 @@ mod tests {
             .sub_ability(put_counter_parent_target_rider(source2));
             let mut events2 = Vec::new();
             resolve(&mut state2, &ability2, &mut events2).unwrap();
-            let rider2 = state2.objects[&a].replacement_definitions[0]
-                .runtime_execute
-                .as_ref()
+            let rider2 = state2
+                .replacement_rider(&state2.objects[&a].replacement_definitions[0])
                 .unwrap();
             assert_eq!(
                 rider2.targets,

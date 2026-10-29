@@ -7,6 +7,7 @@ use super::game_object::GameObject;
 use super::players;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::functioning_abilities::static_kind_present;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AttackerBlockStatus, ContinuousModification, StaticCondition, StaticDefinition, TargetFilter,
     TargetRef,
@@ -28,6 +29,8 @@ use crate::types::statics::{
     RequiredDefender, StaticMode, StaticModeKind,
 };
 use crate::types::zones::Zone;
+
+pub use crate::types::attack_target::AttackTarget;
 
 /// CR 604.1: loop-invariant presence facts for the combat-restriction statics.
 ///
@@ -155,15 +158,6 @@ pub enum TrampleKind {
     Standard,
     /// CR 702.19c: Trample over planeswalkers — excess can spill to PW controller.
     OverPlaneswalkers,
-}
-
-/// Represents who a creature is attacking: a player, planeswalker, or battle (CR 506.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-pub enum AttackTarget {
-    Player(PlayerId),
-    Planeswalker(ObjectId),
-    Battle(ObjectId),
 }
 
 /// Serde default for `AttackerInfo.attack_target` — backward-compatible with states
@@ -1077,6 +1071,60 @@ fn record_block_history(
         combat.creature_blocked_attackers_this_combat.insert(pair);
     }
     state.creature_blocked_attackers_this_turn.insert(pair);
+}
+
+/// CR 509.1g + CR 400.7: every current block pairing `object_id` is in, in both
+/// orientations (as the blocker, and as an attacker some blocker is blocking),
+/// each side pinned to its live incarnation; sorted and deduplicated. Empty
+/// without combat. Reads `blocker_to_attacker` alone: `prune_object_from_combat`
+/// maintains it together with `blocker_assignments`, so the two agree on every
+/// pairing. Single authority for "who is `object_id` paired with right now" —
+/// the zone-change snapshot (`ZoneChangeRecord::block_pairs`) and the connive
+/// subject's related objects both project it.
+pub(crate) fn live_block_pairs_of(state: &GameState, object_id: ObjectId) -> Vec<BlockHistoryPair> {
+    let Some(combat) = state.combat.as_ref() else {
+        return Vec::new();
+    };
+    let live = |id: ObjectId| {
+        state
+            .objects
+            .get(&id)
+            .map(ObjectIncarnationRef::from_object)
+    };
+    let mut pairs: Vec<BlockHistoryPair> = combat
+        .blocker_to_attacker
+        .iter()
+        .flat_map(|(blocker, attackers)| {
+            attackers
+                .iter()
+                .filter(move |attacker| *blocker == object_id || **attacker == object_id)
+                .map(move |attacker| (*blocker, *attacker))
+        })
+        .filter_map(|(blocker, attacker)| {
+            Some(BlockHistoryPair {
+                blocker: live(blocker)?,
+                attacker: live(attacker)?,
+            })
+        })
+        .collect();
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
+/// CR 509.1g + CR 400.7: is `pair` a current block pairing — both creatures the
+/// exact live incarnations the pair names, and the blocker blocking the
+/// attacker right now? A creature that left combat (CR 506.4) or the
+/// battlefield (a new object, CR 400.7) is in no current pairing.
+pub(crate) fn is_live_block_pair(state: &GameState, pair: BlockHistoryPair) -> bool {
+    pair.blocker.is_current(state)
+        && pair.attacker.is_current(state)
+        && state.combat.as_ref().is_some_and(|combat| {
+            combat
+                .blocker_to_attacker
+                .get(&pair.blocker.object_id)
+                .is_some_and(|attackers| attackers.contains(&pair.attacker.object_id))
+        })
 }
 
 /// CR 508.4: Place a permanent onto the battlefield attacking.
@@ -8820,14 +8868,9 @@ fn departed_attack_row<'a>(
         declared_incarnation.map(|incarnation| ObjectIncarnationRef::of(referent, incarnation))
     };
     match exact_identity {
-        Some(identity) => state.zone_changes_this_turn.iter().rev().find(|row| {
-            row.object_id == referent
-                && row.from_zone == Some(Zone::Battlefield)
-                && row.trigger_source_context.as_ref().is_some_and(|context| {
-                    context.identity.reference == identity
-                        && context.identity.expected_zone == Zone::Battlefield
-                })
-        }),
+        Some(identity) => {
+            crate::types::game_state::exact_battlefield_departure_row(state, identity)
+        }
         None => crate::types::game_state::terminal_battlefield_departure_row(state, referent),
     }
 }

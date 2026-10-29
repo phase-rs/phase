@@ -14590,6 +14590,135 @@ fn static_cast_as_though_flash_compound_spell_types_scope_each_leg_to_you() {
     );
 }
 
+/// CR 601.3b + CR 205.4a: when each leg of the list repeats its head noun ("legendary spells
+/// and artifact spells" — Gandalf the White; "colorless spells and artifact spells" — Liberator,
+/// Urza's Battlethopter), each leg keeps only its own qualifiers: any artifact spell gets flash,
+/// legendary or not, and colorless or not.
+#[test]
+fn static_cast_as_though_flash_repeated_noun_legs_keep_their_own_qualifiers() {
+    for (text, left_prop) in [
+        (
+            "You may cast legendary spells and artifact spells as though they had flash.",
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ),
+        (
+            "You may cast colorless spells and artifact spells as though they had flash.",
+            FilterProp::ColorCount {
+                comparator: Comparator::EQ,
+                count: 0,
+            },
+        ),
+    ] {
+        let def = parse_static_line(text).unwrap();
+        let Some(TargetFilter::Or { filters }) = &def.affected else {
+            panic!(
+                "{text}: expected Or affected filter, got {:?}",
+                def.affected
+            );
+        };
+        let [TargetFilter::Typed(left), TargetFilter::Typed(right)] = filters.as_slice() else {
+            panic!("{text}: expected two typed legs, got {filters:?}");
+        };
+        assert_eq!(left.type_filters, vec![TypeFilter::Card], "{text}");
+        assert!(left.properties.contains(&left_prop), "{text}: {left:?}");
+        assert_eq!(right.type_filters, vec![TypeFilter::Artifact], "{text}");
+        assert!(
+            !right.properties.contains(&left_prop),
+            "{text}: the artifact leg must not inherit the left qualifier, got {right:?}"
+        );
+    }
+}
+
+/// The same rule for a repeated "creatures" head: in "enchanted creatures or enchantment
+/// creatures" (Temple Thief, Inspire Awe, Nyx Herald) the enchantment-creature leg need not be
+/// enchanted.
+#[test]
+fn type_list_repeating_its_creature_head_keeps_each_legs_qualifiers() {
+    for phrase in [
+        "enchanted creatures or enchantment creatures",
+        "enchanted creatures and enchantment creatures",
+    ] {
+        let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+        assert_eq!(rest, "", "{phrase}");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("{phrase}: expected Or, got {filter:?}");
+        };
+        let [TargetFilter::Typed(left), TargetFilter::Typed(right)] = filters.as_slice() else {
+            panic!("{phrase}: expected two typed legs, got {filters:?}");
+        };
+        assert!(
+            left.properties.contains(&FilterProp::EnchantedBy),
+            "{phrase}: {left:?}"
+        );
+        assert!(
+            right.type_filters.contains(&TypeFilter::Enchantment)
+                && !right.properties.contains(&FilterProp::EnchantedBy),
+            "{phrase}: the enchantment-creature leg must not need an Aura, got {right:?}"
+        );
+    }
+}
+
+/// The repeated head is found through a leg that lowers to an `And` ("enchantment creatures
+/// with the chosen name"), so "enchanted" still stays on the left leg.
+#[test]
+fn type_list_repeating_its_head_through_an_and_leg_keeps_each_legs_qualifiers() {
+    fn typed_head(filter: &TargetFilter) -> Option<&TypedFilter> {
+        match filter {
+            TargetFilter::Typed(typed) => Some(typed),
+            TargetFilter::And { filters } => filters.first().and_then(typed_head),
+            _ => None,
+        }
+    }
+    let phrase = "enchanted creatures or enchantment creatures with the chosen name";
+    let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(phrase);
+    assert_eq!(rest, "", "{phrase}");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    let [left, right] = filters.as_slice() else {
+        panic!("expected two legs, got {filters:?}");
+    };
+    let left = typed_head(left).expect("typed left leg");
+    assert!(
+        left.properties.contains(&FilterProp::EnchantedBy),
+        "{left:?}"
+    );
+    assert!(
+        matches!(right, TargetFilter::And { .. }),
+        "reach guard: the right leg lowers to an And, got {right:?}"
+    );
+    let right = typed_head(right).expect("typed right head");
+    assert!(
+        right.type_filters.contains(&TypeFilter::Enchantment)
+            && !right.properties.contains(&FilterProp::EnchantedBy),
+        "the enchantment-creature leg must not need an Aura, got {right:?}"
+    );
+}
+
+/// An elided head noun ("legendary creature and planeswalker spells") still lets the shared
+/// adjective distribute: a planeswalker spell must be legendary too.
+#[test]
+fn type_list_with_elided_head_noun_distributes_its_adjective() {
+    let (filter, rest) = crate::parser::oracle_target::parse_type_phrase_folding(
+        "legendary creature and planeswalker spells",
+    );
+    assert_eq!(rest, "");
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected Or, got {filter:?}");
+    };
+    assert!(
+        filters.iter().all(|leg| matches!(
+            leg,
+            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::HasSupertype {
+                value: Supertype::Legendary
+            })
+        )),
+        "both legs stay legendary, got {filters:?}"
+    );
+}
+
 #[test]
 fn static_cast_as_though_flash_players_may_forms_are_unscoped() {
     for text in [

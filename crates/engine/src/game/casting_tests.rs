@@ -60,24 +60,10 @@ fn ability_graph_has_cast_occurrence(
             .else_ability
             .as_deref()
             .is_none_or(|branch| ability_graph_has_cast_occurrence(branch, expected))
-        && match &ability.effect {
-            Effect::EpicCopy { spell } => ability_graph_has_cast_occurrence(spell, expected),
-            _ => true,
-        }
 }
 
-fn graph_spell_definition(source_id: ObjectId) -> AbilityDefinition {
-    let mut definition = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::EpicCopy {
-            spell: Box::new(ResolvedAbility::new(
-                Effect::Investigate,
-                Vec::new(),
-                source_id,
-                PlayerId(0),
-            )),
-        },
-    );
+fn graph_spell_definition() -> AbilityDefinition {
+    let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
     definition.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Investigate,
@@ -136,7 +122,7 @@ fn standard_cast_stamps_one_occurrence_on_record_object_and_resolved_chain() {
         let object = state.objects.get_mut(&spell).unwrap();
         object.card_types.core_types.push(CoreType::Sorcery);
         object.mana_cost = ManaCost::zero();
-        Arc::make_mut(&mut object.abilities).push(graph_spell_definition(spell));
+        Arc::make_mut(&mut object.abilities).push(graph_spell_definition());
     }
 
     assert_eq!(state.objects[&spell].cast_occurrence, None);
@@ -179,7 +165,7 @@ fn standard_cast_stamps_one_occurrence_on_record_object_and_resolved_chain() {
             shards: vec![ManaCostShard::X],
             generic: 0,
         };
-        Arc::make_mut(&mut object.abilities).push(graph_spell_definition(cancelled));
+        Arc::make_mut(&mut object.abilities).push(graph_spell_definition());
     }
     apply_as_current(
         &mut state,

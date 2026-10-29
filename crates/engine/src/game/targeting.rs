@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     ControllerRef, FilterProp, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
     TypeFilter, TypedFilter,
@@ -2153,7 +2154,7 @@ fn target_ref_object(target: &TargetRef) -> Option<ObjectId> {
     }
 }
 
-fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
+pub(crate) fn object_targets(targets: &[TargetRef]) -> impl Iterator<Item = ObjectId> + '_ {
     targets.iter().filter_map(target_ref_object)
 }
 

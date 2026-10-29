@@ -3610,6 +3610,7 @@ mod tests {
     use crate::config::{create_config, AiDifficulty, Platform};
     use crate::planner::quick_state_hash;
     use crate::projection::ProjectionKey;
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::zones::create_object;
     use engine::types::ability::{
         Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,

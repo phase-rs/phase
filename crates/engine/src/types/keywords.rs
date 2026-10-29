@@ -2470,7 +2470,7 @@ fn extract_companion_subtypes(text: &str) -> Vec<String> {
 fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     // If it contains braces, delegate to the MTGJSON parser
     if s.contains('{') {
-        return crate::database::mtgjson::parse_mtgjson_mana_cost(s);
+        return crate::types::mana::parse_mtgjson_mana_cost(s);
     }
 
     // Simple format: try to parse as pure generic (e.g. "3"), or as mana symbols
@@ -4220,15 +4220,6 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Unknown" => Ok(Keyword::Unknown(data.as_str().unwrap_or("").to_string())),
         _ => Ok(Keyword::Unknown(format!("{variant}:{data}"))),
     }
-}
-
-/// Check if a game object has a specific keyword, using discriminant-based matching.
-/// For parameterized keywords, checks the base keyword only (ignoring the parameter value).
-pub fn has_keyword(obj: &crate::game::game_object::GameObject, keyword: &Keyword) -> bool {
-    use std::mem::discriminant;
-    obj.keywords
-        .iter()
-        .any(|k| discriminant(k) == discriminant(keyword))
 }
 
 #[cfg(test)]
